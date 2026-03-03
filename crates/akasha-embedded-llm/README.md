@@ -1,6 +1,9 @@
 # akasha-embedded-llm
 
-POC : petit modèle de langage intégré via **Candle** (Qwen3 0.6B), pour onboarding, diagnostics, réponses simples sans LLM externe.
+POC : petit modèle de langage intégré via **Candle**, pour onboarding, diagnostics, réponses simples sans LLM externe.
+
+- **Par défaut** : Qwen3 0.6B (candle-pipelines).
+- **Baguettotron 321M** : pour configs à faible ressource ou usage conversation ; activer la feature `baguettotron` et définir `AKASHA_EMBEDDED_MODEL=baguettotron`. Modèle : [PleIAs/Baguettotron](https://huggingface.co/PleIAs/Baguettotron).
 
 ## Utilisation
 
@@ -25,8 +28,8 @@ Voir [spec/34_embedded_small_model.md](../../spec/34_embedded_small_model.md) po
 
 ## Dépendances
 
-- `candle-pipelines` 0.0.7 (CPU uniquement, pas de CUDA/Metal par défaut).
-- Premier run : téléchargement du modèle Qwen3 0.6B depuis le Hub (cache local).
+- **candle** (défaut) : `candle-pipelines` 0.0.7, modèle Qwen3 0.6B au premier run.
+- **baguettotron** (optionnel) : `candle-transformers`, `hf-hub`, `tokenizers` ; modèle PleIAs/Baguettotron (321M) au premier run.
 
 ## Intégration (à venir)
 

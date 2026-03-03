@@ -8,6 +8,8 @@ description = "LLM Router: task classifier, multi-provider, fallback, metrics"
 default = []
 # Use embedded local model (Candle) for akasha_core when available; recommend Linux/WSL2
 embedded = ["dep:akasha-embedded-llm"]
+# Include Baguettotron 321M as embedded option; set AKASHA_EMBEDDED_MODEL=baguettotron at runtime for low-resource/conversation
+embedded-baguettotron = ["embedded", "akasha-embedded-llm/baguettotron"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

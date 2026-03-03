@@ -1,7 +1,10 @@
-//! POC: small embedded LLM via Candle (Qwen3 0.6B).
+//! POC: small embedded LLM via Candle (Qwen3 0.6B or Baguettotron 321M).
 //!
 //! Use for onboarding, diagnostics, validation, simple replies when no external LLM is configured.
 //! **Recommandation** : utiliser Linux ou WSL2 pour Windows tant qu’une solution native Windows n’est pas validée. Voir spec/34_embedded_small_model.md.
+
+#[cfg(feature = "baguettotron")]
+mod baguettotron;
 
 use once_cell::sync::OnceCell;
 
@@ -16,6 +19,22 @@ pub enum EmbeddedLlmError {
     Load(String),
     #[error("inference failed: {0}")]
     Inference(String),
+}
+
+/// Which embedded model to use. Read from env `AKASHA_EMBEDDED_MODEL` (qwen3_0_6b | baguettotron).
+#[cfg(feature = "baguettotron")]
+fn embedded_model_variant() -> EmbeddedModelVariant {
+    match std::env::var("AKASHA_EMBEDDED_MODEL").as_deref() {
+        Ok("baguettotron") => EmbeddedModelVariant::Baguettotron,
+        _ => EmbeddedModelVariant::Qwen3_0_6B,
+    }
+}
+
+#[cfg(feature = "baguettotron")]
+#[derive(Clone, Copy, PartialEq)]
+enum EmbeddedModelVariant {
+    Qwen3_0_6B,
+    Baguettotron,
 }
 
 /// Embedded LLM backend (lazy-loaded, one pipeline per process).
@@ -41,7 +60,8 @@ impl EmbeddedLlm {
         }
     }
 
-    /// Run completion (blocking). On first call, downloads and loads the model from HuggingFace (Qwen3 0.6B).
+    /// Run completion (blocking). On first call, downloads and loads the model from HuggingFace.
+    /// Model: Qwen3 0.6B (default) or Baguettotron 321M if `AKASHA_EMBEDDED_MODEL=baguettotron` and feature enabled.
     /// `max_tokens` caps the generated length; `temperature` 0.0 = deterministic, 0.3–0.7 = typical for advice.
     pub fn complete(
         &self,
@@ -49,30 +69,49 @@ impl EmbeddedLlm {
         max_tokens: Option<usize>,
         temperature: Option<f64>,
     ) -> Result<String> {
-        #[cfg(not(feature = "candle"))]
-        {
-            let _ = (prompt, max_tokens, temperature);
-            return Err(EmbeddedLlmError::UnsupportedPlatform);
+        #[cfg(all(feature = "baguettotron", not(feature = "candle")))]
+        if embedded_model_variant() == EmbeddedModelVariant::Baguettotron {
+            return baguettotron::complete(prompt, max_tokens, temperature);
         }
 
         #[cfg(feature = "candle")]
         {
+            #[cfg(feature = "baguettotron")]
+            if embedded_model_variant() == EmbeddedModelVariant::Baguettotron {
+                return baguettotron::complete(prompt, max_tokens, temperature);
+            }
             let _ = (max_tokens, temperature); // POC: pipeline built with fixed max_len=256, temp=0.3
             let pipeline = PIPELINE.get_or_try_init(load_pipeline)?;
             let output = pipeline
                 .inner
                 .run(prompt)
                 .map_err(|e| EmbeddedLlmError::Inference(e.to_string()))?;
-            Ok(output.text.trim().to_string())
+            return Ok(output.text.trim().to_string());
+        }
+
+        #[cfg(not(any(feature = "candle", feature = "baguettotron")))]
+        {
+            let _ = (prompt, max_tokens, temperature);
+            Err(EmbeddedLlmError::UnsupportedPlatform)
+        }
+
+        #[cfg(all(not(feature = "candle"), feature = "baguettotron"))]
+        {
+            let _ = (prompt, max_tokens, temperature);
+            Err(EmbeddedLlmError::UnsupportedPlatform)
         }
     }
 
     /// Whether the embedded backend is available (feature enabled and platform supported).
     pub fn is_available() -> bool {
-        #[cfg(not(feature = "candle"))]
-        return false;
+        #[cfg(feature = "baguettotron")]
+        if embedded_model_variant() == EmbeddedModelVariant::Baguettotron {
+            return baguettotron::is_available();
+        }
         #[cfg(feature = "candle")]
-        true
+        return true;
+        #[cfg(not(any(feature = "candle", feature = "baguettotron")))]
+        false
     }
 }
 
