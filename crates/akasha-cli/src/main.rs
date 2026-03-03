@@ -96,6 +96,20 @@ enum ConfigModelsSub {
         #[arg(long)]
         ollama_url: Option<String>,
     },
+    /// List models by category, or show one category (e.g. conversation, code_generation)
+    Get {
+        /// Category (task_type). If omitted, list all categories with their primary model.
+        category: Option<String>,
+    },
+    /// Set the primary model for a category (e.g. akasha config models set conversation ollama llama3.2)
+    Set {
+        /// Category (task_type): conversation, code_generation, system_diagnostic, etc.
+        category: String,
+        /// Provider: ollama, openai, openrouter, akasha_core
+        provider: String,
+        /// Model name (e.g. llama3.2, gpt-4o-mini, core)
+        model: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -661,6 +675,79 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                             println!("  {}: added to model_options.", model);
                         }
                         None => anyhow::bail!("Could not fetch model '{}' from {}", model, url),
+                    }
+                }
+                ConfigModelsSub::Get { category } => {
+                    if let Some(ref cat) = category {
+                        let tt = config
+                            .task_types
+                            .get(cat.as_str())
+                            .ok_or_else(|| anyhow::anyhow!("Category '{}' not found in llm_router.yaml", cat))?;
+                        println!("Category: {}", cat);
+                        if let Some(ref p) = tt.primary {
+                            println!("  primary: {} / {}", p.provider, p.model);
+                        } else {
+                            println!("  primary: (none)");
+                        }
+                        if tt.fallback.is_empty() {
+                            println!("  fallback: (none)");
+                        } else {
+                            for (i, e) in tt.fallback.iter().enumerate() {
+                                println!("  fallback[{}]: {} / {}", i, e.provider, e.model);
+                            }
+                        }
+                        return Ok(());
+                    }
+                    // List all categories
+                    let mut cats: Vec<_> = config.task_types.keys().collect();
+                    cats.sort();
+                    if cats.is_empty() {
+                        println!("No task_types in llm_router.yaml.");
+                        return Ok(());
+                    }
+                    println!("Models by category (primary):");
+                    for cat in cats {
+                        let tt = config.task_types.get(cat).unwrap();
+                        let primary = tt
+                            .primary
+                            .as_ref()
+                            .map(|p| format!("{} / {}", p.provider, p.model))
+                            .unwrap_or_else(|| "(none)".to_string());
+                        println!("  {}: {}", cat, primary);
+                    }
+                    return Ok(());
+                }
+                ConfigModelsSub::Set {
+                    category,
+                    provider,
+                    model,
+                } => {
+                    let entry = akasha_llm::config::RouteEntry {
+                        provider: provider.clone(),
+                        model: model.clone(),
+                        config: None,
+                    };
+                    let tt = config.task_types.entry(category.clone()).or_insert_with(|| {
+                        akasha_llm::config::TaskTypeConfig {
+                            primary: None,
+                            fallback: vec![
+                                akasha_llm::config::RouteEntry {
+                                    provider: "akasha_core".into(),
+                                    model: "core".into(),
+                                    config: None,
+                                },
+                            ],
+                            constraints: None,
+                        }
+                    });
+                    let old = tt.primary.replace(entry);
+                    if let Some(ref old) = old {
+                        println!(
+                            "{}: {} / {} -> {} / {}",
+                            category, old.provider, old.model, provider, model
+                        );
+                    } else {
+                        println!("{}: primary set to {} / {}", category, provider, model);
                     }
                 }
             }
