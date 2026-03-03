@@ -26,6 +26,8 @@ Assistant personnel **sécurisé**, **local-first**, conçu comme une infrastruc
 - **Tauri CLI** (installé via npm dans `apps/akasha-ui`)
 - Optionnel : **Ollama** pour les réponses LLM locales
 
+**Utilisateurs sans Rust (binaires tout prêts)** : téléchargez l’archive pour votre OS depuis la page **Releases** du dépôt, décompressez, puis lancez `akasha init` puis `akasha start`. Voir [spec/distribution.md](spec/distribution.md).
+
 ---
 
 ## Structure du projet

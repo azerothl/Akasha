@@ -1,0 +1,107 @@
+# Distribution aux utilisateurs (sans compiler)
+
+Ce document décrit comment **obtenir et utiliser Akasha sans installer Rust ni compiler** — pour des utilisateurs finaux ou des testeurs.
+
+---
+
+## 1. Télécharger les binaires précompilés
+
+### Via GitHub Releases (recommandé)
+
+1. Allez sur la page **Releases** du dépôt (ex. `https://github.com/VOTRE_ORG/akasha/releases`).
+2. Choisissez la dernière version (ex. **v0.1.0**).
+3. Téléchargez l’archive correspondant à votre système :
+   - **Windows** : `akasha-windows-x86_64.zip`
+   - **Linux** : `akasha-linux-x86_64.zip`
+   - **macOS Intel** : `akasha-macos-x86_64.zip`
+   - **macOS Apple Silicon (M1/M2/M3)** : `akasha-macos-aarch64.zip`
+4. Décompressez l’archive dans un dossier (ex. `C:\Akasha` ou `~/Akasha`).
+
+Vous obtenez trois exécutables (ou deux sur certaines variantes) :
+- **akasha** (ou `akasha.exe`) — CLI : init, start, stop, doctor, tui, config…
+- **akasha-daemon** — serveur 24/7 (lancé par `akasha start`)
+- **akasha-tui** — interface en terminal (lancée par `akasha tui`)
+
+---
+
+## 2. Premier lancement
+
+### Windows (PowerShell ou CMD)
+
+```powershell
+cd C:\Chemin\Vers\Akasha
+.\akasha.exe init
+.\akasha.exe start
+```
+
+Pour l’interface en terminal : `.\akasha.exe tui`
+
+### Linux / macOS
+
+```bash
+cd ~/Akasha
+chmod +x akasha akasha-daemon akasha-tui
+./akasha init
+./akasha start
+```
+
+Pour l’interface en terminal : `./akasha tui`
+
+---
+
+## 3. (Optionnel) Mettre les binaires dans le PATH
+
+Pour pouvoir lancer `akasha` depuis n’importe quel dossier :
+
+- **Windows** : ajoutez le dossier contenant `akasha.exe` aux variables d’environnement **Path** (Paramètres → Système → À propos → Paramètres système avancés → Variables d’environnement).
+- **Linux / macOS** : copiez ou liez les binaires dans un dossier déjà dans le PATH, par exemple :
+  ```bash
+  sudo cp akasha akasha-daemon akasha-tui /usr/local/bin/
+  ```
+
+---
+
+## 4. Créer une release (mainteneurs)
+
+Les binaires sont produits automatiquement par **GitHub Actions** à chaque tag de version.
+
+1. Vérifier que le workflow `.github/workflows/release.yml` est présent.
+2. Créer un tag et le pousser :
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+3. Attendre la fin du workflow (Actions).
+4. La release apparaît sous **Releases** avec les archives par plateforme.
+
+**Note** : Sous Windows, le daemon est compilé sans la mémoire long terme (ONNX) pour éviter les erreurs de liaison. Les utilisateurs Windows qui veulent la mémoire long terme peuvent utiliser WSL2 et la version Linux.
+
+---
+
+## 5. Application desktop (Tauri)
+
+L’interface graphique **Akasha UI** (Tauri + React) peut être construite en installateur desktop :
+
+```bash
+cd apps/akasha-ui
+npm install
+npm run tauri build
+```
+
+Les artefacts (`.msi` / `.exe` sur Windows, `.dmg` sur macOS, `.deb` / `.AppImage` sur Linux) sont générés dans `apps/akasha-ui/src-tauri/target/release/bundle/`.
+
+L’utilisateur doit dans tous les cas **lancer le daemon** (ou l’avoir déjà lancé) pour que l’UI puisse communiquer avec l’API. À terme, le binaire daemon peut être fourni en **sidecar** de l’app Tauri pour démarrage automatique.
+
+---
+
+## 6. Résumé pour l’utilisateur lambda
+
+| Étape | Action |
+|-------|--------|
+| 1 | Aller sur GitHub → Releases → dernière version |
+| 2 | Télécharger le zip pour son OS (Windows / Linux / Mac) |
+| 3 | Décompresser dans un dossier |
+| 4 | Lancer `akasha init` (premier lancement) puis `akasha start` |
+| 5 | Optionnel : `akasha tui` pour l’interface en terminal, ou ouvrir l’app desktop si installée |
+
+Aucune compilation ni installation de Rust nécessaire.
