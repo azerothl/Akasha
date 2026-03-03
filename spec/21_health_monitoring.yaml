@@ -1,0 +1,23 @@
+health_monitoring:
+  heartbeat_interval_seconds: 5
+  max_missed_heartbeats: 3
+  auto_restart: true
+  max_restart_attempts: 5
+
+self_healing:
+  reload_plugins_on_failure: true
+  clear_corrupted_session: true
+  isolate_faulty_agent: true
+
+cluster_monitoring:
+  node_heartbeat_interval: 5
+  max_node_failures: 1
+  auto_leader_election: true
+
+model_monitoring:
+  external_api_timeout_seconds: 10
+  auto_fallback_enabled: true
+
+degraded_mode:
+  auto_activation: true
+  security_priority: true

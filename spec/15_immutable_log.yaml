@@ -1,0 +1,4 @@
+immutable_log:
+  append_only: true
+  hash_chain: true
+  encrypted: true

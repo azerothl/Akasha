@@ -1,0 +1,20 @@
+[package]
+name = "akasha-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal UI for Akasha (ratatui)"
+
+[[bin]]
+name = "akasha-tui"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.28"
+crossterm = "0.28"
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+pulldown-cmark = "0.9"
+unicode-width = "0.1"
+itertools = "0.12"

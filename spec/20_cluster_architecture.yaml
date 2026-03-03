@@ -1,0 +1,5 @@
+cluster:
+  enabled: true
+  leader_election: automatic
+  replication: encrypted
+  heartbeat_interval_seconds: 5

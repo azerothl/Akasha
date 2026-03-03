@@ -1,0 +1,22 @@
+states:
+  - idle
+  - listening
+  - acknowledging
+  - analyzing
+  - delegating
+  - executing
+  - reporting
+  - error
+
+transitions:
+  - from: idle
+    to: listening
+
+  - from: listening
+    to: acknowledging
+
+  - from: acknowledging
+    to: analyzing
+
+  - from: analyzing
+    to: delegating

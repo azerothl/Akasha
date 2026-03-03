@@ -1,0 +1,14 @@
+[package]
+name = "akasha-core"
+version = "0.1.0"
+edition = "2021"
+description = "Akasha core types, event envelope, and spec loader"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+anyhow = "1.0"

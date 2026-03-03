@@ -1,0 +1,15 @@
+[package]
+name = "akasha-evals"
+version = "0.1.0"
+edition = "2021"
+description = "Phase 8 — Evaluation suite: security, runbooks, hallucinations"
+
+[[bin]]
+name = "akasha-evals"
+path = "src/main.rs"
+
+[dependencies]
+akasha-core = { path = "../akasha-core" }
+akasha-rag = { path = "../akasha-rag" }
+serde_json = "1.0"
+anyhow = "1.0"

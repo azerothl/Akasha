@@ -1,0 +1,103 @@
+# Memory Model
+
+Document décrit le **modèle cible**. **Court terme** (session, compaction), **long terme** (SQLite, embeddings portés par l’application) et **récupération par similarité** sont implémentés ; la politique de sélection fine reste à préciser (voir « État d’implémentation »).
+
+---
+
+## Court Terme (cible)
+
+Type: Volatile  
+Durée: Session  
+Contenu:
+- Conversation active
+- Task status
+- Context immédiat
+
+**Contrainte** : le court terme injecté dans le contexte LLM ne doit pas dépasser la taille de fenêtre du modèle (nombre de tokens max). Si la mémoire court terme dépasse cette limite, elle doit être **compactée** avant envoi au LLM.
+
+## Compaction du court terme (cible)
+
+Lorsque la mémoire court terme (ex. fenêtre des N derniers échanges) devient trop volumineuse pour tenir dans le contexte :
+
+1. **Déclencheur** : estimation en tokens (ou caractères) du contenu court terme à injecter ; si > seuil (ex. 70–80 % de la fenêtre contexte du modèle), déclencher une compaction.
+2. **Stratégies possibles** (à préciser en implémentation) :
+   - **Résumé** : faire résumer par le LLM les échanges les plus anciens de la fenêtre ; remplacer ces échanges par un bloc « Résumé de la conversation précédente : … » et garder les K derniers échanges en clair.
+   - **Déplacement vers long terme** : extraire faits / préférences / décisions des échanges anciens (via politique de sélection), les écrire en long terme, puis remplacer dans le court terme par un court résumé ou une référence (« Contexte antérieur : thème X, décision Y »).
+   - **Troncature douce** : garder les M derniers échanges intacts et ajouter en tête un résumé fixe (N tokens max) des échanges encore plus anciens.
+3. **Objectif** : le contexte effectivement envoyé au LLM reste sous la limite du modèle tout en conservant l’essentiel (résumé + récents) pour la cohérence de la conversation.
+
+## Long Terme (cible)
+
+Type: Persistant chiffré  
+Stockage: Base locale sécurisée  
+Indexation:
+- Embeddings
+- Tags
+- Entités
+
+Chiffrement:
+- AES-256 minimum
+
+## Politique de Stockage (cible)
+
+**À conserver en long terme :**
+- Informations personnelles importantes
+- Préférences utilisateur
+- Historique de décisions
+- Contexte récurrent
+
+**Jamais stocké :**
+- Secrets en clair
+- Tokens API non chiffrés
+
+## Sélection court terme / long terme (cible)
+
+Pour distinguer ce qui est conservé en long terme de ce qui reste du « bruit » :
+
+- **Critères possibles** (à préciser en implémentation) : importance explicite (ex. « retiens que … »), récurrence (mentionné plusieurs fois), type d’entité (préférence, décision, fait sur l’utilisateur), score d’importance dérivé du flux (LLM ou heuristiques).
+- **Court terme** : fenêtre glissante de la conversation courante (N derniers échanges) et statut des tâches ; non persistée entre sessions ou réinitialisable.
+- **Long terme** : uniquement les éléments qui passent le filtre de la politique (ci‑dessus) et les critères de sélection ; stockage persistant, indexé (embeddings/tags/entités) et chiffré.
+
+---
+
+## État d’implémentation
+
+| Composant | Statut | Détail |
+|-----------|--------|--------|
+| Court terme structuré | **Oui** | `ShortTermStore` (daemon) : par `session_id`, fenêtre des N derniers tours (user/assistant/system) ; injectée dans le prompt LLM. `session_id` fourni ou généré dans `POST /api/message`, renvoyé dans la réponse ; TUI et Web UI le conservent et le renvoient pour enchaîner la conversation. |
+| Compaction court terme | **Oui** | Si tokens estimés (histoire + message) > 75 % de `AKASHA_MAX_CONTEXT_TOKENS` (défaut 8192), les 50 % plus anciens des tours sont résumés par le LLM et remplacés par un tour système « Résumé de la conversation précédente : … ». |
+| Long terme | **Oui** | `LongTermStore` (akasha-store) : SQLite `memory.db` dans le data_dir ; entrées avec `content` + `embedding` (blob f32). Recherche par similarité cosinus. **Embeddings** : modèle porté par l’application (crate `akasha-embeddings`, fastembed/ONNX en processus, pas d’application tierce) ; cache du modèle sous `data_dir/embedding_model`. Acteur dédié (thread) pour éviter de passer SQLite entre threads. Promotion automatique des résumés de compaction vers le long terme. Récupération des 5 mémoires les plus pertinentes injectée en préfixe du prompt (« [Mémoire à long terme] »). |
+| Politique / sélection | Partiel | Promotion automatique des résumés de compaction ; pas encore de critères explicites (importance, récurrence, type d’entité). |
+| Plugin Memory | Stub | Trait `MemoryPlugin` (store/retrieve par clé) dans l’API plugin ; pas d’implémentation ni de branchement dans le flux. |
+| RAG | Oui (spec/runbooks) | RAG pack pour la spec et les runbooks (recherche par mots‑clés), pas pour la mémoire utilisateur. |
+
+En résumé : **court terme** et **long terme** sont implémentés. Le modèle d’embeddings est **porté par l’application** (fastembed, inférence locale). La **politique de sélection** fine reste à préciser.
+
+---
+
+## Mémoire long terme sur Windows
+
+Le backend d’embeddings utilise **fastembed** (ONNX Runtime). Sous Windows, les binaires précompilés d’ONNX peuvent provoquer des **erreurs de liaison** (symboles `__std_*` non résolus) à cause d’un décalage d’ABI entre la toolchain MSVC de Rust et celle avec laquelle ONNX a été compilé.
+
+### Options pour faire tourner la mémoire long terme sur Windows
+
+1. **WSL2 (recommandé)**  
+   Compiler et lancer le daemon sous WSL2 (Linux). Même code, même modèle, pas de recompilation d’ONNX.  
+   ```bash
+   # Dans WSL
+   cargo build
+   ./target/debug/akasha start --foreground
+   ```
+
+2. **Daemon sans mémoire long terme**  
+   Le daemon peut être compilé sans les embeddings (pas d’ONNX) :  
+   ```bash
+   cargo build -p akasha-daemon --no-default-features
+   ```  
+   Le reste (CLI, TUI) se compile normalement. La mémoire court terme et le RAG restent actifs ; seules la recherche par similarité et la promotion vers le long terme sont désactivées.
+
+3. **Recompiler ONNX Runtime (avancé)**  
+   Compiler ONNX Runtime depuis les sources avec la **même version de Visual Studio** que celle utilisée par `rustc` (MSVC), puis faire pointer le crate `ort` vers ce build. Documenté sur [onnxruntime](https://onnxruntime.ai/docs/build/inferencing.html) ; réservé aux utilisateurs à l’aise avec CMake et la toolchain C++ Windows.
+
+4. **Backend alternatif (évolutif)**  
+   À terme, un backend d’embeddings en **pur Rust** (ex. inference ONNX via `tract-onnx`, ou autre framework sans binaires C++) pourrait être ajouté pour éviter toute dépendance à ONNX Runtime sur Windows.

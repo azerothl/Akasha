@@ -1,0 +1,12 @@
+memory:
+  short_term:
+    type: volatile
+    scope: session
+    # When short-term exceeds context size, compact (summarize / promote to long-term / truncate with summary).
+    compaction:
+      trigger_ratio: 0.75   # compact when short_term_tokens > 75% of model context
+      strategy: summary     # summary | promote_to_long_term | truncate_with_summary
+  long_term:
+    type: encrypted_persistent
+    encryption: AES-256
+    vector_indexing: true

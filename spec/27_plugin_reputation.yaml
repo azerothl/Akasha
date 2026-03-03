@@ -1,0 +1,6 @@
+plugin_reputation:
+  scoring_metrics:
+    - error_rate
+    - security_incidents
+    - resource_usage
+  auto_restrict_on_low_score: true

@@ -1,0 +1,66 @@
+# Exemple de configuration du LLM Router (Phase 6).
+# Copier vers : data_dir/llm_router.yaml
+# (sous Windows : %LOCALAPPDATA%\akasha\llm_router.yaml)
+
+version: "1.0"
+
+global:
+  enable_metrics: true
+  enable_fallback: true
+  default_timeout_secs: 300   # 5 min par requête LLM (augmenter pour gros modèles Ollama)
+  default_max_retries: 2
+
+# URL et options par provider (optionnel). Clés API : vault (vault://key_name) ou variables d'env.
+providers:
+  ollama:
+    base_url: "http://localhost:11434"   # ou http://192.168.1.10:11434 si Ollama sur une autre machine
+  openai:
+    api_key_ref: "vault://openai_api_key"   # ou définir OPENAI_API_KEY
+    # base_url optionnel (défaut: https://api.openai.com/v1)
+  openrouter:
+    api_key_ref: "vault://openrouter_api_key"   # ou OPENROUTER_API_KEY
+    # base_url optionnel (défaut: https://openrouter.ai/api/v1)
+
+# Métadonnées par modèle (remplies par akasha init ou akasha config models fetch/add)
+# — context_length_max, num_ctx, family, etc. depuis Ollama /api/show
+model_options:
+  llama3.2:
+    context_length_max: 128000
+    num_ctx: 4096
+    family: llama
+    parameter_size: 3B
+  codellama:
+    context_length_max: 16384
+    num_ctx: 2048
+
+# Modèle utilisé par type de tâche (primary + fallback)
+task_types:
+  conversation:
+    primary:
+      provider: ollama
+      model: llama3.2          # Modèle Ollama (voir: ollama list)
+    fallback:
+      - provider: akasha_core
+        model: core
+
+  code_generation:
+    primary:
+      provider: ollama
+      model: codellama        # ou deepseek-coder, etc.
+    fallback:
+      - provider: akasha_core
+        model: core
+
+  creative_writing:
+    primary:
+      provider: ollama
+      model: llama3.2
+    fallback:
+      - provider: akasha_core
+        model: core
+
+  system_diagnostic:
+    primary:
+      provider: akasha_core
+      model: core
+    fallback: []

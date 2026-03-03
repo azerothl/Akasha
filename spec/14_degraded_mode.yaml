@@ -1,0 +1,4 @@
+degraded_mode:
+  auto_activate: true
+  disable_external_calls: true
+  restrict_plugins: true

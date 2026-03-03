@@ -1,0 +1,25 @@
+# Politique des outils machine (Phase A). Utilisé par le daemon : data_dir/tools_policy.yaml
+# Fichier absent ou vide = tout refusé. Pour autoriser lecture/écriture de fichiers, ajoutez
+# des préfixes de chemins (répertoires ou fichiers) sous allowed_read_paths / allowed_write_paths.
+# L'agent peut alors utiliser read_file / write_file pour les chemins sous ces préfixes.
+
+allowed_read_paths:
+  - "."                    # répertoire de travail du daemon (ex. répertoire du projet)
+  # - "C:\\Users\\Vous\\projet"   # Windows : décommenter et adapter
+  # - "/home/user/projet"          # Linux/macOS : décommenter et adapter
+
+allowed_write_paths:
+  - "."                    # idem : autoriser l'écriture dans le répertoire courant
+  # Ajoutez ici les répertoires où l'agent peut écrire des fichiers (génération de code, etc.)
+
+allowed_commands:
+  - "cargo"
+  - "npm"
+  - "node"
+  - "git"
+  # - "cmd"   # Windows : à utiliser avec précaution
+
+command_timeout_secs: 60
+
+# Optionnel : domaines autorisés pour web_fetch (nécessite la feature "web")
+# allowed_web_domains: []

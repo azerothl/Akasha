@@ -1,0 +1,106 @@
+model_strategy:
+  router_enabled: true
+  routing_by_task_type: true
+  multi_provider_support: true
+  fallback_enabled: true
+  offline_supported: true
+
+# LLM Router Configuration
+llm_router:
+  # Providers supportés
+  supported_providers:
+    - openai
+    - anthropic
+    - openrouter
+    - ollama
+    - local
+    - azure_openai
+    - google_ai
+  
+  # Routing par type de tâche
+  task_types:
+    - id: code_generation
+      description: "Génération et analyse de code"
+      default_model: null  # À configurer par l'utilisateur
+      
+    - id: creative_writing
+      description: "Rédaction créative, composition"
+      default_model: null
+      
+    - id: scientific_analysis
+      description: "Analyse scientifique, recherche"
+      default_model: null
+      
+    - id: data_analysis
+      description: "Analyse de données, statistiques"
+      default_model: null
+      
+    - id: conversation
+      description: "Conversation générale"
+      default_model: null
+      
+    - id: system_diagnostic
+      description: "Diagnostic système (réservé à Akasha Core Model)"
+      default_model: "akasha_core"
+      locked: true
+  
+  # Configuration de fallback
+  fallback_strategy:
+    # Fallback par tâche (ordre de priorité)
+    fallback_chain:
+      - primary_model  # Modèle configuré pour le task_type
+      - provider_alternative  # Autre modèle du même provider
+      - cross_provider_fallback  # Modèle d'un autre provider
+      - local_model  # Modèle local
+      - akasha_core  # Modèle de secours minimal
+    
+    # Conditions de basculement
+    trigger_conditions:
+      - api_error
+      - timeout
+      - rate_limit
+      - model_unavailable
+      - cost_threshold_exceeded
+    
+    # Timeout avant fallback
+    timeout_seconds: 10
+    
+    # Tentatives avant fallback définitif
+    max_retries: 2
+    
+    # Cooldown avant retry du primary
+    retry_cooldown_seconds: 60
+  
+  # Monitoring et métriques
+  monitoring:
+    track_latency: true
+    track_cost: true
+    track_quality: true
+    track_errors: true
+    log_model_switches: true
+
+# Configuration par défaut (peut être override par l'utilisateur)
+default_routing:
+  code_generation:
+    preferred_providers: [anthropic, openai, openrouter]
+    fallback_to_local: true
+    
+  creative_writing:
+    preferred_providers: [anthropic, openai, openrouter]
+    fallback_to_local: true
+    
+  scientific_analysis:
+    preferred_providers: [openai, anthropic, google_ai]
+    fallback_to_local: true
+    
+  data_analysis:
+    preferred_providers: [openai, anthropic]
+    fallback_to_local: true
+    
+  conversation:
+    preferred_providers: [openai, anthropic, openrouter, ollama]
+    fallback_to_local: true
+    
+  system_diagnostic:
+    preferred_providers: [akasha_core]
+    fallback_to_local: false  # Pas de fallback pour le core model

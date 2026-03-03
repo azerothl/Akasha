@@ -1,0 +1,76 @@
+//! Subscribes to event bus and fills progress cache and events cache for API
+
+use akasha_core::EventType;
+use chrono::Utc;
+use std::collections::VecDeque;
+use uuid::Uuid;
+
+use super::EventBus;
+use crate::api::{
+    EventsCache, ProgressCache, ProgressEntry, TaskEventEntry, MAX_EVENTS_PER_TASK, MAX_PROGRESS_PER_TASK,
+};
+
+pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache) {
+    let mut rx = bus.subscribe();
+    while let Ok(ev) = rx.recv().await {
+        let payload = match &ev.payload {
+            Some(p) => p,
+            None => continue,
+        };
+        if ev.event_type == EventType::ProgressUpdate {
+            let task_id = payload.get("task_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
+            let progress_pct = payload.get("progress_pct").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+            let message = payload.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let Some(task_id) = task_id else { continue };
+            let entry = ProgressEntry { progress_pct, message };
+            let mut g = progress.write().await;
+            let q = g.entry(task_id).or_insert_with(VecDeque::new);
+            q.push_back(entry);
+            if q.len() > MAX_PROGRESS_PER_TASK {
+                q.pop_front();
+            }
+            continue;
+        }
+        // When a task completes (or fails), add a final progress entry only if none yet
+        // (so LLM reply or other progress is not overwritten by "Done.").
+        if ev.event_type == EventType::TaskCompleted || ev.event_type == EventType::TaskFailed {
+            let task_id = payload.get("task_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
+            let Some(task_id) = task_id else { continue };
+            let message = if ev.event_type == EventType::TaskCompleted {
+                "Done."
+            } else {
+                "Task failed."
+            };
+            let mut g = progress.write().await;
+            let q = g.entry(task_id).or_insert_with(VecDeque::new);
+            if q.is_empty() {
+                q.push_back(ProgressEntry {
+                    progress_pct: 100,
+                    message: message.to_string(),
+                });
+            }
+            if q.len() > MAX_PROGRESS_PER_TASK {
+                q.pop_front();
+            }
+        }
+    }
+}
+
+/// Subscribes to event bus and fills events cache (all events with correlation_id) for GET /api/tasks/:id/events.
+pub async fn run_events_subscriber(bus: EventBus, events: EventsCache) {
+    let mut rx = bus.subscribe();
+    while let Ok(ev) = rx.recv().await {
+        let Some(task_id) = ev.correlation_id else { continue };
+        let entry = TaskEventEntry {
+            event_type: ev.event_type.as_str().to_string(),
+            payload: ev.payload.clone(),
+            at: Utc::now().to_rfc3339(),
+        };
+        let mut g = events.write().await;
+        let q = g.entry(task_id).or_insert_with(VecDeque::new);
+        q.push_back(entry);
+        if q.len() > MAX_EVENTS_PER_TASK {
+            q.pop_front();
+        }
+    }
+}

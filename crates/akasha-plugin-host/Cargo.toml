@@ -1,0 +1,12 @@
+[package]
+name = "akasha-plugin-host"
+version = "0.1.0"
+edition = "2021"
+description = "WASM sandbox for plugins (Wasmtime)"
+
+[dependencies]
+akasha-plugin-api = { path = "../akasha-plugin-api" }
+wasmtime = "22"
+anyhow = "1.0"
+tracing = "0.1"
+serde_json = "1.0"

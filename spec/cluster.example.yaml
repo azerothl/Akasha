@@ -1,0 +1,11 @@
+# Optional cluster config (Phase 7). Place as cluster.yaml in data_dir (e.g. %LOCALAPPDATA%\akasha).
+# Env vars override: NATS_URL, AKASHA_NODE_ID, AKASHA_NATS_TLS_CA, AKASHA_NATS_CLIENT_CERT, AKASHA_NATS_CLIENT_KEY.
+
+nats_url: "nats://127.0.0.1:4222"
+# node_id: "node-1"   # optional; default from HOSTNAME/COMPUTERNAME or UUID
+
+# Optional mTLS for NATS (paths relative to data_dir or absolute)
+# tls:
+#   ca: "certs/ca.pem"
+#   client_cert: "certs/client.pem"
+#   client_key: "certs/client-key.pem"

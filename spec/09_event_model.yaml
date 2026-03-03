@@ -1,0 +1,17 @@
+events:
+  - id: user_request_received
+  - id: acknowledgment_sent
+  - id: task_created
+  - id: task_decomposed
+  - id: sub_agent_spawned
+  - id: progress_update
+  - id: task_completed
+  - id: task_failed
+  - id: security_alert
+  - id: node_joined_cluster
+  - id: node_failed
+  - id: leader_elected
+  - id: model_fallback_activated
+  - id: degraded_mode_enabled
+  - id: plugin_reputation_updated
+  - id: immutable_log_entry_added

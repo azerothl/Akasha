@@ -1,0 +1,7 @@
+security:
+  secrets:
+    storage: encrypted_vault
+    exposure: forbidden
+  sandboxing:
+    agents_isolated: true
+  prompt_injection_protection: true

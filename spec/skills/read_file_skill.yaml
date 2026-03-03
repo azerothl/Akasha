@@ -1,0 +1,9 @@
+# Example skill: read a file (binds to tool read_file)
+name: read_file
+description: Read the contents of a text file from an allowed path.
+parameters:
+  - name: path
+    param_type: string
+    required: true
+tool_ref: read_file
+agents: []   # empty = available to all agents

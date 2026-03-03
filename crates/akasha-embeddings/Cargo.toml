@@ -1,0 +1,10 @@
+[package]
+name = "akasha-embeddings"
+version = "0.1.0"
+edition = "2021"
+description = "Local text embeddings for Akasha (in-process, no third-party service)"
+
+[dependencies]
+fastembed = "5"
+thiserror = "1.0"
+anyhow = "1.0"

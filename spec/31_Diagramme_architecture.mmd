@@ -1,0 +1,46 @@
+flowchart TB
+  U[User] -->|Text / Voice| CH[Channel Adapters<br/>Slack · Teams · Discord · WhatsApp · Telegram · Local UI]
+  CH --> GW[Gateway Normalizer<br/>Unified Message Envelope]
+
+  subgraph Core["Akasha Core (24/7 Daemon)"]
+    GW --> MA[Main Agent<br/>Ack < 500ms · UX · Status]
+    MA --> ORCH[Orchestrator Agent<br/>Task Decomposition · Scheduling]
+    ORCH --> BUS[Event Bus<br/>NATS (standalone/cluster)]
+    MA --> BUS
+    BUS --> WDG[Watchdog & Self-Healing<br/>Health · Restart · Isolation]
+    WDG --> BUS
+
+    MA --> POL[Policy Engine<br/>RBAC/ABAC · Prompt-Injection Guard · Output Redaction]
+    ORCH --> POL
+
+    POL --> PLUG[Plugin Host<br/>WASM Sandbox · Signed Plugins]
+    PLUG --> BUS
+
+    subgraph Data["Data Plane"]
+      MEM[Memory Store<br/>SQLite/Postgres + pgvector] 
+      VAULT[Secrets Vault<br/>OS Keychain / Encrypted Vault]
+      LOG[Immutable Append-Only Log<br/>Hash Chain · Signatures]
+    end
+
+    BUS --> MEM
+    POL --> VAULT
+    BUS --> LOG
+  end
+
+  subgraph Models["Model Layer"]
+    EXT[External LLM APIs]
+    LOC[Local Primary Model]
+    CORE[Akasha Core Model (Offline)<br/>Onboarding · Diagnostics · Validation]
+    ROUTER[Model Router<br/>Fallback · Degraded Mode]
+    MA --> ROUTER
+    ROUTER --> EXT
+    ROUTER --> LOC
+    ROUTER --> CORE
+  end
+
+  subgraph Cluster["Cluster Mode (optional)"]
+    COORD[Coordinator Node]
+    WORK[Worker Nodes]
+    BUS <--> COORD
+    BUS <--> WORK
+  end

@@ -1,0 +1,36 @@
+# Rust
+/target/
+Cargo.lock
+
+# Node / npm
+node_modules/
+npm-debug.log*
+*.log
+
+# Tauri
+apps/akasha-ui/dist/
+apps/akasha-ui/src-tauri/gen/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Akasha runtime
+.akasha/
+
+# Tauri
+.tauri/
+apps/akasha-ui/src-tauri/target/*
+
+# Docker
+docker/
+
+# DB
+*.db

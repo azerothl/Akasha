@@ -1,0 +1,32 @@
+roles:
+  main_agent:
+    access:
+      short_term_memory: read_write
+      long_term_memory: read
+      secrets: none
+      spawn_agents: false
+
+  orchestrator_agent:
+    access:
+      short_term_memory: read
+      long_term_memory: read
+      secrets: none
+      spawn_agents: true
+
+  api_agent:
+    access:
+      short_term_memory: read
+      long_term_memory: read
+      secrets: scoped
+      spawn_agents: false
+  
+  plugin:
+    can_access_short_term_memory: false
+    can_access_long_term_memory: scoped
+    can_access_secrets: scoped
+    requires_signature: true
+    sandboxed: true
+
+  watchdog_system:
+    can_restart_agents: true
+    can_modify_permissions: false

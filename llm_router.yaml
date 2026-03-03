@@ -1,0 +1,39 @@
+global:
+  enable_metrics: true
+  enable_fallback: true
+  default_timeout: 600
+  default_max_retries: 2
+
+providers:
+  ollama:
+    base_url: "http://192.168.1.168:11434"   # URL où tourne Ollama
+    auto_pull_models: true
+  openrouter:
+    api_key_ref: vault://openrouter_api_key
+    site_url: https://akasha.local
+    app_name: Akasha
+
+task_types:
+  conversation:
+    primary:
+      provider: ollama
+      model: gpt-oss:20b                    # Modèle à utiliser (ollama list)
+    fallback:
+      - provider: akasha_core
+        model: core
+  code_generation:
+    primary:
+      provider: ollama
+      model: glm-4.7-flash:latest                  # Autre modèle selon la tâche
+    fallback:
+      - provider: akasha_core
+        model: core
+  system_diagnostic:
+    primary:
+      provider: ollama
+        model: glm-4.7-flash:latest
+    fallback: 
+      - provider: ollama
+        model: gpt-oss:20b
+      - provider: akasha_core
+        model: core

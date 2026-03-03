@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/akasha-core",
+    "crates/akasha-embeddings",
+    "crates/akasha-store",
+    "crates/akasha-tools",
+    "crates/akasha-vault",
+    "crates/akasha-plugin-api",
+    "crates/akasha-plugin-host",
+    "crates/akasha-llm",
+    "crates/akasha-rag",
+    "crates/akasha-cluster",
+    "crates/akasha-daemon",
+    "crates/akasha-cli",
+    "crates/akasha-evals",
+    "crates/akasha-tui",
+]
+exclude = [
+    "apps/akasha-ui/src-tauri",
+]
