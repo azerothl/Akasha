@@ -16,7 +16,7 @@ akasha-embeddings = { path = "../akasha-embeddings", optional = true }
 akasha-vault = { path = "../akasha-vault" }
 akasha-plugin-api = { path = "../akasha-plugin-api" }
 akasha-plugin-host = { path = "../akasha-plugin-host" }
-akasha-llm = { path = "../akasha-llm" }
+akasha-llm = { path = "../akasha-llm", features = ["embedded"] }
 akasha-rag = { path = "../akasha-rag" }
 akasha-tools = { path = "../akasha-tools" }
 akasha-cluster = { path = "../akasha-cluster" }

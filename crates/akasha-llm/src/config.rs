@@ -90,56 +90,25 @@ impl RoutingConfig {
         Ok(config)
     }
 
+    /// Default routing: internal Akasha model (akasha_core/core) as primary for all task types.
+    /// Users can switch to Ollama/OpenAI/etc. via `akasha config models set <category> <provider> <model>`.
     pub fn default_config() -> Self {
+        let internal = RouteEntry {
+            provider: "akasha_core".into(),
+            model: "core".into(),
+            config: None,
+        };
         let mut task_types = HashMap::new();
-        task_types.insert(
-            "conversation".into(),
-            TaskTypeConfig {
-                primary: Some(RouteEntry {
-                    provider: "ollama".into(),
-                    model: "llama3.2".into(),
-                    config: None,
-                }),
-                fallback: vec![RouteEntry {
-                    provider: "akasha_core".into(),
-                    model: "core".into(),
-                    config: None,
-                }],
-                constraints: None,
-            },
-        );
-        task_types.insert(
-            "code_generation".into(),
-            TaskTypeConfig {
-                primary: Some(RouteEntry {
-                    provider: "ollama".into(),
-                    model: "codellama".into(),
-                    config: None,
-                }),
-                fallback: vec![RouteEntry {
-                    provider: "akasha_core".into(),
-                    model: "core".into(),
-                    config: None,
-                }],
-                constraints: None,
-            },
-        );
-        task_types.insert(
-            "system_diagnostic".into(),
-            TaskTypeConfig {
-                primary: Some(RouteEntry {
-                    provider: "ollama".into(),
-                    model: "llama3.2".into(),
-                    config: None,
-                }),
-                fallback: vec![RouteEntry {
-                    provider: "akasha_core".into(),
-                    model: "core".into(),
-                    config: None,
-                }],
-                constraints: None,
-            },
-        );
+        for name in ["conversation", "code_generation", "system_diagnostic"] {
+            task_types.insert(
+                name.into(),
+                TaskTypeConfig {
+                    primary: Some(internal.clone()),
+                    fallback: vec![],
+                    constraints: None,
+                },
+            );
+        }
         Self {
             global: GlobalConfig {
                 enable_metrics: Some(true),

@@ -854,7 +854,6 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
 
     // --- 1. Provider LLM ---
     let mut ollama_url = String::from("http://localhost:11434");
-    let mut ollama_model = String::from("llama3.2");
     let mut openai_key: Option<String> = None;
     let mut openai_model = String::from("gpt-4o-mini");
     let mut openrouter_key: Option<String> = None;
@@ -875,10 +874,6 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
             let url = init_prompt("Ollama URL [http://localhost:11434] :\n> ");
             if !url.is_empty() {
                 ollama_url = url;
-            }
-            let model = init_prompt("Modèle Ollama (conversation) [llama3.2] :\n> ");
-            if !model.is_empty() {
-                ollama_model = model;
             }
         }
         if choice == "2" || choice == "4" {
@@ -933,18 +928,18 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
         }
     }
 
-    // --- 3. llm_router.yaml ---
+    // --- 3. llm_router.yaml --- (default primary = internal Akasha model)
     let primary_provider = if openai_key.is_some() && !use_defaults {
         "openai"
     } else if openrouter_key.is_some() && !use_defaults {
         "openrouter"
     } else {
-        "ollama"
+        "akasha_core"
     };
     let primary_model = match primary_provider {
         "openai" => openai_model.as_str(),
         "openrouter" => openrouter_model.as_str(),
-        _ => ollama_model.as_str(),
+        _ => "core",
     };
 
     let yaml = format!(
@@ -984,41 +979,47 @@ providers:
     } else {
         yaml
     };
+    // When primary is internal (akasha_core), no fallback; otherwise fallback to core
+    let fallback_block = if primary_provider == "akasha_core" {
+        "[]".to_string()
+    } else {
+        "\n      - provider: akasha_core\n        model: core".to_string()
+    };
     let yaml = format!(
-        r#"{}task_types:
-  conversation:
-    primary:
-      provider: {primary_provider}
-      model: {primary_model}
-    fallback:
-      - provider: akasha_core
-        model: core
-  code_generation:
-    primary:
-      provider: ollama
-      model: codellama
-    fallback:
-      - provider: akasha_core
-        model: core
-  creative_writing:
-    primary:
-      provider: ollama
-      model: {ollama_model}
-    fallback:
-      - provider: akasha_core
-        model: core
-  system_diagnostic:
-    primary:
-      provider: ollama
-      model: {ollama_model}
-    fallback:
-      - provider: akasha_core
-        model: core
-"#,
+        "{}task_types:\n\
+  conversation:\n\
+    primary:\n\
+      provider: {}\n\
+      model: {}\n\
+    fallback:{}\n\
+  code_generation:\n\
+    primary:\n\
+      provider: {}\n\
+      model: {}\n\
+    fallback:{}\n\
+  creative_writing:\n\
+    primary:\n\
+      provider: {}\n\
+      model: {}\n\
+    fallback:{}\n\
+  system_diagnostic:\n\
+    primary:\n\
+      provider: {}\n\
+      model: {}\n\
+    fallback:{}\n",
         yaml,
-        primary_provider = primary_provider,
-        primary_model = primary_model,
-        ollama_model = ollama_model
+        primary_provider,
+        primary_model,
+        fallback_block,
+        primary_provider,
+        primary_model,
+        fallback_block,
+        primary_provider,
+        primary_model,
+        fallback_block,
+        primary_provider,
+        primary_model,
+        fallback_block,
     );
 
     let router_path = data_dir.join("llm_router.yaml");

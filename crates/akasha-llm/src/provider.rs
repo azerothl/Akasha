@@ -369,12 +369,28 @@ impl LLMProvider for OpenRouterProvider {
     }
 }
 
-// --- Akasha Core (always available, stub response)
+// --- Akasha Core (local model: embedded LLM when available, else placeholder)
 pub struct AkashaCoreProvider;
 
 impl AkashaCoreProvider {
     pub fn new() -> Self {
         Self
+    }
+}
+
+fn placeholder_response(prompt_len: usize) -> CompletionResponse {
+    let reply = format!(
+        "[Akasha Core] Request received ({} chars). Local model placeholder. Configure Ollama or cloud providers for full completion.",
+        prompt_len
+    );
+    let completion_tokens = reply.split_whitespace().count() as u64;
+    CompletionResponse {
+        text: reply,
+        usage: Some(TokenUsage {
+            prompt_tokens: 0,
+            completion_tokens,
+        }),
+        model_used: "core".into(),
     }
 }
 
@@ -398,19 +414,33 @@ impl LLMProvider for AkashaCoreProvider {
         _timeout: Duration,
         _model_override: Option<&str>,
     ) -> Result<CompletionResponse, ProviderError> {
-        let prompt_len = request.prompt.len();
-        let reply = format!(
-            "[Akasha Core] Request received ({} chars). Local model placeholder. Configure Ollama or cloud providers for full completion.",
-            prompt_len
-        );
-        let completion_tokens = reply.split_whitespace().count() as u64;
-        Ok(CompletionResponse {
-            text: reply,
-            usage: Some(TokenUsage {
-                prompt_tokens: 0,
-                completion_tokens,
-            }),
-            model_used: "core".into(),
-        })
+        #[cfg(feature = "embedded")]
+        {
+            if akasha_embedded_llm::EmbeddedLlm::is_available() {
+                let prompt = request.prompt.clone();
+                let max_tokens = request.max_tokens.map(|u| u as usize);
+                let temperature = request.temperature.map(|f| f as f64);
+                match tokio::task::spawn_blocking(move || {
+                    let llm = akasha_embedded_llm::EmbeddedLlm::new();
+                    llm.complete(&prompt, max_tokens, temperature)
+                })
+                .await
+                {
+                    Ok(Ok(text)) => {
+                        let completion_tokens = text.split_whitespace().count() as u64;
+                        return Ok(CompletionResponse {
+                            text,
+                            usage: Some(TokenUsage {
+                                prompt_tokens: 0,
+                                completion_tokens,
+                            }),
+                            model_used: "core".into(),
+                        });
+                    }
+                    Ok(Err(_)) | Err(_) => {}
+                }
+            }
+        }
+        Ok(placeholder_response(request.prompt.len()))
     }
 }

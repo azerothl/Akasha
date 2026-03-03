@@ -33,31 +33,26 @@ model_options:
     context_length_max: 16384
     num_ctx: 2048
 
-# Modèle utilisé par type de tâche (primary + fallback)
+# Modèle utilisé par type de tâche (primary + fallback).
+# Par défaut : modèle interne Akasha (akasha_core/core). Pour utiliser Ollama/OpenAI : akasha config models set <catégorie> <provider> <model>
 task_types:
   conversation:
     primary:
-      provider: ollama
-      model: llama3.2          # Modèle Ollama (voir: ollama list)
-    fallback:
-      - provider: akasha_core
-        model: core
+      provider: akasha_core
+      model: core
+    fallback: []
 
   code_generation:
     primary:
-      provider: ollama
-      model: codellama        # ou deepseek-coder, etc.
-    fallback:
-      - provider: akasha_core
-        model: core
+      provider: akasha_core
+      model: core
+    fallback: []
 
   creative_writing:
     primary:
-      provider: ollama
-      model: llama3.2
-    fallback:
-      - provider: akasha_core
-        model: core
+      provider: akasha_core
+      model: core
+    fallback: []
 
   system_diagnostic:
     primary:
