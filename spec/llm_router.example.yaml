@@ -34,28 +34,28 @@ model_options:
     num_ctx: 2048
 
 # Modèle utilisé par type de tâche (primary + fallback).
-# Par défaut : modèle interne Akasha (akasha_core/core). Pour utiliser Ollama/OpenAI : akasha config models set <catégorie> <provider> <model>
+# Par défaut : modèle embarqué (akasha_embedded). Pour Ollama/OpenAI : akasha config models set <catégorie> <provider> <model>
 task_types:
   conversation:
     primary:
-      provider: akasha_core
-      model: core
+      provider: akasha_embedded
+      model: default
     fallback: []
 
   code_generation:
     primary:
-      provider: akasha_core
-      model: core
+      provider: akasha_embedded
+      model: default
     fallback: []
 
   creative_writing:
     primary:
-      provider: akasha_core
-      model: core
+      provider: akasha_embedded
+      model: default
     fallback: []
 
   system_diagnostic:
     primary:
-      provider: akasha_core
-      model: core
+      provider: akasha_embedded
+      model: default
     fallback: []

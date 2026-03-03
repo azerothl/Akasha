@@ -90,12 +90,12 @@ impl RoutingConfig {
         Ok(config)
     }
 
-    /// Default routing: internal Akasha model (akasha_core/core) as primary for all task types.
+    /// Default routing: embedded model (akasha_embedded) as primary for all task types.
     /// Users can switch to Ollama/OpenAI/etc. via `akasha config models set <category> <provider> <model>`.
     pub fn default_config() -> Self {
         let internal = RouteEntry {
-            provider: "akasha_core".into(),
-            model: "core".into(),
+            provider: "akasha_embedded".into(),
+            model: "default".into(),
             config: None,
         };
         let mut task_types = HashMap::new();

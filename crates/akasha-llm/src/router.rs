@@ -83,11 +83,15 @@ impl LLMRouter {
             .unwrap_or_else(|| {
                 crate::config::TaskTypeConfig {
                     primary: Some(crate::config::RouteEntry {
+                        provider: "akasha_embedded".into(),
+                        model: "default".into(),
+                        config: None,
+                    }),
+                    fallback: vec![crate::config::RouteEntry {
                         provider: "akasha_core".into(),
                         model: "core".into(),
                         config: None,
-                    }),
-                    fallback: vec![],
+                    }],
                     constraints: None,
                 }
             });

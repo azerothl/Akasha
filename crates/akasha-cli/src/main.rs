@@ -105,7 +105,7 @@ enum ConfigModelsSub {
     Set {
         /// Category (task_type): conversation, code_generation, system_diagnostic, etc.
         category: String,
-        /// Provider: ollama, openai, openrouter, akasha_core
+        /// Provider: ollama, openai, openrouter, akasha_embedded, akasha_core
         provider: String,
         /// Model name (e.g. llama3.2, gpt-4o-mini, core)
         model: String,
@@ -732,8 +732,8 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                             primary: None,
                             fallback: vec![
                                 akasha_llm::config::RouteEntry {
-                                    provider: "akasha_core".into(),
-                                    model: "core".into(),
+                                    provider: "akasha_embedded".into(),
+                                    model: "default".into(),
                                     config: None,
                                 },
                             ],
@@ -934,12 +934,12 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
     } else if openrouter_key.is_some() && !use_defaults {
         "openrouter"
     } else {
-        "akasha_core"
+        "akasha_embedded"
     };
     let primary_model = match primary_provider {
         "openai" => openai_model.as_str(),
         "openrouter" => openrouter_model.as_str(),
-        _ => "core",
+        _ => "default",
     };
 
     let yaml = format!(
@@ -979,8 +979,8 @@ providers:
     } else {
         yaml
     };
-    // When primary is internal (akasha_core), no fallback; otherwise fallback to core
-    let fallback_block = if primary_provider == "akasha_core" {
+    // When primary is internal (akasha_embedded or akasha_core), no fallback; otherwise fallback to core
+    let fallback_block = if primary_provider == "akasha_embedded" || primary_provider == "akasha_core" {
         "[]".to_string()
     } else {
         "\n      - provider: akasha_core\n        model: core".to_string()

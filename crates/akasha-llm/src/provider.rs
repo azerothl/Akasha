@@ -444,3 +444,67 @@ impl LLMProvider for AkashaCoreProvider {
         Ok(placeholder_response(request.prompt.len()))
     }
 }
+
+// --- Akasha Embedded (explicit embedded model provider for llm_router; same backend as akasha_core when feature "embedded")
+/// Provider name: `akasha_embedded`. Use in llm_router.yaml to route a task type to the embedded model (Qwen3 0.6B or Baguettotron via AKASHA_EMBEDDED_MODEL).
+pub struct AkashaEmbeddedProvider;
+
+impl AkashaEmbeddedProvider {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl LLMProvider for AkashaEmbeddedProvider {
+    fn name(&self) -> &str {
+        "akasha_embedded"
+    }
+
+    fn is_available(&self) -> bool {
+        #[cfg(feature = "embedded")]
+        return akasha_embedded_llm::EmbeddedLlm::is_available();
+        #[cfg(not(feature = "embedded"))]
+        false
+    }
+
+    fn is_local(&self) -> bool {
+        true
+    }
+
+    async fn complete(
+        &self,
+        request: &CompletionRequest,
+        _timeout: Duration,
+        _model_override: Option<&str>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        #[cfg(feature = "embedded")]
+        {
+            if akasha_embedded_llm::EmbeddedLlm::is_available() {
+                let prompt = request.prompt.clone();
+                let max_tokens = request.max_tokens.map(|u| u as usize);
+                let temperature = request.temperature.map(|f| f as f64);
+                match tokio::task::spawn_blocking(move || {
+                    let llm = akasha_embedded_llm::EmbeddedLlm::new();
+                    llm.complete(&prompt, max_tokens, temperature)
+                })
+                .await
+                {
+                    Ok(Ok(text)) => {
+                        let completion_tokens = text.split_whitespace().count() as u64;
+                        return Ok(CompletionResponse {
+                            text,
+                            usage: Some(TokenUsage {
+                                prompt_tokens: 0,
+                                completion_tokens,
+                            }),
+                            model_used: "embedded".into(),
+                        });
+                    }
+                    Ok(Err(_)) | Err(_) => {}
+                }
+            }
+        }
+        Err(ProviderError::Unavailable)
+    }
+}

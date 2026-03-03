@@ -138,6 +138,7 @@ impl Daemon {
         let mut llm_router = akasha_llm::LLMRouter::new(router_config);
         llm_router.register_provider(Arc::new(akasha_llm::OllamaProvider::new(ollama_url)));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaCoreProvider::new()));
+        llm_router.register_provider(Arc::new(akasha_llm::AkashaEmbeddedProvider::new()));
         // Phase 6 rattrapage: cloud providers (API key from vault or env)
         if let Some(ref cfg) = openai_cfg {
             let key = cfg
