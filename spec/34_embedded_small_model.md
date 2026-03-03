@@ -103,4 +103,14 @@ L’idée est de ne **pas dépendre** d’Ollama ou d’un service cloud pour ce
 
 ---
 
+## POC Candle (en cours)
+
+- **Crate** : `crates/akasha-embedded-llm`.
+- **Stack** : `candle-pipelines` 0.0.7, modèle **Qwen3 0.6B** (téléchargé depuis Hugging Face au premier usage).
+- **API** : `EmbeddedLlm::new()`, `complete(prompt, max_tokens, temperature)` (bloquant), `is_available()`.
+- **Plateforme** : **recommandation WSL2 pour Windows** tant qu’une solution native Windows n’est pas validée ; build et run sous Linux/WSL2. Le build peut passer sous Windows (Candle 0.9.2) selon l’environnement.
+- **Suite** : brancher le crate en fallback dans le daemon (diagnostic advice, réponses simples) et documenter l’usage dans le guide.
+
+---
+
 *Document de spécification — à mettre à jour au fur et à mesure des POC (Candle, llm/GGUF) et des décisions de bundle (taille de modèle, optionnel ou inclus par défaut).*

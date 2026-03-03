@@ -34,6 +34,7 @@ Assistant personnel **sécurisé**, **local-first**, conçu comme une infrastruc
 akasha/
 ├── crates/
 │   ├── akasha-core/         # Types partagés, Event Envelope, Spec Loader, sécurité
+│   ├── akasha-embedded-llm/ # POC : petit LLM intégré (Candle, Qwen3 0.6B) — onboarding, diagnostics ; WSL2 recommandé sous Windows
 │   ├── akasha-embeddings/   # Embeddings locaux (fastembed/ONNX, modèle porté par l’app)
 │   ├── akasha-store/        # SQLite (tâches, mémoire long terme), log immuable
 │   ├── akasha-vault/        # Secrets (keyring OS + fichier chiffré)

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/akasha-core",
+    "crates/akasha-embedded-llm",
     "crates/akasha-embeddings",
     "crates/akasha-store",
     "crates/akasha-tools",

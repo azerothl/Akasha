@@ -1,0 +1,17 @@
+[package]
+name = "akasha-embedded-llm"
+version = "0.1.0"
+edition = "2021"
+description = "POC: small embedded LLM via Candle for onboarding, diagnostics, simple replies (Linux/WSL2)"
+
+[features]
+default = ["candle"]
+# Candle-based inference (Qwen3 0.6B). Recommended: build and run on Linux or WSL2; Windows native may fail to build.
+candle = ["dep:candle-pipelines"]
+
+[dependencies]
+thiserror = "1.0"
+anyhow = "1.0"
+once_cell = "1.19"
+# CPU-only; model downloaded from HuggingFace on first use.
+candle-pipelines = { version = "0.0.7", optional = true, default-features = false }
