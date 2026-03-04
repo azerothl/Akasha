@@ -214,12 +214,14 @@ fn get_or_load_pipeline() -> Result<Arc<CandlePipeline>> {
             return Ok(Arc::clone(p));
         }
     }
+    // Acquire write lock and re-check before loading (double-checked locking to avoid concurrent loads)
+    let mut g = PIPELINE.write().map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
+    if let Some(ref p) = *g {
+        return Ok(Arc::clone(p));
+    }
     let pipeline = load_pipeline()?;
     let arc = Arc::new(pipeline);
-    {
-        let mut g = PIPELINE.write().map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
-        *g = Some(Arc::clone(&arc));
-    }
+    *g = Some(Arc::clone(&arc));
     Ok(arc)
 }
 

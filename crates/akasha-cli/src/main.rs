@@ -1494,8 +1494,11 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
 
     if json {
         if !daemon_checks.is_empty() {
+            let daemon_all_ok_json = daemon_checks.iter().all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+            let combined_ok = all_ok && daemon_all_ok_json;
             let mut payload = health_payload.clone();
             if let Some(obj) = payload.as_object_mut() {
+                obj.insert("ok".to_string(), serde_json::json!(combined_ok));
                 obj.insert("daemon_checks".to_string(), serde_json::json!(daemon_checks));
             }
             println!("{}", serde_json::to_string_pretty(&payload)?);

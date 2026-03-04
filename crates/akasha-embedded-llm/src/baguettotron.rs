@@ -208,10 +208,10 @@ where
             .tokenizer
             .decode(&generated, true)
             .map_err(|e| EmbeddedLlmError::Inference(e.to_string()))?;
-        let response_part = if decoded.len() > prompt_byte_len {
+        let response_part = if decoded.starts_with(prompt) && decoded.len() > prompt_byte_len {
             &decoded[prompt_byte_len..]
         } else {
-            &decoded[..]
+            decoded.as_str()
         };
         if response_part.len() > prev_decoded_len {
             let delta = &response_part[prev_decoded_len..];
