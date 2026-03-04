@@ -65,6 +65,35 @@ impl LLMRouter {
             .and_then(|c| c.base_url.clone())
     }
 
+    /// Whether the embedded provider (akasha_embedded) is registered and available.
+    pub fn embedded_available(&self) -> bool {
+        self.providers
+            .get("akasha_embedded")
+            .map(|p| p.is_available())
+            .unwrap_or(false)
+    }
+
+    /// Whether the embedded model is already loaded in memory (after first successful completion).
+    /// If false, the next request will trigger download+load and may exceed the usual timeout.
+    #[cfg(feature = "embedded")]
+    pub fn embedded_loaded(&self) -> bool {
+        akasha_embedded_llm::EmbeddedLlm::is_loaded()
+    }
+
+    #[cfg(not(feature = "embedded"))]
+    pub fn embedded_loaded(&self) -> bool {
+        false
+    }
+
+    /// Unload the embedded model from memory. Next completion will load it again.
+    #[cfg(feature = "embedded")]
+    pub fn embedded_unload(&self) {
+        akasha_embedded_llm::EmbeddedLlm::unload();
+    }
+
+    #[cfg(not(feature = "embedded"))]
+    pub fn embedded_unload(&self) {}
+
     fn resolve(&self) -> ProviderResolver {
         let providers = self.providers.clone();
         Arc::new(move |name: &str| providers.get(name).cloned())

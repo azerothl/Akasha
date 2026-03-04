@@ -1394,14 +1394,47 @@ fn cmd_doctor(json: bool, advice: bool) -> anyhow::Result<()> {
         "config_paths": config_paths
     });
 
+    // When daemon is reachable, fetch its checks (ollama, vault, spec_dir, embedded_llm, etc.)
+    let daemon_checks: Vec<serde_json::Value> = if daemon_healthy {
+        reqwest::blocking::Client::new()
+            .get(format!("http://127.0.0.1:{}/api/doctor", port))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .ok()
+            .and_then(|r| r.json::<serde_json::Value>().ok())
+            .and_then(|j| j.get("checks").and_then(|c| c.as_array()).cloned())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     if json {
-        println!("{}", serde_json::to_string_pretty(&health_payload)?);
+        if !daemon_checks.is_empty() {
+            let mut payload = health_payload.clone();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("daemon_checks".to_string(), serde_json::json!(daemon_checks));
+            }
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&health_payload)?);
+        }
     } else {
         println!("Akasha Doctor - System Diagnostics");
         println!("==================================");
         for (_, ok, desc) in &checks {
             let status = if *ok { "OK" } else { "MISSING" };
             println!("  [{}] {}", status, desc);
+        }
+        if !daemon_checks.is_empty() {
+            println!();
+            println!("Daemon checks (when daemon is running):");
+            for c in &daemon_checks {
+                let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let ok = c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                let desc = c.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let status = if ok { "OK" } else { "KO" };
+                println!("  [{}] {} — {}", status, id, desc);
+            }
         }
         println!();
         println!("Chemins de configuration (data_dir = {}):", data_dir.display());
@@ -1410,7 +1443,8 @@ fn cmd_doctor(json: bool, advice: bool) -> anyhow::Result<()> {
         println!("  akasha.env        : {}", data_dir.join("akasha.env").display());
         println!("  tools_policy.yaml : {}", data_dir.join("tools_policy.yaml").display());
         println!();
-        if all_ok {
+        let daemon_all_ok = daemon_checks.is_empty() || daemon_checks.iter().all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+        if all_ok && daemon_all_ok {
             println!("All checks passed.");
         } else {
             println!("Some checks failed. Fix the issues above.");

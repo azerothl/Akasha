@@ -450,6 +450,8 @@ impl App {
   /status           — état du daemon
   /doctor           — diagnostic (daemon, ollama, vault, spec)
   /advice           — conseil diagnostic (RAG + modèle)
+  /embedded         — statut du modèle local embarqué
+  /embedded reload  — décharger le modèle (rechargé au prochain appel)
   /metrics          — métriques du routeur LLM
   /models           — liste des modèles (tous les providers)
   /config list      — variables (akasha.env)
@@ -499,8 +501,9 @@ impl App {
                         if let Ok(doctor_json) = r.json::<serde_json::Value>() {
                             let body = serde_json::json!({ "health": doctor_json });
                             if let Ok(adv_resp) = client.post(&advice_url).json(&body).timeout(Duration::from_secs(180)).send() {
-                                if adv_resp.status().is_success() {
-                                    if let Ok(adv_json) = adv_resp.json::<serde_json::Value>() {
+                                let ok = adv_resp.status().is_success();
+                                if let Ok(adv_json) = adv_resp.json::<serde_json::Value>() {
+                                    if ok {
                                         let advice = adv_json.get("advice").and_then(|v| v.as_str()).unwrap_or("").trim();
                                         let model = adv_json.get("model_used").and_then(|v| v.as_str()).unwrap_or("?");
                                         if advice.is_empty() {
@@ -508,12 +511,51 @@ impl App {
                                         }
                                         return format!("Conseil diagnostic (modèle: {})\n\n{}", model, advice);
                                     }
+                                    if let Some(detail) = adv_json.get("detail").and_then(|v| v.as_str()) {
+                                        return format!("Conseil indisponible : {}", detail);
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                return "Impossible de récupérer le conseil (daemon + LLM requis).".to_string();
+                return "Impossible de récupérer le conseil (daemon + LLM requis). Tapez /embedded pour vérifier le modèle local.".to_string();
+            }
+            "embedded" => {
+                let sub = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+                if sub == "reload" {
+                    let url = format!("{}/api/router/embedded/reload", base);
+                    match client.post(&url).send() {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(json) = r.json::<serde_json::Value>() {
+                                let msg = json.get("message").and_then(|v| v.as_str()).unwrap_or("Modèle déchargé.");
+                                return msg.to_string();
+                            }
+                        }
+                        _ => {}
+                    }
+                    return "Impossible de recharger (daemon ou routeur).".to_string();
+                }
+                let url = format!("{}/api/router/embedded-status", base);
+                match client.get(&url).send() {
+                    Ok(r) if r.status().is_success() => {
+                        if let Ok(json) = r.json::<serde_json::Value>() {
+                            let available = json.get("embedded_available").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let loaded = json.get("embedded_loaded").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let hint = json.get("hint").and_then(|v| v.as_str()).unwrap_or("");
+                            let status = if !available {
+                                "non disponible"
+                            } else if loaded {
+                                "disponible et chargé (prêt)"
+                            } else {
+                                "disponible (chargement au 1ᵉʳ appel, 5–15 min possibles)"
+                            };
+                            return format!("Modèle embarqué : {}\n{}", status, hint);
+                        }
+                    }
+                    _ => {}
+                }
+                return "Impossible de joindre le daemon ou routeur.".to_string();
             }
             "plugins" => {
                 let url = format!("{}/api/plugins", base);
@@ -804,7 +846,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             if app.loading {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "  … Akasha réfléchit …",
+                    "  … Akasha réfléchit … (1ᵉ requête : chargement du modèle local possible)",
                     Style::default().fg(theme.palette().warning).add_modifier(Modifier::ITALIC),
                 )));
             }
@@ -1116,15 +1158,27 @@ fn run_app(
                         });
                         app.input.clear();
                         if msg.starts_with('/') {
-                            let result = App::run_slash_command_blocking(app.port, &msg);
-                            app.messages.push(ChatMessage {
-                                role: "Système".into(),
-                                text: result,
-                                is_error: false,
-                            });
-                            app.scroll = usize::MAX;
-                            // Redraw immediately so the result is visible without waiting for next event
-                            let _ = terminal.draw(|f| ui(f, app));
+                            let cmd_lower = msg.trim().to_lowercase();
+                            let long_running = cmd_lower.starts_with("/advice") || cmd_lower.starts_with("/doctor");
+                            if long_running {
+                                app.loading = true;
+                                let port = app.port;
+                                let tx = app.tx.clone();
+                                let cmd = msg.clone();
+                                thread::spawn(move || {
+                                    let result = App::run_slash_command_blocking(port, &cmd);
+                                    let _ = tx.send(Ok((result, String::new())));
+                                });
+                            } else {
+                                let result = App::run_slash_command_blocking(app.port, &msg);
+                                app.messages.push(ChatMessage {
+                                    role: "Système".into(),
+                                    text: result,
+                                    is_error: false,
+                                });
+                                app.scroll = usize::MAX;
+                                let _ = terminal.draw(|f| ui(f, app));
+                            }
                         } else if !app.loading && app.daemon_ok {
                             app.loading = true;
                             let port = app.port;

@@ -171,13 +171,48 @@ fn sample_next_token<R: rand::Rng + ?Sized>(
     Ok(next_token)
 }
 
-static BAGUETTOTRON_PIPELINE: once_cell::sync::OnceCell<BaguettotronPipeline> = once_cell::sync::OnceCell::new();
+use once_cell::sync::Lazy;
+use std::sync::{Arc, RwLock};
+
+static BAGUETTOTRON_PIPELINE: Lazy<RwLock<Option<Arc<BaguettotronPipeline>>>> =
+    Lazy::new(|| RwLock::new(None));
 
 pub fn is_available() -> bool {
     true
 }
 
+/// True if the model has already been loaded (after first successful complete()).
+pub fn is_loaded() -> bool {
+    BAGUETTOTRON_PIPELINE
+        .read()
+        .map(|g| g.is_some())
+        .unwrap_or(false)
+}
+
+/// Unload the model from memory. Next complete() will load it again.
+pub fn unload() {
+    if let Ok(mut g) = BAGUETTOTRON_PIPELINE.write() {
+        *g = None;
+    }
+}
+
+fn get_or_load_pipeline() -> Result<Arc<BaguettotronPipeline>> {
+    {
+        let g = BAGUETTOTRON_PIPELINE.read().map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
+        if let Some(ref p) = *g {
+            return Ok(Arc::clone(p));
+        }
+    }
+    let pipeline = load_baguettotron()?;
+    let arc = Arc::new(pipeline);
+    {
+        let mut g = BAGUETTOTRON_PIPELINE.write().map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
+        *g = Some(Arc::clone(&arc));
+    }
+    Ok(arc)
+}
+
 pub fn complete(prompt: &str, max_tokens: Option<usize>, _temperature: Option<f64>) -> Result<String> {
-    let pipeline = BAGUETTOTRON_PIPELINE.get_or_try_init(load_baguettotron)?;
-    run_baguettotron(pipeline, prompt, max_tokens)
+    let pipeline = get_or_load_pipeline()?;
+    run_baguettotron(&pipeline, prompt, max_tokens)
 }

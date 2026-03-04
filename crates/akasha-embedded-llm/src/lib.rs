@@ -6,7 +6,8 @@
 #[cfg(feature = "baguettotron")]
 mod baguettotron;
 
-use once_cell::sync::OnceCell;
+use once_cell::sync::Lazy;
+use std::sync::{Arc, RwLock};
 
 /// Result type for embedded LLM operations.
 pub type Result<T> = std::result::Result<T, EmbeddedLlmError>;
@@ -43,7 +44,9 @@ pub struct EmbeddedLlm {
     _marker: std::marker::PhantomData<()>,
 }
 
-static PIPELINE: OnceCell<CandlePipeline> = OnceCell::new();
+#[cfg(feature = "candle")]
+static PIPELINE: Lazy<RwLock<Option<Arc<CandlePipeline>>>> =
+    Lazy::new(|| RwLock::new(None));
 
 #[cfg(feature = "candle")]
 struct CandlePipeline {
@@ -81,7 +84,7 @@ impl EmbeddedLlm {
                 return baguettotron::complete(prompt, max_tokens, temperature);
             }
             let _ = (max_tokens, temperature); // POC: pipeline built with fixed max_len=256, temp=0.3
-            let pipeline = PIPELINE.get_or_try_init(load_pipeline)?;
+            let pipeline = get_or_load_pipeline()?;
             let output = pipeline
                 .inner
                 .run(prompt)
@@ -113,12 +116,55 @@ impl EmbeddedLlm {
         #[cfg(not(any(feature = "candle", feature = "baguettotron")))]
         false
     }
+
+    /// Whether the model is already loaded in memory (true after first successful `complete()`).
+    /// If false, the next completion will trigger download + load and may take several minutes.
+    pub fn is_loaded() -> bool {
+        #[cfg(feature = "baguettotron")]
+        if embedded_model_variant() == EmbeddedModelVariant::Baguettotron {
+            return baguettotron::is_loaded();
+        }
+        #[cfg(feature = "candle")]
+        return PIPELINE.read().map(|g| g.is_some()).unwrap_or(false);
+        #[cfg(not(any(feature = "candle", feature = "baguettotron")))]
+        false
+    }
+
+    /// Unload the model from memory. Next `complete()` will load it again (download + load if needed).
+    pub fn unload() {
+        #[cfg(feature = "baguettotron")]
+        if embedded_model_variant() == EmbeddedModelVariant::Baguettotron {
+            baguettotron::unload();
+            return;
+        }
+        #[cfg(feature = "candle")]
+        if let Ok(mut g) = PIPELINE.write() {
+            *g = None;
+        }
+    }
 }
 
 impl Default for EmbeddedLlm {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[cfg(feature = "candle")]
+fn get_or_load_pipeline() -> Result<Arc<CandlePipeline>> {
+    {
+        let g = PIPELINE.read().map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
+        if let Some(ref p) = *g {
+            return Ok(Arc::clone(p));
+        }
+    }
+    let pipeline = load_pipeline()?;
+    let arc = Arc::new(pipeline);
+    {
+        let mut g = PIPELINE.write().map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
+        *g = Some(Arc::clone(&arc));
+    }
+    Ok(arc)
 }
 
 #[cfg(feature = "candle")]

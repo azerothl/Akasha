@@ -31,20 +31,21 @@ impl MainAgent {
         &self,
         store_path: &Path,
         message: &str,
-        correlation_id: Uuid,
+        _correlation_id: Uuid,
         forward_to_orchestrator: bool,
         session_id: &str,
     ) -> anyhow::Result<Uuid> {
         let session_id = if session_id.is_empty() { "default" } else { session_id };
         let task_id = Uuid::new_v4();
 
-        let _ = self.bus.send(EventEnvelope::new(EventType::UserRequestReceived, None).with_correlation(correlation_id));
+        // Use task_id as correlation so GET /api/tasks/{task_id}/events returns these events.
+        let _ = self.bus.send(EventEnvelope::new(EventType::UserRequestReceived, Some(serde_json::json!({ "message": message }))).with_correlation(task_id));
         let _ = self.bus.send(
             EventEnvelope::new(
                 EventType::AcknowledgmentSent,
                 Some(serde_json::json!({ "task_id": task_id.to_string() })),
             )
-            .with_correlation(correlation_id),
+            .with_correlation(task_id),
         );
 
         let store = TaskStore::open(store_path)?;
@@ -66,7 +67,7 @@ impl MainAgent {
                     "assigned_agent": task.assigned_agent
                 })),
             )
-            .with_correlation(correlation_id),
+            .with_correlation(task_id),
         );
 
         if forward_to_orchestrator {

@@ -19,6 +19,12 @@ if EmbeddedLlm::is_available() {
 
 Au premier appel à `complete()`, le modèle est téléchargé depuis Hugging Face puis chargé (CPU uniquement).
 
+## Vérifier que le modèle est prêt
+
+- **Depuis la TUI** : tapez `/embedded`. Si le modèle est compilé et chargé, vous verrez « Modèle embarqué : disponible et prêt ».
+- **Depuis le CLI** : `akasha doctor` affiche un check `embedded_llm` (OK si prêt). Pour un détail côté routeur : `curl http://127.0.0.1:PORT/api/router/embedded-status` (remplacer PORT par le port du daemon, ex. 3784).
+- **Compilation** : le daemon doit être compilé avec la feature `embedded` (c’est le cas par défaut pour `akasha-daemon`). Si `embedded_llm` est KO au doctor, vérifier que vous lancez bien le binaire daemon compilé avec `--features embedded` ou la default du crate.
+
 ## Plateformes
 
 - **Linux / WSL2** : recommandé pour le POC. Build et exécution testés.

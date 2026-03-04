@@ -15,7 +15,7 @@ use crate::api::ProgressCache;
 /// One subtask from decomposition: (agent_type, message for that agent).
 pub type Subtask = (String, String);
 
-/// Decompose a user request into one or more subtasks via LLM. Falls back to single "conversation" on error or empty.
+/// Decompose a user request into one or more subtasks via LLM. Falls back to single "conversation" on error, timeout or empty.
 async fn decompose_request(
     llm_router: &Arc<akasha_llm::LLMRouter>,
     message: &str,
@@ -29,8 +29,9 @@ async fn decompose_request(
         max_tokens: Some(512),
         temperature: Some(0.2),
     };
-    match llm_router.complete(&request).await {
-        Ok(resp) => {
+    let decompose_timeout = std::time::Duration::from_secs(120);
+    match tokio::time::timeout(decompose_timeout, llm_router.complete(&request)).await {
+        Ok(Ok(resp)) => {
             let text = resp.text.trim();
             let mut steps = Vec::new();
             for line in text.lines() {
@@ -54,8 +55,12 @@ async fn decompose_request(
                 steps
             }
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::debug!(error = %e, "Decompose LLM failed, using single conversation step");
+            vec![("conversation".to_string(), message.to_string())]
+        }
+        Err(_) => {
+            tracing::debug!("Decompose LLM timed out, using single conversation step");
             vec![("conversation".to_string(), message.to_string())]
         }
     }
@@ -131,6 +136,19 @@ async fn process_root_task(
     }
     let store = TaskStore::open(store_path)?;
     store.update_status(root_task_id, TaskStatus::Running)?;
+
+    // Progress immédiat pour que la TUI affiche un retour avant le premier appel LLM (chargement modèle possible).
+    let _ = bus.send(
+        EventEnvelope::new(
+            EventType::ProgressUpdate,
+            Some(serde_json::json!({
+                "task_id": root_task_id.to_string(),
+                "progress_pct": 0,
+                "message": "Analyse de la demande…"
+            })),
+        )
+        .with_correlation(root_task_id),
+    );
 
     let steps = decompose_request(&llm_router, &message).await;
     let _ = bus.send(

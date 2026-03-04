@@ -351,6 +351,19 @@ pub(crate) async fn run_message_via_llm(
         .with_correlation(task_id),
     );
 
+    // Progress pour indiquer que la génération a démarré (modèle local peut charger au premier appel).
+    let _ = bus.send(
+        EventEnvelope::new(
+            EventType::ProgressUpdate,
+            Some(serde_json::json!({
+                "task_id": task_id.to_string(),
+                "progress_pct": 10,
+                "message": "Génération de la réponse…"
+            })),
+        )
+        .with_correlation(task_id),
+    );
+
     let max_tokens = std::env::var("AKASHA_MAX_RESPONSE_TOKENS")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
@@ -413,17 +426,31 @@ pub(crate) async fn run_message_via_llm(
     const MAX_TOOL_ROUNDS: u32 = 3;
     let mut round = 0u32;
 
+    let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(300);
+    let llm_timeout = std::time::Duration::from_secs(llm_timeout_secs);
+
     loop {
         let request = CompletionRequest {
             prompt: format!("{}{}", current_prompt, tool_instruction),
             max_tokens: Some(max_tokens),
             temperature: Some(0.7),
         };
-        let response = match llm_router.complete(&request).await {
-            Ok(resp) => resp.text.trim().to_string(),
-            Err(e) => {
+        let response = match tokio::time::timeout(llm_timeout, llm_router.complete(&request)).await {
+            Ok(Ok(resp)) => resp.text.trim().to_string(),
+            Ok(Err(e)) => {
                 tracing::warn!(error = %e, "LLM completion failed");
                 reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
+                break;
+            }
+            Err(_) => {
+                tracing::warn!(timeout_secs = llm_timeout_secs, "LLM completion timed out (model loading or slow reply)");
+                reply_text = format!(
+                    "Délai dépassé ({} s). Modèle local en cours de chargement ou requête trop longue. Réessayez ou configurez Ollama.",
+                    llm_timeout_secs
+                );
                 break;
             }
         };
@@ -561,6 +588,21 @@ pub async fn handle_api(
             "id": "spec_dir",
             "ok": spec_ok,
             "description": if spec_ok { "Spec directory present" } else { "Spec directory missing" }
+        }));
+
+        let embedded_available = llm_router.embedded_available();
+        let embedded_loaded = llm_router.embedded_loaded();
+        let embedded_desc = if !embedded_available {
+            "Embedded model not available (compile with embedded feature, run on Linux/WSL2)"
+        } else if embedded_loaded {
+            "Embedded model loaded and ready"
+        } else {
+            "Embedded model available; loads on first use (first request may take 5–15 min)"
+        };
+        checks.push(serde_json::json!({
+            "id": "embedded_llm",
+            "ok": embedded_available,
+            "description": embedded_desc
         }));
 
         let all_ok = checks.iter().all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
@@ -802,6 +844,36 @@ pub async fn handle_api(
         return json_response("200 OK", &body);
     }
 
+    // GET /api/router/embedded-status — whether embedded LLM is compiled, and if already loaded (for diagnostics)
+    if method == "GET" && path == "/api/router/embedded-status" {
+        let available = llm_router.embedded_available();
+        let loaded = llm_router.embedded_loaded();
+        let hint = if !available {
+            "Recompile daemon with feature 'embedded', run on Linux/WSL2; or use Ollama/cloud"
+        } else if loaded {
+            "Embedded model loaded and ready for /advice and conversation"
+        } else {
+            "Embedded model will load on first use (first request may take 5–15 min: download + load). Wait or increase AKASHA_LLM_TIMEOUT_SECS."
+        };
+        let body = serde_json::json!({
+            "embedded_registered": true,
+            "embedded_available": available,
+            "embedded_loaded": loaded,
+            "hint": hint
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+
+    // POST /api/router/embedded/reload — unload embedded model; next request will load it again
+    if method == "POST" && path == "/api/router/embedded/reload" {
+        llm_router.embedded_unload();
+        let body = serde_json::json!({
+            "ok": true,
+            "message": "Embedded model unloaded. Next request will load it again."
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+
     // GET /api/router/models — list models from all providers (config + Ollama live when available)
     if method == "GET" && path == "/api/router/models" {
         let mut providers: std::collections::HashMap<String, Vec<String>> =
@@ -1002,14 +1074,22 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
             max_tokens: Some(512),
             temperature: Some(0.3),
         };
-        match llm_router.complete(&req).await {
-            Ok(resp) => {
+        let advice_timeout = std::time::Duration::from_secs(120);
+        match tokio::time::timeout(advice_timeout, llm_router.complete(&req)).await {
+            Ok(Ok(resp)) => {
                 let body = serde_json::json!({ "advice": resp.text, "model_used": resp.model_used });
                 return json_response("200 OK", &body.to_string());
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let body = serde_json::json!({ "error": "advice_failed", "detail": e.to_string() });
                 return json_response("502 Bad Gateway", &body.to_string());
+            }
+            Err(_) => {
+                let body = serde_json::json!({
+                    "error": "advice_timeout",
+                    "detail": "LLM timed out (120s). Embedded model may still be loading; try /embedded to check."
+                });
+                return json_response("504 Gateway Timeout", &body.to_string());
             }
         }
     }
