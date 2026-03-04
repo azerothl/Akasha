@@ -6,7 +6,9 @@ use candle_core::{safetensors, DType, Device};
 use candle_nn::VarBuilder;
 use candle_transformers::models::llama::{Cache, Llama, LlamaConfig, LlamaEosToks};
 use hf_hub::api::sync::Api;
+use once_cell::sync::Lazy;
 use rand::SeedableRng;
+use std::sync::{Arc, RwLock};
 use tokenizers::Tokenizer;
 
 const BAGUETTOTRON_REPO: &str = "PleIAs/Baguettotron";
@@ -182,8 +184,6 @@ fn sample_next_token<R: rand::Rng + ?Sized>(
     Ok(next_token)
 }
 
-use once_cell::sync::Lazy;
-use std::sync::{Arc, RwLock};
 
 static BAGUETTOTRON_PIPELINE: Lazy<RwLock<Option<Arc<BaguettotronPipeline>>>> =
     Lazy::new(|| RwLock::new(None));
@@ -228,6 +228,10 @@ fn get_or_load_pipeline() -> Result<Arc<BaguettotronPipeline>> {
     Ok(arc)
 }
 
+/// Generate a completion with Baguettotron.
+///
+/// Note: the `temperature` parameter is currently ignored for this backend;
+/// Baguettotron always uses its internal default sampling configuration (`TEMPERATURE = 0.3`).
 pub fn complete(prompt: &str, max_tokens: Option<usize>, _temperature: Option<f64>) -> Result<String> {
     let pipeline = get_or_load_pipeline()?;
     run_baguettotron(&pipeline, prompt, max_tokens)

@@ -884,16 +884,16 @@ pub async fn handle_api(
         let model = body_json.as_ref().and_then(|j| j.get("model")).and_then(|v| v.as_str()).map(String::from);
         match (category, provider, model) {
             (Some(cat), Some(prov), Some(modl)) if !cat.is_empty() && !prov.is_empty() && !modl.is_empty() => {
+                if !llm_router.is_provider_registered(&prov) {
+                    let body_err = serde_json::json!({ "ok": false, "error": format!("unknown provider '{}'", prov) });
+                    return json_response("400 Bad Request", &body_err.to_string());
+                }
                 let entry = akasha_llm::config::RouteEntry {
                     provider: prov.clone(),
                     model: modl.clone(),
                     config: None,
                 };
-                llm_router.set_primary_route(&cat, akasha_llm::config::RouteEntry {
-                    provider: prov.clone(),
-                    model: modl.clone(),
-                    config: None,
-                });
+                llm_router.set_primary_route(&cat, entry.clone());
                 let router_path = data_dir.join("llm_router.yaml");
                 let mut config = akasha_llm::config::RoutingConfig::load_from_path(&router_path)
                     .unwrap_or_else(|_| akasha_llm::config::RoutingConfig::default_config());

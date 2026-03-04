@@ -1231,11 +1231,13 @@ fn run_app(
             app.loading = false;
             match result {
                 Ok((text, session_id)) => {
+                    // Slash command results (empty session_id) are displayed as system messages.
+                    let role = if session_id.is_empty() { "Système" } else { "Akasha" };
                     if !session_id.is_empty() {
                         app.session_id = Some(session_id);
                     }
                     app.messages.push(ChatMessage {
-                        role: "Akasha".into(),
+                        role: role.into(),
                         text,
                         is_error: false,
                     });

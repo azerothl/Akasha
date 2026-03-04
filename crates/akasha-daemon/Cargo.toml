@@ -5,9 +5,11 @@ edition = "2021"
 description = "Akasha 24/7 daemon runtime with supervision"
 
 [features]
-default = ["embeddings"]
+default = ["embeddings", "embedded"]
 # Embeddings (ONNX) for long-term memory; disable on Windows if linker errors with ort_sys (e.g. cargo build -p akasha-daemon --no-default-features)
 embeddings = ["dep:akasha-embeddings"]
+# Embedded LLM (Candle, Qwen3 0.6B by default); disable on platforms where Candle is unsupported or not desired
+embedded = ["akasha-llm/embedded"]
 # Use Baguettotron 321M as embedded model option; set AKASHA_EMBEDDED_MODEL=baguettotron at runtime to select it
 embedded-baguettotron = ["akasha-llm/embedded-baguettotron"]
 # Use GPU (CUDA) for embedded LLM when available; requires CUDA toolkit at build time
@@ -20,7 +22,7 @@ akasha-embeddings = { path = "../akasha-embeddings", optional = true }
 akasha-vault = { path = "../akasha-vault" }
 akasha-plugin-api = { path = "../akasha-plugin-api" }
 akasha-plugin-host = { path = "../akasha-plugin-host" }
-akasha-llm = { path = "../akasha-llm", features = ["embedded"] }
+akasha-llm = { path = "../akasha-llm" }
 akasha-rag = { path = "../akasha-rag" }
 akasha-tools = { path = "../akasha-tools" }
 akasha-cluster = { path = "../akasha-cluster" }

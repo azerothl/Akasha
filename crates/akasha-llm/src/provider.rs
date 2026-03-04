@@ -437,7 +437,12 @@ impl LLMProvider for AkashaCoreProvider {
                             model_used: "core".into(),
                         });
                     }
-                    Ok(Err(_)) | Err(_) => {}
+                    Ok(Err(e)) => {
+                        warn!(error = ?e, "AkashaCoreProvider embedded LLM failed to complete prompt; falling back to placeholder response");
+                    }
+                    Err(join_err) => {
+                        warn!(error = ?join_err, "AkashaCoreProvider spawn_blocking for embedded LLM failed; falling back to placeholder response");
+                    }
                 }
             }
         }
