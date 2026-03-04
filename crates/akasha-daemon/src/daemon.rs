@@ -117,6 +117,9 @@ impl Daemon {
         if loaded_from.0 != "default" {
             info!(source = loaded_from.0, path = %loaded_from.1, "LLM router config loaded");
         }
+        if router_config.providers.is_empty() && loaded_from.0 != "default" {
+            info!("llm_router.yaml: section 'providers' vide — Ollama utilisera OLLAMA_HOST ou localhost:11434 ; ajoutez 'providers.ollama.base_url' pour expliciter l'URL.");
+        }
         let ollama_url = router_config
             .providers
             .get("ollama")
@@ -138,6 +141,7 @@ impl Daemon {
         let mut llm_router = akasha_llm::LLMRouter::new(router_config);
         llm_router.register_provider(Arc::new(akasha_llm::OllamaProvider::new(ollama_url)));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaCoreProvider::new()));
+        llm_router.register_provider(Arc::new(akasha_llm::AkashaEmbeddedProvider::new()));
         // Phase 6 rattrapage: cloud providers (API key from vault or env)
         if let Some(ref cfg) = openai_cfg {
             let key = cfg
@@ -174,6 +178,18 @@ impl Daemon {
             info!("LLM Router: degraded mode (local providers only)");
         }
         let llm_router = Arc::new(llm_router);
+
+        // Preload embedded model in background so first user request is fast (avoids 5–15 min load on first use)
+        if llm_router.embedded_available() {
+            let router_preload = llm_router.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = router_preload.embedded_preload() {
+                    warn!(error = %e, "Embedded model preload failed (first request may be slow)");
+                } else {
+                    info!("Embedded model preloaded and ready");
+                }
+            });
+        }
 
         // Phase 8: RAG pack (spec + runbooks) for diagnostic advice
         let runbooks_dir = self.spec_dir.join("runbooks");

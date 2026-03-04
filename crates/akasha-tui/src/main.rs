@@ -450,8 +450,13 @@ impl App {
   /status           — état du daemon
   /doctor           — diagnostic (daemon, ollama, vault, spec)
   /advice           — conseil diagnostic (RAG + modèle)
+  /embedded         — statut du modèle local embarqué
+  /embedded reload  — décharger le modèle (rechargé au prochain appel)
   /metrics          — métriques du routeur LLM
   /models           — liste des modèles (tous les providers)
+  /models list      — modèles par catégorie (primary + fallback)
+  /models set CAT PROV MODÈLE — définir le modèle pour une catégorie (ex. conversation ollama llama3.2)
+  /routes           — modèles par catégorie (primary + fallback)
   /config list      — variables (akasha.env)
   /config get KEY   — valeur d'une variable
   /config set K V   — définir variable (K=V dans akasha.env)
@@ -499,8 +504,9 @@ impl App {
                         if let Ok(doctor_json) = r.json::<serde_json::Value>() {
                             let body = serde_json::json!({ "health": doctor_json });
                             if let Ok(adv_resp) = client.post(&advice_url).json(&body).timeout(Duration::from_secs(180)).send() {
-                                if adv_resp.status().is_success() {
-                                    if let Ok(adv_json) = adv_resp.json::<serde_json::Value>() {
+                                let ok = adv_resp.status().is_success();
+                                if let Ok(adv_json) = adv_resp.json::<serde_json::Value>() {
+                                    if ok {
                                         let advice = adv_json.get("advice").and_then(|v| v.as_str()).unwrap_or("").trim();
                                         let model = adv_json.get("model_used").and_then(|v| v.as_str()).unwrap_or("?");
                                         if advice.is_empty() {
@@ -508,12 +514,51 @@ impl App {
                                         }
                                         return format!("Conseil diagnostic (modèle: {})\n\n{}", model, advice);
                                     }
+                                    if let Some(detail) = adv_json.get("detail").and_then(|v| v.as_str()) {
+                                        return format!("Conseil indisponible : {}", detail);
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                return "Impossible de récupérer le conseil (daemon + LLM requis).".to_string();
+                return "Impossible de récupérer le conseil (daemon + LLM requis). Tapez /embedded pour vérifier le modèle local.".to_string();
+            }
+            "embedded" => {
+                let sub = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+                if sub == "reload" {
+                    let url = format!("{}/api/router/embedded/reload", base);
+                    match client.post(&url).send() {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(json) = r.json::<serde_json::Value>() {
+                                let msg = json.get("message").and_then(|v| v.as_str()).unwrap_or("Modèle déchargé.");
+                                return msg.to_string();
+                            }
+                        }
+                        _ => {}
+                    }
+                    return "Impossible de recharger (daemon ou routeur).".to_string();
+                }
+                let url = format!("{}/api/router/embedded-status", base);
+                match client.get(&url).send() {
+                    Ok(r) if r.status().is_success() => {
+                        if let Ok(json) = r.json::<serde_json::Value>() {
+                            let available = json.get("embedded_available").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let loaded = json.get("embedded_loaded").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let hint = json.get("hint").and_then(|v| v.as_str()).unwrap_or("");
+                            let status = if !available {
+                                "non disponible"
+                            } else if loaded {
+                                "disponible et chargé (prêt)"
+                            } else {
+                                "disponible (chargement au 1ᵉʳ appel, 5–15 min possibles)"
+                            };
+                            return format!("Modèle embarqué : {}\n{}", status, hint);
+                        }
+                    }
+                    _ => {}
+                }
+                return "Impossible de joindre le daemon ou routeur.".to_string();
             }
             "plugins" => {
                 let url = format!("{}/api/plugins", base);
@@ -569,6 +614,86 @@ impl App {
                 return "Impossible de récupérer les métriques.".to_string();
             }
             "models" => {
+                let sub = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+                if sub == "list" {
+                    let url = format!("{}/api/router/routes", base);
+                    match client.get(&url).send() {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(routes) = r.json::<serde_json::Value>() {
+                                let obj = match routes.as_object() {
+                                    Some(o) => o,
+                                    None => return "Aucune route configurée.".to_string(),
+                                };
+                                let mut cats: Vec<_> = obj.keys().collect();
+                                cats.sort();
+                                let mut out = String::from("Modèles par catégorie (primary + fallback)\n\n");
+                                for cat in cats {
+                                    let tt = match routes.get(cat).and_then(|v| v.as_object()) {
+                                        Some(t) => t,
+                                        None => continue,
+                                    };
+                                    let primary = tt
+                                        .get("primary")
+                                        .and_then(|p| p.as_object())
+                                        .map(|p| format!("{} / {}", p.get("provider").and_then(|v| v.as_str()).unwrap_or("?"), p.get("model").and_then(|v| v.as_str()).unwrap_or("?")))
+                                        .unwrap_or_else(|| "(aucun)".to_string());
+                                    out.push_str(&format!("  {}:\n    primary: {}\n", cat, primary));
+                                    let empty: Vec<serde_json::Value> = vec![];
+                                    let fallback = tt.get("fallback").and_then(|f| f.as_array()).unwrap_or(&empty);
+                                    if fallback.is_empty() {
+                                        out.push_str("    fallback: (aucun)\n");
+                                    } else {
+                                        for (i, e) in fallback.iter().enumerate() {
+                                            let obj = e.as_object();
+                                            let line = obj.map(|o| {
+                                                let p = o.get("provider").and_then(|v| v.as_str()).unwrap_or("?");
+                                                let m = o.get("model").and_then(|v| v.as_str()).unwrap_or("?");
+                                                format!("{} / {}", p, m)
+                                            }).unwrap_or_else(|| "?".to_string());
+                                            out.push_str(&format!("    fallback[{}]: {}\n", i, line));
+                                        }
+                                    }
+                                }
+                                return out;
+                            }
+                        }
+                        _ => {}
+                    }
+                    return "Impossible de récupérer les routes.".to_string();
+                }
+                if sub == "set" {
+                    let category = parts.get(2).map(|s| (*s).to_string());
+                    let provider = parts.get(3).map(|s| (*s).to_string());
+                    let model = if parts.len() > 4 {
+                        parts[4..].join(" ").trim().to_string()
+                    } else {
+                        parts.get(4).map(|s| (*s).to_string()).unwrap_or_default()
+                    };
+                    match (category, provider, model) {
+                        (Some(cat), Some(prov), modl) if !cat.is_empty() && !prov.is_empty() && !modl.is_empty() => {
+                            let url = format!("{}/api/router/route", base);
+                            let body = serde_json::json!({ "category": cat, "provider": prov, "model": modl });
+                            match client.post(&url).json(&body).send() {
+                                Ok(r) if r.status().is_success() => {
+                                    if let Ok(json) = r.json::<serde_json::Value>() {
+                                        let msg = json.get("message").and_then(|v| v.as_str()).unwrap_or("Route mise à jour.");
+                                        return format!("{} — {}", json.get("category").and_then(|v| v.as_str()).unwrap_or(""), msg);
+                                    }
+                                }
+                                Ok(r) => {
+                                    let err = r.text().unwrap_or_default();
+                                    let detail: String = serde_json::from_str::<serde_json::Value>(&err)
+                                        .ok()
+                                        .and_then(|j| j.get("error").and_then(|v| v.as_str().map(String::from)))
+                                        .unwrap_or(err);
+                                    return format!("Erreur: {}", detail);
+                                }
+                                Err(e) => return format!("Erreur: {}", e),
+                            }
+                        }
+                        _ => return "Usage: /models set CATÉGORIE PROVIDER MODÈLE (ex. /models set conversation ollama llama3.2)".to_string(),
+                    }
+                }
                 let url = format!("{}/api/router/models", base);
                 match client.get(&url).send() {
                     Ok(r) if r.status().is_success() => {
@@ -607,6 +732,52 @@ impl App {
                     _ => {}
                 }
                 return "Impossible de récupérer la liste des modèles.".to_string();
+            }
+            "routes" => {
+                let url = format!("{}/api/router/routes", base);
+                match client.get(&url).send() {
+                    Ok(r) if r.status().is_success() => {
+                        if let Ok(routes) = r.json::<serde_json::Value>() {
+                            let obj = match routes.as_object() {
+                                Some(o) => o,
+                                None => return "Aucune route configurée.".to_string(),
+                            };
+                            let mut cats: Vec<_> = obj.keys().collect();
+                            cats.sort();
+                            let mut out = String::from("Modèles par catégorie (primary + fallback)\n\n");
+                            for cat in cats {
+                                let tt = match routes.get(cat).and_then(|v| v.as_object()) {
+                                    Some(t) => t,
+                                    None => continue,
+                                };
+                                let primary = tt
+                                    .get("primary")
+                                    .and_then(|p| p.as_object())
+                                    .map(|p| format!("{} / {}", p.get("provider").and_then(|v| v.as_str()).unwrap_or("?"), p.get("model").and_then(|v| v.as_str()).unwrap_or("?")))
+                                    .unwrap_or_else(|| "(aucun)".to_string());
+                                out.push_str(&format!("  {}:\n    primary: {}\n", cat, primary));
+                                let empty: Vec<serde_json::Value> = vec![];
+                                let fallback = tt.get("fallback").and_then(|f| f.as_array()).unwrap_or(&empty);
+                                if fallback.is_empty() {
+                                    out.push_str("    fallback: (aucun)\n");
+                                } else {
+                                    for (i, e) in fallback.iter().enumerate() {
+                                        let obj = e.as_object();
+                                        let line = obj.map(|o| {
+                                            let p = o.get("provider").and_then(|v| v.as_str()).unwrap_or("?");
+                                            let m = o.get("model").and_then(|v| v.as_str()).unwrap_or("?");
+                                            format!("{} / {}", p, m)
+                                        }).unwrap_or_else(|| "?".to_string());
+                                        out.push_str(&format!("    fallback[{}]: {}\n", i, line));
+                                    }
+                                }
+                            }
+                            return out;
+                        }
+                    }
+                    _ => {}
+                }
+                return "Impossible de récupérer les routes.".to_string();
             }
             "config" => {
                 let sub = parts.get(1).map(|s| *s).unwrap_or("").to_lowercase();
@@ -1060,11 +1231,13 @@ fn run_app(
             app.loading = false;
             match result {
                 Ok((text, session_id)) => {
+                    // Slash command results (empty session_id) are displayed as system messages.
+                    let role = if session_id.is_empty() { "Système" } else { "Akasha" };
                     if !session_id.is_empty() {
                         app.session_id = Some(session_id);
                     }
                     app.messages.push(ChatMessage {
-                        role: "Akasha".into(),
+                        role: role.into(),
                         text,
                         is_error: false,
                     });
@@ -1116,15 +1289,27 @@ fn run_app(
                         });
                         app.input.clear();
                         if msg.starts_with('/') {
-                            let result = App::run_slash_command_blocking(app.port, &msg);
-                            app.messages.push(ChatMessage {
-                                role: "Système".into(),
-                                text: result,
-                                is_error: false,
-                            });
-                            app.scroll = usize::MAX;
-                            // Redraw immediately so the result is visible without waiting for next event
-                            let _ = terminal.draw(|f| ui(f, app));
+                            let cmd_lower = msg.trim().to_lowercase();
+                            let long_running = cmd_lower.starts_with("/advice") || cmd_lower.starts_with("/doctor");
+                            if long_running {
+                                app.loading = true;
+                                let port = app.port;
+                                let tx = app.tx.clone();
+                                let cmd = msg.clone();
+                                thread::spawn(move || {
+                                    let result = App::run_slash_command_blocking(port, &cmd);
+                                    let _ = tx.send(Ok((result, String::new())));
+                                });
+                            } else {
+                                let result = App::run_slash_command_blocking(app.port, &msg);
+                                app.messages.push(ChatMessage {
+                                    role: "Système".into(),
+                                    text: result,
+                                    is_error: false,
+                                });
+                                app.scroll = usize::MAX;
+                                let _ = terminal.draw(|f| ui(f, app));
+                            }
                         } else if !app.loading && app.daemon_ok {
                             app.loading = true;
                             let port = app.port;

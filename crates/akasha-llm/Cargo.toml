@@ -4,6 +4,17 @@ version = "0.1.0"
 edition = "2021"
 description = "LLM Router: task classifier, multi-provider, fallback, metrics"
 
+[features]
+default = []
+# Use embedded local model (Candle) for akasha_core when available; recommend Linux/WSL2
+embedded = ["dep:akasha-embedded-llm"]
+# Include Baguettotron 321M as embedded option; set AKASHA_EMBEDDED_MODEL=baguettotron at runtime for low-resource/conversation
+embedded-baguettotron = ["embedded", "akasha-embedded-llm/baguettotron"]
+# Use GPU (CUDA) for embedded model when available; requires CUDA toolkit at build time
+embedded-cuda = ["embedded", "akasha-embedded-llm/cuda"]
+# Intel MKL: faster CPU inference for embedded models (Linux/WSL2). Use when CUDA does not build.
+embedded-mkl = ["embedded", "akasha-embedded-llm/mkl"]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -15,3 +26,4 @@ anyhow = "1.0"
 tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
+akasha-embedded-llm = { path = "../akasha-embedded-llm", optional = true }

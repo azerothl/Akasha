@@ -49,7 +49,10 @@ pub fn classify_task_type(prompt: &str) -> (TaskType, f32) {
         ("runbook", TaskType::SystemDiagnostic),
         ("health", TaskType::SystemDiagnostic),
         ("status", TaskType::SystemDiagnostic),
-        ("code", TaskType::CodeGeneration),
+        ("write code", TaskType::CodeGeneration),
+        ("generate code", TaskType::CodeGeneration),
+        ("code generation", TaskType::CodeGeneration),
+        ("code ", TaskType::CodeGeneration),  // e.g. "code moi", "code un script"
         ("function", TaskType::CodeGeneration),
         ("debug", TaskType::CodeGeneration),
         ("implement", TaskType::CodeGeneration),

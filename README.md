@@ -36,6 +36,7 @@ Assistant personnel **sécurisé**, **local-first**, conçu comme une infrastruc
 akasha/
 ├── crates/
 │   ├── akasha-core/         # Types partagés, Event Envelope, Spec Loader, sécurité
+│   ├── akasha-embedded-llm/ # POC : LLM intégré (Qwen3 0.6B ou Baguettotron 321M) — onboarding, diagnostics, conversation ; WSL2 recommandé sous Windows
 │   ├── akasha-embeddings/   # Embeddings locaux (fastembed/ONNX, modèle porté par l’app)
 │   ├── akasha-store/        # SQLite (tâches, mémoire long terme), log immuable
 │   ├── akasha-vault/        # Secrets (keyring OS + fichier chiffré)
@@ -100,9 +101,9 @@ cargo build -p akasha-cli -p akasha-tui
 akasha tui
 ```
 
-- **Onglets** : Chat, Routeur (métriques LLM), Doc (guide utilisateur servi par le daemon).
+- **Onglets** : Chat, Routeur (métriques LLM), Doc (guide utilisateur servi par le daemon), Activité (tâches et événements).
 - **Chat** : envoi de messages au daemon ; réponses via l’orchestrateur (ack immédiat, traitement en arrière-plan). Défilement : ↑↓, PgUp/PgDn, Home/End.
-- **Commandes slash** (dans le chat) : `/help`, `/status`, `/doctor`, `/advice`, `/metrics`, `/models` (tous les providers), `/config list`, `/vault list`, `/plugins`, `/reload`, `/restart`.
+- **Commandes slash** (dans le chat) : `/help`, `/status`, `/doctor`, `/advice`, `/embedded` (statut modèle local), `/embedded reload`, `/metrics`, `/models` (liste), `/models set CATÉGORIE PROVIDER MODÈLE` (ex. `conversation ollama llama3.2`), `/config list`, `/vault list`, `/plugins`, `/reload`, `/restart`.
 - **Raccourcis** : Tab = changer d’onglet, R = rafraîchir (métriques ou doc), Échap / Ctrl+Q = quitter.
 
 ### Interface web (Tauri)
@@ -150,7 +151,7 @@ Feuille de route agents/outils/skills : [spec/33_agents_tools_orchestrator_skill
 
 **Fichiers principaux** :
 
-- **llm_router.yaml** (data_dir ou racine) : providers (Ollama, OpenAI, OpenRouter), modèles par type de tâche. Exemple : [spec/llm_router.example.yaml](spec/llm_router.example.yaml).
+- **llm_router.yaml** (data_dir ou racine) : providers (Ollama, OpenAI, OpenRouter, akasha_embedded), modèles par type de tâche. Par défaut le routeur utilise le modèle embarqué (akasha_embedded/default). Exemple : [spec/llm_router.example.yaml](spec/llm_router.example.yaml). Depuis la TUI : `/models set CATÉGORIE PROVIDER MODÈLE` pour changer à chaud.
 - **connectors.env** : activation des canaux ; chargé par `akasha start`.
 - **akasha.env** : variables persistantes (config env).
 - **tools_policy.yaml** (data_dir, optionnel) : politique des outils machine (chemins/autorisations). Exemple : [spec/tools_policy.example.yaml](spec/tools_policy.example.yaml).

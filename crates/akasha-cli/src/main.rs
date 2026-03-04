@@ -2,7 +2,7 @@
 
 use akasha_vault::Vault;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -36,6 +36,9 @@ enum Commands {
         /// Fetch diagnostic advice from daemon (RAG + Core Model, requires daemon running)
         #[arg(long)]
         advice: bool,
+        /// Fix missing or minimal config: create llm_router.yaml, tools_policy.yaml, connectors.env in data_dir if absent
+        #[arg(long)]
+        fix: bool,
     },
     /// Vault: manage secrets (Phase 3)
     Vault {
@@ -95,6 +98,22 @@ enum ConfigModelsSub {
         /// Ollama base URL (default from llm_router.yaml or http://localhost:11434)
         #[arg(long)]
         ollama_url: Option<String>,
+    },
+    /// List models by category, or show one category (e.g. conversation, code_generation)
+    Get {
+        /// Category (task_type). If omitted, list all categories with their primary model.
+        category: Option<String>,
+    },
+    /// Show primary and fallback models for every category (same as get without args, explicit)
+    Routes,
+    /// Set the primary model for a category (e.g. akasha config models set conversation ollama llama3.2)
+    Set {
+        /// Category (task_type): conversation, code_generation, system_diagnostic, etc.
+        category: String,
+        /// Provider: ollama, openai, openrouter, akasha_embedded, akasha_core
+        provider: String,
+        /// Model name (e.g. llama3.2, gpt-4o-mini, core)
+        model: String,
     },
 }
 
@@ -201,7 +220,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Start { foreground } => cmd_start(foreground),
         Commands::Stop => cmd_stop(),
-        Commands::Doctor { json, advice } => cmd_doctor(json, advice),
+        Commands::Doctor { json, advice, fix } => cmd_doctor(json, advice, fix),
         Commands::Vault { sub } => cmd_vault(sub),
         Commands::Plugin { sub } => cmd_plugin(sub),
         Commands::Router { sub } => cmd_router(sub),
@@ -663,6 +682,86 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                         None => anyhow::bail!("Could not fetch model '{}' from {}", model, url),
                     }
                 }
+                ConfigModelsSub::Get { category } => {
+                    if let Some(ref cat) = category {
+                        let tt = config
+                            .task_types
+                            .get(cat.as_str())
+                            .ok_or_else(|| anyhow::anyhow!("Category '{}' not found in llm_router.yaml", cat))?;
+                        println!("Category: {}", cat);
+                        if let Some(ref p) = tt.primary {
+                            println!("  primary: {} / {}", p.provider, p.model);
+                        } else {
+                            println!("  primary: (none)");
+                        }
+                        if tt.fallback.is_empty() {
+                            println!("  fallback: (none)");
+                        } else {
+                            for (i, e) in tt.fallback.iter().enumerate() {
+                                println!("  fallback[{}]: {} / {}", i, e.provider, e.model);
+                            }
+                        }
+                        return Ok(());
+                    }
+                    // List all categories
+                    let mut cats: Vec<_> = config.task_types.keys().collect();
+                    cats.sort();
+                    if cats.is_empty() {
+                        println!("No task_types in llm_router.yaml.");
+                        return Ok(());
+                    }
+                    println!("Models by category (primary):");
+                    for cat in cats {
+                        let tt = config.task_types.get(cat).unwrap();
+                        let primary = tt
+                            .primary
+                            .as_ref()
+                            .map(|p| format!("{} / {}", p.provider, p.model))
+                            .unwrap_or_else(|| "(none)".to_string());
+                        println!("  {}: {}", cat, primary);
+                    }
+                    return Ok(());
+                }
+                ConfigModelsSub::Routes => {
+                    let mut cats: Vec<_> = config.task_types.keys().collect();
+                    cats.sort();
+                    if cats.is_empty() {
+                        println!("No task_types in llm_router.yaml.");
+                        return Ok(());
+                    }
+                    println!("Models by category (primary + fallback):");
+                    for cat in cats {
+                        let tt = config.task_types.get(cat).unwrap();
+                        let primary = tt
+                            .primary
+                            .as_ref()
+                            .map(|p| format!("{} / {}", p.provider, p.model))
+                            .unwrap_or_else(|| "(none)".to_string());
+                        println!("  {}:", cat);
+                        println!("    primary: {}", primary);
+                        if tt.fallback.is_empty() {
+                            println!("    fallback: (none)");
+                        } else {
+                            for (i, e) in tt.fallback.iter().enumerate() {
+                                println!("    fallback[{}]: {} / {}", i, e.provider, e.model);
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                ConfigModelsSub::Set {
+                    category,
+                    provider,
+                    model,
+                } => {
+                    let entry = akasha_llm::config::RouteEntry {
+                        provider: provider.clone(),
+                        model: model.clone(),
+                        config: None,
+                    };
+                    config.set_primary_route(&category, entry);
+                    println!("{}: primary set to {} / {} (previous primary moved to fallback if any).", category, provider, model);
+                }
             }
             config.save_to_path(&path)?;
             println!("Config written to {}", path.display());
@@ -767,7 +866,6 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
 
     // --- 1. Provider LLM ---
     let mut ollama_url = String::from("http://localhost:11434");
-    let mut ollama_model = String::from("llama3.2");
     let mut openai_key: Option<String> = None;
     let mut openai_model = String::from("gpt-4o-mini");
     let mut openrouter_key: Option<String> = None;
@@ -788,10 +886,6 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
             let url = init_prompt("Ollama URL [http://localhost:11434] :\n> ");
             if !url.is_empty() {
                 ollama_url = url;
-            }
-            let model = init_prompt("Modèle Ollama (conversation) [llama3.2] :\n> ");
-            if !model.is_empty() {
-                ollama_model = model;
             }
         }
         if choice == "2" || choice == "4" {
@@ -846,18 +940,18 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
         }
     }
 
-    // --- 3. llm_router.yaml ---
+    // --- 3. llm_router.yaml --- (default primary = internal Akasha model)
     let primary_provider = if openai_key.is_some() && !use_defaults {
         "openai"
     } else if openrouter_key.is_some() && !use_defaults {
         "openrouter"
     } else {
-        "ollama"
+        "akasha_embedded"
     };
     let primary_model = match primary_provider {
         "openai" => openai_model.as_str(),
         "openrouter" => openrouter_model.as_str(),
-        _ => ollama_model.as_str(),
+        _ => "default",
     };
 
     let yaml = format!(
@@ -897,41 +991,47 @@ providers:
     } else {
         yaml
     };
+    // When primary is internal (akasha_embedded or akasha_core), no fallback; otherwise fallback to core
+    let fallback_block = if primary_provider == "akasha_embedded" || primary_provider == "akasha_core" {
+        "[]".to_string()
+    } else {
+        "\n      - provider: akasha_core\n        model: core".to_string()
+    };
     let yaml = format!(
-        r#"{}task_types:
-  conversation:
-    primary:
-      provider: {primary_provider}
-      model: {primary_model}
-    fallback:
-      - provider: akasha_core
-        model: core
-  code_generation:
-    primary:
-      provider: ollama
-      model: codellama
-    fallback:
-      - provider: akasha_core
-        model: core
-  creative_writing:
-    primary:
-      provider: ollama
-      model: {ollama_model}
-    fallback:
-      - provider: akasha_core
-        model: core
-  system_diagnostic:
-    primary:
-      provider: ollama
-      model: {ollama_model}
-    fallback:
-      - provider: akasha_core
-        model: core
-"#,
+        "{}task_types:\n\
+  conversation:\n\
+    primary:\n\
+      provider: {}\n\
+      model: {}\n\
+    fallback:{}\n\
+  code_generation:\n\
+    primary:\n\
+      provider: {}\n\
+      model: {}\n\
+    fallback:{}\n\
+  creative_writing:\n\
+    primary:\n\
+      provider: {}\n\
+      model: {}\n\
+    fallback:{}\n\
+  system_diagnostic:\n\
+    primary:\n\
+      provider: {}\n\
+      model: {}\n\
+    fallback:{}\n",
         yaml,
-        primary_provider = primary_provider,
-        primary_model = primary_model,
-        ollama_model = ollama_model
+        primary_provider,
+        primary_model,
+        fallback_block,
+        primary_provider,
+        primary_model,
+        fallback_block,
+        primary_provider,
+        primary_model,
+        fallback_block,
+        primary_provider,
+        primary_model,
+        fallback_block,
     );
 
     let router_path = data_dir.join("llm_router.yaml");
@@ -1249,11 +1349,84 @@ fn cmd_stop() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_doctor(json: bool, advice: bool) -> anyhow::Result<()> {
+/// Apply fixes for missing or minimal config when `akasha doctor --fix` is run.
+/// Returns a list of messages describing what was fixed.
+fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
+    let mut fixes = Vec::new();
+
+    if !data_dir.exists() {
+        std::fs::create_dir_all(data_dir)?;
+        fixes.push(format!("Created data_dir: {}", data_dir.display()));
+    }
+
+    let llm_router_path = data_dir.join("llm_router.yaml");
+    if !llm_router_path.exists() {
+        let mut config = akasha_llm::RoutingConfig::default_config();
+        let ollama_url = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
+        config.providers.insert(
+            "ollama".to_string(),
+            akasha_llm::config::ProviderConfig {
+                api_key_ref: None,
+                base_url: Some(ollama_url.clone()),
+                organization: None,
+                version: None,
+                always_available: None,
+            },
+        );
+        config.save_to_path(&llm_router_path)?;
+        fixes.push(format!("Created llm_router.yaml with default task_types and providers.ollama.base_url = {}", ollama_url));
+    }
+
+    let tools_policy_path = data_dir.join("tools_policy.yaml");
+    if !tools_policy_path.exists() {
+        let spec_dir = std::env::var("AKASHA_SPEC_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("spec"));
+        let example = spec_dir.join("tools_policy.example.yaml");
+        if example.exists() {
+            std::fs::copy(&example, &tools_policy_path)?;
+            fixes.push(format!("Created tools_policy.yaml from {}", example.display()));
+        } else {
+            let minimal = r#"# tools_policy.yaml - edit allowed_read_paths / allowed_write_paths as needed
+allowed_read_paths: []
+allowed_write_paths: []
+allowed_commands: []
+command_timeout_secs: 60
+"#;
+            std::fs::write(&tools_policy_path, minimal)?;
+            fixes.push("Created minimal tools_policy.yaml (no paths allowed by default; edit to add paths).".to_string());
+        }
+    }
+
+    let connectors_path = data_dir.join("connectors.env");
+    if !connectors_path.exists() {
+        let content = r#"# Connectors activation (generated by akasha doctor --fix)
+# Set to 1 to enable: AKASHA_TELEGRAM_ENABLED=1, AKASHA_SLACK_ENABLED=1, AKASHA_DISCORD_ENABLED=1
+"#;
+        std::fs::write(&connectors_path, content)?;
+        fixes.push("Created connectors.env (empty; set vars to 1 to enable Telegram/Slack/Discord).".to_string());
+    }
+
+    Ok(fixes)
+}
+
+fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
     let port: u16 = std::env::var("AKASHA_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_PORT);
+
+    let data_dir = akasha_data_dir();
+    if fix {
+        let fixes = run_doctor_fixes(&data_dir)?;
+        if !json && !fixes.is_empty() {
+            println!("--fix applied:");
+            for msg in &fixes {
+                println!("  {}", msg);
+            }
+            println!();
+        }
+    }
 
     let mut checks = Vec::new();
 
@@ -1289,7 +1462,6 @@ fn cmd_doctor(json: bool, advice: bool) -> anyhow::Result<()> {
 
     let all_ok = checks.iter().all(|(_, ok, _)| *ok);
 
-    let data_dir = akasha_data_dir();
     let config_paths = serde_json::json!({
         "data_dir": data_dir.display().to_string(),
         "llm_router_yaml": data_dir.join("llm_router.yaml").display().to_string(),
@@ -1306,14 +1478,50 @@ fn cmd_doctor(json: bool, advice: bool) -> anyhow::Result<()> {
         "config_paths": config_paths
     });
 
+    // When daemon is reachable, fetch its checks (ollama, vault, spec_dir, embedded_llm, etc.)
+    let daemon_checks: Vec<serde_json::Value> = if daemon_healthy {
+        reqwest::blocking::Client::new()
+            .get(format!("http://127.0.0.1:{}/api/doctor", port))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .ok()
+            .and_then(|r| r.json::<serde_json::Value>().ok())
+            .and_then(|j| j.get("checks").and_then(|c| c.as_array()).cloned())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     if json {
-        println!("{}", serde_json::to_string_pretty(&health_payload)?);
+        if !daemon_checks.is_empty() {
+            let daemon_all_ok_json = daemon_checks.iter().all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+            let combined_ok = all_ok && daemon_all_ok_json;
+            let mut payload = health_payload.clone();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("ok".to_string(), serde_json::json!(combined_ok));
+                obj.insert("daemon_checks".to_string(), serde_json::json!(daemon_checks));
+            }
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&health_payload)?);
+        }
     } else {
         println!("Akasha Doctor - System Diagnostics");
         println!("==================================");
         for (_, ok, desc) in &checks {
             let status = if *ok { "OK" } else { "MISSING" };
             println!("  [{}] {}", status, desc);
+        }
+        if !daemon_checks.is_empty() {
+            println!();
+            println!("Daemon checks (when daemon is running):");
+            for c in &daemon_checks {
+                let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let ok = c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                let desc = c.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let status = if ok { "OK" } else { "KO" };
+                println!("  [{}] {} — {}", status, id, desc);
+            }
         }
         println!();
         println!("Chemins de configuration (data_dir = {}):", data_dir.display());
@@ -1322,7 +1530,8 @@ fn cmd_doctor(json: bool, advice: bool) -> anyhow::Result<()> {
         println!("  akasha.env        : {}", data_dir.join("akasha.env").display());
         println!("  tools_policy.yaml : {}", data_dir.join("tools_policy.yaml").display());
         println!();
-        if all_ok {
+        let daemon_all_ok = daemon_checks.is_empty() || daemon_checks.iter().all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+        if all_ok && daemon_all_ok {
             println!("All checks passed.");
         } else {
             println!("Some checks failed. Fix the issues above.");

@@ -351,6 +351,19 @@ pub(crate) async fn run_message_via_llm(
         .with_correlation(task_id),
     );
 
+    // Progress pour indiquer que la génération a démarré (modèle local peut charger au premier appel).
+    let _ = bus.send(
+        EventEnvelope::new(
+            EventType::ProgressUpdate,
+            Some(serde_json::json!({
+                "task_id": task_id.to_string(),
+                "progress_pct": 10,
+                "message": "Génération de la réponse…"
+            })),
+        )
+        .with_correlation(task_id),
+    );
+
     let max_tokens = std::env::var("AKASHA_MAX_RESPONSE_TOKENS")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
@@ -413,20 +426,128 @@ pub(crate) async fn run_message_via_llm(
     const MAX_TOOL_ROUNDS: u32 = 3;
     let mut round = 0u32;
 
-    loop {
+    let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(300);
+    let idle_timeout_secs = std::env::var("AKASHA_LLM_STREAM_IDLE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(60);
+    // First chunk can take long (model load, first token on CPU). Use longer wait so we don't hit idle before any data.
+    let first_chunk_timeout_secs = std::env::var("AKASHA_LLM_FIRST_CHUNK_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or_else(|| llm_timeout_secs.min(300));
+
+    'tool_rounds: loop {
         let request = CompletionRequest {
             prompt: format!("{}{}", current_prompt, tool_instruction),
             max_tokens: Some(max_tokens),
             temperature: Some(0.7),
         };
-        let response = match llm_router.complete(&request).await {
-            Ok(resp) => resp.text.trim().to_string(),
-            Err(e) => {
-                tracing::warn!(error = %e, "LLM completion failed");
-                reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
-                break;
+        // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
+        // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
+        let (stream_tx, std_rx) = std::sync::mpsc::channel::<String>();
+        let (tok_tx, mut tok_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        std::thread::Builder::new()
+            .name("akasha-stream-fwd".to_string())
+            .spawn(move || {
+                for chunk in std_rx {
+                    if tok_tx.send(chunk).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok();
+        let router = llm_router.clone();
+        let stream_join = tokio::spawn(async move { router.complete_stream(&request, stream_tx).await });
+        let mut accumulated = String::new();
+        let mut first_wait = true;
+        let overall_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(llm_timeout_secs);
+        loop {
+            // Check the overall deadline before waiting for a chunk to avoid spurious zero-duration timeouts.
+            if tokio::time::Instant::now() >= overall_deadline {
+                tracing::warn!(timeout_secs = llm_timeout_secs, "Overall LLM timeout exceeded; aborting task");
+                stream_join.abort();
+                reply_text = if accumulated.is_empty() {
+                    format!("LLM response timed out after {} seconds.", llm_timeout_secs)
+                } else {
+                    accumulated
+                };
+                break 'tool_rounds;
+            }
+            let idle = if first_wait {
+                first_wait = false;
+                std::time::Duration::from_secs(first_chunk_timeout_secs)
+            } else {
+                std::time::Duration::from_secs(idle_timeout_secs)
+            };
+            match tokio::time::timeout(idle, tok_rx.recv()).await {
+                Ok(Some(chunk)) => {
+                    accumulated.push_str(&chunk);
+                    let _ = bus.send(
+                        EventEnvelope::new(
+                            EventType::ProgressUpdate,
+                            Some(serde_json::json!({
+                                "task_id": task_id.to_string(),
+                                "progress_pct": 50,
+                                "message": accumulated
+                            })),
+                        )
+                        .with_correlation(task_id),
+                    );
+                }
+                Ok(None) => break, // channel closed (sender dropped)
+                Err(_) => {
+                    tracing::debug!(idle_secs = idle_timeout_secs, "Stream idle timeout, waiting for final response");
+                    break;
+                }
+            }
+        }
+        // Wrap stream_join.await with remaining overall budget; guard against zero remaining.
+        let remaining = overall_deadline.saturating_duration_since(tokio::time::Instant::now());
+        let response = if remaining.is_zero() {
+            tracing::warn!(timeout_secs = llm_timeout_secs, "Overall LLM timeout on stream completion");
+            reply_text = if accumulated.is_empty() {
+                format!("LLM response timed out after {} seconds.", llm_timeout_secs)
+            } else {
+                accumulated
+            };
+            break;
+        } else {
+            match tokio::time::timeout(remaining, stream_join).await {
+                Ok(Ok(Ok(resp))) => resp.text.trim().to_string(),
+                Ok(Ok(Err(e))) => {
+                    tracing::warn!(error = %e, "LLM completion failed");
+                    reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
+                    break;
+                }
+                Ok(Err(join_err)) => {
+                    tracing::warn!(error = %join_err, "Stream task join failed");
+                    reply_text = if accumulated.is_empty() {
+                        format!("LLM task error: {}", join_err)
+                    } else {
+                        accumulated
+                    };
+                    break;
+                }
+                Err(_timeout) => {
+                    tracing::warn!(timeout_secs = llm_timeout_secs, "Overall LLM timeout on stream completion");
+                    reply_text = if accumulated.is_empty() {
+                        format!("LLM response timed out after {} seconds.", llm_timeout_secs)
+                    } else {
+                        accumulated
+                    };
+                    break;
+                }
             }
         };
+        if !accumulated.is_empty() && response.is_empty() {
+            // Stream sent chunks but final response empty; use accumulated
+            reply_text = accumulated.trim().to_string();
+            break;
+        }
 
         let tool_calls = tools_executor.as_ref().and_then(|_| {
             let calls = parse_tool_calls(&response);
@@ -561,6 +682,21 @@ pub async fn handle_api(
             "id": "spec_dir",
             "ok": spec_ok,
             "description": if spec_ok { "Spec directory present" } else { "Spec directory missing" }
+        }));
+
+        let embedded_available = llm_router.embedded_available();
+        let embedded_loaded = llm_router.embedded_loaded();
+        let embedded_desc = if !embedded_available {
+            "Embedded model not available (compile with embedded feature, run on Linux/WSL2)"
+        } else if embedded_loaded {
+            "Embedded model loaded and ready"
+        } else {
+            "Embedded model available; loads on first use (first request may take 5–15 min)"
+        };
+        checks.push(serde_json::json!({
+            "id": "embedded_llm",
+            "ok": embedded_available,
+            "description": embedded_desc
         }));
 
         let all_ok = checks.iter().all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
@@ -802,6 +938,87 @@ pub async fn handle_api(
         return json_response("200 OK", &body);
     }
 
+    // GET /api/router/embedded-status — whether embedded LLM is compiled, and if already loaded (for diagnostics)
+    if method == "GET" && path == "/api/router/embedded-status" {
+        let available = llm_router.embedded_available();
+        let loaded = llm_router.embedded_loaded();
+        let hint = if !available {
+            "Recompile daemon with feature 'embedded', run on Linux/WSL2; or use Ollama/cloud"
+        } else if loaded {
+            "Embedded model loaded and ready for /advice and conversation"
+        } else {
+            "Embedded model will load on first use (first request may take 5–15 min: download + load). Wait or increase AKASHA_LLM_TIMEOUT_SECS."
+        };
+        let body = serde_json::json!({
+            "embedded_registered": true,
+            "embedded_available": available,
+            "embedded_loaded": loaded,
+            "hint": hint
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+
+    // POST /api/router/embedded/reload — unload embedded model; next request will load it again
+    if method == "POST" && path == "/api/router/embedded/reload" {
+        llm_router.embedded_unload();
+        let body = serde_json::json!({
+            "ok": true,
+            "message": "Embedded model unloaded. Next request will load it again."
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+
+    // POST /api/router/route — set primary provider/model for a task type (body: { "category", "provider", "model" })
+    if method == "POST" && path == "/api/router/route" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let category = body_json.as_ref().and_then(|j| j.get("category")).and_then(|v| v.as_str()).map(String::from);
+        let provider = body_json.as_ref().and_then(|j| j.get("provider")).and_then(|v| v.as_str()).map(String::from);
+        let model = body_json.as_ref().and_then(|j| j.get("model")).and_then(|v| v.as_str()).map(String::from);
+        match (category, provider, model) {
+            (Some(cat), Some(prov), Some(modl)) if !cat.is_empty() && !prov.is_empty() && !modl.is_empty() => {
+                if !llm_router.is_provider_registered(&prov) {
+                    let body_err = serde_json::json!({ "ok": false, "error": format!("unknown provider '{}'", prov) });
+                    return json_response("400 Bad Request", &body_err.to_string());
+                }
+                let entry = akasha_llm::config::RouteEntry {
+                    provider: prov.clone(),
+                    model: modl.clone(),
+                    config: None,
+                };
+                llm_router.set_primary_route(&cat, entry.clone());
+                let router_path = data_dir.join("llm_router.yaml");
+                let mut config = akasha_llm::config::RoutingConfig::load_from_path(&router_path)
+                    .unwrap_or_else(|_| akasha_llm::config::RoutingConfig::default_config());
+                config.set_primary_route(&cat, entry);
+                if let Err(e) = config.save_to_path(&router_path) {
+                    let body_err = serde_json::json!({ "ok": false, "error": format!("save failed: {}", e) });
+                    return json_response("500 Internal Server Error", &body_err.to_string());
+                }
+                let body_ok = serde_json::json!({
+                    "ok": true,
+                    "category": cat,
+                    "provider": prov,
+                    "model": modl,
+                    "message": "Route updated (in memory and saved to llm_router.yaml)."
+                });
+                return json_response("200 OK", &body_ok.to_string());
+            }
+            _ => {
+                let body_err = serde_json::json!({ "error": "missing or empty category, provider, or model" });
+                return json_response("400 Bad Request", &body_err.to_string());
+            }
+        }
+    }
+
+    // GET /api/router/routes — list primary + fallback per category (for CLI and TUI "models by category")
+    if method == "GET" && path == "/api/router/routes" {
+        let routes = llm_router.routes_by_category();
+        let body = serde_json::to_string(&routes).unwrap_or_else(|_| "{}".to_string());
+        return json_response("200 OK", &body);
+    }
+
     // GET /api/router/models — list models from all providers (config + Ollama live when available)
     if method == "GET" && path == "/api/router/models" {
         let mut providers: std::collections::HashMap<String, Vec<String>> =
@@ -1002,14 +1219,22 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
             max_tokens: Some(512),
             temperature: Some(0.3),
         };
-        match llm_router.complete(&req).await {
-            Ok(resp) => {
+        let advice_timeout = std::time::Duration::from_secs(120);
+        match tokio::time::timeout(advice_timeout, llm_router.complete(&req)).await {
+            Ok(Ok(resp)) => {
                 let body = serde_json::json!({ "advice": resp.text, "model_used": resp.model_used });
                 return json_response("200 OK", &body.to_string());
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let body = serde_json::json!({ "error": "advice_failed", "detail": e.to_string() });
                 return json_response("502 Bad Gateway", &body.to_string());
+            }
+            Err(_) => {
+                let body = serde_json::json!({
+                    "error": "advice_timeout",
+                    "detail": "LLM timed out (120s). Embedded model may still be loading; try /embedded to check."
+                });
+                return json_response("504 Gateway Timeout", &body.to_string());
             }
         }
     }
