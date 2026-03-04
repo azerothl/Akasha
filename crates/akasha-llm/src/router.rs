@@ -175,4 +175,68 @@ impl LLMRouter {
             )
             .await
     }
+
+    /// Complete with streaming: chunks are sent to `chunk_tx`. Uses primary provider's complete_stream if it supports streaming, else falls back to complete() and sends full text once. Idle timeout is the caller's responsibility.
+    pub async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, String> {
+        let (task_type, _) = classify_task_type(&request.prompt);
+        let task_type_str = task_type.as_str();
+        info!(task_type = task_type_str, "Router classify (stream)");
+
+        let task_config = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_route(task_type_str)
+            .cloned()
+            .unwrap_or_else(|| {
+                crate::config::TaskTypeConfig {
+                    primary: Some(crate::config::RouteEntry {
+                        provider: "akasha_embedded".into(),
+                        model: "default".into(),
+                        config: None,
+                    }),
+                    fallback: vec![crate::config::RouteEntry {
+                        provider: "akasha_core".into(),
+                        model: "core".into(),
+                        config: None,
+                    }],
+                    constraints: None,
+                }
+            });
+
+        let resolve = self.resolve();
+        let primary_entry = task_config.primary.as_ref();
+        if let Some(entry) = primary_entry {
+            if let Some(provider) = resolve(entry.provider.as_str()) {
+                if provider.supports_streaming() {
+                    let timeout = self
+                        .config
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .global
+                        .default_timeout_secs
+                        .unwrap_or(300);
+                    let timeout = std::time::Duration::from_secs(timeout);
+                    return provider
+                        .complete_stream(
+                            request,
+                            timeout,
+                            Some(&entry.model),
+                            chunk_tx,
+                        )
+                        .await
+                        .map_err(|e| e.to_string());
+                }
+            }
+        }
+
+        // Primary does not support streaming: complete then send full text once
+        let response = self.complete(request).await?;
+        let _ = chunk_tx.send(response.text.clone());
+        Ok(response)
+    }
 }

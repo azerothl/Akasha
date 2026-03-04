@@ -430,7 +430,15 @@ pub(crate) async fn run_message_via_llm(
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(300);
-    let llm_timeout = std::time::Duration::from_secs(llm_timeout_secs);
+    let idle_timeout_secs = std::env::var("AKASHA_LLM_STREAM_IDLE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(60);
+    // First chunk can take long (model load, first token on CPU). Use longer wait so we don't hit idle before any data.
+    let first_chunk_timeout_secs = std::env::var("AKASHA_LLM_FIRST_CHUNK_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or_else(|| llm_timeout_secs.min(300));
 
     loop {
         let request = CompletionRequest {
@@ -438,22 +446,78 @@ pub(crate) async fn run_message_via_llm(
             max_tokens: Some(max_tokens),
             temperature: Some(0.7),
         };
-        let response = match tokio::time::timeout(llm_timeout, llm_router.complete(&request)).await {
+        // Streaming path: chunks via channel, idle timeout instead of total timeout when provider supports streaming
+        let (stream_tx, stream_rx) = std::sync::mpsc::channel::<String>();
+        let stream_rx = std::sync::Arc::new(std::sync::Mutex::new(stream_rx));
+        let router = llm_router.clone();
+        let stream_join = tokio::spawn(async move { router.complete_stream(&request, stream_tx).await });
+        let mut accumulated = String::new();
+        let mut first_wait = true;
+        loop {
+            let rx = stream_rx.clone();
+            let idle = if first_wait {
+                first_wait = false;
+                std::time::Duration::from_secs(first_chunk_timeout_secs)
+            } else {
+                std::time::Duration::from_secs(idle_timeout_secs)
+            };
+            let recv_result: Result<Result<String, std::sync::mpsc::RecvTimeoutError>, _> =
+                tokio::task::spawn_blocking(move || {
+                    let guard = match rx.lock() {
+                        Ok(g) => g,
+                        Err(_) => return Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+                    };
+                    guard.recv_timeout(idle)
+                })
+                .await;
+            let recv_result = match recv_result {
+                Ok(inner) => inner,
+                Err(_) => break,
+            };
+            match recv_result {
+                Ok(chunk) => {
+                    accumulated.push_str(&chunk);
+                    let _ = bus.send(
+                        EventEnvelope::new(
+                            EventType::ProgressUpdate,
+                            Some(serde_json::json!({
+                                "task_id": task_id.to_string(),
+                                "progress_pct": 50,
+                                "message": accumulated
+                            })),
+                        )
+                        .with_correlation(task_id),
+                    );
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    tracing::debug!(idle_secs = idle_timeout_secs, "Stream idle timeout, waiting for final response");
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let response = match stream_join.await {
             Ok(Ok(resp)) => resp.text.trim().to_string(),
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "LLM completion failed");
                 reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
                 break;
             }
-            Err(_) => {
-                tracing::warn!(timeout_secs = llm_timeout_secs, "LLM completion timed out (model loading or slow reply)");
-                reply_text = format!(
-                    "Délai dépassé ({} s). Modèle local en cours de chargement ou requête trop longue. Réessayez ou configurez Ollama.",
-                    llm_timeout_secs
-                );
+            Err(join_err) => {
+                tracing::warn!(error = %join_err, "Stream task join failed");
+                reply_text = if accumulated.is_empty() {
+                    format!("LLM task error: {}", join_err)
+                } else {
+                    accumulated
+                };
                 break;
             }
         };
+        if !accumulated.is_empty() && response.is_empty() {
+            // Stream sent chunks but final response empty; use accumulated
+            reply_text = accumulated.trim().to_string();
+            break;
+        }
 
         let tool_calls = tools_executor.as_ref().and_then(|_| {
             let calls = parse_tool_calls(&response);

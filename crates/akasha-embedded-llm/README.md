@@ -54,15 +54,23 @@ Pour utiliser le GPU quand la machine a une carte NVIDIA compatible :
    cargo build -p akasha-daemon --features embedded-cuda
    # ou avec Baguettotron : --features "embedded-baguettotron,embedded-cuda"
    ```
-2. À l’exécution, si CUDA est disponible le modèle tourne sur le GPU ; sinon il utilise le CPU.
+2. À l’exécution, si CUDA est disponible le modèle tourne sur le GPU ; sinon il utilise le CPU. **Sous WSL2** la compilation CUDA échoue souvent (nvcc/driver) ; dans ce cas utiliser l’option MKL ci‑dessous.
 
-Sous Windows, la compilation avec CUDA peut exiger l’installation de Visual Studio (pour `cl.exe`, utilisé par `nvcc`). Linux ou WSL2 sont recommandés pour le build avec `embedded-cuda`.
+**Optimisation CPU sans CUDA (Intel MKL, optionnel)** :
+```bash
+cargo build -p akasha-daemon --features embedded-mkl
+# ou avec Baguettotron : --features "embedded-baguettotron,embedded-mkl"
+```
+Accélère les opérations matricielles sur CPU (Intel MKL). **Attention** : sur certaines configs (ex. WSL2 avec MKL fourni par ocipkg) le link peut échouer avec `undefined symbol: hgemm_` (demi-précision non incluse dans le build MKL). Dans ce cas, **ne pas** utiliser `embedded-mkl` et compiler uniquement avec `--features embedded` (ou `embedded-baguettotron`) ; le CPU par défaut fonctionnera, ou utiliser Ollama pour de meilleures perfs.
+
+Sous Windows, la compilation avec CUDA peut exiger Visual Studio (`cl.exe`). Linux ou WSL2 sont recommandés pour le build avec `embedded-cuda` ; en cas d’échec sur WSL2, utiliser **`embedded-mkl`**.
 
 ## Dépendances
 
 - **candle** (défaut) : `candle-pipelines` 0.0.7, modèle Qwen3 0.6B au premier run.
 - **baguettotron** (optionnel) : `candle-transformers`, `hf-hub`, `tokenizers` ; modèle PleIAs/Baguettotron (321M) au premier run.
 - **cuda** (optionnel) : active CUDA pour candle-pipelines et candle-transformers ; inférence sur GPU si disponible.
+- **mkl** (optionnel) : active Intel MKL pour candle-core/candle-nn/candle-transformers ; accélération CPU sans CUDA (Linux/WSL2, Intel).
 
 ## Intégration (à venir)
 

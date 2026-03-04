@@ -32,6 +32,10 @@ pub trait LLMProvider: Send + Sync {
     fn is_local(&self) -> bool {
         false
     }
+    /// Whether this provider can stream chunks (avoids total timeout; use idle timeout instead).
+    fn supports_streaming(&self) -> bool {
+        false
+    }
     /// Complete with optional model override from routing config (e.g. "llama3.2", "codellama").
     async fn complete(
         &self,
@@ -39,6 +43,18 @@ pub trait LLMProvider: Send + Sync {
         timeout: Duration,
         model_override: Option<&str>,
     ) -> Result<CompletionResponse, ProviderError>;
+    /// Complete and send each chunk to `chunk_tx`. Default: call `complete()` and send full text once.
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let response = self.complete(request, timeout, model_override).await?;
+        let _ = chunk_tx.send(response.text.clone());
+        Ok(response)
+    }
     fn get_cost(&self, _usage: &TokenUsage) -> f64 {
         0.0
     }
@@ -477,6 +493,13 @@ impl LLMProvider for AkashaEmbeddedProvider {
         true
     }
 
+    fn supports_streaming(&self) -> bool {
+        #[cfg(feature = "embedded")]
+        return akasha_embedded_llm::EmbeddedLlm::is_available();
+        #[cfg(not(feature = "embedded"))]
+        false
+    }
+
     async fn complete(
         &self,
         request: &CompletionRequest,
@@ -512,5 +535,50 @@ impl LLMProvider for AkashaEmbeddedProvider {
             }
         }
         Err(ProviderError::Unavailable)
+    }
+
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        _timeout: Duration,
+        _model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        #[cfg(feature = "embedded")]
+        {
+            if !akasha_embedded_llm::EmbeddedLlm::is_available() {
+                return Err(ProviderError::Unavailable);
+            }
+            let prompt = request.prompt.clone();
+            let max_tokens = request.max_tokens.map(|u| u as usize);
+            let temperature = request.temperature.map(|f| f as f64);
+            match tokio::task::spawn_blocking(move || {
+                let llm = akasha_embedded_llm::EmbeddedLlm::new();
+                llm.complete_stream(&prompt, max_tokens, temperature, move |chunk| {
+                    let _ = chunk_tx.send(chunk.to_string());
+                })
+            })
+            .await
+            {
+                Ok(Ok(text)) => {
+                    let completion_tokens = text.split_whitespace().count() as u64;
+                    Ok(CompletionResponse {
+                        text,
+                        usage: Some(TokenUsage {
+                            prompt_tokens: 0,
+                            completion_tokens,
+                        }),
+                        model_used: "embedded".into(),
+                    })
+                }
+                Ok(Err(e)) => Err(ProviderError::Api(e.to_string())),
+                Err(e) => Err(ProviderError::Api(format!("spawn: {}", e))),
+            }
+        }
+        #[cfg(not(feature = "embedded"))]
+        {
+            let _ = (request, chunk_tx);
+            Err(ProviderError::Unavailable)
+        }
     }
 }

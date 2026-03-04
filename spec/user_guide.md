@@ -144,7 +144,7 @@ Fichiers créés dans le data_dir (ex. `%LOCALAPPDATA%\akasha` sous Windows) :
 
 Les variables définies via `akasha config env set` sont enregistrées dans `data_dir/akasha.env` et chargées au démarrage du daemon.
 
-*Variables optionnelles (debug / avancé)* : `AKASHA_LOG_LLM_RESPONSE=1` (log détaillé des réponses LLM) ; `AKASHA_SPEC_DIR` (chemin vers le dossier `spec` pour la suite d’évals) ; `AKASHA_VAULT_MASTER_KEY` (clé maître pour le vault fichier, si utilisé) ; `AKASHA_LLM_TIMEOUT_SECS` (timeout en secondes pour les appels LLM, défaut 300) ; `AKASHA_EMBEDDED_MODEL` (modèle embarqué : `qwen3_0_6b` par défaut, `baguettotron` si compilé avec la feature `embedded-baguettotron`).
+*Variables optionnelles (debug / avancé)* : `AKASHA_LOG_LLM_RESPONSE=1` (log détaillé des réponses LLM) ; `AKASHA_SPEC_DIR` (chemin vers le dossier `spec` pour la suite d’évals) ; `AKASHA_VAULT_MASTER_KEY` (clé maître pour le vault fichier, si utilisé) ; `AKASHA_LLM_TIMEOUT_SECS` (timeout en secondes pour les appels LLM, défaut 300) ; `AKASHA_LLM_STREAM_IDLE_SECS` (timeout d’inactivité en secondes entre deux chunks, défaut 60) ; `AKASHA_LLM_FIRST_CHUNK_SECS` (délai max pour recevoir le **premier** chunk du modèle embarqué, défaut min(300, AKASHA_LLM_TIMEOUT_SECS) — le premier token peut être lent : chargement modèle, inférence CPU) ; `AKASHA_EMBEDDED_MODEL` (modèle embarqué : `qwen3_0_6b` par défaut, `baguettotron` si compilé avec la feature `embedded-baguettotron`). Pour tenter d’accélérer les modèles locaux **sans CUDA** : compiler avec **`--features embedded-mkl`** (Intel MKL). Si le link échoue avec `undefined symbol: hgemm_`, retirer `embedded-mkl` et utiliser le build par défaut (CPU) ou Ollama.
 
 ### Fichiers de configuration
 

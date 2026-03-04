@@ -63,6 +63,46 @@ impl EmbeddedLlm {
         }
     }
 
+    /// Run completion with optional streaming: `on_chunk` is called with each new text delta (Baguettotron token-by-token; Qwen in one chunk).
+    /// Use for streaming to avoid timeout and improve UX. Returns the full response text when done.
+    pub fn complete_stream<F>(
+        &self,
+        prompt: &str,
+        max_tokens: Option<usize>,
+        temperature: Option<f64>,
+        mut on_chunk: F,
+    ) -> Result<String>
+    where
+        F: FnMut(&str),
+    {
+        #[cfg(all(feature = "baguettotron", not(feature = "candle")))]
+        if embedded_model_variant() == EmbeddedModelVariant::Baguettotron {
+            return baguettotron::complete_stream(prompt, max_tokens, temperature, on_chunk);
+        }
+
+        #[cfg(feature = "candle")]
+        {
+            #[cfg(feature = "baguettotron")]
+            if embedded_model_variant() == EmbeddedModelVariant::Baguettotron {
+                return baguettotron::complete_stream(prompt, max_tokens, temperature, on_chunk);
+            }
+            let out = self.complete(prompt, max_tokens, temperature)?;
+            if !out.is_empty() {
+                on_chunk(&out);
+            }
+            return Ok(out);
+        }
+
+        #[cfg(not(any(feature = "candle", feature = "baguettotron")))]
+        return Err(EmbeddedLlmError::UnsupportedPlatform);
+
+        #[cfg(all(not(feature = "candle"), feature = "baguettotron"))]
+        {
+            let _ = (prompt, max_tokens, temperature, on_chunk);
+            return Err(EmbeddedLlmError::UnsupportedPlatform);
+        }
+    }
+
     /// Run completion (blocking). On first call, downloads and loads the model from HuggingFace.
     /// Model: Qwen3 0.6B (default) or Baguettotron 321M if `AKASHA_EMBEDDED_MODEL=baguettotron` and feature enabled.
     /// `max_tokens` caps the generated length; `temperature` 0.0 = deterministic, 0.3–0.7 = typical for advice.

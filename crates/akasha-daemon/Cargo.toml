@@ -14,6 +14,8 @@ embedded = ["akasha-llm/embedded"]
 embedded-baguettotron = ["akasha-llm/embedded-baguettotron"]
 # Use GPU (CUDA) for embedded LLM when available; requires CUDA toolkit at build time
 embedded-cuda = ["akasha-llm/embedded-cuda"]
+# Intel MKL: faster CPU for embedded LLM (Linux/WSL2). Use when CUDA does not build or on Intel CPUs.
+embedded-mkl = ["akasha-llm/embedded-mkl"]
 
 [dependencies]
 akasha-core = { path = "../akasha-core" }

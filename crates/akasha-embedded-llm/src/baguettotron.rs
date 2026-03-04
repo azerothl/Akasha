@@ -148,6 +148,112 @@ fn run_baguettotron(pipeline: &BaguettotronPipeline, prompt: &str, max_tokens: O
     Ok(out)
 }
 
+/// Run text generation with streaming: calls `on_chunk` with each new text delta (decoded after each token).
+fn run_baguettotron_stream<F>(
+    pipeline: &BaguettotronPipeline,
+    prompt: &str,
+    max_tokens: Option<usize>,
+    mut on_chunk: F,
+) -> Result<String>
+where
+    F: FnMut(&str),
+{
+    use candle_core::IndexOp;
+
+    let max_new = max_tokens.unwrap_or(MAX_NEW_TOKENS).min(512);
+    let enc = pipeline
+        .tokenizer
+        .encode(prompt, true)
+        .map_err(|e| EmbeddedLlmError::Inference(e.to_string()))?;
+    let prompt_ids = enc.get_ids().to_vec();
+    if prompt_ids.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut cache = Cache::new(true, DType::BF16, &pipeline.config, &pipeline.device)
+        .map_err(|e| EmbeddedLlmError::Inference(e.to_string()))?;
+    let eos_token_id = match &pipeline.config.eos_token_id {
+        Some(LlamaEosToks::Single(id)) => *id,
+        Some(LlamaEosToks::Multiple(ids)) => ids.first().copied().unwrap_or(2),
+        None => 2,
+    };
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+
+    let prompt_len = prompt_ids.len();
+    let input = candle_core::Tensor::from_vec(
+        prompt_ids.iter().copied().map(|u| u as i64).collect::<Vec<_>>(),
+        (1, prompt_len),
+        &pipeline.device,
+    )
+    .map_err(|e| EmbeddedLlmError::Inference(e.to_string()))?;
+    let logits = pipeline
+        .model
+        .forward(&input, 0, &mut cache)
+        .map_err(|e| EmbeddedLlmError::Inference(e.to_string()))?;
+    let logits = logits
+        .i((0, prompt_len - 1, ..))
+        .map_err(|e| EmbeddedLlmError::Inference(e.to_string()))?;
+
+    let mut generated: Vec<u32> = prompt_ids;
+    let next_token = sample_next_token(&logits, TEMPERATURE, &mut rng)?;
+    if next_token == eos_token_id {
+        return Ok(String::new());
+    }
+    generated.push(next_token);
+    let mut prev_decoded_len = 0usize;
+    let prompt_byte_len = prompt.len();
+
+    for _ in 1..max_new {
+        let decoded = pipeline
+            .tokenizer
+            .decode(&generated, true)
+            .map_err(|e| EmbeddedLlmError::Inference(e.to_string()))?;
+        let response_part = if decoded.len() > prompt_byte_len {
+            &decoded[prompt_byte_len..]
+        } else {
+            &decoded[..]
+        };
+        if response_part.len() > prev_decoded_len {
+            let delta = &response_part[prev_decoded_len..];
+            if !delta.is_empty() {
+                on_chunk(delta);
+            }
+            prev_decoded_len = response_part.len();
+        }
+
+        let index_pos = generated.len() - 1;
+        let input = candle_core::Tensor::from_vec(
+            vec![generated[index_pos] as i64],
+            (1, 1),
+            &pipeline.device,
+        )
+        .map_err(|e| EmbeddedLlmError::Inference(e.to_string()))?;
+        let logits = pipeline
+            .model
+            .forward(&input, index_pos, &mut cache)
+            .map_err(|e| EmbeddedLlmError::Inference(e.to_string()))?;
+        let logits = logits
+            .i((0, 0, ..))
+            .map_err(|e| EmbeddedLlmError::Inference(e.to_string()))?;
+        let next_token = sample_next_token(&logits, TEMPERATURE, &mut rng)?;
+        if next_token == eos_token_id {
+            break;
+        }
+        generated.push(next_token);
+    }
+
+    let decoded = pipeline
+        .tokenizer
+        .decode(&generated, true)
+        .map_err(|e| EmbeddedLlmError::Inference(e.to_string()))?;
+    let out = if decoded.starts_with(prompt) {
+        decoded[prompt.len()..].trim().to_string()
+    } else {
+        decoded.trim().to_string()
+    };
+    Ok(out)
+}
+
 fn sample_next_token<R: rand::Rng + ?Sized>(
     logits: &candle_core::Tensor,
     temperature: f64,
@@ -235,4 +341,18 @@ fn get_or_load_pipeline() -> Result<Arc<BaguettotronPipeline>> {
 pub fn complete(prompt: &str, max_tokens: Option<usize>, _temperature: Option<f64>) -> Result<String> {
     let pipeline = get_or_load_pipeline()?;
     run_baguettotron(&pipeline, prompt, max_tokens)
+}
+
+/// Generate a completion with Baguettotron, calling `on_chunk` with each new text delta (streaming).
+pub fn complete_stream<F>(
+    prompt: &str,
+    max_tokens: Option<usize>,
+    _temperature: Option<f64>,
+    on_chunk: F,
+) -> Result<String>
+where
+    F: FnMut(&str),
+{
+    let pipeline = get_or_load_pipeline()?;
+    run_baguettotron_stream(&pipeline, prompt, max_tokens, on_chunk)
 }

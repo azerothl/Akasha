@@ -7,11 +7,13 @@ description = "POC: small embedded LLM via Candle for onboarding, diagnostics, s
 [features]
 default = ["candle"]
 # Candle-based inference (Qwen3 0.6B). Recommended: build and run on Linux or WSL2; Windows native may fail to build.
-candle = ["dep:candle-pipelines"]
+candle = ["dep:candle-pipelines", "dep:candle-core", "dep:candle-nn"]
 # Baguettotron (321M, PleIAs/Baguettotron) for low-resource or conversation; uses candle-transformers + hf-hub.
 baguettotron = ["dep:hf-hub", "dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:rand", "dep:serde", "dep:serde_json"]
 # Use GPU (CUDA) when available. Requires CUDA toolkit; compile with --features cuda. Falls back to CPU at runtime if no GPU.
 cuda = ["candle-pipelines/cuda", "candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+# Intel MKL: faster CPU matrix ops on Intel (Linux/WSL2). No CUDA needed. Use when CUDA does not build or for Intel CPUs.
+mkl = ["candle-core/mkl", "candle-nn/mkl", "candle-transformers?/mkl"]
 
 [dependencies]
 thiserror = "1.0"

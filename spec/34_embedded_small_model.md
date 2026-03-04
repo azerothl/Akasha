@@ -94,6 +94,21 @@ L’idée est de ne **pas dépendre** d’Ollama ou d’un service cloud pour ce
 
 ---
 
+## Streaming des réponses (implémenté)
+
+**Est-ce que le streaming évite les timeouts ?** Oui : on utilise un **timeout d’inactivité** (aucune donnée reçue depuis X s) au lieu d’un timeout total. Tant que le modèle envoie des tokens, on ne coupe pas. L’utilisateur voit le texte apparaître au fur et à mesure (TUI affiche la dernière entrée de progression).
+
+**Implémenté** :
+
+1. **`akasha-embedded-llm`** : `complete_stream(prompt, max_tokens, temperature, on_chunk)` — Baguettotron émet token par token ; Qwen en un seul chunk.
+2. **`akasha-llm`** : trait `LLMProvider::supports_streaming()` et `complete_stream(..., chunk_tx)` ; routeur `complete_stream()` utilise le primary si il supporte le stream, sinon `complete()` + envoi du texte en un chunk.
+3. **Daemon** : `run_message_via_llm` utilise le chemin stream. **`AKASHA_LLM_STREAM_IDLE_SECS`** (défaut 60) : timeout entre deux chunks. **`AKASHA_LLM_FIRST_CHUNK_SECS`** (défaut min(300, AKASHA_LLM_TIMEOUT_SECS)) : délai max pour le **premier** chunk (chargement + premier token souvent lent en CPU).
+4. **TUI** : affiche la dernière entrée `progress` ; le texte streamé s’affiche au fur et à mesure.
+
+**Ollama vs modèle embarqué (même nom de modèle)** : ce n’est pas le même runtime. Ollama = processus dédié, backend optimisé (souvent llama.cpp / CUDA), modèle préchargé → réponses rapides. Embarqué = même architecture (ex. Qwen3 0.6B) mais exécution **dans le processus** via Candle (Rust, CPU par défaut) : premier appel = téléchargement + chargement possible ; inférence CPU bien plus lente. Pour des réponses rapides avec Qwen3 0.6B, utiliser Ollama (`ollama run qwen3:0.6b`) et router vers `ollama` / `qwen3:0.6b` dans `llm_router.yaml`. Le modèle embarqué reste utile hors ligne, sans dépendance Ollama, ou avec Baguettotron pour configs très légères.
+
+---
+
 ## Fichiers et références
 
 - Stub actuel : `crates/akasha-llm/src/provider.rs` (`AkashaCoreProvider`).
@@ -108,8 +123,9 @@ L’idée est de ne **pas dépendre** d’Ollama ou d’un service cloud pour ce
 - **Crate** : `crates/akasha-embedded-llm`.
 - **Stack** : `candle-pipelines` 0.0.7 (Qwen3 0.6B) ou **Baguettotron 321M** (feature `baguettotron`, [PleIAs/Baguettotron](https://huggingface.co/PleIAs/Baguettotron)) pour configs à faible ressource ou conversation.
 - **Choix du modèle** : `AKASHA_EMBEDDED_MODEL` = `qwen3_0_6b` (défaut) ou `baguettotron`. Pour Baguettotron : compiler le daemon avec `cargo build -p akasha-daemon --features embedded-baguettotron`, puis lancer avec `AKASHA_EMBEDDED_MODEL=baguettotron`.
-- **GPU (CUDA)** : avec la feature **`embedded-cuda`** (`cargo build -p akasha-daemon --features embedded-cuda`), l’inférence utilise le GPU si la machine a une carte NVIDIA compatible (toolkit CUDA installé). Sinon repli sur CPU à l’exécution. Baguettotron et Qwen profitent tous deux du GPU quand la feature est activée.
-- **API** : `EmbeddedLlm::new()`, `complete(prompt, max_tokens, temperature)` (bloquant), `is_available()`.
+- **GPU (CUDA)** : avec la feature **`embedded-cuda`** (`cargo build -p akasha-daemon --features embedded-cuda`), l’inférence utilise le GPU si la machine a une carte NVIDIA compatible (toolkit CUDA installé). Sinon repli sur CPU. **Sur WSL2 la compilation CUDA échoue souvent** ; utiliser **`embedded-mkl`** à la place.
+- **Optimisation CPU (Intel MKL)** : avec la feature **`embedded-mkl`** (`cargo build -p akasha-daemon --features embedded-mkl`), les opérations matricielles peuvent utiliser Intel MKL sur CPU. **Limitation** : le link peut échouer avec `undefined symbol: hgemm_` (build MKL sans demi-précision). Si c’est le cas, compiler sans `embedded-mkl` et utiliser le CPU par défaut ou Ollama.
+- **API** : `EmbeddedLlm::new()`, `complete()` et `complete_stream(..., on_chunk)` (bloquant), `is_available()`, `is_loaded()`, `preload()`, `unload()`.
 - **Plateforme** : **recommandation WSL2 pour Windows** tant qu’une solution native Windows n’est pas validée ; build et run sous Linux/WSL2. Le build peut passer sous Windows (Candle 0.9.2) selon l’environnement.
 - **Suite** : brancher le crate en fallback dans le daemon (diagnostic advice, réponses simples) et documenter l’usage dans le guide.
 
