@@ -2,7 +2,7 @@
 //! See: https://huggingface.co/PleIAs/Baguettotron
 
 use crate::{EmbeddedLlmError, Result};
-use candle_core::{DType, Device};
+use candle_core::{safetensors, DType, Device};
 use candle_nn::VarBuilder;
 use candle_transformers::models::llama::{Cache, Llama, LlamaConfig, LlamaEosToks};
 use hf_hub::api::sync::Api;
@@ -36,10 +36,9 @@ fn load_baguettotron() -> Result<BaguettotronPipeline> {
 
     let model_path = repo.get("model.safetensors").map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
     let device = Device::Cpu;
-    let vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(&[model_path], DType::BF16, &device)
-            .map_err(|e| EmbeddedLlmError::Load(e.to_string()))?
-    };
+    // Load into memory (avoids mmap path that can fail with "ModelWrapper" deserialization on some HF files)
+    let tensors = safetensors::load(&model_path, &device).map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
+    let vb = VarBuilder::new_with_args(Box::new(tensors), DType::BF16, &device);
     let model = Llama::load(vb, &config).map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
 
     let tokenizer_path =
@@ -187,6 +186,11 @@ pub fn is_loaded() -> bool {
         .read()
         .map(|g| g.is_some())
         .unwrap_or(false)
+}
+
+/// Preload the model (load into cache without running inference). Call at startup to avoid first-request delay.
+pub fn preload() -> Result<()> {
+    get_or_load_pipeline().map(|_| ())
 }
 
 /// Unload the model from memory. Next complete() will load it again.

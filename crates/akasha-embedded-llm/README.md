@@ -5,6 +5,19 @@ POC : petit modèle de langage intégré via **Candle**, pour onboarding, diagno
 - **Par défaut** : Qwen3 0.6B (candle-pipelines).
 - **Baguettotron 321M** : pour configs à faible ressource ou usage conversation ; activer la feature `baguettotron` et définir `AKASHA_EMBEDDED_MODEL=baguettotron`. Modèle : [PleIAs/Baguettotron](https://huggingface.co/PleIAs/Baguettotron).
 
+### Tester avec Baguettotron au lieu de Qwen
+
+1. **Compiler le daemon avec le support Baguettotron** :
+   ```bash
+   cargo build -p akasha-daemon --features embedded-baguettotron
+   ```
+2. **Au lancement, définir la variable d’environnement** :
+   ```bash
+   AKASHA_EMBEDDED_MODEL=baguettotron ./target/debug/akasha-daemon
+   ```
+   Ou pour un test rapide : `AKASHA_EMBEDDED_MODEL=baguettotron akasha start` (si le binaire est dans le PATH).
+3. Le premier appel téléchargera le modèle [PleIAs/Baguettotron](https://huggingface.co/PleIAs/Baguettotron) (~321M) depuis Hugging Face, puis les requêtes utiliseront Baguettotron.
+
 ## Utilisation
 
 ```rust

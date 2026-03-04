@@ -176,6 +176,18 @@ impl Daemon {
         }
         let llm_router = Arc::new(llm_router);
 
+        // Preload embedded model in background so first user request is fast (avoids 5–15 min load on first use)
+        if llm_router.embedded_available() {
+            let router_preload = llm_router.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = router_preload.embedded_preload() {
+                    warn!(error = %e, "Embedded model preload failed (first request may be slow)");
+                } else {
+                    info!("Embedded model preloaded and ready");
+                }
+            });
+        }
+
         // Phase 8: RAG pack (spec + runbooks) for diagnostic advice
         let runbooks_dir = self.spec_dir.join("runbooks");
         let rag_pack = akasha_rag::RagPack::load(

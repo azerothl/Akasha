@@ -846,7 +846,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             if app.loading {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "  … Akasha réfléchit … (1ᵉ requête : chargement du modèle local possible)",
+                    "  … Akasha réfléchit …",
                     Style::default().fg(theme.palette().warning).add_modifier(Modifier::ITALIC),
                 )));
             }

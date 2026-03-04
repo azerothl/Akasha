@@ -94,6 +94,18 @@ impl LLMRouter {
     #[cfg(not(feature = "embedded"))]
     pub fn embedded_unload(&self) {}
 
+    /// Preload the embedded model in the current thread (blocking). Call from spawn_blocking at daemon startup to reduce first-request latency.
+    #[cfg(feature = "embedded")]
+    pub fn embedded_preload(&self) -> Result<(), String> {
+        akasha_embedded_llm::EmbeddedLlm::preload()
+            .map_err(|e| e.to_string())
+    }
+
+    #[cfg(not(feature = "embedded"))]
+    pub fn embedded_preload(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     fn resolve(&self) -> ProviderResolver {
         let providers = self.providers.clone();
         Arc::new(move |name: &str| providers.get(name).cloned())

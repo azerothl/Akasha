@@ -130,6 +130,22 @@ impl EmbeddedLlm {
         false
     }
 
+    /// Preload the model into memory (e.g. at daemon startup). Call in a background thread;
+    /// returns Ok(()) when loaded or already loaded, Err on load failure.
+    pub fn preload() -> Result<()> {
+        #[cfg(feature = "baguettotron")]
+        if embedded_model_variant() == EmbeddedModelVariant::Baguettotron {
+            return baguettotron::preload();
+        }
+        #[cfg(feature = "candle")]
+        {
+            get_or_load_pipeline()?;
+            return Ok(());
+        }
+        #[cfg(not(any(feature = "candle", feature = "baguettotron")))]
+        Ok(())
+    }
+
     /// Unload the model from memory. Next `complete()` will load it again (download + load if needed).
     pub fn unload() {
         #[cfg(feature = "baguettotron")]
