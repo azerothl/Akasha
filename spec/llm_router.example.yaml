@@ -40,22 +40,30 @@ task_types:
     primary:
       provider: akasha_embedded
       model: default
-    fallback: []
+    fallback:
+      - provider: akasha_core
+        model: core
 
   code_generation:
     primary:
       provider: akasha_embedded
       model: default
-    fallback: []
+    fallback:
+      - provider: akasha_core
+        model: core
 
   creative_writing:
     primary:
       provider: akasha_embedded
       model: default
-    fallback: []
+    fallback:
+      - provider: akasha_core
+        model: core
 
   system_diagnostic:
     primary:
       provider: akasha_embedded
       model: default
-    fallback: []
+    fallback:
+      - provider: akasha_core
+        model: core

@@ -98,13 +98,18 @@ impl RoutingConfig {
             model: "default".into(),
             config: None,
         };
+        let fallback_entry = RouteEntry {
+            provider: "akasha_core".into(),
+            model: "core".into(),
+            config: None,
+        };
         let mut task_types = HashMap::new();
         for name in ["conversation", "code_generation", "system_diagnostic"] {
             task_types.insert(
                 name.into(),
                 TaskTypeConfig {
                     primary: Some(internal.clone()),
-                    fallback: vec![],
+                    fallback: vec![fallback_entry.clone()],
                     constraints: None,
                 },
             );

@@ -48,25 +48,30 @@ impl LLMRouter {
         self.providers.insert(provider.name().to_string(), provider);
     }
 
+    /// Returns true if the given provider name is registered with the router.
+    pub fn is_provider_registered(&self, provider: &str) -> bool {
+        self.providers.contains_key(provider)
+    }
+
     pub fn metrics(&self) -> Arc<MetricsCollector> {
         self.metrics.clone()
     }
 
     /// List models per provider from routing config (for GET /api/router/models).
     pub fn list_models_from_config(&self) -> std::collections::HashMap<String, Vec<String>> {
-        self.config.read().unwrap().list_models_by_provider()
+        self.config.read().unwrap_or_else(|e| e.into_inner()).list_models_by_provider()
     }
 
     /// Routes by category (primary + fallback) for GET /api/router/routes and CLI/TUI.
     pub fn routes_by_category(&self) -> HashMap<String, TaskTypeConfig> {
-        self.config.read().unwrap().task_types.clone()
+        self.config.read().unwrap_or_else(|e| e.into_inner()).task_types.clone()
     }
 
     /// Base URL of the Ollama provider from config (if set).
     pub fn ollama_base_url(&self) -> Option<String> {
         self.config
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .providers
             .get("ollama")
             .and_then(|c| c.base_url.clone())
@@ -115,10 +120,15 @@ impl LLMRouter {
 
     /// Set the primary provider/model for a task type (e.g. conversation, code_generation). Applied immediately.
     pub fn set_primary_route(&self, task_type: &str, entry: crate::config::RouteEntry) {
-        self.config
-            .write()
-            .unwrap()
-            .set_primary_route(task_type, entry);
+        match self.config.write() {
+            Ok(mut cfg) => {
+                cfg.set_primary_route(task_type, entry);
+            }
+            Err(poisoned) => {
+                let mut cfg = poisoned.into_inner();
+                cfg.set_primary_route(task_type, entry);
+            }
+        }
     }
 
     fn resolve(&self) -> ProviderResolver {
@@ -135,7 +145,7 @@ impl LLMRouter {
         let task_config = self
             .config
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get_route(task_type_str)
             .cloned()
             .unwrap_or_else(|| {

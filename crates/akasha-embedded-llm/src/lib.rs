@@ -83,7 +83,7 @@ impl EmbeddedLlm {
             if embedded_model_variant() == EmbeddedModelVariant::Baguettotron {
                 return baguettotron::complete(prompt, max_tokens, temperature);
             }
-            let _ = (max_tokens, temperature); // POC: pipeline built with fixed max_len=256, temp=0.3
+            let _ = (max_tokens, temperature); // POC: Candle pipeline built with fixed max_len=256, temp=0.3; these parameters are currently ignored for the Qwen3 backend
             let pipeline = get_or_load_pipeline()?;
             let output = pipeline
                 .inner
