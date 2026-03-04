@@ -13,6 +13,18 @@ const BAGUETTOTRON_REPO: &str = "PleIAs/Baguettotron";
 const MAX_NEW_TOKENS: usize = 256;
 const TEMPERATURE: f64 = 0.3;
 
+/// Prefer GPU (CUDA) when the cuda feature is enabled and a compatible GPU is available; otherwise CPU.
+fn preferred_device() -> Device {
+    #[cfg(feature = "cuda")]
+    {
+        Device::cuda_if_available(0).unwrap_or_else(|_| Device::Cpu)
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Device::Cpu
+    }
+}
+
 struct BaguettotronPipeline {
     model: Llama,
     tokenizer: Tokenizer,
@@ -35,7 +47,7 @@ fn load_baguettotron() -> Result<BaguettotronPipeline> {
     let config = llama_config.into_config(use_flash_attn);
 
     let model_path = repo.get("model.safetensors").map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
-    let device = Device::Cpu;
+    let device = preferred_device();
     // Load into memory (avoids mmap path that can fail with "ModelWrapper" deserialization on some HF files)
     let tensors = safetensors::load(&model_path, &device).map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
     let vb = VarBuilder::new_with_args(Box::new(tensors), DType::BF16, &device);

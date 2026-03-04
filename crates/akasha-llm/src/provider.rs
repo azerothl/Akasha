@@ -501,7 +501,8 @@ impl LLMProvider for AkashaEmbeddedProvider {
                             model_used: "embedded".into(),
                         });
                     }
-                    Ok(Err(_)) | Err(_) => {}
+                    Ok(Err(e)) => return Err(ProviderError::Api(e.to_string())),
+                    Err(e) => return Err(ProviderError::Api(format!("spawn: {}", e))),
                 }
             }
         }

@@ -454,6 +454,9 @@ impl App {
   /embedded reload  — décharger le modèle (rechargé au prochain appel)
   /metrics          — métriques du routeur LLM
   /models           — liste des modèles (tous les providers)
+  /models list      — modèles par catégorie (primary + fallback)
+  /models set CAT PROV MODÈLE — définir le modèle pour une catégorie (ex. conversation ollama llama3.2)
+  /routes           — modèles par catégorie (primary + fallback)
   /config list      — variables (akasha.env)
   /config get KEY   — valeur d'une variable
   /config set K V   — définir variable (K=V dans akasha.env)
@@ -611,6 +614,86 @@ impl App {
                 return "Impossible de récupérer les métriques.".to_string();
             }
             "models" => {
+                let sub = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+                if sub == "list" {
+                    let url = format!("{}/api/router/routes", base);
+                    match client.get(&url).send() {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(routes) = r.json::<serde_json::Value>() {
+                                let obj = match routes.as_object() {
+                                    Some(o) => o,
+                                    None => return "Aucune route configurée.".to_string(),
+                                };
+                                let mut cats: Vec<_> = obj.keys().collect();
+                                cats.sort();
+                                let mut out = String::from("Modèles par catégorie (primary + fallback)\n\n");
+                                for cat in cats {
+                                    let tt = match routes.get(cat).and_then(|v| v.as_object()) {
+                                        Some(t) => t,
+                                        None => continue,
+                                    };
+                                    let primary = tt
+                                        .get("primary")
+                                        .and_then(|p| p.as_object())
+                                        .map(|p| format!("{} / {}", p.get("provider").and_then(|v| v.as_str()).unwrap_or("?"), p.get("model").and_then(|v| v.as_str()).unwrap_or("?")))
+                                        .unwrap_or_else(|| "(aucun)".to_string());
+                                    out.push_str(&format!("  {}:\n    primary: {}\n", cat, primary));
+                                    let empty: Vec<serde_json::Value> = vec![];
+                                    let fallback = tt.get("fallback").and_then(|f| f.as_array()).unwrap_or(&empty);
+                                    if fallback.is_empty() {
+                                        out.push_str("    fallback: (aucun)\n");
+                                    } else {
+                                        for (i, e) in fallback.iter().enumerate() {
+                                            let obj = e.as_object();
+                                            let line = obj.map(|o| {
+                                                let p = o.get("provider").and_then(|v| v.as_str()).unwrap_or("?");
+                                                let m = o.get("model").and_then(|v| v.as_str()).unwrap_or("?");
+                                                format!("{} / {}", p, m)
+                                            }).unwrap_or_else(|| "?".to_string());
+                                            out.push_str(&format!("    fallback[{}]: {}\n", i, line));
+                                        }
+                                    }
+                                }
+                                return out;
+                            }
+                        }
+                        _ => {}
+                    }
+                    return "Impossible de récupérer les routes.".to_string();
+                }
+                if sub == "set" {
+                    let category = parts.get(2).map(|s| (*s).to_string());
+                    let provider = parts.get(3).map(|s| (*s).to_string());
+                    let model = if parts.len() > 4 {
+                        parts[4..].join(" ").trim().to_string()
+                    } else {
+                        parts.get(4).map(|s| (*s).to_string()).unwrap_or_default()
+                    };
+                    match (category, provider, model) {
+                        (Some(cat), Some(prov), modl) if !cat.is_empty() && !prov.is_empty() && !modl.is_empty() => {
+                            let url = format!("{}/api/router/route", base);
+                            let body = serde_json::json!({ "category": cat, "provider": prov, "model": modl });
+                            match client.post(&url).json(&body).send() {
+                                Ok(r) if r.status().is_success() => {
+                                    if let Ok(json) = r.json::<serde_json::Value>() {
+                                        let msg = json.get("message").and_then(|v| v.as_str()).unwrap_or("Route mise à jour.");
+                                        return format!("{} — {}", json.get("category").and_then(|v| v.as_str()).unwrap_or(""), msg);
+                                    }
+                                }
+                                Ok(r) => {
+                                    let err = r.text().unwrap_or_default();
+                                    let detail: String = serde_json::from_str::<serde_json::Value>(&err)
+                                        .ok()
+                                        .and_then(|j| j.get("error").and_then(|v| v.as_str().map(String::from)))
+                                        .unwrap_or(err);
+                                    return format!("Erreur: {}", detail);
+                                }
+                                Err(e) => return format!("Erreur: {}", e),
+                            }
+                        }
+                        _ => return "Usage: /models set CATÉGORIE PROVIDER MODÈLE (ex. /models set conversation ollama llama3.2)".to_string(),
+                    }
+                }
                 let url = format!("{}/api/router/models", base);
                 match client.get(&url).send() {
                     Ok(r) if r.status().is_success() => {
@@ -649,6 +732,52 @@ impl App {
                     _ => {}
                 }
                 return "Impossible de récupérer la liste des modèles.".to_string();
+            }
+            "routes" => {
+                let url = format!("{}/api/router/routes", base);
+                match client.get(&url).send() {
+                    Ok(r) if r.status().is_success() => {
+                        if let Ok(routes) = r.json::<serde_json::Value>() {
+                            let obj = match routes.as_object() {
+                                Some(o) => o,
+                                None => return "Aucune route configurée.".to_string(),
+                            };
+                            let mut cats: Vec<_> = obj.keys().collect();
+                            cats.sort();
+                            let mut out = String::from("Modèles par catégorie (primary + fallback)\n\n");
+                            for cat in cats {
+                                let tt = match routes.get(cat).and_then(|v| v.as_object()) {
+                                    Some(t) => t,
+                                    None => continue,
+                                };
+                                let primary = tt
+                                    .get("primary")
+                                    .and_then(|p| p.as_object())
+                                    .map(|p| format!("{} / {}", p.get("provider").and_then(|v| v.as_str()).unwrap_or("?"), p.get("model").and_then(|v| v.as_str()).unwrap_or("?")))
+                                    .unwrap_or_else(|| "(aucun)".to_string());
+                                out.push_str(&format!("  {}:\n    primary: {}\n", cat, primary));
+                                let empty: Vec<serde_json::Value> = vec![];
+                                let fallback = tt.get("fallback").and_then(|f| f.as_array()).unwrap_or(&empty);
+                                if fallback.is_empty() {
+                                    out.push_str("    fallback: (aucun)\n");
+                                } else {
+                                    for (i, e) in fallback.iter().enumerate() {
+                                        let obj = e.as_object();
+                                        let line = obj.map(|o| {
+                                            let p = o.get("provider").and_then(|v| v.as_str()).unwrap_or("?");
+                                            let m = o.get("model").and_then(|v| v.as_str()).unwrap_or("?");
+                                            format!("{} / {}", p, m)
+                                        }).unwrap_or_else(|| "?".to_string());
+                                        out.push_str(&format!("    fallback[{}]: {}\n", i, line));
+                                    }
+                                }
+                            }
+                            return out;
+                        }
+                    }
+                    _ => {}
+                }
+                return "Impossible de récupérer les routes.".to_string();
             }
             "config" => {
                 let sub = parts.get(1).map(|s| *s).unwrap_or("").to_lowercase();

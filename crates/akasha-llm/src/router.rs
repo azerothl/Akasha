@@ -1,16 +1,16 @@
 //! LLM Router — classifier + config + fallback engine + provider registry.
 
 use crate::classifier::classify_task_type;
-use crate::config::RoutingConfig;
+use crate::config::{RoutingConfig, TaskTypeConfig};
 use crate::fallback::{FallbackEngine, ProviderResolver};
 use crate::metrics::MetricsCollector;
 use crate::provider::{CompletionRequest, CompletionResponse, LLMProvider};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tracing::info;
 
 pub struct LLMRouter {
-    config: Arc<RoutingConfig>,
+    config: Arc<RwLock<RoutingConfig>>,
     fallback: FallbackEngine,
     metrics: Arc<MetricsCollector>,
     providers: HashMap<String, Arc<dyn LLMProvider>>,
@@ -32,7 +32,7 @@ impl LLMRouter {
             timeout_per_call: std::time::Duration::from_secs(timeout_secs),
         };
         Self {
-            config: Arc::new(config),
+            config: Arc::new(RwLock::new(config)),
             fallback,
             metrics: Arc::new(MetricsCollector::new()),
             providers: HashMap::new(),
@@ -54,12 +54,19 @@ impl LLMRouter {
 
     /// List models per provider from routing config (for GET /api/router/models).
     pub fn list_models_from_config(&self) -> std::collections::HashMap<String, Vec<String>> {
-        self.config.list_models_by_provider()
+        self.config.read().unwrap().list_models_by_provider()
+    }
+
+    /// Routes by category (primary + fallback) for GET /api/router/routes and CLI/TUI.
+    pub fn routes_by_category(&self) -> HashMap<String, TaskTypeConfig> {
+        self.config.read().unwrap().task_types.clone()
     }
 
     /// Base URL of the Ollama provider from config (if set).
     pub fn ollama_base_url(&self) -> Option<String> {
         self.config
+            .read()
+            .unwrap()
             .providers
             .get("ollama")
             .and_then(|c| c.base_url.clone())
@@ -106,6 +113,14 @@ impl LLMRouter {
         Ok(())
     }
 
+    /// Set the primary provider/model for a task type (e.g. conversation, code_generation). Applied immediately.
+    pub fn set_primary_route(&self, task_type: &str, entry: crate::config::RouteEntry) {
+        self.config
+            .write()
+            .unwrap()
+            .set_primary_route(task_type, entry);
+    }
+
     fn resolve(&self) -> ProviderResolver {
         let providers = self.providers.clone();
         Arc::new(move |name: &str| providers.get(name).cloned())
@@ -119,6 +134,8 @@ impl LLMRouter {
 
         let task_config = self
             .config
+            .read()
+            .unwrap()
             .get_route(task_type_str)
             .cloned()
             .unwrap_or_else(|| {

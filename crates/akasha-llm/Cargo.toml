@@ -10,6 +10,8 @@ default = []
 embedded = ["dep:akasha-embedded-llm"]
 # Include Baguettotron 321M as embedded option; set AKASHA_EMBEDDED_MODEL=baguettotron at runtime for low-resource/conversation
 embedded-baguettotron = ["embedded", "akasha-embedded-llm/baguettotron"]
+# Use GPU (CUDA) for embedded model when available; requires CUDA toolkit at build time
+embedded-cuda = ["akasha-embedded-llm/cuda"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

@@ -30,7 +30,7 @@ if EmbeddedLlm::is_available() {
 }
 ```
 
-Au premier appel à `complete()`, le modèle est téléchargé depuis Hugging Face puis chargé (CPU uniquement).
+Au premier appel à `complete()`, le modèle est téléchargé depuis Hugging Face puis chargé. Les fichiers sont mis en cache dans le **cache Hugging Face** par défaut (`~/.cache/huggingface/hub` ou `%USERPROFILE%\.cache\huggingface\hub` sous Windows) ; vous pouvez définir **`HF_HOME`** pour utiliser un autre répertoire (ex. `HF_HOME=$AKASHA_DATA_DIR/hf_cache`). Par défaut l’inférence utilise le **CPU** ; avec la feature **`cuda`**, le modèle utilise le **GPU** (CUDA) si la machine en dispose d’un compatible (sinon repli sur CPU à l’exécution).
 
 ## Vérifier que le modèle est prêt
 
@@ -45,10 +45,24 @@ Au premier appel à `complete()`, le modèle est téléchargé depuis Hugging Fa
 
 Voir [spec/34_embedded_small_model.md](../../spec/34_embedded_small_model.md) pour l’objectif et les options techniques.
 
+## GPU (CUDA)
+
+Pour utiliser le GPU quand la machine a une carte NVIDIA compatible :
+
+1. **Compiler avec la feature `embedded-cuda`** (nécessite le toolkit CUDA installé) :
+   ```bash
+   cargo build -p akasha-daemon --features embedded-cuda
+   # ou avec Baguettotron : --features "embedded-baguettotron,embedded-cuda"
+   ```
+2. À l’exécution, si CUDA est disponible le modèle tourne sur le GPU ; sinon il utilise le CPU.
+
+Sous Windows, la compilation avec CUDA peut exiger l’installation de Visual Studio (pour `cl.exe`, utilisé par `nvcc`). Linux ou WSL2 sont recommandés pour le build avec `embedded-cuda`.
+
 ## Dépendances
 
 - **candle** (défaut) : `candle-pipelines` 0.0.7, modèle Qwen3 0.6B au premier run.
 - **baguettotron** (optionnel) : `candle-transformers`, `hf-hub`, `tokenizers` ; modèle PleIAs/Baguettotron (321M) au premier run.
+- **cuda** (optionnel) : active CUDA pour candle-pipelines et candle-transformers ; inférence sur GPU si disponible.
 
 ## Intégration (à venir)
 

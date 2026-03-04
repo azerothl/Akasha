@@ -117,6 +117,9 @@ impl Daemon {
         if loaded_from.0 != "default" {
             info!(source = loaded_from.0, path = %loaded_from.1, "LLM router config loaded");
         }
+        if router_config.providers.is_empty() && loaded_from.0 != "default" {
+            info!("llm_router.yaml: section 'providers' vide — Ollama utilisera OLLAMA_HOST ou localhost:11434 ; ajoutez 'providers.ollama.base_url' pour expliciter l'URL.");
+        }
         let ollama_url = router_config
             .providers
             .get("ollama")

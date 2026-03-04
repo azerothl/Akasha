@@ -187,9 +187,12 @@ fn get_or_load_pipeline() -> Result<Arc<CandlePipeline>> {
 fn load_pipeline() -> Result<CandlePipeline> {
     use candle_pipelines::text_generation::{Qwen3, TextGenerationPipelineBuilder};
 
-    let pipeline = TextGenerationPipelineBuilder::qwen3(Qwen3::Size0_6B)
+    let builder = TextGenerationPipelineBuilder::qwen3(Qwen3::Size0_6B)
         .temperature(0.3)
-        .max_len(256)
+        .max_len(256);
+    #[cfg(feature = "cuda")]
+    let builder = builder.cuda(0);
+    let pipeline = builder
         .build()
         .map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
 

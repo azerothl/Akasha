@@ -10,12 +10,14 @@ default = ["candle"]
 candle = ["dep:candle-pipelines"]
 # Baguettotron (321M, PleIAs/Baguettotron) for low-resource or conversation; uses candle-transformers + hf-hub.
 baguettotron = ["dep:hf-hub", "dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:rand", "dep:serde", "dep:serde_json"]
+# Use GPU (CUDA) when available. Requires CUDA toolkit; compile with --features cuda. Falls back to CPU at runtime if no GPU.
+cuda = ["candle-pipelines/cuda", "candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 
 [dependencies]
 thiserror = "1.0"
 anyhow = "1.0"
 once_cell = "1.19"
-# CPU-only; model downloaded from HuggingFace on first use.
+# CPU-only by default; add feature "cuda" for GPU. Model downloaded from HuggingFace on first use.
 candle-pipelines = { version = "0.0.7", optional = true, default-features = false }
 hf-hub = { version = "0.4", optional = true }
 candle-core = { version = "0.9", optional = true }

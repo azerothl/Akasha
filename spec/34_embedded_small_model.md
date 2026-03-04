@@ -108,6 +108,7 @@ L’idée est de ne **pas dépendre** d’Ollama ou d’un service cloud pour ce
 - **Crate** : `crates/akasha-embedded-llm`.
 - **Stack** : `candle-pipelines` 0.0.7 (Qwen3 0.6B) ou **Baguettotron 321M** (feature `baguettotron`, [PleIAs/Baguettotron](https://huggingface.co/PleIAs/Baguettotron)) pour configs à faible ressource ou conversation.
 - **Choix du modèle** : `AKASHA_EMBEDDED_MODEL` = `qwen3_0_6b` (défaut) ou `baguettotron`. Pour Baguettotron : compiler le daemon avec `cargo build -p akasha-daemon --features embedded-baguettotron`, puis lancer avec `AKASHA_EMBEDDED_MODEL=baguettotron`.
+- **GPU (CUDA)** : avec la feature **`embedded-cuda`** (`cargo build -p akasha-daemon --features embedded-cuda`), l’inférence utilise le GPU si la machine a une carte NVIDIA compatible (toolkit CUDA installé). Sinon repli sur CPU à l’exécution. Baguettotron et Qwen profitent tous deux du GPU quand la feature est activée.
 - **API** : `EmbeddedLlm::new()`, `complete(prompt, max_tokens, temperature)` (bloquant), `is_available()`.
 - **Plateforme** : **recommandation WSL2 pour Windows** tant qu’une solution native Windows n’est pas validée ; build et run sous Linux/WSL2. Le build peut passer sous Windows (Candle 0.9.2) selon l’environnement.
 - **Suite** : brancher le crate en fallback dans le daemon (diagnostic advice, réponses simples) et documenter l’usage dans le guide.

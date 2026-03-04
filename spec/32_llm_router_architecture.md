@@ -155,6 +155,10 @@ struct AkashaCoreProvider {
     runtime: LocalModelRuntime,
 }
 ```
+Utilise en priorité le modèle embarqué (Candle) quand la feature `embedded` est activée ; sinon message placeholder.
+
+#### Akasha Embedded Provider
+Provider explicite pour le modèle intégré (Qwen3 0.6B ou Baguettotron 321M). `akasha_embedded` / `default`. Voir [34_embedded_small_model.md](34_embedded_small_model.md). Par défaut le routeur utilise ce provider pour tous les types de tâche si aucune config utilisateur n’est définie.
 
 ### 4. Fallback Engine
 

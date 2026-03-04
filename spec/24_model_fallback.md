@@ -68,7 +68,8 @@ Akasha supporte de multiples providers LLM:
 
 - **Ollama** - Modèles locaux (Llama, Mistral, etc.)
 - **Local** - Modèle custom de l'utilisateur
-- **Akasha Core** - Modèle interne natif
+- **akasha_embedded** - Modèle intégré à l’application (Qwen3 0.6B ou Baguettotron 321M) ; utilisé par défaut pour tous les types de tâche. Voir [34_embedded_small_model.md](34_embedded_small_model.md).
+- **Akasha Core** - Modèle interne natif (utilise aussi l’embarqué en priorité si disponible)
 
 ### Architecture Multi-Provider
 

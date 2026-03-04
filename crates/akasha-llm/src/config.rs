@@ -49,7 +49,7 @@ pub struct TaskTypeConfig {
     pub constraints: Option<RouteConstraints>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RouteEntry {
     pub provider: String,
     pub model: String,
@@ -130,6 +130,28 @@ impl RoutingConfig {
 
     pub fn get_route(&self, task_type: &str) -> Option<&TaskTypeConfig> {
         self.task_types.get(task_type)
+    }
+
+    /// Set the primary provider/model for a task type (e.g. from TUI or API). Creates the entry if missing.
+    /// If there was already a primary, it is moved to the front of the fallback list (no duplicate added if already present).
+    pub fn set_primary_route(&mut self, task_type: &str, entry: RouteEntry) {
+        let tt = self.task_types.entry(task_type.to_string()).or_insert_with(|| TaskTypeConfig {
+            primary: None,
+            fallback: vec![
+                RouteEntry { provider: "akasha_embedded".into(), model: "default".into(), config: None },
+                RouteEntry { provider: "akasha_core".into(), model: "core".into(), config: None },
+            ],
+            constraints: None,
+        });
+        if let Some(old) = tt.primary.take() {
+            if old != entry {
+                let already_in_fallback = tt.fallback.iter().any(|e| e.provider == old.provider && e.model == old.model);
+                if !already_in_fallback {
+                    tt.fallback.insert(0, old);
+                }
+            }
+        }
+        tt.primary = Some(entry);
     }
 
     /// Collect all (provider, model) from routing config for listing in UI.

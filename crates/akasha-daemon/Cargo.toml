@@ -10,6 +10,8 @@ default = ["embeddings"]
 embeddings = ["dep:akasha-embeddings"]
 # Use Baguettotron 321M as embedded model option; set AKASHA_EMBEDDED_MODEL=baguettotron at runtime to select it
 embedded-baguettotron = ["akasha-llm/embedded-baguettotron"]
+# Use GPU (CUDA) for embedded LLM when available; requires CUDA toolkit at build time
+embedded-cuda = ["akasha-llm/embedded-cuda"]
 
 [dependencies]
 akasha-core = { path = "../akasha-core" }

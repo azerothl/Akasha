@@ -874,6 +874,57 @@ pub async fn handle_api(
         return json_response("200 OK", &body.to_string());
     }
 
+    // POST /api/router/route — set primary provider/model for a task type (body: { "category", "provider", "model" })
+    if method == "POST" && path == "/api/router/route" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let category = body_json.as_ref().and_then(|j| j.get("category")).and_then(|v| v.as_str()).map(String::from);
+        let provider = body_json.as_ref().and_then(|j| j.get("provider")).and_then(|v| v.as_str()).map(String::from);
+        let model = body_json.as_ref().and_then(|j| j.get("model")).and_then(|v| v.as_str()).map(String::from);
+        match (category, provider, model) {
+            (Some(cat), Some(prov), Some(modl)) if !cat.is_empty() && !prov.is_empty() && !modl.is_empty() => {
+                let entry = akasha_llm::config::RouteEntry {
+                    provider: prov.clone(),
+                    model: modl.clone(),
+                    config: None,
+                };
+                llm_router.set_primary_route(&cat, akasha_llm::config::RouteEntry {
+                    provider: prov.clone(),
+                    model: modl.clone(),
+                    config: None,
+                });
+                let router_path = data_dir.join("llm_router.yaml");
+                let mut config = akasha_llm::config::RoutingConfig::load_from_path(&router_path)
+                    .unwrap_or_else(|_| akasha_llm::config::RoutingConfig::default_config());
+                config.set_primary_route(&cat, entry);
+                if let Err(e) = config.save_to_path(&router_path) {
+                    let body_err = serde_json::json!({ "ok": false, "error": format!("save failed: {}", e) });
+                    return json_response("500 Internal Server Error", &body_err.to_string());
+                }
+                let body_ok = serde_json::json!({
+                    "ok": true,
+                    "category": cat,
+                    "provider": prov,
+                    "model": modl,
+                    "message": "Route updated (in memory and saved to llm_router.yaml)."
+                });
+                return json_response("200 OK", &body_ok.to_string());
+            }
+            _ => {
+                let body_err = serde_json::json!({ "error": "missing or empty category, provider, or model" });
+                return json_response("400 Bad Request", &body_err.to_string());
+            }
+        }
+    }
+
+    // GET /api/router/routes — list primary + fallback per category (for CLI and TUI "models by category")
+    if method == "GET" && path == "/api/router/routes" {
+        let routes = llm_router.routes_by_category();
+        let body = serde_json::to_string(&routes).unwrap_or_else(|_| "{}".to_string());
+        return json_response("200 OK", &body);
+    }
+
     // GET /api/router/models — list models from all providers (config + Ollama live when available)
     if method == "GET" && path == "/api/router/models" {
         let mut providers: std::collections::HashMap<String, Vec<String>> =

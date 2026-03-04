@@ -39,6 +39,7 @@ impl FallbackEngine {
         }
         chain.extend(task_config.fallback.iter());
 
+        let mut last_error: Option<String> = None;
         for (i, entry) in chain.iter().enumerate() {
             if degraded_only && !self.is_local_provider(entry.provider.as_str(), resolve) {
                 continue;
@@ -47,6 +48,7 @@ impl FallbackEngine {
                 Some(p) => p,
                 None => {
                     warn!(provider = %entry.provider, "Provider not found, skip");
+                    last_error = Some(format!("{}: provider not registered", entry.provider));
                     continue;
                 }
             };
@@ -69,6 +71,7 @@ impl FallbackEngine {
                                 attempt = attempt + 1,
                                 "Provider returned empty text"
                             );
+                            last_error = Some(format!("{}: empty response", entry.provider));
                             if attempt + 1 < self.max_retries {
                                 tokio::time::sleep(Duration::from_secs(1)).await;
                                 continue;
@@ -94,6 +97,7 @@ impl FallbackEngine {
                         if i > 0 {
                             metrics.record_fallback_triggered(entry.provider.as_str(), &entry.model);
                         }
+                        last_error = Some(format!("{}: {}", entry.provider, e));
                         let retry = matches!(e, ProviderError::Timeout | ProviderError::RateLimit);
                         if retry && attempt + 1 < self.max_retries {
                             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -104,7 +108,11 @@ impl FallbackEngine {
                 }
             }
         }
-        Err("All providers in fallback chain failed".to_string())
+        let msg = match last_error {
+            Some(e) => format!("All providers in fallback chain failed (last: {}).", e),
+            None => "All providers in fallback chain failed.".to_string(),
+        };
+        Err(msg)
     }
 
     fn is_local_provider(&self, name: &str, resolve: &ProviderResolver) -> bool {
