@@ -440,42 +440,51 @@ pub(crate) async fn run_message_via_llm(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or_else(|| llm_timeout_secs.min(300));
 
-    loop {
+    'tool_rounds: loop {
         let request = CompletionRequest {
             prompt: format!("{}{}", current_prompt, tool_instruction),
             max_tokens: Some(max_tokens),
             temperature: Some(0.7),
         };
-        // Streaming path: chunks via channel, idle timeout instead of total timeout when provider supports streaming
-        let (stream_tx, stream_rx) = std::sync::mpsc::channel::<String>();
-        let stream_rx = std::sync::Arc::new(std::sync::Mutex::new(stream_rx));
+        // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
+        // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
+        let (stream_tx, std_rx) = std::sync::mpsc::channel::<String>();
+        let (tok_tx, mut tok_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        std::thread::Builder::new()
+            .name("akasha-stream-fwd".to_string())
+            .spawn(move || {
+                for chunk in std_rx {
+                    if tok_tx.send(chunk).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok();
         let router = llm_router.clone();
         let stream_join = tokio::spawn(async move { router.complete_stream(&request, stream_tx).await });
         let mut accumulated = String::new();
         let mut first_wait = true;
+        let overall_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(llm_timeout_secs);
         loop {
-            let rx = stream_rx.clone();
+            // Check the overall deadline before waiting for a chunk to avoid spurious zero-duration timeouts.
+            if tokio::time::Instant::now() >= overall_deadline {
+                tracing::warn!(timeout_secs = llm_timeout_secs, "Overall LLM timeout exceeded; aborting task");
+                stream_join.abort();
+                reply_text = if accumulated.is_empty() {
+                    format!("LLM response timed out after {} seconds.", llm_timeout_secs)
+                } else {
+                    accumulated
+                };
+                break 'tool_rounds;
+            }
             let idle = if first_wait {
                 first_wait = false;
                 std::time::Duration::from_secs(first_chunk_timeout_secs)
             } else {
                 std::time::Duration::from_secs(idle_timeout_secs)
             };
-            let recv_result: Result<Result<String, std::sync::mpsc::RecvTimeoutError>, _> =
-                tokio::task::spawn_blocking(move || {
-                    let guard = match rx.lock() {
-                        Ok(g) => g,
-                        Err(_) => return Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
-                    };
-                    guard.recv_timeout(idle)
-                })
-                .await;
-            let recv_result = match recv_result {
-                Ok(inner) => inner,
-                Err(_) => break,
-            };
-            match recv_result {
-                Ok(chunk) => {
+            match tokio::time::timeout(idle, tok_rx.recv()).await {
+                Ok(Some(chunk)) => {
                     accumulated.push_str(&chunk);
                     let _ = bus.send(
                         EventEnvelope::new(
@@ -489,28 +498,49 @@ pub(crate) async fn run_message_via_llm(
                         .with_correlation(task_id),
                     );
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                Ok(None) => break, // channel closed (sender dropped)
+                Err(_) => {
                     tracing::debug!(idle_secs = idle_timeout_secs, "Stream idle timeout, waiting for final response");
                     break;
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
-        let response = match stream_join.await {
-            Ok(Ok(resp)) => resp.text.trim().to_string(),
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "LLM completion failed");
-                reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
-                break;
-            }
-            Err(join_err) => {
-                tracing::warn!(error = %join_err, "Stream task join failed");
-                reply_text = if accumulated.is_empty() {
-                    format!("LLM task error: {}", join_err)
-                } else {
-                    accumulated
-                };
-                break;
+        // Wrap stream_join.await with remaining overall budget; guard against zero remaining.
+        let remaining = overall_deadline.saturating_duration_since(tokio::time::Instant::now());
+        let response = if remaining.is_zero() {
+            tracing::warn!(timeout_secs = llm_timeout_secs, "Overall LLM timeout on stream completion");
+            reply_text = if accumulated.is_empty() {
+                format!("LLM response timed out after {} seconds.", llm_timeout_secs)
+            } else {
+                accumulated
+            };
+            break;
+        } else {
+            match tokio::time::timeout(remaining, stream_join).await {
+                Ok(Ok(Ok(resp))) => resp.text.trim().to_string(),
+                Ok(Ok(Err(e))) => {
+                    tracing::warn!(error = %e, "LLM completion failed");
+                    reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
+                    break;
+                }
+                Ok(Err(join_err)) => {
+                    tracing::warn!(error = %join_err, "Stream task join failed");
+                    reply_text = if accumulated.is_empty() {
+                        format!("LLM task error: {}", join_err)
+                    } else {
+                        accumulated
+                    };
+                    break;
+                }
+                Err(_timeout) => {
+                    tracing::warn!(timeout_secs = llm_timeout_secs, "Overall LLM timeout on stream completion");
+                    reply_text = if accumulated.is_empty() {
+                        format!("LLM response timed out after {} seconds.", llm_timeout_secs)
+                    } else {
+                        accumulated
+                    };
+                    break;
+                }
             }
         };
         if !accumulated.is_empty() && response.is_empty() {
