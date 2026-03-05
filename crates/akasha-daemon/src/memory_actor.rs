@@ -7,11 +7,13 @@ use std::thread;
 pub enum MemoryRequest {
     Search { query_text: String, top_k: usize },
     Promote { content: String, source: String },
+    List { limit: usize },
 }
 
 pub enum MemoryResponse {
     Search(Vec<String>),
     Promote(Result<(), String>),
+    List(Vec<(String, String, String)>), // (content, created_at, source)
 }
 
 /// Client handle: Send + Sync, can be used from async code.
@@ -59,6 +61,26 @@ impl LongTermMemoryClient {
             Ok(())
         }
     }
+
+    /// List recent long-term entries (content, created_at, source). Empty if long-term disabled.
+    pub fn list(&self, limit: usize) -> Vec<(String, String, String)> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::List { limit }, resp_tx)).is_err() {
+                return Vec::new();
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::List(entries)) => entries,
+                _ => Vec::new(),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = limit;
+            Vec::new()
+        }
+    }
 }
 
 /// Start the long-term memory actor on a dedicated thread. Returns a client and the join handle.
@@ -91,6 +113,10 @@ pub fn start_memory_actor(
             let embedder = Embedder::new(&embedding_cache_dir);
             while let Ok((req, resp_tx)) = rx.recv() {
                 let response = match req {
+                    MemoryRequest::List { limit } => {
+                        let entries = store.list_recent(limit).unwrap_or_default();
+                        MemoryResponse::List(entries)
+                    }
                     MemoryRequest::Search { query_text, top_k } => {
                         let vec = match embedder.embed_one(&query_text) {
                             Ok(v) => v,

@@ -482,6 +482,8 @@ impl Daemon {
                                 let restart_tx: RestartTx = Some(restart_tx.clone());
                                 let tools_executor = tools_executor.clone();
                                 let skill_registry = skill_registry.clone();
+                                let short_term = short_term.clone();
+                                let long_term_client = long_term_client.clone();
                                 tokio::spawn(async move {
                                     let response = handle_api(
                                         &method,
@@ -501,6 +503,8 @@ impl Daemon {
                                         restart_tx,
                                         tools_executor.as_ref(),
                                         &skill_registry,
+                                        Some(short_term),
+                                        long_term_client,
                                     )
                                     .await;
                                     let _ = stream.write_all(response.as_bytes()).await;

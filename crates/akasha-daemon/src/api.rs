@@ -625,15 +625,40 @@ pub(crate) async fn run_message_via_llm(
 
     // Extract and promote personal facts to long-term memory (spec 06: nom, préférences, décisions).
     if let Some(ref long_term) = long_term_client {
-        let msg = message;
+        let msg = message.clone();
         let reply = reply_text.clone();
         let client = long_term.clone();
         let router = llm_router.clone();
         tokio::spawn(async move {
+            let mut facts = Vec::new();
+            // Heuristic: capture obvious "my name is X" from user message so we don't rely only on LLM.
+            let msg_lower = msg.to_lowercase();
+            for (pattern, prefix) in [
+                ("je m'appelle ", "L'utilisateur s'appelle "),
+                ("mon nom est ", "L'utilisateur s'appelle "),
+                ("je suis ", "L'utilisateur est "),
+                ("i'm ", "The user is "),
+                ("my name is ", "The user's name is "),
+                ("call me ", "The user wants to be called "),
+            ] {
+                if let Some(rest) = msg_lower.strip_prefix(pattern) {
+                    let name = rest
+                        .trim()
+                        .split(|c: char| c == ',' || c == '.' || c == '\n' || c == '!')
+                        .next()
+                        .unwrap_or(rest)
+                        .trim();
+                    let name = name.chars().take(80).collect::<String>();
+                    if !name.is_empty() {
+                        facts.push(format!("{}{}", prefix, name));
+                        break;
+                    }
+                }
+            }
             let extract_prompt = format!(
-                "À partir de cet échange, extrais les faits personnels importants à retenir (nom ou prénom de l'utilisateur, préférences, décisions explicites). \
-Un fait par ligne, préfixe par FACT: (ex: FACT: L'utilisateur s'appelle Jean.). \
-Si rien à retenir, réponds uniquement: NOTHING.\n\nUtilisateur: {}\n\nAssistant: {}",
+                "Tu dois extraire UNIQUEMENT les faits personnels à retenir sur l'utilisateur (nom, prénom, préférences, décisions). \
+Une ligne par fait, chaque ligne commence par FACT: (ex: FACT: L'utilisateur s'appelle Jean. FACT: L'utilisateur préfère le café.). \
+N'écris que des lignes FACT: ou NOTHING si aucun fait. Pas d'autre texte.\n\nUtilisateur: {}\n\nAssistant: {}",
                 msg.trim(),
                 reply.trim()
             );
@@ -646,19 +671,27 @@ Si rien à retenir, réponds uniquement: NOTHING.\n\nUtilisateur: {}\n\nAssistan
                 std::time::Duration::from_secs(30),
                 router.complete(&req),
             ).await {
-                let mut facts = Vec::new();
                 for line in resp.text.lines() {
                     let line = line.trim();
                     if let Some(fact) = line.strip_prefix("FACT:") {
                         let fact = fact.trim().to_string();
-                        if !fact.is_empty() {
+                        if !fact.is_empty() && !facts.contains(&fact) {
                             facts.push(fact);
                         }
                     }
                 }
-                for fact in facts {
-                    let client = client.clone();
-                    let _ = tokio::task::spawn_blocking(move || client.promote(fact, "user_fact".to_string())).await;
+            }
+            if facts.is_empty() {
+                tracing::debug!(user_msg = %msg.trim().chars().take(100).collect::<String>(), "No personal facts extracted for long-term memory");
+            } else {
+                tracing::debug!(count = facts.len(), "Promoting personal facts to long-term memory");
+            }
+            for fact in facts {
+                let client = client.clone();
+                match tokio::task::spawn_blocking(move || client.promote(fact, "user_fact".to_string())).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote user_fact failed"),
+                    Err(e) => tracing::debug!(error = %e, "Promote task join error"),
                 }
             }
         });
@@ -709,11 +742,71 @@ pub async fn handle_api(
     restart_tx: RestartTx,
     _tools_executor: Option<&std::sync::Arc<akasha_tools::ToolExecutor>>,
     skill_registry: &std::sync::Arc<crate::skills::SkillRegistry>,
+    short_term: Option<std::sync::Arc<ShortTermStore>>,
+    long_term_client: Option<LongTermMemoryClient>,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
     if method == "GET" && (path == "/" || path.is_empty()) {
         return json_response("200 OK", r#"{"status":"ok"}"#);
+    }
+
+    // GET /api/memory/short-term?session_id=... — turns for session (default: day-YYYY-MM-DD)
+    if method == "GET" && path.starts_with("/api/memory/short-term") {
+        let session_id = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| {
+                q.split('&')
+                    .find(|p| p.starts_with("session_id="))
+                    .map(|p| urlencoding::decode(p.trim_start_matches("session_id=")).unwrap_or_default().into_owned())
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("day-{}", chrono::Utc::now().format("%Y-%m-%d")));
+        let turns = if let Some(ref st) = short_term {
+            st.get_turns(&session_id).await
+        } else {
+            vec![]
+        };
+        let list: Vec<serde_json::Value> = turns
+            .iter()
+            .map(|t| serde_json::json!({ "role": t.role, "content": t.content }))
+            .collect();
+        let body_json = serde_json::json!({ "session_id": session_id, "turns": list });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
+    // GET /api/memory/long-term?limit=50 — recent long-term entries (content, created_at, source)
+    if method == "GET" && path.starts_with("/api/memory/long-term") {
+        let limit = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| {
+                q.split('&')
+                    .find(|p| p.starts_with("limit="))
+                    .and_then(|p| p.trim_start_matches("limit=").parse::<usize>().ok())
+            })
+            .unwrap_or(50)
+            .min(200);
+        let entries = if let Some(ref client) = long_term_client {
+            let client = client.clone();
+            tokio::task::spawn_blocking(move || client.list(limit))
+                .await
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+        let list: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|(content, created_at, source)| {
+                serde_json::json!({ "content": content, "created_at": created_at, "source": source })
+            })
+            .collect();
+        let body_json = serde_json::json!({
+            "entries": list,
+            "long_term_available": long_term_client.is_some()
+        });
+        return json_response("200 OK", &body_json.to_string());
     }
 
     // GET /api/status — same as / but explicit for slash commands
