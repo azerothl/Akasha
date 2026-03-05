@@ -1168,9 +1168,18 @@ fn ui(f: &mut Frame, app: &mut App) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(0),
-            Constraint::Min(4),
         ])
         .split(f.area());
+
+    let (content_area, input_area_opt) = if app.mode == Mode::Chat {
+        let vert = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(3)])
+            .split(chunks[1]);
+        (vert[0], Some(vert[1]))
+    } else {
+        (chunks[1], None)
+    };
 
     let top_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1218,7 +1227,7 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     match app.mode {
         Mode::Chat => {
-            let content_width = chunks[1].width as usize;
+            let content_width = content_area.width as usize;
             let mut lines: Vec<Line<'static>> = Vec::new();
             for m in &app.messages {
                 let (role_style, _base_style) = if m.role == "Vous" {
@@ -1266,7 +1275,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                     Style::default().fg(theme.palette().warning).add_modifier(Modifier::ITALIC),
                 )));
             }
-            let content_height = chunks[1].height.saturating_sub(2); // inner height (block borders)
+            let content_height = content_area.height.saturating_sub(2); // inner height (block borders)
             app.last_content_lines = lines.len();
             app.last_content_area_height = content_height;
             // Wrap-aware row count so scrolling shows full content (Paragraph wraps to area width).
@@ -1298,7 +1307,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 )
                 .wrap(Wrap { trim: true })
                 .scroll((app.scroll as u16, 0));
-            f.render_widget(chat, chunks[1]);
+            f.render_widget(chat, content_area);
         }
         Mode::Router => {
             let rows: Vec<Row> = app
@@ -1343,10 +1352,10 @@ fn ui(f: &mut Frame, app: &mut App) {
                     .title(" Métriques routeur (R: rafraîchir) ")
                     .border_style(theme.block_border()),
             );
-            f.render_widget(table, chunks[1]);
+            f.render_widget(table, content_area);
         }
         Mode::Doc => {
-            let content_width = chunks[1].width as usize;
+            let content_width = content_area.width as usize;
             let md_styles = theme.markdown_styles();
             let marked = markdown::from_str_with_width(
                 &app.doc_content,
@@ -1354,7 +1363,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 Some(content_width as u16),
             );
             let lines = marked.to_flat_lines();
-            let content_height = chunks[1].height.saturating_sub(2);
+            let content_height = content_area.height.saturating_sub(2);
             app.last_content_lines = lines.len();
             app.last_content_area_height = content_height;
             app.last_content_rendered_rows = 0;
@@ -1371,10 +1380,10 @@ fn ui(f: &mut Frame, app: &mut App) {
                 )
                 .wrap(Wrap { trim: true })
                 .scroll((app.scroll as u16, 0));
-            f.render_widget(doc_para, chunks[1]);
+            f.render_widget(doc_para, content_area);
         }
         Mode::Tasks => {
-            let area = chunks[1];
+            let area = content_area;
             let (list_area, detail_area) = if area.height >= 8 {
                 let list_h = (area.height / 2).max(4);
                 let chunks_act = ratatui::layout::Layout::default()
@@ -1516,7 +1525,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                     lines.push(Line::from(format!("  {}  {}  {}  task {}", short_id, status, planned, short_task)));
                 }
             }
-            let content_height = chunks[1].height.saturating_sub(2);
+            let content_height = content_area.height.saturating_sub(2);
             app.last_content_lines = lines.len();
             app.last_content_area_height = content_height;
             app.last_content_rendered_rows = 0;
@@ -1524,7 +1533,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .borders(Borders::ALL)
                 .title(" Calendrier (récurrences et runs) ")
                 .border_style(theme.block_border());
-            f.render_widget(Paragraph::new(lines).block(cal_block).wrap(Wrap { trim: true }), chunks[1]);
+            f.render_widget(Paragraph::new(lines).block(cal_block).wrap(Wrap { trim: true }), content_area);
         }
         Mode::Memory => {
             let mut lines: Vec<Line<'static>> = vec![
@@ -1577,7 +1586,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             if app.memory_long_term.is_empty() && app.memory_long_term_available {
                 lines.push(Line::from(Span::styled("  (aucune entrée)", Style::default().fg(theme.palette().muted))));
             }
-            let content_height = chunks[1].height.saturating_sub(2);
+            let content_height = content_area.height.saturating_sub(2);
             app.last_content_lines = lines.len();
             app.last_content_area_height = content_height;
             app.last_content_rendered_rows = 0;
@@ -1591,37 +1600,32 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .border_style(theme.block_border());
             f.render_widget(
                 Paragraph::new(lines).block(mem_block).wrap(Wrap { trim: true }).scroll((app.scroll as u16, 0)),
-                chunks[1],
+                content_area,
             );
         }
     }
 
-    let input_label = match app.mode {
-        Mode::Chat => " Message (Entrée = envoyer, Maj+Entrée = nouvelle ligne, ↑↓ = chat, Ctrl+↑↓ = défilement saisie, Tab = onglet) ",
-        Mode::Router => " Tab = onglet, R = rafraîchir, Échap = quitter ",
-        Mode::Doc => " Tab = onglet, ↑↓ PgUp/PgDn = défilement, R = actualiser, Échap = quitter ",
-        Mode::Tasks => " Tab = onglet, ↑↓ = tâche, PgUp/PgDn = détails, R = actualiser, Échap = quitter ",
-        Mode::Calendar => " Tab = onglet, R = actualiser, Échap = quitter ",
-        Mode::Memory => " Tab = onglet, ↑↓ PgUp/PgDn = défilement, R = actualiser, Échap = quitter ",
-    };
-    let input_area_width = chunks[2].width.saturating_sub(2) as usize;
-    app.input_inner_height = chunks[2].height.saturating_sub(2) as usize;
-    app.input_wrapped_lines = App::wrapped_line_count(&app.input, input_area_width.max(1));
-    let max_input_scroll = app.input_wrapped_lines.saturating_sub(app.input_inner_height);
-    if app.input_scroll > max_input_scroll {
-        app.input_scroll = max_input_scroll;
+    if let Some(input_rect) = input_area_opt {
+        let input_label = " Message (Entrée = envoyer, Maj+Entrée = nouvelle ligne, ↑↓ = chat, Ctrl+↑↓ = saisie, Tab = onglet) ";
+        let input_area_width = input_rect.width.saturating_sub(2) as usize;
+        app.input_inner_height = input_rect.height.saturating_sub(2) as usize;
+        app.input_wrapped_lines = App::wrapped_line_count(&app.input, input_area_width.max(1));
+        let max_input_scroll = app.input_wrapped_lines.saturating_sub(app.input_inner_height);
+        if app.input_scroll > max_input_scroll {
+            app.input_scroll = max_input_scroll;
+        }
+        let input_para = Paragraph::new(app.input.as_str())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(input_label)
+                    .border_style(theme.block_border()),
+            )
+            .wrap(Wrap { trim: true })
+            .scroll((app.input_scroll as u16, 0))
+            .style(Style::default().fg(theme.palette().fg));
+        f.render_widget(input_para, input_rect);
     }
-    let input_para = Paragraph::new(app.input.as_str())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(input_label)
-                .border_style(theme.block_border()),
-        )
-        .wrap(Wrap { trim: true })
-        .scroll((app.input_scroll as u16, 0))
-        .style(Style::default().fg(theme.palette().fg));
-    f.render_widget(input_para, chunks[2]);
 }
 
 fn run_app(

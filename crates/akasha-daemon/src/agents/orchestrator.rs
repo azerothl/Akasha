@@ -2,7 +2,7 @@
 
 use akasha_core::{EventEnvelope, EventType};
 use akasha_llm::{classify_task_type, CompletionRequest, TaskType};
-use akasha_store::{Task, TaskStatus, TaskStore};
+use akasha_store::{Schedule, ScheduleStore, Task, TaskStatus, TaskStore};
 use chrono::Utc;
 use std::path::Path;
 use std::sync::Arc;
@@ -21,7 +21,15 @@ async fn decompose_request(
     message: &str,
 ) -> Vec<Subtask> {
     let prompt = format!(
-        "You are a task decomposer. Output one line per subtask: agent_type|message. Agent types: conversation (general chat), code (code gen), search (info search). Use 'conversation' if one simple question. Example:\nconversation|What is 2+2?\n\nUser request:\n\n{}",
+        r#"You are a task decomposer. Output one line per subtask: agent_type|message.
+Agent types: conversation (general chat), code (code gen), search (info search), schedule (create recurring task IN THE APP).
+- If the user asks to CREATE a recurring/scheduled task (e.g. "tâche récurrente", "rappel toutes les 2 heures", "crée un rappel"), output exactly ONE line: schedule|interval_seconds|name|message
+  where interval_seconds is in seconds (3600=1h, 7200=2h, 86400=1 day), name is a short title, message is the reminder text shown when the task runs. Example: schedule|7200|Rappel Github|Rappel: regarder l'avancement du projet sur GitHub
+- Otherwise output agent_type|message. Example: conversation|What is 2+2?
+
+User request:
+
+{}"#,
         message
     );
     // Models with "thinking" (e.g. glm-4.7-flash) use output tokens for thinking then response; 512 is too low and yields empty response (done_reason: length).
@@ -47,7 +55,7 @@ async fn decompose_request(
                 }
                 if let Some((agent_type, sub_message)) = line.split_once('|') {
                     let agent_type = agent_type.trim().to_lowercase();
-                    let agent_type = if agent_type == "code" || agent_type == "search" {
+                    let agent_type = if agent_type == "code" || agent_type == "search" || agent_type == "schedule" {
                         agent_type
                     } else {
                         "conversation".to_string()
@@ -212,6 +220,126 @@ async fn process_root_task(
         )
         .with_correlation(root_task_id),
     );
+
+    // Single subtask (schedule): create recurring task in the app, no delegation to code agent.
+    if steps.len() == 1 && steps[0].0 == "schedule" {
+        let payload = steps[0].1.as_str();
+        let parts: Vec<&str> = payload.splitn(3, '|').map(str::trim).collect();
+        let (interval_secs, name, reminder_message) = if parts.len() >= 3 {
+            let interval_secs = parts[0].parse::<u64>().unwrap_or(7200);
+            let name = parts[1].to_string();
+            let reminder_message = parts[2].to_string();
+            (interval_secs, name, reminder_message)
+        } else if parts.len() == 2 {
+            let interval_secs = parts[0].parse::<u64>().unwrap_or(7200);
+            (interval_secs, "Rappel".to_string(), parts[1].to_string())
+        } else {
+            (7200, "Rappel".to_string(), payload.to_string())
+        };
+        let schedule_store = match ScheduleStore::open(store_path) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": root_task_id.to_string(),
+                            "progress_pct": 100,
+                            "message": format!("Erreur création récurrence : {}", e)
+                        })),
+                    )
+                    .with_correlation(root_task_id),
+                );
+                let _ = store.update_status(root_task_id, TaskStatus::Failed);
+                let _ = bus.send(
+                    EventEnvelope::new(EventType::TaskFailed, Some(serde_json::json!({ "task_id": root_task_id.to_string() })))
+                        .with_correlation(root_task_id),
+                );
+                return Ok(());
+            }
+        };
+        let now = Utc::now();
+        let schedule = Schedule {
+            id: Uuid::new_v4(),
+            name: name.clone(),
+            description: format!("Rappel toutes les {} secondes", interval_secs),
+            enabled: true,
+            timezone: "UTC".to_string(),
+            rrule: String::new(),
+            interval_seconds: Some(interval_secs),
+            start_at: now,
+            end_at: None,
+            channel_context: Some(reminder_message.clone()),
+            created_at: now,
+            updated_at: now,
+        };
+        if let Err(e) = schedule_store.insert_schedule(&schedule) {
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::ProgressUpdate,
+                    Some(serde_json::json!({
+                        "task_id": root_task_id.to_string(),
+                        "progress_pct": 100,
+                        "message": format!("Erreur création récurrence : {}", e)
+                    })),
+                )
+                .with_correlation(root_task_id),
+            );
+            let _ = store.update_status(root_task_id, TaskStatus::Failed);
+            let _ = bus.send(
+                EventEnvelope::new(EventType::TaskFailed, Some(serde_json::json!({ "task_id": root_task_id.to_string() })))
+                    .with_correlation(root_task_id),
+            );
+            return Ok(());
+        }
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ScheduleCreated,
+                Some(serde_json::json!({
+                    "schedule_id": schedule.id.to_string(),
+                    "name": schedule.name,
+                    "interval_seconds": interval_secs
+                })),
+            )
+            .with_correlation(root_task_id),
+        );
+        let interval_desc = if interval_secs >= 86400 {
+            format!("tous les {} jours", interval_secs / 86400)
+        } else if interval_secs >= 3600 {
+            format!("toutes les {} heures", interval_secs / 3600)
+        } else if interval_secs >= 60 {
+            format!("toutes les {} minutes", interval_secs / 60)
+        } else {
+            format!("toutes les {} secondes", interval_secs)
+        };
+        let success_msg = format!(
+            "Récurrence créée : « {} ». {} — Tu peux la voir dans l'onglet Calendrier.",
+            name, interval_desc
+        );
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ProgressUpdate,
+                Some(serde_json::json!({
+                    "task_id": root_task_id.to_string(),
+                    "progress_pct": 100,
+                    "message": success_msg
+                })),
+            )
+            .with_correlation(root_task_id),
+        );
+        let _ = store.update_status(root_task_id, TaskStatus::Completed);
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::TaskCompleted,
+                Some(serde_json::json!({
+                    "task_id": root_task_id.to_string(),
+                    "status": "completed"
+                })),
+            )
+            .with_correlation(root_task_id),
+        );
+        return Ok(());
+    }
 
     // Single subtask (conversation): delegate to conversation worker for root (user sees reply on root_id).
     if steps.len() == 1 && steps[0].0 == "conversation" {
