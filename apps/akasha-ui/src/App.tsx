@@ -887,10 +887,15 @@ function App() {
                             {calendarTaskDetail.progress && calendarTaskDetail.progress.length > 0 && (
                               <div className="task-detail-progress">
                                 <strong>Progression / résultat:</strong>
+                                <p className="task-detail-progress-hint">
+                                  Les lignes « État » sont des étapes intermédiaires ; le pourcentage indique l’avancement.
+                                </p>
                                 <ul>
                                   {calendarTaskDetail.progress.map((p, i) => (
                                     <li key={i}>
-                                      {p.progress_pct != null ? `${p.progress_pct}% — ` : ""}
+                                      {p.progress_pct != null && p.progress_pct > 0
+                                        ? `${p.progress_pct}% — `
+                                        : "État: "}
                                       {p.message ?? ""}
                                     </li>
                                   ))}

@@ -668,6 +668,12 @@ body {
   margin-top: 1rem;
 }
 
+.calendar-detail-modal-body .task-detail-progress-hint {
+  font-size: 0.8125rem;
+  color: #71717a;
+  margin: 0 0 0.5rem;
+}
+
 .calendar-detail-modal-body .task-detail-progress ul {
   list-style: none;
   padding: 0;
