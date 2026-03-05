@@ -1,5 +1,5 @@
 //! Long-term memory actor: runs on a dedicated thread (SQLite and embedder are !Send), services search/insert via channel.
-//! When feature "embeddings" is disabled (e.g. to avoid ONNX linker errors on Windows), no-op client and start_memory_actor returns Err.
+//! When neither "embeddings" nor "embeddings-tract" is enabled, no-op client and start_memory_actor returns Err.
 
 use std::path::Path;
 use std::thread;
@@ -7,23 +7,25 @@ use std::thread;
 pub enum MemoryRequest {
     Search { query_text: String, top_k: usize },
     Promote { content: String, source: String },
+    List { limit: usize },
 }
 
 pub enum MemoryResponse {
     Search(Vec<String>),
     Promote(Result<(), String>),
+    List(Vec<(String, String, String)>), // (content, created_at, source)
 }
 
 /// Client handle: Send + Sync, can be used from async code.
 #[derive(Clone)]
 pub struct LongTermMemoryClient {
-    #[cfg(feature = "embeddings")]
+    #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
     tx: std::sync::mpsc::Sender<(MemoryRequest, tokio::sync::oneshot::Sender<MemoryResponse>)>,
 }
 
 impl LongTermMemoryClient {
     pub fn search(&self, query_text: String, _top_k: usize) -> Vec<String> {
-        #[cfg(feature = "embeddings")]
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
             if self.tx.send((MemoryRequest::Search { query_text, top_k: _top_k }, resp_tx)).is_err() {
@@ -34,7 +36,7 @@ impl LongTermMemoryClient {
                 _ => Vec::new(),
             }
         }
-        #[cfg(not(feature = "embeddings"))]
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
         {
             let _ = query_text;
             Vec::new()
@@ -42,7 +44,7 @@ impl LongTermMemoryClient {
     }
 
     pub fn promote(&self, content: String, source: String) -> Result<(), String> {
-        #[cfg(feature = "embeddings")]
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
             if self.tx.send((MemoryRequest::Promote { content, source }, resp_tx)).is_err() {
@@ -53,21 +55,41 @@ impl LongTermMemoryClient {
                 _ => Err("no response".into()),
             }
         }
-        #[cfg(not(feature = "embeddings"))]
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
         {
             let _ = (content, source);
             Ok(())
         }
     }
+
+    /// List recent long-term entries (content, created_at, source). Empty if long-term disabled.
+    pub fn list(&self, limit: usize) -> Vec<(String, String, String)> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::List { limit }, resp_tx)).is_err() {
+                return Vec::new();
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::List(entries)) => entries,
+                _ => Vec::new(),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = limit;
+            Vec::new()
+        }
+    }
 }
 
 /// Start the long-term memory actor on a dedicated thread. Returns a client and the join handle.
-/// When feature "embeddings" is off (e.g. Windows linker issues with ONNX), returns Err so daemon runs without long-term memory.
+/// When neither "embeddings" nor "embeddings-tract" is enabled, returns Err.
 pub fn start_memory_actor(
     _memory_db_path: &Path,
     _embedding_cache_dir: &Path,
 ) -> anyhow::Result<(LongTermMemoryClient, thread::JoinHandle<()>)> {
-    #[cfg(feature = "embeddings")]
+    #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
     {
         use std::sync::mpsc;
         use tokio::sync::oneshot;
@@ -91,6 +113,10 @@ pub fn start_memory_actor(
             let embedder = Embedder::new(&embedding_cache_dir);
             while let Ok((req, resp_tx)) = rx.recv() {
                 let response = match req {
+                    MemoryRequest::List { limit } => {
+                        let entries = store.list_recent(limit).unwrap_or_default();
+                        MemoryResponse::List(entries)
+                    }
                     MemoryRequest::Search { query_text, top_k } => {
                         let vec = match embedder.embed_one(&query_text) {
                             Ok(v) => v,
@@ -104,15 +130,22 @@ pub fn start_memory_actor(
                         MemoryResponse::Search(contents)
                     }
                     MemoryRequest::Promote { content, source } => {
-                        let result = embedder
-                            .embed_one(&content)
-                            .map_err(|e| e.to_string())
-                            .and_then(|vec| {
-                                let bytes = embedding_to_bytes(&vec);
-                                store.insert(&content, &bytes, &source).map_err(|e| e.to_string())?;
-                                Ok(())
-                            });
-                        MemoryResponse::Promote(result)
+                        // Skip if an identical fact is already stored (dedup).
+                        let already_exists = store.content_exists(&content).unwrap_or(false);
+                        if already_exists {
+                            tracing::debug!(content = %content.chars().take(60).collect::<String>(), "Skipping duplicate long-term memory entry");
+                            MemoryResponse::Promote(Ok(()))
+                        } else {
+                            let result = embedder
+                                .embed_one(&content)
+                                .map_err(|e| e.to_string())
+                                .and_then(|vec| {
+                                    let bytes = embedding_to_bytes(&vec);
+                                    store.insert(&content, &bytes, &source).map_err(|e| e.to_string())?;
+                                    Ok(())
+                                });
+                            MemoryResponse::Promote(result)
+                        }
                     }
                 };
                 let _ = resp_tx.send(response);
@@ -121,8 +154,8 @@ pub fn start_memory_actor(
         Ok((LongTermMemoryClient { tx }, handle))
     }
 
-    #[cfg(not(feature = "embeddings"))]
+    #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
     {
-        anyhow::bail!("long-term memory disabled (build without embeddings feature); use default features to enable")
+        anyhow::bail!("long-term memory disabled; enable feature 'embeddings' or 'embeddings-tract' (Windows)")
     }
 }

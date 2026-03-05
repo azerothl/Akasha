@@ -104,7 +104,7 @@ impl RoutingConfig {
             config: None,
         };
         let mut task_types = HashMap::new();
-        for name in ["conversation", "code_generation", "system_diagnostic"] {
+        for name in ["conversation", "code_generation", "system_diagnostic", "system"] {
             task_types.insert(
                 name.into(),
                 TaskTypeConfig {

@@ -82,6 +82,16 @@ impl LongTermStore {
         Ok(id)
     }
 
+    /// Return true if an entry with the exact same content already exists.
+    pub fn content_exists(&self, content: &str) -> anyhow::Result<bool> {
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM memory_entries WHERE content = ?1)",
+            rusqlite::params![content],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
+    }
+
     /// Retrieve all entries with their embeddings for similarity search in memory.
     fn get_all_with_embedding(
         &self,
@@ -96,6 +106,24 @@ impl LongTermStore {
                 row.get::<_, Vec<u8>>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// List most recent entries (no embedding). For display in UI. Returns (content, created_at_rfc3339, source).
+    pub fn list_recent(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT content, created_at, source FROM memory_entries ORDER BY created_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
             ))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

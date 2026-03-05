@@ -67,3 +67,12 @@ task_types:
     fallback:
       - provider: akasha_core
         model: core
+
+  # Tâches internes (extraction mémoire, décomposition) — voir spec 06 (modèle système Akasha)
+  system:
+    primary:
+      provider: akasha_embedded
+      model: default
+    fallback:
+      - provider: akasha_core
+        model: core

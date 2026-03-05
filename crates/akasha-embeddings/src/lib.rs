@@ -1,63 +1,10 @@
-//! Local text embeddings for Akasha. Uses fastembed (ONNX in-process); model is cached under
-//! the provided cache_dir (e.g. data_dir/embedding_model) so no third-party application is required.
+//! Local text embeddings for Akasha. Backend: fastembed (default, ONNX Runtime) or tract (pure Rust, Windows-friendly).
 
 use std::path::Path;
 use std::sync::RwLock;
 
-/// In-process embedder. Model is loaded on first use and cached under `cache_dir`.
-pub struct Embedder {
-    inner: RwLock<Option<fastembed::TextEmbedding>>,
-    cache_dir: std::path::PathBuf,
-}
-
-impl Embedder {
-    /// Create an embedder that will cache the model under `cache_dir` (e.g. data_dir/embedding_model).
-    /// The model is downloaded on first embed() if not already present; inference runs in-process.
-    pub fn new(cache_dir: impl AsRef<Path>) -> Self {
-        Self {
-            inner: RwLock::new(None),
-            cache_dir: cache_dir.as_ref().to_path_buf(),
-        }
-    }
-
-    fn ensure_loaded(&self) -> anyhow::Result<()> {
-        let mut g = self.inner.write().map_err(|e| anyhow::anyhow!("lock: {}", e))?;
-        if g.is_none() {
-            std::fs::create_dir_all(&self.cache_dir)?;
-            let opts = fastembed::InitOptions::new(fastembed::EmbeddingModel::AllMiniLML6V2)
-                .with_cache_dir(self.cache_dir.clone())
-                .with_show_download_progress(false);
-            let model = fastembed::TextEmbedding::try_new(opts)
-                .map_err(|e| anyhow::anyhow!("embedding model init: {}", e))?;
-            *g = Some(model);
-        }
-        Ok(())
-    }
-
-    /// Embed a single text. Returns a vector of dimension 384 for AllMiniLML6V2.
-    pub fn embed_one(&self, text: &str) -> anyhow::Result<Vec<f32>> {
-        let vec = self.embed_slice(&[text])?;
-        Ok(vec.into_iter().next().unwrap_or_default())
-    }
-
-    /// Embed multiple texts. Order is preserved.
-    pub fn embed_slice(&self, texts: &[impl AsRef<str>]) -> anyhow::Result<Vec<Vec<f32>>> {
-        self.ensure_loaded()?;
-        let mut g = self.inner.write().map_err(|e| anyhow::anyhow!("lock: {}", e))?;
-        let model = g.as_mut().ok_or_else(|| anyhow::anyhow!("embedder not loaded"))?;
-        let input: Vec<&str> = texts.iter().map(|s| s.as_ref()).collect();
-        let embeddings = model
-            .embed(input.as_slice(), None)
-            .map_err(|e| anyhow::anyhow!("embed: {}", e))?;
-        let out: Vec<Vec<f32>> = embeddings.into_iter().map(|e| e.to_vec()).collect();
-        Ok(out)
-    }
-
-    /// Dimension of the embedding vectors (384 for AllMiniLML6V2).
-    pub fn dimension(&self) -> usize {
-        384
-    }
-}
+#[cfg(all(feature = "fastembed", feature = "tract"))]
+compile_error!("Features 'fastembed' and 'tract' are mutually exclusive. Enable only one embedding backend.");
 
 /// Serialize embedding to bytes (little-endian f32) for storage.
 pub fn embedding_to_bytes(v: &[f32]) -> Vec<u8> {
@@ -82,6 +29,241 @@ pub fn bytes_to_embedding(b: &[u8]) -> anyhow::Result<Vec<f32>> {
     }
     Ok(out)
 }
+
+#[cfg(feature = "fastembed")]
+mod fastembed_backend {
+    use super::*;
+
+    /// In-process embedder (fastembed / ONNX Runtime). Model cached under `cache_dir`.
+    pub struct Embedder {
+        inner: RwLock<Option<fastembed::TextEmbedding>>,
+        cache_dir: std::path::PathBuf,
+    }
+
+    impl Embedder {
+        pub fn new(cache_dir: impl AsRef<Path>) -> Self {
+            Self {
+                inner: RwLock::new(None),
+                cache_dir: cache_dir.as_ref().to_path_buf(),
+            }
+        }
+
+        fn ensure_loaded(&self) -> anyhow::Result<()> {
+            let mut g = self.inner.write().map_err(|e| anyhow::anyhow!("lock: {}", e))?;
+            if g.is_none() {
+                std::fs::create_dir_all(&self.cache_dir)?;
+                let opts = fastembed::InitOptions::new(fastembed::EmbeddingModel::AllMiniLML6V2)
+                    .with_cache_dir(self.cache_dir.clone())
+                    .with_show_download_progress(false);
+                let model = fastembed::TextEmbedding::try_new(opts)
+                    .map_err(|e| anyhow::anyhow!("embedding model init: {}", e))?;
+                *g = Some(model);
+            }
+            Ok(())
+        }
+
+        pub fn embed_one(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            let vec = self.embed_slice(&[text])?;
+            Ok(vec.into_iter().next().unwrap_or_default())
+        }
+
+        pub fn embed_slice(&self, texts: &[impl AsRef<str>]) -> anyhow::Result<Vec<Vec<f32>>> {
+            self.ensure_loaded()?;
+            let mut g = self.inner.write().map_err(|e| anyhow::anyhow!("lock: {}", e))?;
+            let model = g.as_mut().ok_or_else(|| anyhow::anyhow!("embedder not loaded"))?;
+            let input: Vec<&str> = texts.iter().map(|s| s.as_ref()).collect();
+            let embeddings = model
+                .embed(input.as_slice(), None)
+                .map_err(|e| anyhow::anyhow!("embed: {}", e))?;
+            let out: Vec<Vec<f32>> = embeddings.into_iter().map(|e| e.to_vec()).collect();
+            Ok(out)
+        }
+
+        pub fn dimension(&self) -> usize {
+            384
+        }
+    }
+}
+
+#[cfg(feature = "tract")]
+mod tract_backend {
+    use super::*;
+    use ndarray::{Array, Array2};
+    use std::fs::File;
+
+    const MAX_LENGTH: usize = 256;
+    const EMBED_DIM: usize = 384;
+    const MODEL_HF_URL: &str =
+        "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx";
+    const TOKENIZER_HF_URL: &str =
+        "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
+
+    /// In-process embedder (tract-onnx, pure Rust). Works on Windows. Model cached under `cache_dir`.
+    pub struct Embedder {
+        inner: RwLock<Option<TractModel>>,
+        cache_dir: std::path::PathBuf,
+    }
+
+    struct TractModel {
+        model: tract_onnx::prelude::TypedRunnableModel<tract_onnx::prelude::TypedModel>,
+        tokenizer: tokenizers::Tokenizer,
+        n_inputs: usize,
+    }
+
+    impl Embedder {
+        pub fn new(cache_dir: impl AsRef<Path>) -> Self {
+            Self {
+                inner: RwLock::new(None),
+                cache_dir: cache_dir.as_ref().to_path_buf(),
+            }
+        }
+
+        fn ensure_loaded(&self) -> anyhow::Result<()> {
+            let mut g = self.inner.write().map_err(|e| anyhow::anyhow!("lock: {}", e))?;
+            if g.is_none() {
+                std::fs::create_dir_all(&self.cache_dir)?;
+                let model_path = self.cache_dir.join("model.onnx");
+                let tokenizer_path = self.cache_dir.join("tokenizer.json");
+                if !model_path.exists() || !tokenizer_path.exists() {
+                    Self::download_model(&model_path, &tokenizer_path)?;
+                }
+                let tokenizer =
+                    tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|e| anyhow::anyhow!("tokenizer: {}", e))?;
+                let (model, n_inputs) = Self::load_onnx(&model_path)?;
+                *g = Some(TractModel { model, tokenizer, n_inputs });
+            }
+            Ok(())
+        }
+
+        fn download_model(model_path: &Path, tokenizer_path: &Path) -> anyhow::Result<()> {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()?;
+            if !model_path.exists() {
+                let mut resp = client.get(MODEL_HF_URL).send()?.error_for_status()?;
+                let mut out = File::create(model_path)?;
+                std::io::copy(&mut resp, &mut out)?;
+            }
+            if !tokenizer_path.exists() {
+                let mut resp = client.get(TOKENIZER_HF_URL).send()?.error_for_status()?;
+                let mut out = File::create(tokenizer_path)?;
+                std::io::copy(&mut resp, &mut out)?;
+            }
+            Ok(())
+        }
+
+        fn load_onnx(
+            path: &Path,
+        ) -> anyhow::Result<(tract_onnx::prelude::TypedRunnableModel<tract_onnx::prelude::TypedModel>, usize)>
+        {
+            use tract_onnx::prelude::*;
+            let mut model = tract_onnx::onnx().model_for_path(path)?;
+            let n_inputs = model.input_outlets()?.len();
+            model.set_input_fact(
+                0,
+                InferenceFact::dt_shape(i64::datum_type(), tvec!(1i64, MAX_LENGTH as i64)),
+            )?;
+            if n_inputs > 1 {
+                model.set_input_fact(
+                    1,
+                    InferenceFact::dt_shape(i64::datum_type(), tvec!(1i64, MAX_LENGTH as i64)),
+                )?;
+            }
+            if n_inputs > 2 {
+                model.set_input_fact(
+                    2,
+                    InferenceFact::dt_shape(i64::datum_type(), tvec!(1i64, MAX_LENGTH as i64)),
+                )?;
+            }
+            let model = model.into_optimized()?.into_runnable()?;
+            Ok((model, n_inputs))
+        }
+
+        pub fn embed_one(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            let vec = self.embed_slice(&[text])?;
+            Ok(vec.into_iter().next().unwrap_or_default())
+        }
+
+        pub fn embed_slice(&self, texts: &[impl AsRef<str>]) -> anyhow::Result<Vec<Vec<f32>>> {
+            self.ensure_loaded()?;
+            let mut g = self.inner.write().map_err(|e| anyhow::anyhow!("lock: {}", e))?;
+            let m = g.as_mut().ok_or_else(|| anyhow::anyhow!("embedder not loaded"))?;
+            let mut out = Vec::with_capacity(texts.len());
+            for t in texts {
+                let enc = m
+                    .tokenizer
+                    .encode(t.as_ref().to_string(), true)
+                    .map_err(|e| anyhow::anyhow!("tokenize: {}", e))?;
+                let ids: Vec<i64> = enc.get_ids().iter().map(|&x| x as i64).collect();
+                let attn: Vec<i64> = enc.get_attention_mask().iter().map(|&x| x as i64).collect();
+                let (input_ids, attention_mask) = Self::pad(ids, attn, MAX_LENGTH);
+                // Build inputs dynamically based on the number of inputs the model expects.
+                use tract_onnx::prelude::*;
+                let input_ids_t = Array::from_shape_vec((1, MAX_LENGTH), input_ids)?;
+                let attention_mask_t = Array::from_shape_vec((1, MAX_LENGTH), attention_mask)?;
+                let mut inputs = tvec!(input_ids_t.into_tensor().into());
+                if m.n_inputs > 1 {
+                    inputs.push(attention_mask_t.clone().into_tensor().into());
+                }
+                if m.n_inputs > 2 {
+                    let token_type_ids: Vec<i64> = vec![0; MAX_LENGTH];
+                    let token_type_ids_t = Array::from_shape_vec((1, MAX_LENGTH), token_type_ids)?;
+                    inputs.push(token_type_ids_t.into_tensor().into());
+                }
+                let outputs = m.model.run(inputs)?;
+                let last_hidden = outputs[0]
+                    .to_array_view::<f32>()?
+                    .into_dimensionality::<ndarray::Ix3>()?;
+                let embedding = mean_pool_and_normalize(&last_hidden, &attention_mask_t);
+                out.push(embedding.to_vec());
+            }
+            Ok(out)
+        }
+
+        fn pad(ids: Vec<i64>, attn: Vec<i64>, max_len: usize) -> (Vec<i64>, Vec<i64>) {
+            let mut input_ids = vec![0i64; max_len];
+            let mut attention_mask = vec![0i64; max_len];
+            let len = ids.len().min(max_len);
+            input_ids[..len].copy_from_slice(&ids[..len]);
+            attention_mask[..len].copy_from_slice(&attn[..len]);
+            (input_ids, attention_mask)
+        }
+
+        pub fn dimension(&self) -> usize {
+            EMBED_DIM
+        }
+    }
+
+    fn mean_pool_and_normalize(
+        last_hidden: &ndarray::ArrayView3<f32>,
+        attention_mask: &Array2<i64>,
+    ) -> ndarray::Array1<f32> {
+        let (_, seq_len, dim) = last_hidden.dim();
+        let mut sum = ndarray::Array1::zeros(dim);
+        let mut count = 0.0f32;
+        for i in 0..seq_len {
+            let w = attention_mask[[0, i]] as f32;
+            count += w;
+            for j in 0..dim {
+                sum[j] += last_hidden[[0, i, j]] * w;
+            }
+        }
+        if count > 0.0 {
+            sum.mapv_inplace(|x| x / count);
+        }
+        let norm: f32 = sum.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            sum.mapv_inplace(|x| x / norm);
+        }
+        sum
+    }
+}
+
+#[cfg(feature = "fastembed")]
+pub use fastembed_backend::Embedder;
+
+#[cfg(feature = "tract")]
+pub use tract_backend::Embedder;
 
 #[cfg(test)]
 mod tests {

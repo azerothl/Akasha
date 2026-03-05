@@ -10,6 +10,9 @@ pub struct CompletionRequest {
     pub prompt: String,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    /// When set, router uses this task type instead of classifying from the prompt (e.g. "system" for memory extraction, decomposition).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_task_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

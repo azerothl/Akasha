@@ -48,6 +48,7 @@ enum Mode {
     Router,
     Doc,
     Activity,
+    Memory,
 }
 
 #[derive(Clone)]
@@ -117,6 +118,14 @@ struct App {
     activity_detail_scroll: usize,
     /// Session id for short-term memory (returned by daemon, send back on next message).
     session_id: Option<String>,
+    /// If true, next message will request a new session (context reset).
+    force_new_session: bool,
+    /// Memory tab: short-term turns (role, content) for current session.
+    memory_short_term: Vec<(String, String)>,
+    /// Memory tab: long-term entries (content, created_at, source).
+    memory_long_term: Vec<(String, String, String)>,
+    /// Whether long-term memory is available (daemon has embeddings).
+    memory_long_term_available: bool,
     /// Current theme (cycle with F2).
     theme: ThemeName,
     port: u16,
@@ -144,6 +153,10 @@ impl App {
             activity_user_message: None,
             activity_detail_scroll: 0,
             session_id: None,
+            force_new_session: false,
+            memory_short_term: Vec::new(),
+            memory_long_term: Vec::new(),
+            memory_long_term_available: false,
             theme: ThemeName::default(),
             port,
             tx,
@@ -268,6 +281,62 @@ impl App {
         self.activity_task_detail = None;
     }
 
+    fn fetch_memory(&mut self) {
+        let base = daemon_base_url(self.port);
+        let session_param = self.session_id.as_deref().map(|s| format!("?session_id={}", urlencoding::encode(s)));
+        let short_url = match &session_param {
+            Some(p) => format!("{}/api/memory/short-term{}", base, p),
+            None => format!("{}/api/memory/short-term", base),
+        };
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_default();
+        if let Ok(resp) = client.get(&short_url).send() {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>() {
+                    let turns = json.get("turns").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+                    self.memory_short_term = turns
+                        .iter()
+                        .filter_map(|t| {
+                            let role = t.get("role")?.as_str()?.to_string();
+                            let content = t.get("content")?.as_str()?.to_string();
+                            Some((role, content))
+                        })
+                        .collect();
+                }
+            } else {
+                self.memory_short_term.clear();
+            }
+        } else {
+            self.memory_short_term.clear();
+        }
+        let long_url = format!("{}/api/memory/long-term?limit=50", base);
+        if let Ok(resp) = client.get(&long_url).send() {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>() {
+                    self.memory_long_term_available = json.get("long_term_available").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let entries = json.get("entries").and_then(|e| e.as_array()).cloned().unwrap_or_default();
+                    self.memory_long_term = entries
+                        .iter()
+                        .filter_map(|e| {
+                            let content = e.get("content")?.as_str()?.to_string();
+                            let created_at = e.get("created_at")?.as_str()?.to_string();
+                            let source = e.get("source")?.as_str()?.to_string();
+                            Some((content, created_at, source))
+                        })
+                        .collect();
+                }
+            } else {
+                self.memory_long_term.clear();
+                self.memory_long_term_available = false;
+            }
+        } else {
+            self.memory_long_term.clear();
+            self.memory_long_term_available = false;
+        }
+    }
+
     fn fetch_doc(&mut self) {
         let url = format!("{}/api/docs", daemon_base_url(self.port));
         let client = reqwest::blocking::Client::builder()
@@ -354,16 +423,20 @@ impl App {
     }
 
     /// Returns (reply_text, session_id) on success. Caller should store session_id for next message (memory).
-    fn send_message_blocking(message: String, port: u16, session_id: Option<&str>) -> Result<(String, String), String> {
+    /// If new_session is true, asks the daemon for a new session (context reset); session_id is ignored.
+    fn send_message_blocking(message: String, port: u16, session_id: Option<&str>, new_session: bool) -> Result<(String, String), String> {
         let base = daemon_base_url(port);
         let url = format!("{}/api/message", base);
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| e.to_string())?;
-        let body = match session_id {
-            Some(s) => serde_json::json!({ "message": message, "session_id": s }),
-            None => serde_json::json!({ "message": message }),
+        let body = if new_session {
+            serde_json::json!({ "message": message, "new_session": true })
+        } else if let Some(s) = session_id {
+            serde_json::json!({ "message": message, "session_id": s })
+        } else {
+            serde_json::json!({ "message": message })
         };
         let resp = client
             .post(&url)
@@ -447,6 +520,7 @@ impl App {
             "help" | "?" => {
                 return r#"Commandes disponibles:
   /help, /?         — cette aide
+  /newsession       — repartir de zéro (nouvelle session, contexte court terme effacé)
   /status           — état du daemon
   /doctor           — diagnostic (daemon, ollama, vault, spec)
   /advice           — conseil diagnostic (RAG + modèle)
@@ -923,12 +997,13 @@ fn ui(f: &mut Frame, app: &mut App) {
         )
         .style(Style::default().fg(status_color));
     f.render_widget(header, top_chunks[0]);
-    let titles = vec![" Chat ", " Routeur ", " Doc ", " Activité "];
+    let titles = vec![" Chat ", " Routeur ", " Doc ", " Activité ", " Mémoire "];
     let tab_index = match app.mode {
         Mode::Chat => 0,
         Mode::Router => 1,
         Mode::Doc => 2,
         Mode::Activity => 3,
+        Mode::Memory => 4,
     };
     let tabs = Tabs::new(titles)
         .block(Block::default().borders(Borders::BOTTOM).border_style(theme.block_border()))
@@ -1194,6 +1269,74 @@ fn ui(f: &mut Frame, app: &mut App) {
             app.last_content_area_height = area.height;
             app.last_content_rendered_rows = 0;
         }
+        Mode::Memory => {
+            let mut lines: Vec<Line<'static>> = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    " Mémoire court terme (session en cours — perdue si daemon redémarre) ",
+                    Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+            ];
+            for (role, content) in &app.memory_short_term {
+                let role_style = match role.as_str() {
+                    "user" => Style::default().fg(theme.palette().accent),
+                    "assistant" => Style::default().fg(theme.palette().success),
+                    _ => Style::default().fg(theme.palette().muted),
+                };
+                lines.push(Line::from(Span::styled(format!("  [{}] ", role), role_style)));
+                for l in content.lines().take(5) {
+                    lines.push(Line::from(format!("    {}", l)));
+                }
+                if content.lines().count() > 5 {
+                    lines.push(Line::from(Span::styled("    …", Style::default().fg(theme.palette().muted))));
+                }
+                lines.push(Line::from(""));
+            }
+            if app.memory_short_term.is_empty() {
+                lines.push(Line::from(Span::styled("  (aucun tour pour cette session)", Style::default().fg(theme.palette().muted))));
+                lines.push(Line::from(""));
+            }
+            let lt_status = if app.memory_long_term_available {
+                "Mémoire long terme (persistante)"
+            } else {
+                "Mémoire long terme (désactivée — compiler daemon avec embeddings ou embeddings-tract)"
+            };
+            lines.push(Line::from(Span::styled(
+                lt_status,
+                Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+            for (content, created_at, source) in &app.memory_long_term {
+                lines.push(Line::from(Span::styled(
+                    format!("  [{}] {} — {}", source, &created_at[..created_at.len().min(19)], content.chars().take(80).collect::<String>()),
+                    Style::default().fg(theme.palette().fg),
+                )));
+                if content.chars().count() > 80 {
+                    lines.push(Line::from(Span::styled("    …", Style::default().fg(theme.palette().muted))));
+                }
+                lines.push(Line::from(""));
+            }
+            if app.memory_long_term.is_empty() && app.memory_long_term_available {
+                lines.push(Line::from(Span::styled("  (aucune entrée)", Style::default().fg(theme.palette().muted))));
+            }
+            let content_height = chunks[1].height;
+            app.last_content_lines = lines.len();
+            app.last_content_area_height = content_height;
+            app.last_content_rendered_rows = 0;
+            let max_scroll = app.max_scroll();
+            if app.scroll > max_scroll {
+                app.scroll = max_scroll;
+            }
+            let mem_block = Block::default()
+                .borders(Borders::ALL)
+                .title(" Mémoire agent (R = actualiser, Tab = onglet) ")
+                .border_style(theme.block_border());
+            f.render_widget(
+                Paragraph::new(lines).block(mem_block).wrap(Wrap { trim: true }).scroll((app.scroll as u16, 0)),
+                chunks[1],
+            );
+        }
     }
 
     let input_label = match app.mode {
@@ -1201,6 +1344,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         Mode::Router => " Tab = onglet, R = rafraîchir métriques, Échap ou Ctrl+Q = quitter ",
         Mode::Doc => " Tab = onglet, ↑↓ PgUp/PgDn = défilement, R = actualiser doc, Échap ou Ctrl+Q = quitter ",
         Mode::Activity => " Tab = onglet, ↑↓ = tâche, PgUp/PgDn = défiler détails, R = actualiser, Échap ou Ctrl+Q = quitter ",
+        Mode::Memory => " Tab = onglet, R = actualiser, ↑↓ PgUp/PgDn = défilement, Échap ou Ctrl+Q = quitter ",
     };
     let input = Paragraph::new(app.input.as_str())
         .block(
@@ -1265,7 +1409,8 @@ fn run_app(
                             Mode::Chat => Mode::Router,
                             Mode::Router => Mode::Doc,
                             Mode::Doc => Mode::Activity,
-                            Mode::Activity => Mode::Chat,
+                            Mode::Activity => Mode::Memory,
+                            Mode::Memory => Mode::Chat,
                         };
                         if app.mode == Mode::Router {
                             app.fetch_metrics();
@@ -1275,6 +1420,9 @@ fn run_app(
                         }
                         if app.mode == Mode::Activity {
                             app.fetch_activity_tasks();
+                        }
+                        if app.mode == Mode::Memory {
+                            app.fetch_memory();
                         }
                     }
                     (Mode::Chat, KeyCode::Enter, _) => {
@@ -1290,33 +1438,46 @@ fn run_app(
                         app.input.clear();
                         if msg.starts_with('/') {
                             let cmd_lower = msg.trim().to_lowercase();
-                            let long_running = cmd_lower.starts_with("/advice") || cmd_lower.starts_with("/doctor");
-                            if long_running {
-                                app.loading = true;
-                                let port = app.port;
-                                let tx = app.tx.clone();
-                                let cmd = msg.clone();
-                                thread::spawn(move || {
-                                    let result = App::run_slash_command_blocking(port, &cmd);
-                                    let _ = tx.send(Ok((result, String::new())));
-                                });
-                            } else {
-                                let result = App::run_slash_command_blocking(app.port, &msg);
+                            if cmd_lower == "/newsession" || cmd_lower == "/nouvelle session" {
+                                app.session_id = None;
+                                app.force_new_session = true;
                                 app.messages.push(ChatMessage {
                                     role: "Système".into(),
-                                    text: result,
+                                    text: "Nouvelle session demandée. Votre prochain message repartira de zéro (contexte court terme effacé).".into(),
                                     is_error: false,
                                 });
                                 app.scroll = usize::MAX;
-                                let _ = terminal.draw(|f| ui(f, app));
+                            } else {
+                                let long_running = cmd_lower.starts_with("/advice") || cmd_lower.starts_with("/doctor");
+                                if long_running {
+                                    app.loading = true;
+                                    let port = app.port;
+                                    let tx = app.tx.clone();
+                                    let cmd = msg.clone();
+                                    thread::spawn(move || {
+                                        let result = App::run_slash_command_blocking(port, &cmd);
+                                        let _ = tx.send(Ok((result, String::new())));
+                                    });
+                                } else {
+                                    let result = App::run_slash_command_blocking(app.port, &msg);
+                                    app.messages.push(ChatMessage {
+                                        role: "Système".into(),
+                                        text: result,
+                                        is_error: false,
+                                    });
+                                    app.scroll = usize::MAX;
+                                    let _ = terminal.draw(|f| ui(f, app));
+                                }
                             }
                         } else if !app.loading && app.daemon_ok {
                             app.loading = true;
                             let port = app.port;
                             let tx = app.tx.clone();
                             let session_id = app.session_id.clone();
+                            let new_session = app.force_new_session;
+                            app.force_new_session = false;
                             thread::spawn(move || {
-                                let _ = tx.send(App::send_message_blocking(msg, port, session_id.as_deref()));
+                                let _ = tx.send(App::send_message_blocking(msg, port, session_id.as_deref(), new_session));
                             });
                         }
                     }
@@ -1353,6 +1514,12 @@ fn run_app(
                     (Mode::Doc, KeyCode::PageDown, _) => app.scroll_page_down(),
                     (Mode::Doc, KeyCode::Home, _) => app.scroll = 0,
                     (Mode::Doc, KeyCode::End, _) => app.scroll_to_bottom(),
+                    (Mode::Memory, KeyCode::Up, _) => app.scroll_up(),
+                    (Mode::Memory, KeyCode::Down, _) => app.scroll_down(),
+                    (Mode::Memory, KeyCode::PageUp, _) => app.scroll_page_up(),
+                    (Mode::Memory, KeyCode::PageDown, _) => app.scroll_page_down(),
+                    (Mode::Memory, KeyCode::Home, _) => app.scroll = 0,
+                    (Mode::Memory, KeyCode::End, _) => app.scroll_to_bottom(),
                     (Mode::Activity, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_activity_tasks();
                     }
@@ -1384,6 +1551,9 @@ fn run_app(
                     (Mode::Activity, KeyCode::End, _) => {
                         // Max scroll will be applied when rendering
                         app.activity_detail_scroll = usize::MAX;
+                    }
+                    (Mode::Memory, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
+                        app.fetch_memory();
                     }
                     (Mode::Doc, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.doc_content.clear();

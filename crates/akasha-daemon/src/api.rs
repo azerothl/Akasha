@@ -13,6 +13,13 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+/// Limits concurrent background LLM fact-extraction tasks to prevent unbounded queue growth under load.
+static EXTRACT_SEMAPHORE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+
+fn extract_semaphore() -> Arc<tokio::sync::Semaphore> {
+    EXTRACT_SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2))).clone()
+}
+
 async fn get_task_list(store_path: &Path) -> String {
     let store = match TaskStore::open(store_path) {
         Ok(s) => s,
@@ -148,6 +155,14 @@ fn available_tools_instruction() -> String {
         .collect::<Vec<_>>()
         .join(" ; ")
 }
+
+/// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
+const APP_CONTEXT: &str = "[Contexte Akasha] Tu es l'assistant intégré à Akasha. Akasha est l'application dans laquelle tu tournes actuellement. \
+Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : \
+commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Mémoire/Doc/Activité), \
+commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, etc.). \
+La documentation complète est disponible dans l'onglet Doc de l'interface. \
+Réponds en français sauf si l'utilisateur utilise une autre langue.\n\n";
 
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
 fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
@@ -292,10 +307,15 @@ async fn compact_short_term_if_needed(
         "Résume en un court paragraphe en français, en gardant les faits importants et décisions:\n\n{}",
         blob
     );
+    let summary_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(2048);
     let req = CompletionRequest {
         prompt: summary_prompt,
-        max_tokens: Some(512),
+        max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
+        preferred_task_type: None,
     };
     match llm_router.complete(&req).await {
         Ok(resp) => {
@@ -382,7 +402,9 @@ pub(crate) async fn run_message_via_llm(
 
     // Build prompt with short-term + long-term memory (spec 06)
     let mut context_prefix = String::new();
-    // Long-term: retrieve top-k relevant memories by embedding similarity
+    context_prefix.push_str(APP_CONTEXT);
+
+    // Long-term: retrieve top-k relevant memories by embedding similarity (current message + optional user-identity for first message)
     if let Some(ref client) = long_term_client {
         let msg = message.clone();
         let client = client.clone();
@@ -411,6 +433,27 @@ pub(crate) async fn run_message_via_llm(
         )
         .await;
         let turns = st.get_turns(&session_id).await;
+        // First message of session: search long-term for user identity (name, etc.) so the agent can greet the user.
+        let is_first_message = turns.is_empty();
+        if is_first_message {
+            if let Some(ref client) = long_term_client {
+                let query = "nom prénom utilisateur user name identité".to_string();
+                let client = client.clone();
+                let user_memories = tokio::task::spawn_blocking(move || client.search(query, 3))
+                    .await
+                    .ok()
+                    .unwrap_or_default();
+                if !user_memories.is_empty() {
+                    context_prefix.push_str("[Contexte utilisateur — utilise pour saluer si pertinent]\n");
+                    for content in &user_memories {
+                        context_prefix.push_str("- ");
+                        context_prefix.push_str(&content.replace('\n', " "));
+                        context_prefix.push_str("\n");
+                    }
+                    context_prefix.push_str("Si c'est le premier échange de la session, salue l'utilisateur avec son prénom si tu le connais.\n\n");
+                }
+            }
+        }
         let short_ctx = ShortTermStore::turns_to_context(&turns);
         if !short_ctx.is_empty() {
             context_prefix.push_str(short_ctx.trim_end());
@@ -445,6 +488,7 @@ pub(crate) async fn run_message_via_llm(
             prompt: format!("{}{}", current_prompt, tool_instruction),
             max_tokens: Some(max_tokens),
             temperature: Some(0.7),
+            preferred_task_type: None,
         };
         // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
         // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
@@ -588,8 +632,120 @@ pub(crate) async fn run_message_via_llm(
 
     // Persist this exchange in short-term memory (spec 06)
     if let Some(ref st) = short_term {
-        st.append(&session_id, "user", message).await;
+        st.append(&session_id, "user", message.clone()).await;
         st.append(&session_id, "assistant", reply_text.clone()).await;
+    }
+
+    // Extract and promote personal facts to long-term memory (spec 06: nom, préférences, décisions).
+    if let Some(ref long_term) = long_term_client {
+        // Heuristic: capture obvious name/intro from user message. Promote these *immediately* so they appear in Memory tab right away.
+        // Case-insensitive matching on lowercased text, but extract from original message to preserve casing.
+        let msg_lower = message.to_lowercase();
+        let mut heuristic_facts = Vec::new();
+        for (pattern, prefix) in [
+            ("je m'appelle ", "L'utilisateur s'appelle "),
+            ("mon nom est ", "L'utilisateur s'appelle "),
+            ("mon prénom est ", "L'utilisateur s'appelle "),
+            ("mon prénom c'est ", "L'utilisateur s'appelle "),
+            ("je suis ", "L'utilisateur est "),
+            ("tu peux m'appeler ", "L'utilisateur veut être appelé "),
+            ("appelle-moi ", "L'utilisateur veut être appelé "),
+            ("i'm ", "The user is "),
+            ("my name is ", "The user's name is "),
+            ("call me ", "The user wants to be called "),
+        ] {
+            if let Some(start_idx) = msg_lower.find(pattern) {
+                let value_start = start_idx + pattern.len();
+                // Extract value from the *original* message at the same position to preserve casing.
+                let original_rest = &message[value_start..];
+                let name = original_rest
+                    .trim()
+                    .split(|c: char| c == ',' || c == '.' || c == '\n' || c == '!')
+                    .next()
+                    .unwrap_or(original_rest)
+                    .trim();
+                let name = name.chars().take(80).collect::<String>();
+                if !name.is_empty() {
+                    heuristic_facts.push(format!("{}{}", prefix, name));
+                    break;
+                }
+            }
+        }
+        // Promote heuristic facts synchronously so they are stored before the user opens the Memory tab.
+        for fact in &heuristic_facts {
+            let client = long_term.clone();
+            let fact = fact.clone();
+            match tokio::task::spawn_blocking(move || client.promote(fact, "user_fact".to_string())).await {
+                Ok(Ok(())) => tracing::info!("Personal fact stored in long-term memory (heuristic)"),
+                Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote failed — check that embeddings/tract model loads (see daemon logs)"),
+                Err(e) => tracing::debug!(error = %e, "Promote task join error"),
+            }
+        }
+
+        // Then spawn LLM extraction for additional facts (async, bounded concurrency, no wait).
+        let msg = message.clone();
+        let reply = reply_text.clone();
+        let client = long_term.clone();
+        let router = llm_router.clone();
+        let n_heuristic = heuristic_facts.len();
+        let sem = extract_semaphore();
+        tokio::spawn(async move {
+            // Acquire a permit; if all slots are busy, drop this extraction cycle rather than queuing unbounded work.
+            let _permit = match sem.try_acquire() {
+                Ok(p) => p,
+                Err(_) => {
+                    tracing::debug!("Background fact extraction skipped: semaphore full (too many concurrent extractions)");
+                    return;
+                }
+            };
+            let mut facts = heuristic_facts;
+            let extract_prompt = format!(
+                "Tu dois extraire UNIQUEMENT les faits personnels à retenir sur l'utilisateur (nom, prénom, préférences, décisions). \
+Une ligne par fait, chaque ligne commence par FACT: (ex: FACT: L'utilisateur s'appelle Jean. FACT: L'utilisateur préfère le café.). \
+N'écris que des lignes FACT: ou NOTHING si aucun fait. Pas d'autre texte.\n\nUtilisateur: {}\n\nAssistant: {}",
+                msg.trim(),
+                reply.trim()
+            );
+            // Allow enough tokens for models that output "thinking" before the FACT: lines (done_reason: length otherwise).
+            let extract_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(2048);
+            let req = CompletionRequest {
+                prompt: extract_prompt,
+                max_tokens: Some(extract_max_tokens),
+                temperature: Some(0.1),
+                preferred_task_type: Some("system".to_string()),
+            };
+            if let Ok(Ok(resp)) = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                router.complete(&req),
+            ).await {
+                for line in resp.text.lines() {
+                    let line = line.trim();
+                    if let Some(fact) = line.strip_prefix("FACT:") {
+                        let fact = fact.trim().to_string();
+                        if !fact.is_empty() && !facts.contains(&fact) {
+                            facts.push(fact);
+                        }
+                    }
+                }
+            }
+            if facts.is_empty() {
+                tracing::debug!(user_msg = %msg.trim().chars().take(100).collect::<String>(), "No personal facts extracted for long-term memory");
+            } else {
+                tracing::debug!(count = facts.len(), "Promoting extra facts to long-term memory");
+            }
+            // Promote only facts that weren't already promoted (heuristic ones were done above).
+            for fact in facts.into_iter().skip(n_heuristic) {
+                let client = client.clone();
+                match tokio::task::spawn_blocking(move || client.promote(fact, "user_fact".to_string())).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote user_fact failed"),
+                    Err(e) => tracing::debug!(error = %e, "Promote task join error"),
+                }
+            }
+        });
     }
 
     let _ = bus.send(
@@ -637,11 +793,71 @@ pub async fn handle_api(
     restart_tx: RestartTx,
     _tools_executor: Option<&std::sync::Arc<akasha_tools::ToolExecutor>>,
     skill_registry: &std::sync::Arc<crate::skills::SkillRegistry>,
+    short_term: Option<std::sync::Arc<ShortTermStore>>,
+    long_term_client: Option<LongTermMemoryClient>,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
     if method == "GET" && (path == "/" || path.is_empty()) {
         return json_response("200 OK", r#"{"status":"ok"}"#);
+    }
+
+    // GET /api/memory/short-term?session_id=... — turns for session (default: day-YYYY-MM-DD)
+    if method == "GET" && path.starts_with("/api/memory/short-term") {
+        let session_id = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| {
+                q.split('&')
+                    .find(|p| p.starts_with("session_id="))
+                    .map(|p| urlencoding::decode(p.trim_start_matches("session_id=")).unwrap_or_default().into_owned())
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("day-{}", chrono::Utc::now().format("%Y-%m-%d")));
+        let turns = if let Some(ref st) = short_term {
+            st.get_turns(&session_id).await
+        } else {
+            vec![]
+        };
+        let list: Vec<serde_json::Value> = turns
+            .iter()
+            .map(|t| serde_json::json!({ "role": t.role, "content": t.content }))
+            .collect();
+        let body_json = serde_json::json!({ "session_id": session_id, "turns": list });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
+    // GET /api/memory/long-term?limit=50 — recent long-term entries (content, created_at, source)
+    if method == "GET" && path.starts_with("/api/memory/long-term") {
+        let limit = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| {
+                q.split('&')
+                    .find(|p| p.starts_with("limit="))
+                    .and_then(|p| p.trim_start_matches("limit=").parse::<usize>().ok())
+            })
+            .unwrap_or(50)
+            .min(200);
+        let entries = if let Some(ref client) = long_term_client {
+            let client = client.clone();
+            tokio::task::spawn_blocking(move || client.list(limit))
+                .await
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+        let list: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|(content, created_at, source)| {
+                serde_json::json!({ "content": content, "created_at": created_at, "source": source })
+            })
+            .collect();
+        let body_json = serde_json::json!({
+            "entries": list,
+            "long_term_available": long_term_client.is_some()
+        });
+        return json_response("200 OK", &body_json.to_string());
     }
 
     // GET /api/status — same as / but explicit for slash commands
@@ -831,10 +1047,23 @@ pub async fn handle_api(
             .as_ref()
             .and_then(|v| v.get("message").and_then(|v| v.as_str().map(String::from)))
             .unwrap_or_default();
-        let session_id = body_json
-            .as_ref()
-            .and_then(|v| v.get("session_id").and_then(|v| v.as_str().map(String::from)))
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // Session: "new_session" => new UUID; else provided non-empty session_id; else new UUID (isolated context).
+        let session_id = {
+            let new_session = body_json.as_ref().and_then(|v| v.get("new_session")).and_then(|v| v.as_bool()).unwrap_or(false);
+            let provided = body_json.as_ref().and_then(|v| v.get("session_id").and_then(|v| v.as_str().map(String::from)));
+            if new_session {
+                uuid::Uuid::new_v4().to_string()
+            } else if let Some(s) = provided {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    uuid::Uuid::new_v4().to_string()
+                } else {
+                    trimmed.to_string()
+                }
+            } else {
+                uuid::Uuid::new_v4().to_string()
+            }
+        };
         if let Err(e) = akasha_core::check_prompt_injection(&message) {
             let body = serde_json::json!({ "error": "prompt_injection_rejected", "detail": e.to_string() });
             return json_response("400 Bad Request", &body.to_string());
@@ -915,6 +1144,7 @@ pub async fn handle_api(
             prompt,
             max_tokens: body.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32),
             temperature: body.get("temperature").and_then(|v| v.as_f64()).map(|f| f as f32),
+            preferred_task_type: None,
         };
         match llm_router.complete(&req).await {
             Ok(resp) => {
@@ -1218,6 +1448,7 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
             prompt,
             max_tokens: Some(512),
             temperature: Some(0.3),
+            preferred_task_type: None,
         };
         let advice_timeout = std::time::Duration::from_secs(120);
         match tokio::time::timeout(advice_timeout, llm_router.complete(&req)).await {

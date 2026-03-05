@@ -142,36 +142,56 @@ impl Daemon {
         llm_router.register_provider(Arc::new(akasha_llm::OllamaProvider::new(ollama_url)));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaCoreProvider::new()));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaEmbeddedProvider::new()));
-        // Phase 6 rattrapage: cloud providers (API key from vault or env)
-        if let Some(ref cfg) = openai_cfg {
-            let key = cfg
-                .api_key_ref
+        // Resolve API key: vault://key_name → vault; else key_name → vault then env var of that name; else default env.
+        let resolve_api_key = |api_key_ref: Option<&String>, default_env: &str| -> Option<String> {
+            let ref_str = api_key_ref
                 .as_ref()
-                .and_then(|r| r.strip_prefix("vault://"))
-                .and_then(|name| vault.as_ref().ok().and_then(|v| v.get(name).ok()))
-                .or_else(|| std::env::var("OPENAI_API_KEY").ok());
-            if let Some(k) = key {
-                llm_router.register_provider(Arc::new(akasha_llm::OpenAIProvider::new(
-                    Some(k),
-                    cfg.base_url.clone(),
-                )));
-                info!("OpenAI provider registered");
+                .map(|s| s.as_str().trim())
+                .filter(|s| !s.is_empty());
+            if let Some(r) = ref_str {
+                if let Some(name) = r.strip_prefix("vault://") {
+                    if let Ok(v) = &vault {
+                        if let Ok(k) = v.get(name) {
+                            return Some(k);
+                        }
+                    }
+                }
+                // No vault:// prefix: try vault key = api_key_ref (e.g. "openrouter_api_key"), then env var with that name
+                if let Ok(v) = &vault {
+                    if let Ok(k) = v.get(r) {
+                        return Some(k);
+                    }
+                }
+                if let Ok(k) = std::env::var(r) {
+                    return Some(k);
+                }
             }
+            std::env::var(default_env).ok()
+        };
+        // Phase 6 rattrapage: cloud providers (API key from config vault ref or env).
+        let openai_key = openai_cfg
+            .as_ref()
+            .and_then(|c| resolve_api_key(c.api_key_ref.as_ref(), "OPENAI_API_KEY"));
+        if let Some(k) = openai_key {
+            let base_url = openai_cfg.as_ref().and_then(|c| c.base_url.clone());
+            llm_router.register_provider(Arc::new(akasha_llm::OpenAIProvider::new(
+                Some(k),
+                base_url,
+            )));
+            info!("OpenAI provider registered");
         }
-        if let Some(ref cfg) = openrouter_cfg {
-            let key = cfg
-                .api_key_ref
-                .as_ref()
-                .and_then(|r| r.strip_prefix("vault://"))
-                .and_then(|name| vault.as_ref().ok().and_then(|v| v.get(name).ok()))
-                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
-            if let Some(k) = key {
-                llm_router.register_provider(Arc::new(akasha_llm::OpenRouterProvider::new(
-                    Some(k),
-                    cfg.base_url.clone(),
-                )));
-                info!("OpenRouter provider registered");
-            }
+        // Register OpenRouter if we have an API key (vault or env).
+        let openrouter_key = openrouter_cfg
+            .as_ref()
+            .and_then(|c| resolve_api_key(c.api_key_ref.as_ref(), "OPENROUTER_API_KEY"))
+            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
+        if let Some(k) = openrouter_key {
+            let base_url = openrouter_cfg.as_ref().and_then(|c| c.base_url.clone());
+            llm_router.register_provider(Arc::new(akasha_llm::OpenRouterProvider::new(
+                Some(k),
+                base_url,
+            )));
+            info!("OpenRouter provider registered");
         }
         if std::env::var("AKASHA_DEGRADED_MODE").as_deref() == Ok("1") {
             llm_router.set_degraded_mode(true);
@@ -482,6 +502,8 @@ impl Daemon {
                                 let restart_tx: RestartTx = Some(restart_tx.clone());
                                 let tools_executor = tools_executor.clone();
                                 let skill_registry = skill_registry.clone();
+                                let short_term = short_term.clone();
+                                let long_term_client = long_term_client.clone();
                                 tokio::spawn(async move {
                                     let response = handle_api(
                                         &method,
@@ -501,6 +523,8 @@ impl Daemon {
                                         restart_tx,
                                         tools_executor.as_ref(),
                                         &skill_registry,
+                                        Some(short_term),
+                                        long_term_client,
                                     )
                                     .await;
                                     let _ = stream.write_all(response.as_bytes()).await;
