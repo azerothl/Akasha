@@ -126,7 +126,6 @@ async fn send_message(message: String, session_id: Option<String>, port: Option<
     let deadline = std::time::Instant::now()
         + std::time::Duration::from_secs(TASK_POLL_TIMEOUT_SECS);
     let mut last_message = String::new();
-    let mut session_id = session_id;
     loop {
         if std::time::Instant::now() > deadline {
             return Ok(SendMessageResult {
@@ -468,8 +467,9 @@ async fn cancel_task(task_id: String, port: Option<u16>) -> Result<serde_json::V
         .build()
         .map_err(|e| e.to_string())?;
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
     let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({ "error": "invalid_response" }));
-    if !resp.status().is_success() {
+    if !status.is_success() {
         let detail = json.get("detail").and_then(|v| v.as_str()).unwrap_or(json.get("error").and_then(|v| v.as_str()).unwrap_or("Erreur inconnue"));
         return Err(detail.to_string());
     }
