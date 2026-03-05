@@ -784,6 +784,8 @@ impl App {
             "help" | "?" => {
                 return r#"Commandes disponibles:
   /help, /?         — cette aide
+  /stop TASK_ID     — annuler une tâche (en cours ou en attente)
+  /cancel TASK_ID   — idem que /stop
   /newsession       — repartir de zéro (nouvelle session, contexte court terme effacé)
   /status           — état du daemon
   /doctor           — diagnostic (daemon, ollama, vault, spec)
@@ -803,6 +805,26 @@ impl App {
   /reload           — recharger les plugins
   /restart          — redémarrer le daemon (superviseur)
   /vault set        — utiliser le CLI : akasha vault set KEY [value]"#.to_string();
+            }
+            "stop" | "cancel" => {
+                let task_id = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty());
+                match task_id {
+                    Some(id) => {
+                        let url = format!("{}/api/tasks/{}/cancel", base, id);
+                        match client.post(&url).send() {
+                            Ok(r) if r.status().is_success() => return format!("Tâche {} annulée.", id),
+                            Ok(r) => {
+                                if let Ok(json) = r.json::<serde_json::Value>() {
+                                    let detail = json.get("detail").and_then(|v| v.as_str()).unwrap_or_else(|| json.get("error").and_then(|v| v.as_str()).unwrap_or("Erreur"));
+                                    return format!("Erreur : {}", detail);
+                                }
+                                return format!("Erreur : {}", r.status());
+                            }
+                            Err(e) => return format!("Erreur : {}", e),
+                        }
+                    }
+                    None => return "Usage: /stop TASK_ID ou /cancel TASK_ID".to_string(),
+                }
             }
             "status" => {
                 let url = format!("{}/api/status", base);

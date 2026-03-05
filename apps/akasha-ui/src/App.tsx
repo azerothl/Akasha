@@ -261,6 +261,8 @@ function App() {
       return `Commandes disponibles:
 /help, /?         — cette aide
 /status           — état du daemon
+/stop TASK_ID     — annuler une tâche (en cours ou en attente)
+/cancel TASK_ID   — idem que /stop
 /doctor           — diagnostic (daemon, ollama, vault, spec)
 /advice           — conseil diagnostic (RAG + modèle)
 /metrics          — métriques du routeur LLM
@@ -273,6 +275,16 @@ function App() {
 /reload           — recharger les plugins
 /restart          — redémarrer le daemon
 /vault set        — utiliser le CLI : akasha vault set KEY [value]`;
+    }
+    if (cmd === "stop" || cmd === "cancel") {
+      const taskId = parts[1]?.trim();
+      if (!taskId) return "Usage: /stop TASK_ID ou /cancel TASK_ID (ex: /stop 412e7256-f808-4e83-b371-b7dd9b6fc4f8)";
+      try {
+        await invoke<{ cancelled?: boolean }>("cancel_task", { task_id: taskId, port: DAEMON_PORT });
+        return `Tâche ${taskId.slice(-8)} annulée.`;
+      } catch (err) {
+        return `Erreur: ${String(err)}`;
+      }
     }
     if (cmd === "status") {
       const r = await invoke<{ ok: boolean }>("check_health", { port });

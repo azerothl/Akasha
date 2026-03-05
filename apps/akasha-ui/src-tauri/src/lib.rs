@@ -458,6 +458,24 @@ async fn get_task_events(task_id: String, port: Option<u16>) -> Result<serde_jso
     Ok(json)
 }
 
+/// Cancel a running or pending task: POST /api/tasks/:id/cancel.
+#[tauri::command]
+async fn cancel_task(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/tasks/{}/cancel", daemon_base_url(port), task_id);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({ "error": "invalid_response" }));
+    if !resp.status().is_success() {
+        let detail = json.get("detail").and_then(|v| v.as_str()).unwrap_or(json.get("error").and_then(|v| v.as_str()).unwrap_or("Erreur inconnue"));
+        return Err(detail.to_string());
+    }
+    Ok(json)
+}
+
 /// Schedules: GET /api/schedules (FR-028, Calendrier).
 #[tauri::command]
 async fn get_schedules(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -524,6 +542,7 @@ pub fn run() {
             get_task_status,
             get_tasks,
             get_task_events,
+            cancel_task,
             get_schedules,
             get_task_runs,
             get_schedule_run_reports,

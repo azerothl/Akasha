@@ -1087,15 +1087,20 @@ pub async fn handle_api(
     if method == "GET" && path == "/api/tasks" {
         return get_task_list(store_path).await;
     }
-    if method == "GET" && path.starts_with("/api/tasks/") {
+    if path.starts_with("/api/tasks/") {
         let rest = path.trim_start_matches("/api/tasks/");
         let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
         if let Some(&id_str) = parts.first() {
             if let Ok(id) = Uuid::parse_str(id_str) {
-                if parts.get(1) == Some(&"events") {
+                if method == "POST" && parts.get(1) == Some(&"cancel") {
+                    return cancel_task(store_path, id, main_agent).await;
+                }
+                if method == "GET" && parts.get(1) == Some(&"events") {
                     return get_task_events(events, id).await;
                 }
-                return get_task_status(store_path, progress, id).await;
+                if method == "GET" {
+                    return get_task_status(store_path, progress, id).await;
+                }
             }
         }
     }
@@ -1518,6 +1523,46 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
     }
 
     json_response("404 Not Found", r#"{"error":"not_found"}"#)
+}
+
+async fn cancel_task(
+    store_path: &Path,
+    id: Uuid,
+    main_agent: &crate::agents::MainAgent,
+) -> String {
+    let store = match TaskStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let task = match store.get(id) {
+        Ok(Some(t)) => t,
+        Ok(None) => return json_response("404 Not Found", r#"{"error":"task_not_found"}"#),
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let cancellable = matches!(
+        task.status,
+        TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running
+    );
+    if !cancellable {
+        let body = serde_json::json!({
+            "error": "task_not_cancellable",
+            "detail": "La tâche est déjà terminée, annulée ou en pause.",
+            "status": task.status.as_str()
+        });
+        return json_response("400 Bad Request", &body.to_string());
+    }
+    if store.update_status(id, TaskStatus::Cancelled).is_err() {
+        return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
+    }
+    let _ = main_agent.bus().send(
+        EventEnvelope::new(
+            EventType::TaskCancelled,
+            Some(serde_json::json!({ "task_id": id.to_string() })),
+        )
+        .with_correlation(id),
+    );
+    let body = serde_json::json!({ "cancelled": true, "task_id": id.to_string() });
+    json_response("200 OK", &body.to_string())
 }
 
 async fn get_task_status(store_path: &Path, progress: &ProgressCache, id: Uuid) -> String {

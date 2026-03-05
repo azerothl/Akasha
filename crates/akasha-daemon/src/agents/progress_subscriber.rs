@@ -31,15 +31,20 @@ pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache) {
             }
             continue;
         }
-        // When a task completes (or fails), always add a final progress entry with 100%
-        // so the UI shows a clear "Terminé" / "Échec" line (and we don't end with only 0% steps).
-        if ev.event_type == EventType::TaskCompleted || ev.event_type == EventType::TaskFailed {
+        // When a task completes, fails or is cancelled, always add a final progress entry with 100%
+        // so the UI shows a clear "Terminé" / "Échec" / "Annulé" line.
+        if ev.event_type == EventType::TaskCompleted
+            || ev.event_type == EventType::TaskFailed
+            || ev.event_type == EventType::TaskCancelled
+        {
             let task_id = payload.get("task_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
             let Some(task_id) = task_id else { continue };
             let message = if ev.event_type == EventType::TaskCompleted {
                 "Terminé."
-            } else {
+            } else if ev.event_type == EventType::TaskFailed {
                 "Échec."
+            } else {
+                "Annulé."
             };
             let mut g = progress.write().await;
             let q = g.entry(task_id).or_insert_with(VecDeque::new);
