@@ -664,6 +664,13 @@ impl App {
                     if let Some(msg) = last.get("message").and_then(|m| m.as_str()) {
                         last_message = msg.to_string();
                     }
+                    if let Some(ref ptx) = progress_tx {
+                        let pct = last
+                            .get("progress_pct")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u8;
+                        let _ = ptx.send((task_id.clone(), pct));
+                    }
                 }
             }
             let status = task_json.get("status").and_then(|v| v.as_str()).unwrap_or("");
@@ -678,6 +685,26 @@ impl App {
             if status == "failed" {
                 let _ = tx.send(Ok((
                     if last_message.is_empty() { "Tâche en échec.".to_string() } else { last_message },
+                    session_id,
+                    None,
+                )));
+                return;
+            }
+            if status == "cancelled" {
+                let _ = tx.send(Ok(("Annulé.".to_string(), session_id, None)));
+                return;
+            }
+            if status == "waiting_user_input" {
+                let _ = tx.send(Ok((
+                    "En attente de votre saisie. Consultez l'onglet Tâches.".to_string(),
+                    session_id,
+                    None,
+                )));
+                return;
+            }
+            if status == "paused" {
+                let _ = tx.send(Ok((
+                    "Tâche en pause. Consultez l'onglet Tâches.".to_string(),
                     session_id,
                     None,
                 )));
@@ -814,11 +841,12 @@ impl App {
                         match client.post(&url).send() {
                             Ok(r) if r.status().is_success() => return format!("Tâche {} annulée.", id),
                             Ok(r) => {
+                                let status = r.status();
                                 if let Ok(json) = r.json::<serde_json::Value>() {
                                     let detail = json.get("detail").and_then(|v| v.as_str()).unwrap_or_else(|| json.get("error").and_then(|v| v.as_str()).unwrap_or("Erreur"));
                                     return format!("Erreur : {}", detail);
                                 }
-                                return format!("Erreur : {}", r.status());
+                                return format!("Erreur : {}", status);
                             }
                             Err(e) => return format!("Erreur : {}", e),
                         }
