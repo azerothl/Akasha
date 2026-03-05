@@ -3,6 +3,9 @@
 use std::path::Path;
 use std::sync::RwLock;
 
+#[cfg(all(feature = "fastembed", feature = "tract"))]
+compile_error!("Features 'fastembed' and 'tract' are mutually exclusive. Enable only one embedding backend.");
+
 /// Serialize embedding to bytes (little-endian f32) for storage.
 pub fn embedding_to_bytes(v: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(v.len() * 4);
@@ -104,6 +107,7 @@ mod tract_backend {
     struct TractModel {
         model: tract_onnx::prelude::TypedRunnableModel<tract_onnx::prelude::TypedModel>,
         tokenizer: tokenizers::Tokenizer,
+        n_inputs: usize,
     }
 
     impl Embedder {
@@ -125,8 +129,8 @@ mod tract_backend {
                 }
                 let tokenizer =
                     tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|e| anyhow::anyhow!("tokenizer: {}", e))?;
-                let model = Self::load_onnx(&model_path)?;
-                *g = Some(TractModel { model, tokenizer });
+                let (model, n_inputs) = Self::load_onnx(&model_path)?;
+                *g = Some(TractModel { model, tokenizer, n_inputs });
             }
             Ok(())
         }
@@ -136,12 +140,12 @@ mod tract_backend {
                 .timeout(std::time::Duration::from_secs(120))
                 .build()?;
             if !model_path.exists() {
-                let mut resp = client.get(MODEL_HF_URL).send()?;
+                let mut resp = client.get(MODEL_HF_URL).send()?.error_for_status()?;
                 let mut out = File::create(model_path)?;
                 std::io::copy(&mut resp, &mut out)?;
             }
             if !tokenizer_path.exists() {
-                let mut resp = client.get(TOKENIZER_HF_URL).send()?;
+                let mut resp = client.get(TOKENIZER_HF_URL).send()?.error_for_status()?;
                 let mut out = File::create(tokenizer_path)?;
                 std::io::copy(&mut resp, &mut out)?;
             }
@@ -150,28 +154,29 @@ mod tract_backend {
 
         fn load_onnx(
             path: &Path,
-        ) -> anyhow::Result<tract_onnx::prelude::TypedRunnableModel<tract_onnx::prelude::TypedModel>>
+        ) -> anyhow::Result<(tract_onnx::prelude::TypedRunnableModel<tract_onnx::prelude::TypedModel>, usize)>
         {
             use tract_onnx::prelude::*;
             let mut model = tract_onnx::onnx().model_for_path(path)?;
+            let n_inputs = model.input_outlets()?.len();
             model.set_input_fact(
                 0,
                 InferenceFact::dt_shape(i64::datum_type(), tvec!(1i64, MAX_LENGTH as i64)),
             )?;
-            if model.input_outlets()?.len() > 1 {
+            if n_inputs > 1 {
                 model.set_input_fact(
                     1,
                     InferenceFact::dt_shape(i64::datum_type(), tvec!(1i64, MAX_LENGTH as i64)),
                 )?;
             }
-            if model.input_outlets()?.len() > 2 {
+            if n_inputs > 2 {
                 model.set_input_fact(
                     2,
                     InferenceFact::dt_shape(i64::datum_type(), tvec!(1i64, MAX_LENGTH as i64)),
                 )?;
             }
             let model = model.into_optimized()?.into_runnable()?;
-            Ok(model)
+            Ok((model, n_inputs))
         }
 
         pub fn embed_one(&self, text: &str) -> anyhow::Result<Vec<f32>> {
@@ -192,17 +197,20 @@ mod tract_backend {
                 let ids: Vec<i64> = enc.get_ids().iter().map(|&x| x as i64).collect();
                 let attn: Vec<i64> = enc.get_attention_mask().iter().map(|&x| x as i64).collect();
                 let (input_ids, attention_mask) = Self::pad(ids, attn, MAX_LENGTH);
-                // BERT-style models expect 3 inputs: input_ids, attention_mask, token_type_ids (zeros for single segment).
-                let token_type_ids: Vec<i64> = vec![0; MAX_LENGTH];
+                // Build inputs dynamically based on the number of inputs the model expects.
                 use tract_onnx::prelude::*;
                 let input_ids_t = Array::from_shape_vec((1, MAX_LENGTH), input_ids)?;
                 let attention_mask_t = Array::from_shape_vec((1, MAX_LENGTH), attention_mask)?;
-                let token_type_ids_t = Array::from_shape_vec((1, MAX_LENGTH), token_type_ids)?;
-                let outputs = m.model.run(tvec!(
-                    input_ids_t.into_tensor().into(),
-                    attention_mask_t.clone().into_tensor().into(),
-                    token_type_ids_t.into_tensor().into()
-                ))?;
+                let mut inputs = tvec!(input_ids_t.into_tensor().into());
+                if m.n_inputs > 1 {
+                    inputs.push(attention_mask_t.clone().into_tensor().into());
+                }
+                if m.n_inputs > 2 {
+                    let token_type_ids: Vec<i64> = vec![0; MAX_LENGTH];
+                    let token_type_ids_t = Array::from_shape_vec((1, MAX_LENGTH), token_type_ids)?;
+                    inputs.push(token_type_ids_t.into_tensor().into());
+                }
+                let outputs = m.model.run(inputs)?;
                 let last_hidden = outputs[0]
                     .to_array_view::<f32>()?
                     .into_dimensionality::<ndarray::Ix3>()?;

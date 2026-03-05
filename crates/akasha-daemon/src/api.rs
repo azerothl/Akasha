@@ -13,6 +13,13 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+/// Limits concurrent background LLM fact-extraction tasks to prevent unbounded queue growth under load.
+static EXTRACT_SEMAPHORE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+
+fn extract_semaphore() -> Arc<tokio::sync::Semaphore> {
+    EXTRACT_SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2))).clone()
+}
+
 async fn get_task_list(store_path: &Path) -> String {
     let store = match TaskStore::open(store_path) {
         Ok(s) => s,
@@ -152,8 +159,8 @@ fn available_tools_instruction() -> String {
 /// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
 const APP_CONTEXT: &str = "[Contexte Akasha] Tu es l'assistant intégré à Akasha. Akasha est l'application dans laquelle tu tournes actuellement. \
 Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : \
-commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Doc/Activité), \
-commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, etc.). \
+commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Mémoire/Doc/Activité), \
+commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, etc.). \
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
 Réponds en français sauf si l'utilisateur utilise une autre langue.\n\n";
 
@@ -628,6 +635,7 @@ pub(crate) async fn run_message_via_llm(
     // Extract and promote personal facts to long-term memory (spec 06: nom, préférences, décisions).
     if let Some(ref long_term) = long_term_client {
         // Heuristic: capture obvious name/intro from user message. Promote these *immediately* so they appear in Memory tab right away.
+        // Case-insensitive matching on lowercased text, but extract from original message to preserve casing.
         let msg_lower = message.to_lowercase();
         let mut heuristic_facts = Vec::new();
         for (pattern, prefix) in [
@@ -642,12 +650,15 @@ pub(crate) async fn run_message_via_llm(
             ("my name is ", "The user's name is "),
             ("call me ", "The user wants to be called "),
         ] {
-            if let Some(rest) = msg_lower.strip_prefix(pattern) {
-                let name = rest
+            if let Some(start_idx) = msg_lower.find(pattern) {
+                let value_start = start_idx + pattern.len();
+                // Extract value from the *original* message at the same position to preserve casing.
+                let original_rest = &message[value_start..];
+                let name = original_rest
                     .trim()
                     .split(|c: char| c == ',' || c == '.' || c == '\n' || c == '!')
                     .next()
-                    .unwrap_or(rest)
+                    .unwrap_or(original_rest)
                     .trim();
                 let name = name.chars().take(80).collect::<String>();
                 if !name.is_empty() {
@@ -667,13 +678,22 @@ pub(crate) async fn run_message_via_llm(
             }
         }
 
-        // Then spawn LLM extraction for additional facts (async, no wait).
+        // Then spawn LLM extraction for additional facts (async, bounded concurrency, no wait).
         let msg = message.clone();
         let reply = reply_text.clone();
         let client = long_term.clone();
         let router = llm_router.clone();
         let n_heuristic = heuristic_facts.len();
+        let sem = extract_semaphore();
         tokio::spawn(async move {
+            // Acquire a permit; if all slots are busy, drop this extraction cycle rather than queuing unbounded work.
+            let _permit = match sem.try_acquire() {
+                Ok(p) => p,
+                Err(_) => {
+                    tracing::debug!("Background fact extraction skipped: semaphore full (too many concurrent extractions)");
+                    return;
+                }
+            };
             let mut facts = heuristic_facts;
             let extract_prompt = format!(
                 "Tu dois extraire UNIQUEMENT les faits personnels à retenir sur l'utilisateur (nom, prénom, préférences, décisions). \
@@ -1018,22 +1038,21 @@ pub async fn handle_api(
             .as_ref()
             .and_then(|v| v.get("message").and_then(|v| v.as_str().map(String::from)))
             .unwrap_or_default();
-        // Session: "new_session" => new UUID; else provided session_id; else "day-YYYY-MM-DD" (same day = same context).
+        // Session: "new_session" => new UUID; else provided non-empty session_id; else new UUID (isolated context).
         let session_id = {
             let new_session = body_json.as_ref().and_then(|v| v.get("new_session")).and_then(|v| v.as_bool()).unwrap_or(false);
             let provided = body_json.as_ref().and_then(|v| v.get("session_id").and_then(|v| v.as_str().map(String::from)));
             if new_session {
                 uuid::Uuid::new_v4().to_string()
             } else if let Some(s) = provided {
-                if s.trim().is_empty() {
-                    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                    format!("day-{}", today)
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    uuid::Uuid::new_v4().to_string()
                 } else {
-                    s
+                    trimmed.to_string()
                 }
             } else {
-                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                format!("day-{}", today)
+                uuid::Uuid::new_v4().to_string()
             }
         };
         if let Err(e) = akasha_core::check_prompt_injection(&message) {

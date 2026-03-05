@@ -82,6 +82,16 @@ impl LongTermStore {
         Ok(id)
     }
 
+    /// Return true if an entry with the exact same content already exists.
+    pub fn content_exists(&self, content: &str) -> anyhow::Result<bool> {
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM memory_entries WHERE content = ?1)",
+            rusqlite::params![content],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
+    }
+
     /// Retrieve all entries with their embeddings for similarity search in memory.
     fn get_all_with_embedding(
         &self,
