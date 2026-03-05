@@ -138,15 +138,12 @@ impl LLMRouter {
 
     /// Complete using preferred_task_type if set, else classifier on prompt; then routing config and fallback.
     pub async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, String> {
-        let task_type_str = request
-            .preferred_task_type
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                let (task_type, _) = classify_task_type(&request.prompt);
-                task_type.as_str()
-            });
-        if request.preferred_task_type.is_some() {
+        let preferred = request.preferred_task_type.as_deref().filter(|s| !s.is_empty());
+        let task_type_str = preferred.unwrap_or_else(|| {
+            let (task_type, _) = classify_task_type(&request.prompt);
+            task_type.as_str()
+        });
+        if preferred.is_some() {
             info!(task_type = task_type_str, "Router using preferred task type (system/memory)");
         } else {
             info!(task_type = task_type_str, "Router classify");

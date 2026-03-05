@@ -283,7 +283,7 @@ impl App {
 
     fn fetch_memory(&mut self) {
         let base = daemon_base_url(self.port);
-        let session_param = self.session_id.as_deref().map(|s| format!("?session_id={}", s));
+        let session_param = self.session_id.as_deref().map(|s| format!("?session_id={}", urlencoding::encode(s)));
         let short_url = match &session_param {
             Some(p) => format!("{}/api/memory/short-term{}", base, p),
             None => format!("{}/api/memory/short-term", base),

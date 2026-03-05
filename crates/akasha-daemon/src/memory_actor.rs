@@ -130,15 +130,22 @@ pub fn start_memory_actor(
                         MemoryResponse::Search(contents)
                     }
                     MemoryRequest::Promote { content, source } => {
-                        let result = embedder
-                            .embed_one(&content)
-                            .map_err(|e| e.to_string())
-                            .and_then(|vec| {
-                                let bytes = embedding_to_bytes(&vec);
-                                store.insert(&content, &bytes, &source).map_err(|e| e.to_string())?;
-                                Ok(())
-                            });
-                        MemoryResponse::Promote(result)
+                        // Skip if an identical fact is already stored (dedup).
+                        let already_exists = store.content_exists(&content).unwrap_or(false);
+                        if already_exists {
+                            tracing::debug!(content = %content.chars().take(60).collect::<String>(), "Skipping duplicate long-term memory entry");
+                            MemoryResponse::Promote(Ok(()))
+                        } else {
+                            let result = embedder
+                                .embed_one(&content)
+                                .map_err(|e| e.to_string())
+                                .and_then(|vec| {
+                                    let bytes = embedding_to_bytes(&vec);
+                                    store.insert(&content, &bytes, &source).map_err(|e| e.to_string())?;
+                                    Ok(())
+                                });
+                            MemoryResponse::Promote(result)
+                        }
                     }
                 };
                 let _ = resp_tx.send(response);
