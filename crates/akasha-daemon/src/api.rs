@@ -625,36 +625,54 @@ pub(crate) async fn run_message_via_llm(
 
     // Extract and promote personal facts to long-term memory (spec 06: nom, préférences, décisions).
     if let Some(ref long_term) = long_term_client {
+        // Heuristic: capture obvious name/intro from user message. Promote these *immediately* so they appear in Memory tab right away.
+        let msg_lower = message.to_lowercase();
+        let mut heuristic_facts = Vec::new();
+        for (pattern, prefix) in [
+            ("je m'appelle ", "L'utilisateur s'appelle "),
+            ("mon nom est ", "L'utilisateur s'appelle "),
+            ("mon prénom est ", "L'utilisateur s'appelle "),
+            ("mon prénom c'est ", "L'utilisateur s'appelle "),
+            ("je suis ", "L'utilisateur est "),
+            ("tu peux m'appeler ", "L'utilisateur veut être appelé "),
+            ("appelle-moi ", "L'utilisateur veut être appelé "),
+            ("i'm ", "The user is "),
+            ("my name is ", "The user's name is "),
+            ("call me ", "The user wants to be called "),
+        ] {
+            if let Some(rest) = msg_lower.strip_prefix(pattern) {
+                let name = rest
+                    .trim()
+                    .split(|c: char| c == ',' || c == '.' || c == '\n' || c == '!')
+                    .next()
+                    .unwrap_or(rest)
+                    .trim();
+                let name = name.chars().take(80).collect::<String>();
+                if !name.is_empty() {
+                    heuristic_facts.push(format!("{}{}", prefix, name));
+                    break;
+                }
+            }
+        }
+        // Promote heuristic facts synchronously so they are stored before the user opens the Memory tab.
+        for fact in &heuristic_facts {
+            let client = long_term.clone();
+            let fact = fact.clone();
+            match tokio::task::spawn_blocking(move || client.promote(fact, "user_fact".to_string())).await {
+                Ok(Ok(())) => tracing::info!("Personal fact stored in long-term memory (heuristic)"),
+                Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote failed — check that embeddings/tract model loads (see daemon logs)"),
+                Err(e) => tracing::debug!(error = %e, "Promote task join error"),
+            }
+        }
+
+        // Then spawn LLM extraction for additional facts (async, no wait).
         let msg = message.clone();
         let reply = reply_text.clone();
         let client = long_term.clone();
         let router = llm_router.clone();
+        let n_heuristic = heuristic_facts.len();
         tokio::spawn(async move {
-            let mut facts = Vec::new();
-            // Heuristic: capture obvious "my name is X" from user message so we don't rely only on LLM.
-            let msg_lower = msg.to_lowercase();
-            for (pattern, prefix) in [
-                ("je m'appelle ", "L'utilisateur s'appelle "),
-                ("mon nom est ", "L'utilisateur s'appelle "),
-                ("je suis ", "L'utilisateur est "),
-                ("i'm ", "The user is "),
-                ("my name is ", "The user's name is "),
-                ("call me ", "The user wants to be called "),
-            ] {
-                if let Some(rest) = msg_lower.strip_prefix(pattern) {
-                    let name = rest
-                        .trim()
-                        .split(|c: char| c == ',' || c == '.' || c == '\n' || c == '!')
-                        .next()
-                        .unwrap_or(rest)
-                        .trim();
-                    let name = name.chars().take(80).collect::<String>();
-                    if !name.is_empty() {
-                        facts.push(format!("{}{}", prefix, name));
-                        break;
-                    }
-                }
-            }
+            let mut facts = heuristic_facts;
             let extract_prompt = format!(
                 "Tu dois extraire UNIQUEMENT les faits personnels à retenir sur l'utilisateur (nom, prénom, préférences, décisions). \
 Une ligne par fait, chaque ligne commence par FACT: (ex: FACT: L'utilisateur s'appelle Jean. FACT: L'utilisateur préfère le café.). \
@@ -684,9 +702,10 @@ N'écris que des lignes FACT: ou NOTHING si aucun fait. Pas d'autre texte.\n\nUt
             if facts.is_empty() {
                 tracing::debug!(user_msg = %msg.trim().chars().take(100).collect::<String>(), "No personal facts extracted for long-term memory");
             } else {
-                tracing::debug!(count = facts.len(), "Promoting personal facts to long-term memory");
+                tracing::debug!(count = facts.len(), "Promoting extra facts to long-term memory");
             }
-            for fact in facts {
+            // Promote only facts that weren't already promoted (heuristic ones were done above).
+            for fact in facts.into_iter().skip(n_heuristic) {
                 let client = client.clone();
                 match tokio::task::spawn_blocking(move || client.promote(fact, "user_fact".to_string())).await {
                     Ok(Ok(())) => {}

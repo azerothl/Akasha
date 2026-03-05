@@ -192,12 +192,16 @@ mod tract_backend {
                 let ids: Vec<i64> = enc.get_ids().iter().map(|&x| x as i64).collect();
                 let attn: Vec<i64> = enc.get_attention_mask().iter().map(|&x| x as i64).collect();
                 let (input_ids, attention_mask) = Self::pad(ids, attn, MAX_LENGTH);
+                // BERT-style models expect 3 inputs: input_ids, attention_mask, token_type_ids (zeros for single segment).
+                let token_type_ids: Vec<i64> = vec![0; MAX_LENGTH];
                 use tract_onnx::prelude::*;
                 let input_ids_t = Array::from_shape_vec((1, MAX_LENGTH), input_ids)?;
                 let attention_mask_t = Array::from_shape_vec((1, MAX_LENGTH), attention_mask)?;
+                let token_type_ids_t = Array::from_shape_vec((1, MAX_LENGTH), token_type_ids)?;
                 let outputs = m.model.run(tvec!(
                     input_ids_t.into_tensor().into(),
-                    attention_mask_t.clone().into_tensor().into()
+                    attention_mask_t.clone().into_tensor().into(),
+                    token_type_ids_t.into_tensor().into()
                 ))?;
                 let last_hidden = outputs[0]
                     .to_array_view::<f32>()?
