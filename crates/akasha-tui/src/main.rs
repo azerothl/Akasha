@@ -131,6 +131,14 @@ struct App {
     calendar_scroll: usize,
     /// Pending task id after ack (show "En cours: Task #xxx" in chat).
     pending_reply_task_id: Option<String>,
+    /// Progress % for the pending task (from background poll).
+    pending_reply_pct: Option<u8>,
+    /// Schedule run reports to show in chat (Rappel « X » exécuté : …).
+    schedule_reports: Vec<(String, String)>,
+    /// Calendar: selected task_run index to show task detail.
+    calendar_selected_run: Option<usize>,
+    /// Calendar: task detail for selected run (status, last message).
+    calendar_run_detail: Option<(String, String)>,
     /// Session id for short-term memory (returned by daemon, send back on next message).
     session_id: Option<String>,
     /// If true, next message will request a new session (context reset).
@@ -146,6 +154,8 @@ struct App {
     port: u16,
     /// (content, session_id, pending_task_id). When pending_task_id is Some, reply will follow later.
     tx: mpsc::Sender<Result<(String, String, Option<String>), String>>,
+    /// Optional channel to send (task_id, progress_pct) for running task (TUI progress %).
+    progress_tx: Option<mpsc::Sender<(String, u8)>>,
     /// Scroll offset for input area when text wraps to more lines than visible (Ctrl+↑/↓).
     input_scroll: usize,
     /// Set by ui(): inner height of input area for clamping input_scroll.
@@ -155,7 +165,7 @@ struct App {
 }
 
 impl App {
-    fn new(port: u16, tx: mpsc::Sender<Result<(String, String, Option<String>), String>>) -> Self {
+    fn new(port: u16, tx: mpsc::Sender<Result<(String, String, Option<String>), String>>, progress_tx: Option<mpsc::Sender<(String, u8)>>) -> Self {
         Self {
             mode: Mode::Chat,
             messages: Vec::new(),
@@ -178,6 +188,10 @@ impl App {
             calendar_task_runs: Vec::new(),
             calendar_scroll: 0,
             pending_reply_task_id: None,
+            pending_reply_pct: None,
+            schedule_reports: Vec::new(),
+            calendar_selected_run: None,
+            calendar_run_detail: None,
             session_id: None,
             force_new_session: false,
             memory_short_term: Vec::new(),
@@ -186,6 +200,7 @@ impl App {
             theme: ThemeName::default(),
             port,
             tx,
+            progress_tx,
             input_scroll: 0,
             input_inner_height: 3,
             input_wrapped_lines: 0,
@@ -335,6 +350,47 @@ impl App {
         self.activity_task_detail = None;
     }
 
+    fn fetch_schedule_reports(&mut self) {
+        let base = daemon_base_url(self.port);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_default();
+        self.schedule_reports.clear();
+        if let Ok(resp) = client.get(format!("{}/api/schedule_run_reports", base)).send() {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>() {
+                    if let Some(arr) = json.get("reports").and_then(|a| a.as_array()) {
+                        for r in arr {
+                            let name = r.get("schedule_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let msg = r.get("message").and_then(|v| v.as_str()).unwrap_or("Exécuté.").to_string();
+                            self.schedule_reports.push((name, msg));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn fetch_calendar_run_detail(&mut self, task_id: &str) {
+        let base = daemon_base_url(self.port);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap_or_default();
+        if let Ok(resp) = client.get(format!("{}/api/tasks/{}", base, task_id)).send() {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>() {
+                    let status = json.get("status").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                    let message = json.get("progress").and_then(|p| p.as_array()).and_then(|a| a.last()).and_then(|e| e.get("message").and_then(|m| m.as_str())).unwrap_or("").to_string();
+                    self.calendar_run_detail = Some((status, message));
+                    return;
+                }
+            }
+        }
+        self.calendar_run_detail = None;
+    }
+
     fn fetch_calendar(&mut self) {
         let base = daemon_base_url(self.port);
         let client = reqwest::blocking::Client::builder()
@@ -343,6 +399,8 @@ impl App {
             .unwrap_or_default();
         self.calendar_schedules.clear();
         self.calendar_task_runs.clear();
+        self.calendar_selected_run = None;
+        self.calendar_run_detail = None;
         if let Ok(resp) = client.get(format!("{}/api/schedules", base)).send() {
             if resp.status().is_success() {
                 if let Ok(json) = resp.json::<serde_json::Value>() {
@@ -517,8 +575,10 @@ impl App {
     }
 
     /// Non-blocking: POST /api/message, send ack via tx, then poll and send final reply (FR-025).
+    /// If progress_tx is Some, sends (task_id, progress_pct) on each poll for TUI progress display.
     fn send_message_non_blocking(
         tx: mpsc::Sender<Result<(String, String, Option<String>), String>>,
+        progress_tx: Option<mpsc::Sender<(String, u8)>>,
         message: String,
         port: u16,
         session_id: Option<String>,
@@ -1229,6 +1289,12 @@ fn ui(f: &mut Frame, app: &mut App) {
         Mode::Chat => {
             let content_width = content_area.width as usize;
             let mut lines: Vec<Line<'static>> = Vec::new();
+            for (name, msg) in &app.schedule_reports {
+                lines.push(Line::from(""));
+                let style_muted = Style::default().fg(theme.palette().muted).add_modifier(Modifier::BOLD);
+                lines.push(Line::from(Span::styled("  ─── Rappel exécuté ───", style_muted)));
+                lines.push(Line::from(Span::styled(format!("  « {} » — {}", name, msg), Style::default().fg(theme.palette().muted))));
+            }
             for m in &app.messages {
                 let (role_style, _base_style) = if m.role == "Vous" {
                     (
@@ -1263,8 +1329,9 @@ fn ui(f: &mut Frame, app: &mut App) {
             if let Some(ref tid) = app.pending_reply_task_id {
                 lines.push(Line::from(""));
                 let short = if tid.len() > 8 { &tid[tid.len()-8..] } else { tid.as_str() };
+                let pct_str = app.pending_reply_pct.map(|p| format!(" {}%", p)).unwrap_or_default();
                 lines.push(Line::from(Span::styled(
-                    format!("  [ Task #{} en cours… ]", short),
+                    format!("  [ Task #{} en cours{}… ]", short, pct_str),
                     Style::default().fg(theme.palette().warning).add_modifier(Modifier::ITALIC),
                 )));
             }
@@ -1516,13 +1583,28 @@ fn ui(f: &mut Frame, app: &mut App) {
             )));
             lines.push(Line::from(""));
             if app.calendar_task_runs.is_empty() {
-                lines.push(Line::from(Span::styled("  Aucun run.", Style::default().fg(theme.palette().muted))));
+                lines.push(Line::from(Span::styled("  Aucun run. ↑↓ = sélectionner.", Style::default().fg(theme.palette().muted))));
             } else {
-                for (id, status, planned_for, task_id) in &app.calendar_task_runs {
+                for (i, (id, status, planned_for, task_id)) in app.calendar_task_runs.iter().enumerate() {
                     let short_id = if id.len() > 8 { &id[id.len()-8..] } else { id.as_str() };
                     let short_task = if task_id.len() > 8 { format!("…{}", &task_id[task_id.len()-8..]) } else { task_id.clone() };
                     let planned = if planned_for.len() >= 19 { &planned_for[..19] } else { planned_for.as_str() };
-                    lines.push(Line::from(format!("  {}  {}  {}  task {}", short_id, status, planned, short_task)));
+                    let sel = app.calendar_selected_run == Some(i);
+                    let style = if sel { Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme.palette().fg) };
+                    lines.push(Line::from(Span::styled(
+                        format!("  {} {}  {}  {}  task {}", if sel { "►" } else { " " }, short_id, status, planned, short_task),
+                        style,
+                    )));
+                }
+            }
+            if let Some((status, message)) = &app.calendar_run_detail {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("  Détail tâche sélectionnée", Style::default().fg(theme.palette().accent))));
+                lines.push(Line::from(format!("  Statut : {}", status)));
+                if !message.is_empty() {
+                    for line in message.lines().take(10) {
+                        lines.push(Line::from(format!("  {}", line)));
+                    }
                 }
             }
             let content_height = content_area.height.saturating_sub(2);
@@ -1632,15 +1714,24 @@ fn run_app(
     terminal: &mut Terminal<ratatui::backend::CrosstermBackend<Stdout>>,
     app: &mut App,
     rx: &mpsc::Receiver<Result<(String, String, Option<String>), String>>,
+    progress_rx: &mpsc::Receiver<(String, u8)>,
 ) -> anyhow::Result<()> {
     let mut last_health = std::time::Instant::now();
     loop {
         if last_health.elapsed() > Duration::from_secs(5) {
             app.check_health();
+            if app.mode == Mode::Chat {
+                app.fetch_schedule_reports();
+            }
             last_health = std::time::Instant::now();
         }
         if app.mode == Mode::Router && app.metrics.is_empty() {
             app.fetch_metrics();
+        }
+        while let Ok((task_id, pct)) = progress_rx.try_recv() {
+            if app.pending_reply_task_id.as_deref() == Some(&task_id) {
+                app.pending_reply_pct = Some(pct);
+            }
         }
         while let Ok(result) = rx.try_recv() {
             app.loading = false;
@@ -1650,7 +1741,10 @@ fn run_app(
                     if !session_id.is_empty() {
                         app.session_id = Some(session_id);
                     }
-                    app.pending_reply_task_id = pending_task_id;
+                    app.pending_reply_task_id = pending_task_id.clone();
+                    if pending_task_id.is_none() {
+                        app.pending_reply_pct = None;
+                    }
                     app.messages.push(ChatMessage {
                         role: role.into(),
                         text,
@@ -1698,6 +1792,9 @@ fn run_app(
                         }
                         if app.mode == Mode::Calendar {
                             app.fetch_calendar();
+                        }
+                        if app.mode == Mode::Chat {
+                            app.fetch_schedule_reports();
                         }
                         if app.mode == Mode::Memory {
                             app.fetch_memory();
@@ -1758,8 +1855,9 @@ fn run_app(
                             let session_id = app.session_id.clone();
                             let new_session = app.force_new_session;
                             app.force_new_session = false;
+                            let progress_tx = app.progress_tx.clone();
                             thread::spawn(move || {
-                                App::send_message_non_blocking(tx, msg, port, session_id, new_session);
+                                App::send_message_non_blocking(tx, progress_tx, msg, port, session_id, new_session);
                             });
                         }
                         }
@@ -1843,6 +1941,38 @@ fn run_app(
                     (Mode::Calendar, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_calendar();
                     }
+                    (Mode::Calendar, KeyCode::Up, _) => {
+                        let n = app.calendar_task_runs.len();
+                        if n > 0 {
+                            app.calendar_selected_run = Some(match app.calendar_selected_run {
+                                None => n - 1,
+                                Some(i) if i > 0 => i - 1,
+                                Some(i) => i,
+                            });
+                            if let Some(i) = app.calendar_selected_run {
+                                if let Some((_, _, _, ref task_id)) = app.calendar_task_runs.get(i) {
+                                    let tid = task_id.clone();
+                                    app.fetch_calendar_run_detail(&tid);
+                                }
+                            }
+                        }
+                    }
+                    (Mode::Calendar, KeyCode::Down, _) => {
+                        let n = app.calendar_task_runs.len();
+                        if n > 0 {
+                            app.calendar_selected_run = Some(match app.calendar_selected_run {
+                                None => 0,
+                                Some(i) if i + 1 < n => i + 1,
+                                Some(i) => i,
+                            });
+                            if let Some(i) = app.calendar_selected_run {
+                                if let Some((_, _, _, ref task_id)) = app.calendar_task_runs.get(i) {
+                                    let tid = task_id.clone();
+                                    app.fetch_calendar_run_detail(&tid);
+                                }
+                            }
+                        }
+                    }
                     (Mode::Memory, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_memory();
                     }
@@ -1869,7 +1999,8 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or(DAEMON_PORT);
 
     let (tx, rx) = mpsc::channel::<Result<(String, String, Option<String>), String>>();
-    let mut app = App::new(port, tx);
+    let (progress_tx, progress_rx) = mpsc::channel::<(String, u8)>();
+    let mut app = App::new(port, tx, Some(progress_tx));
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1878,7 +2009,7 @@ fn main() -> anyhow::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     app.check_health();
-    let result = run_app(&mut terminal, &mut app, &rx);
+    let result = run_app(&mut terminal, &mut app, &rx, &progress_rx);
 
     disable_raw_mode()?;
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;

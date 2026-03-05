@@ -72,6 +72,9 @@ function App() {
   const [schedules, setSchedules] = useState<Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>>([]);
   const [taskRuns, setTaskRuns] = useState<Array<{ id: string; schedule_id?: string; task_id: string; status: string; planned_for: string }>>([]);
   const [calendarLoading, setCalendarLoading] = useState(false);
+  const [calendarSelectedTaskId, setCalendarSelectedTaskId] = useState<string | null>(null);
+  const [calendarTaskDetail, setCalendarTaskDetail] = useState<{ status: string; progress?: Array<{ progress_pct?: number; message?: string }> } | null>(null);
+  const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
@@ -207,6 +210,38 @@ function App() {
   useEffect(() => {
     if (tab === "calendar") fetchCalendar();
   }, [tab, fetchCalendar]);
+
+  const fetchScheduleReports = useCallback(async () => {
+    try {
+      const data = await invoke<{ reports?: Array<{ schedule_name?: string; message?: string; ended_at?: string }> }>("get_schedule_run_reports", { port: DAEMON_PORT });
+      setScheduleReports((data?.reports ?? []).map((r) => ({ schedule_name: r.schedule_name ?? "", message: r.message ?? "Exécuté.", ended_at: r.ended_at })));
+    } catch {
+      setScheduleReports([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab === "chat") fetchScheduleReports();
+  }, [tab, fetchScheduleReports]);
+
+  useEffect(() => {
+    if (!calendarSelectedTaskId) {
+      setCalendarTaskDetail(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = await invoke<string>("get_task_status", { taskId: calendarSelectedTaskId, port: DAEMON_PORT });
+        if (cancelled) return;
+        const st = JSON.parse(raw) as { status?: string; progress?: Array<{ progress_pct?: number; message?: string }> };
+        setCalendarTaskDetail({ status: st?.status ?? "?", progress: st?.progress });
+      } catch {
+        if (!cancelled) setCalendarTaskDetail(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [calendarSelectedTaskId]);
 
   const runSlashCommand = async (input: string): Promise<string> => {
     const parts = input.replace(/^\//, "").trim().split(/\s+/);
@@ -504,19 +539,29 @@ function App() {
                   </p>
                 </div>
               ) : (
-                messages.map((m, i) => (
-                  <div
-                    key={i}
-                    className={`message ${m.role} ${m.error ? "error" : ""}`}
-                  >
-                    <span className="role" aria-hidden>
-                      {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : "Akasha"}
-                    </span>
-                    <div className="text" style={{ whiteSpace: "pre-wrap" }}>
-                      {m.text}
+                <>
+                  {scheduleReports.map((r, i) => (
+                    <div key={`report-${i}`} className="message system report">
+                      <span className="role" aria-hidden>Rappel exécuté</span>
+                      <div className="text" style={{ whiteSpace: "pre-wrap" }}>
+                        <strong>« {r.schedule_name} »</strong> — {r.message}
+                      </div>
                     </div>
-                  </div>
-                ))
+                  ))}
+                  {messages.map((m, i) => (
+                    <div
+                      key={i}
+                      className={`message ${m.role} ${m.error ? "error" : ""}`}
+                    >
+                      <span className="role" aria-hidden>
+                        {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : "Akasha"}
+                      </span>
+                      <div className="text" style={{ whiteSpace: "pre-wrap" }}>
+                        {m.text}
+                      </div>
+                    </div>
+                  ))}
+                </>
               )}
               {Object.keys(runningTaskChips).length > 0 && (
                 <div className="chat-chips" role="status">
@@ -789,12 +834,44 @@ function App() {
                 ) : (
                   <ul className="calendar-runs-list" role="list">
                     {taskRuns.slice(0, 20).map((r) => (
-                      <li key={r.id}>
+                      <li
+                        key={r.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setCalendarSelectedTaskId(r.task_id)}
+                        onKeyDown={(e) => e.key === "Enter" && setCalendarSelectedTaskId(r.task_id)}
+                        className={calendarSelectedTaskId === r.task_id ? "selected" : ""}
+                      >
                         <span className="run-id">{r.id.slice(-8)}</span> {r.status} —{" "}
                         {r.planned_for ? new Date(r.planned_for).toLocaleString() : ""} (task: {r.task_id.slice(-8)})
                       </li>
                     ))}
                   </ul>
+                )}
+                {calendarSelectedTaskId && (
+                  <div className="calendar-task-detail" aria-label="Détail de la tâche">
+                    <h4>Détail tâche {calendarSelectedTaskId.slice(-8)}</h4>
+                    {calendarTaskDetail ? (
+                      <>
+                        <p><strong>Statut:</strong> {calendarTaskDetail.status}</p>
+                        {calendarTaskDetail.progress && calendarTaskDetail.progress.length > 0 && (
+                          <div className="task-detail-progress">
+                            <strong>Progression / résultat:</strong>
+                            <ul>
+                              {calendarTaskDetail.progress.map((p, i) => (
+                                <li key={i}>
+                                  {p.progress_pct != null ? `${p.progress_pct}% — ` : ""}
+                                  {p.message ?? ""}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <p className="loading-inline">Chargement…</p>
+                    )}
+                  </div>
                 )}
               </>
             )}

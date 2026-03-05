@@ -495,6 +495,23 @@ async fn get_task_runs(port: Option<u16>, schedule_id: Option<String>) -> Result
     Ok(json)
 }
 
+/// Schedule run reports: GET /api/schedule_run_reports — completed schedule runs with message (for chat).
+#[tauri::command]
+async fn get_schedule_run_reports(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/schedule_run_reports", daemon_base_url(port));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -509,6 +526,7 @@ pub fn run() {
             get_task_events,
             get_schedules,
             get_task_runs,
+            get_schedule_run_reports,
             get_docs,
             get_config,
             set_config,
