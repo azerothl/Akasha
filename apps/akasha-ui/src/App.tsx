@@ -243,6 +243,15 @@ function App() {
     return () => { cancelled = true; };
   }, [calendarSelectedTaskId]);
 
+  useEffect(() => {
+    if (!calendarSelectedTaskId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setCalendarSelectedTaskId(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [calendarSelectedTaskId]);
+
   const runSlashCommand = async (input: string): Promise<string> => {
     const parts = input.replace(/^\//, "").trim().split(/\s+/);
     const cmd = parts[0]?.toLowerCase() ?? "";
@@ -849,28 +858,51 @@ function App() {
                   </ul>
                 )}
                 {calendarSelectedTaskId && (
-                  <div className="calendar-task-detail" aria-label="Détail de la tâche">
-                    <h4>Détail tâche {calendarSelectedTaskId.slice(-8)}</h4>
-                    {calendarTaskDetail ? (
-                      <>
-                        <p><strong>Statut:</strong> {calendarTaskDetail.status}</p>
-                        {calendarTaskDetail.progress && calendarTaskDetail.progress.length > 0 && (
-                          <div className="task-detail-progress">
-                            <strong>Progression / résultat:</strong>
-                            <ul>
-                              {calendarTaskDetail.progress.map((p, i) => (
-                                <li key={i}>
-                                  {p.progress_pct != null ? `${p.progress_pct}% — ` : ""}
-                                  {p.message ?? ""}
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
+                  <div
+                    className="calendar-detail-modal-overlay"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="calendar-detail-title"
+                    onClick={() => setCalendarSelectedTaskId(null)}
+                  >
+                    <div
+                      className="calendar-detail-modal"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="calendar-detail-modal-header">
+                        <h2 id="calendar-detail-title">Détail tâche {calendarSelectedTaskId.slice(-8)}</h2>
+                        <button
+                          type="button"
+                          className="calendar-detail-modal-close"
+                          onClick={() => setCalendarSelectedTaskId(null)}
+                          aria-label="Fermer"
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <div className="calendar-detail-modal-body">
+                        {calendarTaskDetail ? (
+                          <>
+                            <p><strong>Statut:</strong> {calendarTaskDetail.status}</p>
+                            {calendarTaskDetail.progress && calendarTaskDetail.progress.length > 0 && (
+                              <div className="task-detail-progress">
+                                <strong>Progression / résultat:</strong>
+                                <ul>
+                                  {calendarTaskDetail.progress.map((p, i) => (
+                                    <li key={i}>
+                                      {p.progress_pct != null ? `${p.progress_pct}% — ` : ""}
+                                      {p.message ?? ""}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <p className="loading-inline">Chargement…</p>
                         )}
-                      </>
-                    ) : (
-                      <p className="loading-inline">Chargement…</p>
-                    )}
+                      </div>
+                    </div>
                   </div>
                 )}
               </>
