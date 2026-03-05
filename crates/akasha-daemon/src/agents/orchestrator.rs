@@ -24,9 +24,14 @@ async fn decompose_request(
         "You are a task decomposer. Output one line per subtask: agent_type|message. Agent types: conversation (general chat), code (code gen), search (info search). Use 'conversation' if one simple question. Example:\nconversation|What is 2+2?\n\nUser request:\n\n{}",
         message
     );
+    // Models with "thinking" (e.g. glm-4.7-flash) use output tokens for thinking then response; 512 is too low and yields empty response (done_reason: length).
+    let system_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(4096);
     let request = CompletionRequest {
         prompt,
-        max_tokens: Some(512),
+        max_tokens: Some(system_max_tokens),
         temperature: Some(0.2),
         preferred_task_type: Some("system".to_string()),
     };

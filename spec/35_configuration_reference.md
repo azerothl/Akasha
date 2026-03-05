@@ -57,6 +57,7 @@ Voir [llm_router.example.yaml](llm_router.example.yaml).
 - **Utiliser Ollama** : ajouter `providers.ollama.base_url` et `akasha config models set conversation ollama llama3.2`.
 - **Utiliser OpenAI** : `providers.openai.api_key_ref: "vault://openai_api_key"` puis définir la route pour une catégorie.
 - **Modèle système (mémoire, décomposition)** : la catégorie `system` doit exister ; par défaut elle pointe vers `akasha_embedded` (voir [06_memory_model.md](06_memory_model.md)).
+- **OpenRouter / OpenAI en primary** : le daemon enregistre le provider OpenRouter (resp. OpenAI) dès qu’une clé API est disponible : variable d’environnement `OPENROUTER_API_KEY` (resp. `OPENAI_API_KEY`) ou vault `vault://openrouter_api_key` (resp. `vault://openai_api_key`). Il n’est pas obligatoire d’avoir une section `providers.openrouter` (resp. `providers.openai`) dans `llm_router.yaml` ; définir la route (ex. `task_types.conversation.primary: { provider: openrouter, model: "..." }`) via la TUI ou le fichier suffit une fois la clé définie.
 
 ---
 
@@ -121,6 +122,7 @@ Voir [tools_policy.example.yaml](tools_policy.example.yaml).
 | `AKASHA_LLM_STREAM_IDLE_SECS` | entier | Timeout d’inactivité entre deux chunks (streaming). |
 | `AKASHA_LLM_FIRST_CHUNK_SECS` | entier | Délai max pour le premier chunk (modèle embarqué). |
 | `AKASHA_EMBEDDED_MODEL` | string | Modèle embarqué : `qwen3_0_6b` (défaut) ou `baguettotron`. |
+| `AKASHA_SYSTEM_TASK_MAX_TOKENS` | entier | Nombre max de tokens pour les tâches « system » (décomposition, extraction mémoire, compaction). Défaut : 4096. À augmenter si un modèle avec « thinking » (ex. glm-4.7-flash) renvoie une réponse vide car le thinking consomme tout le budget (done_reason: length). |
 | `AKASHA_LOG_LLM_RESPONSE` | `1` / vide | Logger la réponse LLM complète (debug). |
 | `AKASHA_VAULT_MASTER_KEY` | string | Clé maître du vault (si utilisé). |
 | `AKASHA_SPEC_DIR` | chemin | Dossier `spec` (evals, etc.). |

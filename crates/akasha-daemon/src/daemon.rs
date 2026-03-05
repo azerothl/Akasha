@@ -142,36 +142,43 @@ impl Daemon {
         llm_router.register_provider(Arc::new(akasha_llm::OllamaProvider::new(ollama_url)));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaCoreProvider::new()));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaEmbeddedProvider::new()));
-        // Phase 6 rattrapage: cloud providers (API key from vault or env)
-        if let Some(ref cfg) = openai_cfg {
-            let key = cfg
-                .api_key_ref
-                .as_ref()
-                .and_then(|r| r.strip_prefix("vault://"))
-                .and_then(|name| vault.as_ref().ok().and_then(|v| v.get(name).ok()))
-                .or_else(|| std::env::var("OPENAI_API_KEY").ok());
-            if let Some(k) = key {
-                llm_router.register_provider(Arc::new(akasha_llm::OpenAIProvider::new(
-                    Some(k),
-                    cfg.base_url.clone(),
-                )));
-                info!("OpenAI provider registered");
-            }
+        // Phase 6 rattrapage: cloud providers (API key from config vault ref or env).
+        // Register if key is available so primary route to openai works even without providers.openai in config.
+        let openai_key = openai_cfg
+            .as_ref()
+            .and_then(|c| {
+                c.api_key_ref
+                    .as_ref()
+                    .and_then(|r| r.strip_prefix("vault://"))
+                    .and_then(|name| vault.as_ref().ok().and_then(|v| v.get(name).ok()))
+            })
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+        if let Some(k) = openai_key {
+            let base_url = openai_cfg.as_ref().and_then(|c| c.base_url.clone());
+            llm_router.register_provider(Arc::new(akasha_llm::OpenAIProvider::new(
+                Some(k),
+                base_url,
+            )));
+            info!("OpenAI provider registered");
         }
-        if let Some(ref cfg) = openrouter_cfg {
-            let key = cfg
-                .api_key_ref
-                .as_ref()
-                .and_then(|r| r.strip_prefix("vault://"))
-                .and_then(|name| vault.as_ref().ok().and_then(|v| v.get(name).ok()))
-                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
-            if let Some(k) = key {
-                llm_router.register_provider(Arc::new(akasha_llm::OpenRouterProvider::new(
-                    Some(k),
-                    cfg.base_url.clone(),
-                )));
-                info!("OpenRouter provider registered");
-            }
+        // Register OpenRouter if we have an API key (from config providers.openrouter, vault, or env).
+        // This allows primary route to openrouter to work even when llm_router.yaml has no providers.openrouter section.
+        let openrouter_key = openrouter_cfg
+            .as_ref()
+            .and_then(|c| {
+                c.api_key_ref
+                    .as_ref()
+                    .and_then(|r| r.strip_prefix("vault://"))
+                    .and_then(|name| vault.as_ref().ok().and_then(|v| v.get(name).ok()))
+            })
+            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
+        if let Some(k) = openrouter_key {
+            let base_url = openrouter_cfg.as_ref().and_then(|c| c.base_url.clone());
+            llm_router.register_provider(Arc::new(akasha_llm::OpenRouterProvider::new(
+                Some(k),
+                base_url,
+            )));
+            info!("OpenRouter provider registered");
         }
         if std::env::var("AKASHA_DEGRADED_MODE").as_deref() == Ok("1") {
             llm_router.set_degraded_mode(true);

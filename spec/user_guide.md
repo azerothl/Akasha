@@ -136,8 +136,11 @@ Fichiers créés dans le data_dir (ex. `%LOCALAPPDATA%\akasha` sous Windows) :
 | `AKASHA_NATS_TLS_CA` | Chemin vers le certificat CA pour NATS (mTLS) | — |
 | `AKASHA_NATS_CLIENT_CERT` | Chemin vers le certificat client NATS (mTLS) | — |
 | `AKASHA_NATS_CLIENT_KEY` | Chemin vers la clé privée client NATS (mTLS) | — |
+| `AKASHA_SYSTEM_TASK_MAX_TOKENS` | Max tokens pour tâches system (décomposition, extraction, compaction). Modèles « thinking » (ex. glm-4.7-flash) peuvent nécessiter 4096+ | 4096 |
 | `NATS_URL` | URL du serveur NATS (mode cluster) | nats://127.0.0.1:4222 |
 | `OLLAMA_HOST` | URL Ollama si pas de `llm_router.yaml` | http://localhost:11434 |
+| `OPENROUTER_API_KEY` | Clé API OpenRouter (permet d’utiliser openrouter en primary même sans section `providers.openrouter`) | — |
+| `OPENAI_API_KEY` | Clé API OpenAI (idem pour `providers.openai`) | — |
 
 **PowerShell** : `$env:AKASHA_TELEGRAM_ENABLED="1"` (et non `set`).  
 **CMD** : `set AKASHA_TELEGRAM_ENABLED=1`.
@@ -150,7 +153,7 @@ Les variables définies via `akasha config env set` sont enregistrées dans `dat
 
 Pour les **formats, types de données et exemples** de chaque fichier, voir [35_configuration_reference.md](35_configuration_reference.md).
 
-- **llm_router.yaml** : recherché dans l'ordre : data_dir, puis racine du projet. Définit les providers (Ollama, OpenAI, OpenRouter) et les modèles par type de tâche. **Section `providers` vide** : ce n'est pas la cause de timeouts. Le daemon enregistre quand même Ollama (URL = `OLLAMA_HOST` ou découverte auto ou `http://localhost:11434`) et le modèle embarqué. Pour éviter les timeouts : vérifier qu'Ollama tourne si vous l'utilisez ; pour le modèle local, le premier appel peut être long (téléchargement + chargement) — précharge au démarrage ou augmenter `default_timeout_secs` / `AKASHA_LLM_TIMEOUT_SECS`. Ajouter une section `providers` avec au moins `ollama.base_url` rend la config explicite (voir `spec/llm_router.example.yaml`).
+- **llm_router.yaml** : recherché dans l'ordre : data_dir, puis racine du projet. Définit les providers (Ollama, OpenAI, OpenRouter) et les modèles par type de tâche. **Section `providers` vide** : ce n'est pas la cause de timeouts. Le daemon enregistre Ollama (URL = `OLLAMA_HOST` ou découverte auto), le modèle embarqué, et **OpenRouter/OpenAI dès qu’une clé API est disponible** (env `OPENROUTER_API_KEY` / `OPENAI_API_KEY` ou vault). Vous pouvez donc définir une route primary vers openrouter/openai (TUI ou fichier) sans ajouter `providers.openrouter` dans le YAML si la clé est en variable d’environnement. Pour les modèles avec « thinking » (ex. glm-4.7-flash) qui renvoient une réponse vide (done_reason: length), augmenter **AKASHA_SYSTEM_TASK_MAX_TOKENS** (défaut 4096). Voir `spec/llm_router.example.yaml`.
 - **connectors.env** : variables d'activation des connecteurs (chargé par `akasha start`).
 - **akasha.env** : variables persistantes (chargé après connectors.env).
 - **tools_policy.yaml** (dans le data_dir) : politique de sécurité des **outils machine** (lecture/écriture de fichiers, commandes). Utilisé par l’agent pour `read_file`, `write_file`, `search_files`, `run_command`, etc. Si le fichier est absent, le daemon peut le créer à partir de `spec/tools_policy.example.yaml` au premier démarrage. Pour autoriser l’écriture de fichiers (ex. génération de code sur disque), éditez ce fichier et ajoutez les répertoires sous **allowed_write_paths** (et **allowed_read_paths** pour la lecture). Par défaut, tout est refusé si le fichier est vide ou manquant.

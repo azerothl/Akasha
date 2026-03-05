@@ -300,9 +300,13 @@ async fn compact_short_term_if_needed(
         "Résume en un court paragraphe en français, en gardant les faits importants et décisions:\n\n{}",
         blob
     );
+    let summary_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(2048);
     let req = CompletionRequest {
         prompt: summary_prompt,
-        max_tokens: Some(512),
+        max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
         preferred_task_type: None,
     };
@@ -682,9 +686,14 @@ N'écris que des lignes FACT: ou NOTHING si aucun fait. Pas d'autre texte.\n\nUt
                 msg.trim(),
                 reply.trim()
             );
+            // Allow enough tokens for models that output "thinking" before the FACT: lines (done_reason: length otherwise).
+            let extract_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(2048);
             let req = CompletionRequest {
                 prompt: extract_prompt,
-                max_tokens: Some(256),
+                max_tokens: Some(extract_max_tokens),
                 temperature: Some(0.1),
                 preferred_task_type: Some("system".to_string()),
             };
