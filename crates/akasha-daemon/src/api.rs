@@ -1819,13 +1819,28 @@ async fn get_schedule_run_reports(store_path: &Path, progress: &ProgressCache) -
         Ok(l) => l,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
-    let progress_guard = progress.read().await;
-    let reports: Vec<serde_json::Value> = list
+    let completed: Vec<_> = list
         .into_iter()
         .filter(|r| r.status == TaskRunStatus::Completed && r.schedule_id.is_some())
+        .collect();
+    // Prefetch all needed schedules into a local cache before acquiring the progress lock.
+    let mut schedule_names: std::collections::HashMap<Uuid, String> =
+        std::collections::HashMap::new();
+    for run in &completed {
+        if let Some(sid) = run.schedule_id {
+            if !schedule_names.contains_key(&sid) {
+                if let Ok(Some(schedule)) = store.get_schedule(sid) {
+                    schedule_names.insert(sid, schedule.name);
+                }
+            }
+        }
+    }
+    let progress_guard = progress.read().await;
+    let reports: Vec<serde_json::Value> = completed
+        .into_iter()
         .filter_map(|r| {
             let schedule_id = r.schedule_id?;
-            let schedule = store.get_schedule(schedule_id).ok().flatten()?;
+            let schedule_name = schedule_names.get(&schedule_id)?.clone();
             let message = progress_guard
                 .get(&r.task_id)
                 .and_then(|q| q.back())
@@ -1833,7 +1848,7 @@ async fn get_schedule_run_reports(store_path: &Path, progress: &ProgressCache) -
                 .unwrap_or_else(|| "Exécuté.".to_string());
             Some(serde_json::json!({
                 "schedule_id": schedule_id.to_string(),
-                "schedule_name": schedule.name,
+                "schedule_name": schedule_name,
                 "task_id": r.task_id.to_string(),
                 "task_run_id": r.id.to_string(),
                 "message": message,

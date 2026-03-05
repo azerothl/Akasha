@@ -370,17 +370,23 @@ fn row_to_schedule(row: &rusqlite::Row) -> rusqlite::Result<Schedule> {
         rrule: row.get(5)?,
         interval_seconds: row.get::<_, Option<i64>>(6)?.map(|n| n as u64),
         start_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
-            .unwrap()
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                7, rusqlite::types::Type::Text, Box::new(e),
+            ))?
             .with_timezone(&Utc),
         end_at: row
             .get::<_, Option<String>>(8)?
             .and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|t| t.with_timezone(&Utc))),
         channel_context: row.get(9)?,
         created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
-            .unwrap()
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                10, rusqlite::types::Type::Text, Box::new(e),
+            ))?
             .with_timezone(&Utc),
         updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(11)?)
-            .unwrap()
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                11, rusqlite::types::Type::Text, Box::new(e),
+            ))?
             .with_timezone(&Utc),
     })
 }
@@ -393,7 +399,9 @@ fn row_to_task_run(row: &rusqlite::Row) -> rusqlite::Result<TaskRun> {
         task_id: Uuid::parse_str(&row.get::<_, String>(2)?).unwrap_or(Uuid::nil()),
         status: TaskRunStatus::from_str(&status_str),
         planned_for: DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-            .unwrap()
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                4, rusqlite::types::Type::Text, Box::new(e),
+            ))?
             .with_timezone(&Utc),
         started_at: row
             .get::<_, Option<String>>(5)?

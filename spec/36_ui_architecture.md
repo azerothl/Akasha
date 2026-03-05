@@ -23,7 +23,7 @@ Référence : FR-026, FR-027.
 ### 1.3 Calendrier
 
 - **Vue** : récurrences + prochaines occurrences (mois / semaine / jour).
-- **Actions** : CRUD sur les récurrences (edit, suppress, pause) ; exceptions (skip une occurrence).
+- **Actions** : CRUD sur les récurrences (edit, supprimer, pause) ; exceptions (skip une occurrence).
 - **Lien** : accès aux runs historiques (task_run, task_id).
 
 Référence : FR-029.
