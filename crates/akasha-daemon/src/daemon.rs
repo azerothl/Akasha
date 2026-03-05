@@ -331,6 +331,7 @@ impl Daemon {
                 });
             let (orch_tx, orch_rx) = mpsc::channel::<OrchestratorTask>(64);
             let (conv_tx, mut conv_rx) = mpsc::channel::<OrchestratorTask>(64);
+            let orch_tx_for_scheduler = orch_tx.clone();
             let main_agent = MainAgent::new(bus.clone(), orch_tx);
             let orchestrator = Arc::new(Orchestrator::new(
                 bus.clone(),
@@ -382,6 +383,15 @@ impl Daemon {
                 let events = events.clone();
                 async move {
                     crate::agents::run_events_subscriber(bus, events).await;
+                }
+            });
+
+            // Scheduler: tick, create task_runs, push to orchestrator (FR-028, 37_scheduler_design)
+            tokio::spawn({
+                let store_path = db_path.clone();
+                let bus = bus.clone();
+                async move {
+                    crate::scheduler::run_scheduler(store_path, orch_tx_for_scheduler, bus).await;
                 }
             });
 

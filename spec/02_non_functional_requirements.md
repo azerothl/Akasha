@@ -7,3 +7,6 @@ NFR-004 — Isolation agents
 NFR-005 — Redondance cluster
 NFR-006 — Mode offline complet
 NFR-007 — Secrets jamais exposés
+NFR-008 — Temps réel UI
+NFR-009 — Robustesse scheduler
+NFR-010 — Exactly-once (at-least-once + dédup)

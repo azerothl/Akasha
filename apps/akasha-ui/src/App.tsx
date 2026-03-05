@@ -5,7 +5,7 @@ import remarkGfm from "remark-gfm";
 
 const DAEMON_PORT = 3876;
 
-type Tab = "chat" | "router" | "settings" | "docs" | "activity";
+type Tab = "chat" | "router" | "settings" | "docs" | "tasks" | "calendar";
 
 /** French label for Activity event types (delegation, progress, etc.). */
 function eventTypeLabel(typ: string): string {
@@ -13,11 +13,19 @@ function eventTypeLabel(typ: string): string {
     user_request_received: "Demande reçue",
     acknowledgment_sent: "Accusé de réception envoyé",
     task_created: "Tâche créée",
+    task_started: "Tâche démarrée",
     task_decomposed: "Tâche décomposée (délégation à des sous-agents)",
     sub_agent_spawned: "Délégué à un agent spécialisé",
     progress_update: "Progression",
+    task_progress_updated: "Progression mise à jour",
+    task_step_completed: "Étape terminée",
     task_completed: "Tâche terminée",
     task_failed: "Tâche en échec",
+    task_run_created: "Run planifié créé",
+    task_run_scheduled: "Run planifié",
+    schedule_created: "Récurrence créée",
+    schedule_updated: "Récurrence mise à jour",
+    schedule_deleted: "Récurrence supprimée",
   };
   return labels[typ] ?? typ;
 }
@@ -56,10 +64,17 @@ function App() {
   const [docContent, setDocContent] = useState<string | null>(null);
   const [docLoading, setDocLoading] = useState(false);
   const [docError, setDocError] = useState<string | null>(null);
-  const [activityTasks, setActivityTasks] = useState<Array<{ id: string; status: string }>>([]);
-  const [activitySelected, setActivitySelected] = useState(0);
-  const [activityEvents, setActivityEvents] = useState<Array<{ event_type: string; payload?: unknown; at: string }>>([]);
-  const [activityLoading, setActivityLoading] = useState(false);
+  const [tasksList, setTasksList] = useState<Array<{ id: string; status: string }>>([]);
+  const [tasksSelected, setTasksSelected] = useState(0);
+  const [tasksEvents, setTasksEvents] = useState<Array<{ event_type: string; payload?: unknown; at: string }>>([]);
+  const [tasksLoading, setTasksLoading] = useState(false);
+  const [runningTaskChips, setRunningTaskChips] = useState<Record<string, { pct?: number; message?: string }>>({});
+  const [schedules, setSchedules] = useState<Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>>([]);
+  const [taskRuns, setTaskRuns] = useState<Array<{ id: string; schedule_id?: string; task_id: string; status: string; planned_for: string }>>([]);
+  const [calendarLoading, setCalendarLoading] = useState(false);
+  const [calendarSelectedTaskId, setCalendarSelectedTaskId] = useState<string | null>(null);
+  const [calendarTaskDetail, setCalendarTaskDetail] = useState<{ status: string; progress?: Array<{ progress_pct?: number; message?: string }> } | null>(null);
+  const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
@@ -127,8 +142,8 @@ function App() {
     if (tab === "docs") fetchDocs();
   }, [tab, fetchDocs]);
 
-  const fetchActivityTasks = useCallback(async () => {
-    setActivityLoading(true);
+  const fetchTasksList = useCallback(async () => {
+    setTasksLoading(true);
     try {
       const data = await invoke<{ tasks?: Array<{ id?: string; status?: string }> }>("get_tasks", {
         port: DAEMON_PORT,
@@ -137,23 +152,23 @@ function App() {
       const tasks = list
         .map((t) => ({ id: t.id ?? "", status: t.status ?? "?" }))
         .filter((t) => t.id);
-      setActivityTasks(tasks);
-      setActivitySelected((prev) => (prev >= tasks.length && tasks.length > 0 ? tasks.length - 1 : prev));
+      setTasksList(tasks);
+      setTasksSelected((prev) => (prev >= tasks.length && tasks.length > 0 ? tasks.length - 1 : prev));
     } catch {
-      setActivityTasks([]);
+      setTasksList([]);
     } finally {
-      setActivityLoading(false);
+      setTasksLoading(false);
     }
   }, []);
 
-  const fetchActivityEvents = useCallback(async (taskId: string) => {
+  const fetchTasksEvents = useCallback(async (taskId: string) => {
     try {
       const data = await invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string }> }>(
         "get_task_events",
         { taskId, port: DAEMON_PORT }
       );
       const list = data?.events ?? [];
-      setActivityEvents(
+      setTasksEvents(
         list.map((e) => ({
           event_type: e.event_type ?? "?",
           payload: e.payload,
@@ -161,19 +176,81 @@ function App() {
         }))
       );
     } catch {
-      setActivityEvents([]);
+      setTasksEvents([]);
+    }
+  }, []);
+
+  const fetchCalendar = useCallback(async () => {
+    setCalendarLoading(true);
+    try {
+      const [schedData, runsData] = await Promise.all([
+        invoke<{ schedules?: Array<{ id?: string; name?: string; enabled?: boolean; interval_seconds?: number }> }>("get_schedules", { port: DAEMON_PORT }),
+        invoke<{ task_runs?: Array<{ id?: string; schedule_id?: string; task_id?: string; status?: string; planned_for?: string }> }>("get_task_runs", { port: DAEMON_PORT }),
+      ]);
+      setSchedules((schedData?.schedules ?? []).map((s) => ({ id: s.id ?? "", name: s.name ?? "", enabled: s.enabled ?? false, interval_seconds: s.interval_seconds })));
+      setTaskRuns((runsData?.task_runs ?? []).map((r) => ({ id: r.id ?? "", schedule_id: r.schedule_id, task_id: r.task_id ?? "", status: r.status ?? "?", planned_for: r.planned_for ?? "" })));
+    } catch {
+      setSchedules([]);
+      setTaskRuns([]);
+    } finally {
+      setCalendarLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    if (tab === "activity") fetchActivityTasks();
-  }, [tab, fetchActivityTasks]);
+    if (tab === "tasks") fetchTasksList();
+  }, [tab, fetchTasksList]);
 
   useEffect(() => {
-    const task = activityTasks[activitySelected];
-    if (task?.id) fetchActivityEvents(task.id);
-    else setActivityEvents([]);
-  }, [activityTasks, activitySelected, fetchActivityEvents]);
+    const task = tasksList[tasksSelected];
+    if (task?.id) fetchTasksEvents(task.id);
+    else setTasksEvents([]);
+  }, [tasksList, tasksSelected, fetchTasksEvents]);
+
+  useEffect(() => {
+    if (tab === "calendar") fetchCalendar();
+  }, [tab, fetchCalendar]);
+
+  const fetchScheduleReports = useCallback(async () => {
+    try {
+      const data = await invoke<{ reports?: Array<{ schedule_name?: string; message?: string; ended_at?: string }> }>("get_schedule_run_reports", { port: DAEMON_PORT });
+      setScheduleReports((data?.reports ?? []).map((r) => ({ schedule_name: r.schedule_name ?? "", message: r.message ?? "Exécuté.", ended_at: r.ended_at })));
+    } catch {
+      setScheduleReports([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab === "chat") fetchScheduleReports();
+  }, [tab, fetchScheduleReports]);
+
+  useEffect(() => {
+    if (!calendarSelectedTaskId) {
+      setCalendarTaskDetail(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = await invoke<string>("get_task_status", { taskId: calendarSelectedTaskId, port: DAEMON_PORT });
+        if (cancelled) return;
+        const st = JSON.parse(raw) as { status?: string; progress?: Array<{ progress_pct?: number; message?: string }> };
+        setCalendarTaskDetail({ status: st?.status ?? "?", progress: st?.progress });
+      } catch {
+        if (!cancelled) setCalendarTaskDetail(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [calendarSelectedTaskId]);
+
+  useEffect(() => {
+    if (!calendarSelectedTaskId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setCalendarSelectedTaskId(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [calendarSelectedTaskId]);
 
   const runSlashCommand = async (input: string): Promise<string> => {
     const parts = input.replace(/^\//, "").trim().split(/\s+/);
@@ -184,6 +261,8 @@ function App() {
       return `Commandes disponibles:
 /help, /?         — cette aide
 /status           — état du daemon
+/stop TASK_ID     — annuler une tâche (en cours ou en attente)
+/cancel TASK_ID   — idem que /stop
 /doctor           — diagnostic (daemon, ollama, vault, spec)
 /advice           — conseil diagnostic (RAG + modèle)
 /metrics          — métriques du routeur LLM
@@ -196,6 +275,16 @@ function App() {
 /reload           — recharger les plugins
 /restart          — redémarrer le daemon
 /vault set        — utiliser le CLI : akasha vault set KEY [value]`;
+    }
+    if (cmd === "stop" || cmd === "cancel") {
+      const taskId = parts[1]?.trim();
+      if (!taskId) return "Usage: /stop TASK_ID ou /cancel TASK_ID (ex: /stop 412e7256-f808-4e83-b371-b7dd9b6fc4f8)";
+      try {
+        await invoke<{ cancelled?: boolean }>("cancel_task", { task_id: taskId, port: DAEMON_PORT });
+        return `Tâche ${taskId.slice(-8)} annulée.`;
+      } catch (err) {
+        return `Erreur: ${String(err)}`;
+      }
     }
     if (cmd === "status") {
       const r = await invoke<{ ok: boolean }>("check_health", { port });
@@ -294,38 +383,81 @@ function App() {
     const userMessage = message.trim();
     setMessages((prev) => [...prev, { role: "user", text: userMessage }]);
     setMessage("");
-    setLoading(true);
     chatInputRef.current?.focus();
 
-    try {
-      if (userMessage.startsWith("/")) {
+    if (userMessage.startsWith("/")) {
+      setLoading(true);
+      try {
         const result = await runSlashCommand(userMessage);
         setMessages((prev) => [...prev, { role: "system", text: result }]);
-      } else {
-        const result = await invoke<{ reply: string; session_id: string }>("send_message", {
-          message: userMessage,
-          session_id: sessionId,
-          port: DAEMON_PORT,
-        });
-        if (result?.session_id) setSessionId(result.session_id);
-        setMessages((prev) => [
-          ...prev,
-          { role: "assistant", text: result?.reply ?? "Done." },
-        ]);
+      } catch (err) {
+        setMessages((prev) => [...prev, { role: "assistant", text: `Erreur : ${String(err)}`, error: true }]);
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    // Non-blocking: ACK + task_id, then poll in background (FR-025)
+    try {
+      const ack = await invoke<{ task_id: string; session_id: string; message: string }>("send_message_ack", {
+        message: userMessage,
+        session_id: sessionId,
+        port: DAEMON_PORT,
+      });
+      if (ack?.session_id) setSessionId(ack.session_id);
+      const ackText = ack?.message ?? "Je prends en compte votre demande.";
+      setMessages((prev) => [...prev, { role: "assistant", text: ackText + (ack?.task_id ? " Tu peux suivre l'avancement dans l'onglet Tâches." : "") }]);
+      if (ack?.task_id) {
+        setRunningTaskChips((prev) => ({ ...prev, [ack.task_id]: { pct: 0, message: "en cours…" } }));
+        fetchTasksList();
+        const taskId = ack.task_id;
+        const pollUntilDone = async () => {
+          const maxWait = 600;
+          for (let i = 0; i < maxWait; i++) {
+            await new Promise((r) => setTimeout(r, 1500));
+            try {
+              const raw = await invoke<string>("get_task_status", { taskId, port: DAEMON_PORT });
+              const status = JSON.parse(raw) as { status?: string; progress?: Array<{ progress_pct?: number; message?: string }> };
+              const pct = status?.progress?.slice(-1)[0]?.progress_pct ?? 0;
+              const msg = status?.progress?.slice(-1)[0]?.message ?? "";
+              setRunningTaskChips((prev) => (prev[taskId] !== undefined ? { ...prev, [taskId]: { pct, message: msg } } : prev));
+              if (status?.status === "completed") {
+                setRunningTaskChips((prev) => {
+                  const next = { ...prev };
+                  delete next[taskId];
+                  return next;
+                });
+                const finalMsg = status?.progress?.slice(-1)[0]?.message ?? "Terminé.";
+                setMessages((prev) => [...prev, { role: "assistant", text: finalMsg }]);
+                return;
+              }
+              if (status?.status === "failed") {
+                setRunningTaskChips((prev) => {
+                  const next = { ...prev };
+                  delete next[taskId];
+                  return next;
+                });
+                setMessages((prev) => [...prev, { role: "assistant", text: "Tâche en échec.", error: true }]);
+                return;
+              }
+            } catch {
+              /* ignore */
+            }
+          }
+          setRunningTaskChips((prev) => {
+            const next = { ...prev };
+            delete next[taskId];
+            return next;
+          });
+          setMessages((prev) => [...prev, { role: "assistant", text: "Délai dépassé. Consultez l'onglet Tâches." }]);
+        };
+        pollUntilDone();
       }
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          text: `Erreur : ${String(err)}`,
-          error: true,
-        },
-      ]);
-    } finally {
-      setLoading(false);
-      chatInputRef.current?.focus();
+      setMessages((prev) => [...prev, { role: "assistant", text: `Erreur : ${String(err)}`, error: true }]);
     }
+    chatInputRef.current?.focus();
   };
 
   return (
@@ -377,13 +509,23 @@ function App() {
           </button>
           <button
             role="tab"
-            aria-selected={tab === "activity"}
-            aria-controls="panel-activity"
-            id="tab-activity"
-            className={tab === "activity" ? "active" : ""}
-            onClick={() => setTab("activity")}
+            aria-selected={tab === "tasks"}
+            aria-controls="panel-tasks"
+            id="tab-tasks"
+            className={tab === "tasks" ? "active" : ""}
+            onClick={() => setTab("tasks")}
           >
-            Activité
+            Tâches
+          </button>
+          <button
+            role="tab"
+            aria-selected={tab === "calendar"}
+            aria-controls="panel-calendar"
+            id="tab-calendar"
+            className={tab === "calendar" ? "active" : ""}
+            onClick={() => setTab("calendar")}
+          >
+            Calendrier
           </button>
           <button
             role="tab"
@@ -418,24 +560,37 @@ function App() {
                   </p>
                 </div>
               ) : (
-                messages.map((m, i) => (
-                  <div
-                    key={i}
-                    className={`message ${m.role} ${m.error ? "error" : ""}`}
-                  >
-                    <span className="role" aria-hidden>
-                      {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : "Akasha"}
-                    </span>
-                    <div className="text" style={{ whiteSpace: "pre-wrap" }}>
-                      {m.text}
+                <>
+                  {scheduleReports.map((r, i) => (
+                    <div key={`report-${i}`} className="message system report">
+                      <span className="role" aria-hidden>Rappel exécuté</span>
+                      <div className="text" style={{ whiteSpace: "pre-wrap" }}>
+                        <strong>« {r.schedule_name} »</strong> — {r.message}
+                      </div>
                     </div>
-                  </div>
-                ))
+                  ))}
+                  {messages.map((m, i) => (
+                    <div
+                      key={i}
+                      className={`message ${m.role} ${m.error ? "error" : ""}`}
+                    >
+                      <span className="role" aria-hidden>
+                        {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : "Akasha"}
+                      </span>
+                      <div className="text" style={{ whiteSpace: "pre-wrap" }}>
+                        {m.text}
+                      </div>
+                    </div>
+                  ))}
+                </>
               )}
-              {loading && (
-                <div className="message assistant loading" aria-busy="true">
-                  <span className="role">Akasha</span>
-                  <span className="loading-dots">Réflexion…</span>
+              {Object.keys(runningTaskChips).length > 0 && (
+                <div className="chat-chips" role="status">
+                  {Object.entries(runningTaskChips).map(([tid, { pct, message }]) => (
+                    <span key={tid} className="task-chip">
+                      Task #{tid.slice(-8)} {pct != null ? `(${pct}%)` : ""} {message ?? "en cours"}
+                    </span>
+                  ))}
                 </div>
               )}
               <div ref={chatEndRef} aria-hidden />
@@ -582,74 +737,194 @@ function App() {
           </section>
         )}
 
-        {tab === "activity" && (
+        {tab === "tasks" && (
           <section
-            id="panel-activity"
+            id="panel-tasks"
             role="tabpanel"
-            aria-labelledby="tab-activity"
+            aria-labelledby="tab-tasks"
             className="panel activity-panel"
           >
-            <h2 className="panel-title">Activité (tâches et événements)</h2>
+            <h2 className="panel-title">Tâches (Task Center)</h2>
             <button
               type="button"
               className="refresh-btn"
-              onClick={fetchActivityTasks}
+              onClick={fetchTasksList}
               aria-label="Rafraîchir l’activité"
-              disabled={activityLoading}
+              disabled={tasksLoading}
             >
               Rafraîchir
             </button>
-            {activityLoading && (
+            {tasksLoading && (
               <p className="loading-inline" aria-busy="true">
                 Chargement…
               </p>
             )}
-            {!activityLoading && (
+            {!tasksLoading && (
+              <div className="activity-panel-body">
+                <div className="activity-tasks-block">
+                  <h3>Liste des tâches</h3>
+                  {tasksList.length === 0 ? (
+                    <p className="empty-state">Aucune tâche. Envoyez un message dans le Chat.</p>
+                  ) : (
+                    <ul className="activity-task-list" role="list">
+                      {tasksList.map((t, i) => (
+                        <li
+                          key={t.id}
+                          className={i === tasksSelected ? "selected" : ""}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => setTasksSelected(i)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              setTasksSelected(i);
+                            }
+                            if (e.key === "ArrowDown" && i < tasksList.length - 1)
+                              setTasksSelected(i + 1);
+                            if (e.key === "ArrowUp" && i > 0) setTasksSelected(i - 1);
+                          }}
+                        >
+                          <span className="task-id">{t.id.slice(-8)}</span>{" "}
+                          <span className="task-status">{t.status}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div className="activity-events-block">
+                  <h3>Événements</h3>
+                  {tasksEvents.length === 0 ? (
+                    <p className="empty-state">
+                      {tasksList.length > 0 ? "Aucun événement pour cette tâche." : "Sélectionnez une tâche."}
+                    </p>
+                  ) : (
+                    <ul className="activity-events-list" role="list">
+                      {tasksEvents.map((e, i) => (
+                        <li key={i}>
+                          <strong>{eventTypeLabel(e.event_type)}</strong> @ {e.at}
+                          {e.payload != null && (
+                            <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
+        {tab === "calendar" && (
+          <section
+            id="panel-calendar"
+            role="tabpanel"
+            aria-labelledby="tab-calendar"
+            className="panel calendar-panel"
+          >
+            <h2 className="panel-title">Calendrier (récurrences)</h2>
+            <button
+              type="button"
+              className="refresh-btn"
+              onClick={fetchCalendar}
+              aria-label="Rafraîchir le calendrier"
+              disabled={calendarLoading}
+            >
+              Rafraîchir
+            </button>
+            {calendarLoading && (
+              <p className="loading-inline" aria-busy="true">
+                Chargement…
+              </p>
+            )}
+            {!calendarLoading && (
               <>
-                <h3>Tâches</h3>
-                {activityTasks.length === 0 ? (
-                  <p className="empty-state">Aucune tâche. Envoyez un message dans le Chat.</p>
+                <h3>Récurrences</h3>
+                {schedules.length === 0 ? (
+                  <p className="empty-state">Aucune récurrence. Créez-en via l'API ou un outil.</p>
                 ) : (
-                  <ul className="activity-task-list" role="list">
-                    {activityTasks.map((t, i) => (
-                      <li
-                        key={t.id}
-                        className={i === activitySelected ? "selected" : ""}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => setActivitySelected(i)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            setActivitySelected(i);
-                          }
-                          if (e.key === "ArrowDown" && i < activityTasks.length - 1)
-                            setActivitySelected(i + 1);
-                          if (e.key === "ArrowUp" && i > 0) setActivitySelected(i - 1);
-                        }}
-                      >
-                        <span className="task-id">{t.id.slice(-8)}</span>{" "}
-                        <span className="task-status">{t.status}</span>
+                  <ul className="calendar-schedule-list" role="list">
+                    {schedules.map((s) => (
+                      <li key={s.id}>
+                        <strong>{s.name || s.id.slice(0, 8)}</strong>{" "}
+                        {s.enabled ? "(activée)" : "(en pause)"}
+                        {s.interval_seconds != null && ` — toutes les ${s.interval_seconds}s`}
                       </li>
                     ))}
                   </ul>
                 )}
-                <h3>Événements</h3>
-                {activityEvents.length === 0 ? (
-                  <p className="empty-state">
-                    {activityTasks.length > 0 ? "Aucun événement pour cette tâche." : "Sélectionnez une tâche."}
-                  </p>
+                <h3>Runs récents</h3>
+                {taskRuns.length === 0 ? (
+                  <p className="empty-state">Aucun run.</p>
                 ) : (
-                  <ul className="activity-events-list" role="list">
-                    {activityEvents.map((e, i) => (
-                      <li key={i}>
-                        <strong>{eventTypeLabel(e.event_type)}</strong> @ {e.at}
-                        {e.payload != null && (
-                          <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
-                        )}
+                  <ul className="calendar-runs-list" role="list">
+                    {taskRuns.slice(0, 20).map((r) => (
+                      <li
+                        key={r.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setCalendarSelectedTaskId(r.task_id)}
+                        onKeyDown={(e) => e.key === "Enter" && setCalendarSelectedTaskId(r.task_id)}
+                        className={calendarSelectedTaskId === r.task_id ? "selected" : ""}
+                      >
+                        <span className="run-id">{r.id.slice(-8)}</span> {r.status} —{" "}
+                        {r.planned_for ? new Date(r.planned_for).toLocaleString() : ""} (task: {r.task_id.slice(-8)})
                       </li>
                     ))}
                   </ul>
+                )}
+                {calendarSelectedTaskId && (
+                  <div
+                    className="calendar-detail-modal-overlay"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="calendar-detail-title"
+                    onClick={() => setCalendarSelectedTaskId(null)}
+                  >
+                    <div
+                      className="calendar-detail-modal"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="calendar-detail-modal-header">
+                        <h2 id="calendar-detail-title">Détail tâche {calendarSelectedTaskId.slice(-8)}</h2>
+                        <button
+                          type="button"
+                          className="calendar-detail-modal-close"
+                          onClick={() => setCalendarSelectedTaskId(null)}
+                          aria-label="Fermer"
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <div className="calendar-detail-modal-body">
+                        {calendarTaskDetail ? (
+                          <>
+                            <p><strong>Statut:</strong> {calendarTaskDetail.status}</p>
+                            {calendarTaskDetail.progress && calendarTaskDetail.progress.length > 0 && (
+                              <div className="task-detail-progress">
+                                <strong>Progression / résultat:</strong>
+                                <p className="task-detail-progress-hint">
+                                  Les lignes « État » sont des étapes intermédiaires ; le pourcentage indique l’avancement.
+                                </p>
+                                <ul>
+                                  {calendarTaskDetail.progress.map((p, i) => (
+                                    <li key={i}>
+                                      {p.progress_pct != null && p.progress_pct > 0
+                                        ? `${p.progress_pct}% — `
+                                        : "État: "}
+                                      {p.message ?? ""}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <p className="loading-inline">Chargement…</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 )}
               </>
             )}

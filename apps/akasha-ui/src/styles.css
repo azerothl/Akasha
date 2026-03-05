@@ -206,6 +206,25 @@ body {
   font-style: italic;
 }
 
+.chat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  margin: 0 1rem 0.5rem;
+  background: #18181b;
+  border-radius: 8px;
+  border: 1px solid #27272a;
+}
+
+.task-chip {
+  font-size: 0.8125rem;
+  color: #a1a1aa;
+  padding: 0.25rem 0.5rem;
+  background: #27272a;
+  border-radius: 6px;
+}
+
 .input-area {
   display: flex;
   gap: 0.5rem;
@@ -515,6 +534,46 @@ body {
   margin-top: 0;
 }
 
+/* Task Center: list always visible, events detail scrollable */
+.activity-panel-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.activity-tasks-block {
+  flex-shrink: 0;
+}
+
+.activity-tasks-block .activity-task-list {
+  max-height: 14rem;
+}
+
+.activity-events-block {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.activity-events-block h3 {
+  flex-shrink: 0;
+}
+
+.activity-events-block .activity-events-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: 1px solid #27272a;
+  border-radius: 6px;
+  padding: 0.5rem;
+  margin-top: 0.25rem;
+}
+
 .activity-task-list {
   list-style: none;
   padding: 0;
@@ -572,4 +631,102 @@ body {
   font-size: 0.75rem;
   overflow-x: auto;
   white-space: pre-wrap;
+}
+
+/* Calendar task detail modal (popup) */
+.calendar-detail-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+
+.calendar-detail-modal {
+  background: #18181b;
+  border: 1px solid #3f3f46;
+  border-radius: 12px;
+  max-width: 36rem;
+  width: 100%;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+}
+
+.calendar-detail-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid #27272a;
+  flex-shrink: 0;
+}
+
+.calendar-detail-modal-header h2 {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: #e4e4e7;
+}
+
+.calendar-detail-modal-close {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  background: #27272a;
+  color: #a1a1aa;
+  border-radius: 6px;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.calendar-detail-modal-close:hover {
+  background: #3f3f46;
+  color: #e4e4e7;
+}
+
+.calendar-detail-modal-body {
+  padding: 1.25rem;
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1;
+  min-height: 0;
+}
+
+.calendar-detail-modal-body .task-detail-progress {
+  margin-top: 1rem;
+}
+
+.calendar-detail-modal-body .task-detail-progress-hint {
+  font-size: 0.8125rem;
+  color: #71717a;
+  margin: 0 0 0.5rem;
+}
+
+.calendar-detail-modal-body .task-detail-progress ul {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+}
+
+.calendar-detail-modal-body .task-detail-progress li {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #27272a;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.calendar-detail-modal-body .task-detail-progress li:last-child {
+  border-bottom: none;
 }

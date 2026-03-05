@@ -269,3 +269,57 @@ Critères:
 - Taux de succès/erreur par modèle
 - Nombre de fallbacks déclenchés
 - Dashboard utilisateur avec visualisation des métriques
+
+---
+
+FR-025 — Chat non bloquant
+Description:
+> Une tâche longue ne doit jamais bloquer l'interface de discussion. L'utilisateur peut continuer à converser pendant l'exécution des sous-agents.
+
+Critères d'acceptation:
+- Le main agent envoie un ACK immédiat + task_id
+- La conversation reste fluide pendant l'exécution
+- Aucun "freeze" UI lors de tâches longues
+
+---
+
+FR-026 — Onglet « Tâches » (Task Center)
+Description:
+> L'utilisateur dispose d'un onglet dédié affichant en temps réel l'état, la progression, les logs et les résultats des tâches.
+
+Critères d'acceptation:
+- Liste des tâches (en cours, terminées, échouées)
+- Détails par tâche: timeline d'événements + % + sous-tâches + erreurs
+- Actions: pause / reprendre / annuler / relancer (selon permissions)
+
+---
+
+FR-027 — Suivi temps réel (streaming)
+Description:
+> Les mises à jour d'état/progression d'une tâche doivent être visibles en temps réel dans l'onglet Tâches.
+
+Critères d'acceptation:
+- progress_update reçu en streaming
+- UI mise à jour sans refresh
+
+---
+
+FR-028 — Tâches récurrentes
+Description:
+> L'utilisateur peut planifier une tâche récurrente (cron-like) et suivre l'état en temps réel de chaque occurrence (run).
+
+Critères d'acceptation:
+- Création/édition/suppression d'une récurrence
+- Chaque exécution génère un run_id et un task_id
+- Historique des runs consultable
+
+---
+
+FR-029 — Onglet « Calendrier »
+Description:
+> Un onglet calendrier affiche toutes les récurrences et occurrences planifiées. L'utilisateur peut modifier ou supprimer les tâches planifiées.
+
+Critères d'acceptation:
+- Vue mois/semaine/jour
+- Click -> détails récurrence
+- Edit / delete / pause / exceptions (skip une occurrence)

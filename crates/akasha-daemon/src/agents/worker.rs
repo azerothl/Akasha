@@ -17,6 +17,13 @@ pub async fn run_worker(bus: EventBus, store_path: std::path::PathBuf, task_id: 
     if store.update_status(task_id, TaskStatus::Running).is_err() {
         return;
     }
+    let _ = bus.send(
+        EventEnvelope::new(
+            EventType::TaskStarted,
+            Some(serde_json::json!({ "task_id": task_id.to_string() })),
+        )
+        .with_correlation(task_id),
+    );
 
     let correlation_id = task_id;
 

@@ -12,6 +12,12 @@ Il orchestre dynamiquement une flotte d’agents spécialisés, interagit via de
 - Plugin-first extensibility
 - Zero secret exposure
 
+## Principes UX
+- **Chat** = interaction continue avec le main agent (toujours réactif).
+- **Tâches** = objets de workflow qui vivent en parallèle et publient des événements.
+- **Onglet « Tâches »** = suivi live (timeline, logs, étapes, erreurs, relance).
+- **Onglet « Calendrier »** = vue des récurrences (edit/suppress, exceptions, historique).
+
 ## Extension Stratégique
 Akasha peut fonctionner :
 - En mode standalone local

@@ -92,6 +92,13 @@ Voir aussi les documents listés en [§1](#1-vision-et-périmètre) (scope, FR, 
 |----------|-------------|
 | [33_agents_tools_orchestrator_skills.md](33_agents_tools_orchestrator_skills.md) | **Feuille de route** : outils machine, politique, conteneur, skills chargeables, orchestrateur seul point d’entrée, sous-agents, onglets UI Agents/Actions. État d’implémentation. |
 
+### UI et Scheduler
+
+| Document | Description |
+|----------|-------------|
+| [36_ui_architecture.md](36_ui_architecture.md) | Architecture UI : onglets Chat, Tâches (Task Center), Calendrier ; transport temps réel (WS/SSE, NATS). |
+| [37_scheduler_design.md](37_scheduler_design.md) | Scheduler : standalone (tick, persistance, dedup), cluster (leader, workers, event log). |
+
 ---
 
 ## 4. Guide utilisateur et onboarding
@@ -151,4 +158,6 @@ Ces fichiers sont conservés pour référence mais pointent vers la version à j
 | Premier lancement | [onboarding.md](onboarding.md) |
 | Architecture LLM (router, fallback) | [32_llm_router_architecture.md](32_llm_router_architecture.md) |
 | Agents, outils, skills, orchestrateur | [33_agents_tools_orchestrator_skills.md](33_agents_tools_orchestrator_skills.md) |
+| Task Center, suivi des tâches en direct | [36_ui_architecture.md](36_ui_architecture.md) |
+| Calendrier, récurrences, scheduler | [37_scheduler_design.md](37_scheduler_design.md) |
 | Diagnostic / redémarrage | [runbooks/](runbooks/) |

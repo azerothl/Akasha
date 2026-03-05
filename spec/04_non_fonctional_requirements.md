@@ -20,3 +20,12 @@ NFR-006 — Extensibilité par Plugin
 
 NFR-007 — Sécurité
 > Les mécanismes d’auto-restart ne doivent jamais exposer les secrets.
+
+NFR-008 — Temps réel UI
+> Les updates de progression doivent arriver en < 1s en local, < 2s en cluster LAN.
+
+NFR-009 — Robustesse scheduler
+> Une tâche récurrente ne doit pas être perdue après crash/restart (persistence).
+
+NFR-010 — Exactly-once (at-least-once + dédup)
+> Les occurrences récurrentes doivent être déclenchées avec déduplication (run_id).

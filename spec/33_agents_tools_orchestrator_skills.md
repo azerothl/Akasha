@@ -105,6 +105,17 @@ Aujourd’hui, `POST /api/message` appelle `main_agent.handle_message(..., false
 - Toujours passer par l’orchestrateur (`forward_to_orchestrator: true`) pour les demandes « conversation / travail agent ».
 - Faire en sorte que l’orchestrateur décide (classification) et délègue à un agent spécialisé (dont un agent « conversation / LLM ») au lieu de faire un chemin court direct LLM dans l’API.
 
+### 5.3 Comportement conversationnel — tâches longues
+
+Quand une tâche est longue :
+
+- **Main agent** envoie un **ACK immédiat** : « Ok, je lance ça » (ou variante) + `task_id`.
+- Il propose le lien : « Tu peux suivre l’avancement dans l’onglet Tâches. »
+- L’utilisateur peut **continuer à parler** ; le main agent gère la discussion sans attendre la fin de la tâche.
+- **Mises à jour** : option « chips » dans le chat (ex. Task #1234 running 35 %) ; flux complet dans le Task Center (onglet Tâches).
+
+Voir [36_ui_architecture.md](36_ui_architecture.md) pour les onglets Chat et Tâches.
+
 ---
 
 ## 6. Sous-agents et décomposition

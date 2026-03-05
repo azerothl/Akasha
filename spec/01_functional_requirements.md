@@ -13,3 +13,19 @@ FR-010 — Fallback modèle local
 FR-011 — Mode dégradé sécurisé
 FR-012 — Journal append-only
 FR-013 — Système réputation plugins
+FR-014 — Sandbox des plugins
+FR-015 — Système de réputation plugins
+FR-016 — Diagnostic et self-healing
+FR-017 — CLI de diagnostic
+FR-018 — Onboarding guidé
+FR-019 — Permissions granulaires
+FR-020 — Prompt injection protection
+FR-021 — LLM Router avec routing par type de tâche
+FR-022 — Support multi-provider LLM
+FR-023 — Fallback automatique inter-modèles
+FR-024 — Monitoring et métriques des modèles
+FR-025 — Chat non bloquant
+FR-026 — Onglet « Tâches » (Task Center)
+FR-027 — Suivi temps réel (streaming)
+FR-028 — Tâches récurrentes
+FR-029 — Onglet « Calendrier »

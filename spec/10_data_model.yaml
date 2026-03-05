@@ -7,10 +7,41 @@ entities:
   task:
     id: uuid
     parent_task_id: uuid | null
-    status: pending | running | completed | failed
+    status: pending | queued | running | completed | failed | paused | cancelled | waiting_user_input
     assigned_agent: string
     created_at: datetime
     updated_at: datetime
+
+  schedule:
+    id: uuid
+    name: string
+    description: string
+    enabled: boolean
+    timezone: string
+    rrule: string          # iCal RRULE ou cron
+    start_at: datetime
+    end_at: datetime | null
+    channel_context: object | null
+    created_at: datetime
+    updated_at: datetime
+
+  schedule_exception:
+    id: uuid
+    schedule_id: uuid
+    type: skip | override
+    date: date
+    override_payload: object | null
+
+  # Récurrence → schedule ; occurrence planifiée → task_run (planned_for) ; exécution effective → task (task_id). Calendrier = schedule + task_run à venir.
+  task_run:
+    id: uuid
+    schedule_id: uuid | null
+    task_id: uuid
+    status: queued | running | completed | failed | skipped | cancelled
+    planned_for: datetime
+    started_at: datetime | null
+    ended_at: datetime | null
+    dedup_key: string      # pour éviter double-run après restart
 
   memory_entry:
     id: uuid
