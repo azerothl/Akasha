@@ -1,9 +1,7 @@
 //! Scheduler service: tick, create task_runs with dedup, push to orchestrator (spec 37_scheduler_design)
 
 use akasha_core::{EventEnvelope, EventType};
-use akasha_store::{
-    Schedule, ScheduleStore, Task, TaskRun, TaskRunStatus, TaskStore, TaskStatus,
-};
+use akasha_store::{Schedule, ScheduleStore, Task, TaskRun, TaskRunStatus, TaskStatus, TaskStore};
 use chrono::{Duration, Utc};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -39,9 +37,12 @@ async fn tick(
     let task_store = TaskStore::open(store_path)?;
     let now = Utc::now();
 
-    let _ = bus.send(
-        EventEnvelope::new(EventType::SchedulerTick, Some(serde_json::json!({ "at": now.to_rfc3339() }))),
-    );
+    sync_terminal_task_run_statuses(&schedule_store, &task_store, now)?;
+
+    let _ = bus.send(EventEnvelope::new(
+        EventType::SchedulerTick,
+        Some(serde_json::json!({ "at": now.to_rfc3339() })),
+    ));
 
     let enabled = schedule_store.list_enabled_schedules()?;
     for schedule in enabled {
@@ -103,12 +104,33 @@ async fn tick(
         if orch_tx.send((task_id, message, session_id)).await.is_err() {
             tracing::warn!(task_id = %task_id, "Scheduler: orchestrator channel closed");
         }
-        schedule_store.update_task_run_status(
-            run_id,
-            TaskRunStatus::Running,
-            Some(now),
-            None,
-        )?;
+        schedule_store.update_task_run_status(run_id, TaskRunStatus::Running, Some(now), None)?;
+    }
+    Ok(())
+}
+
+fn sync_terminal_task_run_statuses(
+    schedule_store: &ScheduleStore,
+    task_store: &TaskStore,
+    now: chrono::DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let task_runs = schedule_store.list_task_runs(None, 1_000)?;
+    for run in task_runs {
+        if run.status != TaskRunStatus::Running {
+            continue;
+        }
+        let Some(task) = task_store.get(run.task_id)? else {
+            continue;
+        };
+        let terminal_status = match task.status {
+            TaskStatus::Completed => Some(TaskRunStatus::Completed),
+            TaskStatus::Failed => Some(TaskRunStatus::Failed),
+            TaskStatus::Cancelled => Some(TaskRunStatus::Cancelled),
+            _ => None,
+        };
+        if let Some(status) = terminal_status {
+            schedule_store.update_task_run_status(run.id, status, None, Some(now))?;
+        }
     }
     Ok(())
 }
@@ -121,7 +143,11 @@ fn next_planned_for(
     interval_secs: u64,
 ) -> anyhow::Result<Option<chrono::DateTime<Utc>>> {
     let runs = schedule_store.list_task_runs(Some(schedule.id), 1)?;
-    let base = runs.into_iter().next().map(|r| r.planned_for).unwrap_or(schedule.start_at);
+    let base = runs
+        .into_iter()
+        .next()
+        .map(|r| r.planned_for)
+        .unwrap_or(schedule.start_at);
     if let Some(end_at) = schedule.end_at {
         if end_at < now {
             return Ok(None);
@@ -136,4 +162,53 @@ fn next_planned_for(
         candidate = candidate + delta;
     }
     Ok(Some(candidate))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn sync_terminal_task_run_statuses_marks_completed_runs() {
+        let db = NamedTempFile::new().expect("temp db");
+        let schedule_store = ScheduleStore::open(db.path()).expect("open schedule store");
+        let task_store = TaskStore::open(db.path()).expect("open task store");
+        let now = Utc::now();
+
+        let task_id = Uuid::new_v4();
+        task_store
+            .insert(&Task {
+                id: task_id,
+                parent_task_id: None,
+                status: TaskStatus::Completed,
+                assigned_agent: "conversation".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .expect("insert task");
+
+        let run_id = Uuid::new_v4();
+        schedule_store
+            .insert_task_run(&TaskRun {
+                id: run_id,
+                schedule_id: Some(Uuid::new_v4()),
+                task_id,
+                status: TaskRunStatus::Running,
+                planned_for: now,
+                started_at: Some(now),
+                ended_at: None,
+                dedup_key: "dedup".to_string(),
+            })
+            .expect("insert task run");
+
+        sync_terminal_task_run_statuses(&schedule_store, &task_store, now).expect("sync task runs");
+
+        let updated_run = schedule_store
+            .get_task_run(run_id)
+            .expect("get task run")
+            .expect("task run exists");
+        assert_eq!(updated_run.status, TaskRunStatus::Completed);
+        assert_eq!(updated_run.ended_at, Some(now));
+    }
 }
