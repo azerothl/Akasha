@@ -99,5 +99,16 @@ Le backend d’embeddings utilise **fastembed** (ONNX Runtime). Sous Windows, le
 3. **Recompiler ONNX Runtime (avancé)**  
    Compiler ONNX Runtime depuis les sources avec la **même version de Visual Studio** que celle utilisée par `rustc` (MSVC), puis faire pointer le crate `ort` vers ce build. Documenté sur [onnxruntime](https://onnxruntime.ai/docs/build/inferencing.html) ; réservé aux utilisateurs à l’aise avec CMake et la toolchain C++ Windows.
 
-4. **Backend alternatif (évolutif)**  
-   À terme, un backend d’embeddings en **pur Rust** (ex. inference ONNX via `tract-onnx`, ou autre framework sans binaires C++) pourrait être ajouté pour éviter toute dépendance à ONNX Runtime sur Windows.
+4. **Backend tract (pur Rust, Windows)**  
+   Le crate `akasha-embeddings` propose un second backend via la feature **`tract`** : inférence ONNX en pur Rust avec `tract-onnx`, sans binaires C++. Compatible Windows. Le daemon peut être compilé avec ce backend à la place de fastembed :  
+   ```bash
+   cargo build -p akasha-daemon --no-default-features --features embedded,embeddings-tract
+   ```  
+   Le modèle (all-MiniLM-L6-v2) et le tokenizer sont téléchargés automatiquement au premier usage dans le cache (data_dir/embedding_model). Les embeddings restent en 384 dimensions, compatibles avec la base mémoire existante.
+
+5. **Daemon sans mémoire long terme**  
+   Si aucune des options ci-dessus n’est possible :  
+   ```bash
+   cargo build -p akasha-daemon --no-default-features --features embedded
+   ```  
+   Mémoire court terme et RAG actifs ; recherche par similarité et promotion long terme désactivées.

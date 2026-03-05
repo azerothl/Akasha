@@ -1,5 +1,5 @@
 //! Long-term memory actor: runs on a dedicated thread (SQLite and embedder are !Send), services search/insert via channel.
-//! When feature "embeddings" is disabled (e.g. to avoid ONNX linker errors on Windows), no-op client and start_memory_actor returns Err.
+//! When neither "embeddings" nor "embeddings-tract" is enabled, no-op client and start_memory_actor returns Err.
 
 use std::path::Path;
 use std::thread;
@@ -17,13 +17,13 @@ pub enum MemoryResponse {
 /// Client handle: Send + Sync, can be used from async code.
 #[derive(Clone)]
 pub struct LongTermMemoryClient {
-    #[cfg(feature = "embeddings")]
+    #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
     tx: std::sync::mpsc::Sender<(MemoryRequest, tokio::sync::oneshot::Sender<MemoryResponse>)>,
 }
 
 impl LongTermMemoryClient {
     pub fn search(&self, query_text: String, _top_k: usize) -> Vec<String> {
-        #[cfg(feature = "embeddings")]
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
             if self.tx.send((MemoryRequest::Search { query_text, top_k: _top_k }, resp_tx)).is_err() {
@@ -34,7 +34,7 @@ impl LongTermMemoryClient {
                 _ => Vec::new(),
             }
         }
-        #[cfg(not(feature = "embeddings"))]
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
         {
             let _ = query_text;
             Vec::new()
@@ -42,7 +42,7 @@ impl LongTermMemoryClient {
     }
 
     pub fn promote(&self, content: String, source: String) -> Result<(), String> {
-        #[cfg(feature = "embeddings")]
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
             if self.tx.send((MemoryRequest::Promote { content, source }, resp_tx)).is_err() {
@@ -53,7 +53,7 @@ impl LongTermMemoryClient {
                 _ => Err("no response".into()),
             }
         }
-        #[cfg(not(feature = "embeddings"))]
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
         {
             let _ = (content, source);
             Ok(())
@@ -62,12 +62,12 @@ impl LongTermMemoryClient {
 }
 
 /// Start the long-term memory actor on a dedicated thread. Returns a client and the join handle.
-/// When feature "embeddings" is off (e.g. Windows linker issues with ONNX), returns Err so daemon runs without long-term memory.
+/// When neither "embeddings" nor "embeddings-tract" is enabled, returns Err.
 pub fn start_memory_actor(
     _memory_db_path: &Path,
     _embedding_cache_dir: &Path,
 ) -> anyhow::Result<(LongTermMemoryClient, thread::JoinHandle<()>)> {
-    #[cfg(feature = "embeddings")]
+    #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
     {
         use std::sync::mpsc;
         use tokio::sync::oneshot;
@@ -121,8 +121,8 @@ pub fn start_memory_actor(
         Ok((LongTermMemoryClient { tx }, handle))
     }
 
-    #[cfg(not(feature = "embeddings"))]
+    #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
     {
-        anyhow::bail!("long-term memory disabled (build without embeddings feature); use default features to enable")
+        anyhow::bail!("long-term memory disabled; enable feature 'embeddings' or 'embeddings-tract' (Windows)")
     }
 }

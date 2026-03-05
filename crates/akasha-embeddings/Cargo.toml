@@ -4,7 +4,19 @@ version = "0.1.0"
 edition = "2021"
 description = "Local text embeddings for Akasha (in-process, no third-party service)"
 
+[features]
+default = ["fastembed"]
+# fastembed: ONNX Runtime (Linux/macOS; on Windows may cause linker errors)
+fastembed = ["dep:fastembed"]
+# tract: pure Rust ONNX inference via tract-onnx (works on Windows, no C++ deps)
+tract = ["dep:tract-onnx", "dep:tokenizers", "dep:ndarray", "dep:reqwest"]
+
 [dependencies]
-fastembed = "5"
 thiserror = "1.0"
 anyhow = "1.0"
+
+fastembed = { version = "5", optional = true }
+tract-onnx = { version = "0.22", optional = true }
+tokenizers = { version = "0.19", optional = true }
+ndarray = { version = "0.16", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
