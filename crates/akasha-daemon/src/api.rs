@@ -149,6 +149,14 @@ fn available_tools_instruction() -> String {
         .join(" ; ")
 }
 
+/// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
+const APP_CONTEXT: &str = "[Contexte Akasha] Tu es l'assistant intégré à Akasha. Akasha est l'application dans laquelle tu tournes actuellement. \
+Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : \
+commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Doc/Activité), \
+commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, etc.). \
+La documentation complète est disponible dans l'onglet Doc de l'interface. \
+Réponds en français sauf si l'utilisateur utilise une autre langue.\n\n";
+
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
 fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
@@ -382,7 +390,9 @@ pub(crate) async fn run_message_via_llm(
 
     // Build prompt with short-term + long-term memory (spec 06)
     let mut context_prefix = String::new();
-    // Long-term: retrieve top-k relevant memories by embedding similarity
+    context_prefix.push_str(APP_CONTEXT);
+
+    // Long-term: retrieve top-k relevant memories by embedding similarity (current message + optional user-identity for first message)
     if let Some(ref client) = long_term_client {
         let msg = message.clone();
         let client = client.clone();
@@ -411,6 +421,27 @@ pub(crate) async fn run_message_via_llm(
         )
         .await;
         let turns = st.get_turns(&session_id).await;
+        // First message of session: search long-term for user identity (name, etc.) so the agent can greet the user.
+        let is_first_message = turns.is_empty();
+        if is_first_message {
+            if let Some(ref client) = long_term_client {
+                let query = "nom prénom utilisateur user name identité".to_string();
+                let client = client.clone();
+                let user_memories = tokio::task::spawn_blocking(move || client.search(query, 3))
+                    .await
+                    .ok()
+                    .unwrap_or_default();
+                if !user_memories.is_empty() {
+                    context_prefix.push_str("[Contexte utilisateur — utilise pour saluer si pertinent]\n");
+                    for content in &user_memories {
+                        context_prefix.push_str("- ");
+                        context_prefix.push_str(&content.replace('\n', " "));
+                        context_prefix.push_str("\n");
+                    }
+                    context_prefix.push_str("Si c'est le premier échange de la session, salue l'utilisateur avec son prénom si tu le connais.\n\n");
+                }
+            }
+        }
         let short_ctx = ShortTermStore::turns_to_context(&turns);
         if !short_ctx.is_empty() {
             context_prefix.push_str(short_ctx.trim_end());
@@ -588,8 +619,49 @@ pub(crate) async fn run_message_via_llm(
 
     // Persist this exchange in short-term memory (spec 06)
     if let Some(ref st) = short_term {
-        st.append(&session_id, "user", message).await;
+        st.append(&session_id, "user", message.clone()).await;
         st.append(&session_id, "assistant", reply_text.clone()).await;
+    }
+
+    // Extract and promote personal facts to long-term memory (spec 06: nom, préférences, décisions).
+    if let Some(ref long_term) = long_term_client {
+        let msg = message;
+        let reply = reply_text.clone();
+        let client = long_term.clone();
+        let router = llm_router.clone();
+        tokio::spawn(async move {
+            let extract_prompt = format!(
+                "À partir de cet échange, extrais les faits personnels importants à retenir (nom ou prénom de l'utilisateur, préférences, décisions explicites). \
+Un fait par ligne, préfixe par FACT: (ex: FACT: L'utilisateur s'appelle Jean.). \
+Si rien à retenir, réponds uniquement: NOTHING.\n\nUtilisateur: {}\n\nAssistant: {}",
+                msg.trim(),
+                reply.trim()
+            );
+            let req = CompletionRequest {
+                prompt: extract_prompt,
+                max_tokens: Some(256),
+                temperature: Some(0.1),
+            };
+            if let Ok(Ok(resp)) = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                router.complete(&req),
+            ).await {
+                let mut facts = Vec::new();
+                for line in resp.text.lines() {
+                    let line = line.trim();
+                    if let Some(fact) = line.strip_prefix("FACT:") {
+                        let fact = fact.trim().to_string();
+                        if !fact.is_empty() {
+                            facts.push(fact);
+                        }
+                    }
+                }
+                for fact in facts {
+                    let client = client.clone();
+                    let _ = tokio::task::spawn_blocking(move || client.promote(fact, "user_fact".to_string())).await;
+                }
+            }
+        });
     }
 
     let _ = bus.send(
@@ -831,10 +903,24 @@ pub async fn handle_api(
             .as_ref()
             .and_then(|v| v.get("message").and_then(|v| v.as_str().map(String::from)))
             .unwrap_or_default();
-        let session_id = body_json
-            .as_ref()
-            .and_then(|v| v.get("session_id").and_then(|v| v.as_str().map(String::from)))
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // Session: "new_session" => new UUID; else provided session_id; else "day-YYYY-MM-DD" (same day = same context).
+        let session_id = {
+            let new_session = body_json.as_ref().and_then(|v| v.get("new_session")).and_then(|v| v.as_bool()).unwrap_or(false);
+            let provided = body_json.as_ref().and_then(|v| v.get("session_id").and_then(|v| v.as_str().map(String::from)));
+            if new_session {
+                uuid::Uuid::new_v4().to_string()
+            } else if let Some(s) = provided {
+                if s.trim().is_empty() {
+                    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                    format!("day-{}", today)
+                } else {
+                    s
+                }
+            } else {
+                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                format!("day-{}", today)
+            }
+        };
         if let Err(e) = akasha_core::check_prompt_injection(&message) {
             let body = serde_json::json!({ "error": "prompt_injection_rejected", "detail": e.to_string() });
             return json_response("400 Bad Request", &body.to_string());

@@ -117,6 +117,8 @@ struct App {
     activity_detail_scroll: usize,
     /// Session id for short-term memory (returned by daemon, send back on next message).
     session_id: Option<String>,
+    /// If true, next message will request a new session (context reset).
+    force_new_session: bool,
     /// Current theme (cycle with F2).
     theme: ThemeName,
     port: u16,
@@ -144,6 +146,7 @@ impl App {
             activity_user_message: None,
             activity_detail_scroll: 0,
             session_id: None,
+            force_new_session: false,
             theme: ThemeName::default(),
             port,
             tx,
@@ -354,16 +357,20 @@ impl App {
     }
 
     /// Returns (reply_text, session_id) on success. Caller should store session_id for next message (memory).
-    fn send_message_blocking(message: String, port: u16, session_id: Option<&str>) -> Result<(String, String), String> {
+    /// If new_session is true, asks the daemon for a new session (context reset); session_id is ignored.
+    fn send_message_blocking(message: String, port: u16, session_id: Option<&str>, new_session: bool) -> Result<(String, String), String> {
         let base = daemon_base_url(port);
         let url = format!("{}/api/message", base);
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| e.to_string())?;
-        let body = match session_id {
-            Some(s) => serde_json::json!({ "message": message, "session_id": s }),
-            None => serde_json::json!({ "message": message }),
+        let body = if new_session {
+            serde_json::json!({ "message": message, "new_session": true })
+        } else if let Some(s) = session_id {
+            serde_json::json!({ "message": message, "session_id": s })
+        } else {
+            serde_json::json!({ "message": message })
         };
         let resp = client
             .post(&url)
@@ -447,6 +454,7 @@ impl App {
             "help" | "?" => {
                 return r#"Commandes disponibles:
   /help, /?         — cette aide
+  /newsession       — repartir de zéro (nouvelle session, contexte court terme effacé)
   /status           — état du daemon
   /doctor           — diagnostic (daemon, ollama, vault, spec)
   /advice           — conseil diagnostic (RAG + modèle)
@@ -1290,33 +1298,46 @@ fn run_app(
                         app.input.clear();
                         if msg.starts_with('/') {
                             let cmd_lower = msg.trim().to_lowercase();
-                            let long_running = cmd_lower.starts_with("/advice") || cmd_lower.starts_with("/doctor");
-                            if long_running {
-                                app.loading = true;
-                                let port = app.port;
-                                let tx = app.tx.clone();
-                                let cmd = msg.clone();
-                                thread::spawn(move || {
-                                    let result = App::run_slash_command_blocking(port, &cmd);
-                                    let _ = tx.send(Ok((result, String::new())));
-                                });
-                            } else {
-                                let result = App::run_slash_command_blocking(app.port, &msg);
+                            if cmd_lower == "/newsession" || cmd_lower == "/nouvelle session" {
+                                app.session_id = None;
+                                app.force_new_session = true;
                                 app.messages.push(ChatMessage {
                                     role: "Système".into(),
-                                    text: result,
+                                    text: "Nouvelle session demandée. Votre prochain message repartira de zéro (contexte court terme effacé).".into(),
                                     is_error: false,
                                 });
                                 app.scroll = usize::MAX;
-                                let _ = terminal.draw(|f| ui(f, app));
+                            } else {
+                                let long_running = cmd_lower.starts_with("/advice") || cmd_lower.starts_with("/doctor");
+                                if long_running {
+                                    app.loading = true;
+                                    let port = app.port;
+                                    let tx = app.tx.clone();
+                                    let cmd = msg.clone();
+                                    thread::spawn(move || {
+                                        let result = App::run_slash_command_blocking(port, &cmd);
+                                        let _ = tx.send(Ok((result, String::new())));
+                                    });
+                                } else {
+                                    let result = App::run_slash_command_blocking(app.port, &msg);
+                                    app.messages.push(ChatMessage {
+                                        role: "Système".into(),
+                                        text: result,
+                                        is_error: false,
+                                    });
+                                    app.scroll = usize::MAX;
+                                    let _ = terminal.draw(|f| ui(f, app));
+                                }
                             }
                         } else if !app.loading && app.daemon_ok {
                             app.loading = true;
                             let port = app.port;
                             let tx = app.tx.clone();
                             let session_id = app.session_id.clone();
+                            let new_session = app.force_new_session;
+                            app.force_new_session = false;
                             thread::spawn(move || {
-                                let _ = tx.send(App::send_message_blocking(msg, port, session_id.as_deref()));
+                                let _ = tx.send(App::send_message_blocking(msg, port, session_id.as_deref(), new_session));
                             });
                         }
                     }
