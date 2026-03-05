@@ -3,7 +3,7 @@
 use akasha_core::{EventEnvelope, EventType};
 use akasha_vault::Vault;
 use akasha_llm::CompletionRequest;
-use akasha_store::{TaskStatus, TaskStore};
+use akasha_store::{Schedule, ScheduleStore, TaskStatus, TaskStore};
 use crate::agents::EventBus;
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
@@ -1100,6 +1100,50 @@ pub async fn handle_api(
         }
     }
 
+    // Schedules and task_runs (FR-028, FR-029)
+    if method == "GET" && path == "/api/schedules" {
+        return get_schedules_list(store_path).await;
+    }
+    if method == "GET" && path.starts_with("/api/schedules/") {
+        let rest = path.trim_start_matches("/api/schedules/");
+        let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+        if let Some(&id_str) = parts.first() {
+            if let Ok(id) = Uuid::parse_str(id_str) {
+                return get_schedule_by_id(store_path, id).await;
+            }
+        }
+    }
+    if method == "POST" && path == "/api/schedules" {
+        return post_schedule(store_path, body).await;
+    }
+    if method == "PUT" && path.starts_with("/api/schedules/") {
+        let rest = path.trim_start_matches("/api/schedules/");
+        if let Some(id_str) = rest.split('/').next() {
+            if let Ok(id) = Uuid::parse_str(id_str) {
+                return put_schedule(store_path, id, body).await;
+            }
+        }
+    }
+    if method == "DELETE" && path.starts_with("/api/schedules/") {
+        let rest = path.trim_start_matches("/api/schedules/");
+        if let Some(id_str) = rest.split('/').next() {
+            if let Ok(id) = Uuid::parse_str(id_str) {
+                return delete_schedule(store_path, id).await;
+            }
+        }
+    }
+    if method == "GET" && path == "/api/task_runs" {
+        return get_task_runs_list(store_path, path).await;
+    }
+    if method == "GET" && path.starts_with("/api/task_runs/") {
+        let rest = path.trim_start_matches("/api/task_runs/");
+        if let Some(id_str) = rest.split('/').next() {
+            if let Ok(id) = Uuid::parse_str(id_str) {
+                return get_task_run_by_id(store_path, id).await;
+            }
+        }
+    }
+
     // Phase 5: Plugins
     if method == "GET" && path == "/api/plugins" {
         let list = plugin_registry.list();
@@ -1496,6 +1540,223 @@ async fn get_task_status(store_path: &Path, progress: &ProgressCache, id: Uuid) 
         "created_at": task.created_at.to_rfc3339(),
         "updated_at": task.updated_at.to_rfc3339(),
         "progress": progress_list
+    });
+    json_response("200 OK", &body.to_string())
+}
+
+async fn get_schedules_list(store_path: &Path) -> String {
+    let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let list = match store.list_schedules() {
+        Ok(l) => l,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let arr: Vec<serde_json::Value> = list
+        .into_iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id.to_string(),
+                "name": s.name,
+                "description": s.description,
+                "enabled": s.enabled,
+                "timezone": s.timezone,
+                "rrule": s.rrule,
+                "interval_seconds": s.interval_seconds,
+                "start_at": s.start_at.to_rfc3339(),
+                "end_at": s.end_at.map(|t| t.to_rfc3339()),
+                "created_at": s.created_at.to_rfc3339(),
+                "updated_at": s.updated_at.to_rfc3339()
+            })
+        })
+        .collect();
+    let body = serde_json::json!({ "schedules": arr });
+    json_response("200 OK", &body.to_string())
+}
+
+async fn get_schedule_by_id(store_path: &Path, id: Uuid) -> String {
+    let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let s = match store.get_schedule(id) {
+        Ok(Some(x)) => x,
+        Ok(None) => return json_response("404 Not Found", r#"{"error":"schedule_not_found"}"#),
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let body = serde_json::json!({
+        "id": s.id.to_string(),
+        "name": s.name,
+        "description": s.description,
+        "enabled": s.enabled,
+        "timezone": s.timezone,
+        "rrule": s.rrule,
+        "interval_seconds": s.interval_seconds,
+        "start_at": s.start_at.to_rfc3339(),
+        "end_at": s.end_at.map(|t| t.to_rfc3339()),
+        "channel_context": s.channel_context,
+        "created_at": s.created_at.to_rfc3339(),
+        "updated_at": s.updated_at.to_rfc3339()
+    });
+    json_response("200 OK", &body.to_string())
+}
+
+async fn post_schedule(store_path: &Path, body: Option<Vec<u8>>) -> String {
+    let json: serde_json::Value = match body.as_deref().and_then(|b| serde_json::from_slice(b).ok()) {
+        Some(j) => j,
+        None => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
+    };
+    let now = chrono::Utc::now();
+    let id = Uuid::new_v4();
+    let schedule = Schedule {
+        id,
+        name: json.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        description: json.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        enabled: json.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+        timezone: json.get("timezone").and_then(|v| v.as_str()).unwrap_or("UTC").to_string(),
+        rrule: json.get("rrule").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        interval_seconds: json.get("interval_seconds").and_then(|v| v.as_u64()),
+        start_at: json
+            .get("start_at")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.with_timezone(&chrono::Utc))
+            .unwrap_or(now),
+        end_at: json
+            .get("end_at")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.with_timezone(&chrono::Utc)),
+        channel_context: json.get("channel_context").and_then(|v| v.as_str()).map(String::from),
+        created_at: now,
+        updated_at: now,
+    };
+    let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    if store.insert_schedule(&schedule).is_err() {
+        return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
+    }
+    let body = serde_json::json!({
+        "id": id.to_string(),
+        "name": schedule.name,
+        "description": schedule.description,
+        "enabled": schedule.enabled,
+        "timezone": schedule.timezone,
+        "rrule": schedule.rrule,
+        "interval_seconds": schedule.interval_seconds,
+        "start_at": schedule.start_at.to_rfc3339(),
+        "end_at": schedule.end_at.map(|t| t.to_rfc3339()),
+        "created_at": schedule.created_at.to_rfc3339(),
+        "updated_at": schedule.updated_at.to_rfc3339()
+    });
+    json_response("201 Created", &body.to_string())
+}
+
+async fn put_schedule(store_path: &Path, id: Uuid, body: Option<Vec<u8>>) -> String {
+    let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let mut s = match store.get_schedule(id) {
+        Ok(Some(x)) => x,
+        Ok(None) => return json_response("404 Not Found", r#"{"error":"schedule_not_found"}"#),
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let json: serde_json::Value = match body.as_deref().and_then(|b| serde_json::from_slice(b).ok()) {
+        Some(j) => j,
+        None => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
+    };
+    if let Some(v) = json.get("name").and_then(|v| v.as_str()) {
+        s.name = v.to_string();
+    }
+    if let Some(v) = json.get("description").and_then(|v| v.as_str()) {
+        s.description = v.to_string();
+    }
+    if let Some(v) = json.get("enabled").and_then(|v| v.as_bool()) {
+        s.enabled = v;
+    }
+    if let Some(v) = json.get("timezone").and_then(|v| v.as_str()) {
+        s.timezone = v.to_string();
+    }
+    if let Some(v) = json.get("rrule").and_then(|v| v.as_str()) {
+        s.rrule = v.to_string();
+    }
+    if let Some(v) = json.get("interval_seconds").and_then(|v| v.as_u64()) {
+        s.interval_seconds = Some(v);
+    }
+    if store.update_schedule(&s).is_err() {
+        return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
+    }
+    json_response("200 OK", &serde_json::json!({ "id": id.to_string() }).to_string())
+}
+
+async fn delete_schedule(store_path: &Path, id: Uuid) -> String {
+    let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    if store.delete_schedule(id).is_err() {
+        return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
+    }
+    json_response("200 OK", &serde_json::json!({ "deleted": id.to_string() }).to_string())
+}
+
+async fn get_task_runs_list(store_path: &Path, path: &str) -> String {
+    let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let schedule_id = path
+        .split('?')
+        .nth(1)
+        .and_then(|q| q.split('&').find(|p| p.starts_with("schedule_id=")))
+        .and_then(|p| p.strip_prefix("schedule_id="))
+        .and_then(|s| Uuid::parse_str(s).ok());
+    let list = match store.list_task_runs(schedule_id, 100) {
+        Ok(l) => l,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let arr: Vec<serde_json::Value> = list
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id.to_string(),
+                "schedule_id": r.schedule_id.map(|u| u.to_string()),
+                "task_id": r.task_id.to_string(),
+                "status": r.status.as_str(),
+                "planned_for": r.planned_for.to_rfc3339(),
+                "started_at": r.started_at.map(|t| t.to_rfc3339()),
+                "ended_at": r.ended_at.map(|t| t.to_rfc3339()),
+                "dedup_key": r.dedup_key
+            })
+        })
+        .collect();
+    let body = serde_json::json!({ "task_runs": arr });
+    json_response("200 OK", &body.to_string())
+}
+
+async fn get_task_run_by_id(store_path: &Path, id: Uuid) -> String {
+    let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let r = match store.get_task_run(id) {
+        Ok(Some(x)) => x,
+        Ok(None) => return json_response("404 Not Found", r#"{"error":"task_run_not_found"}"#),
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let body = serde_json::json!({
+        "id": r.id.to_string(),
+        "schedule_id": r.schedule_id.map(|u| u.to_string()),
+        "task_id": r.task_id.to_string(),
+        "status": r.status.as_str(),
+        "planned_for": r.planned_for.to_rfc3339(),
+        "started_at": r.started_at.map(|t| t.to_rfc3339()),
+        "ended_at": r.ended_at.map(|t| t.to_rfc3339()),
+        "dedup_key": r.dedup_key
     });
     json_response("200 OK", &body.to_string())
 }

@@ -10,18 +10,39 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
     Pending,
+    Queued,
     Running,
     Completed,
     Failed,
+    Paused,
+    Cancelled,
+    WaitingUserInput,
 }
 
 impl TaskStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Queued => "queued",
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Paused => "paused",
+            Self::Cancelled => "cancelled",
+            Self::WaitingUserInput => "waiting_user_input",
+        }
+    }
+
+    fn from_str(s: &str) -> Self {
+        match s {
+            "queued" => Self::Queued,
+            "running" => Self::Running,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "paused" => Self::Paused,
+            "cancelled" => Self::Cancelled,
+            "waiting_user_input" => Self::WaitingUserInput,
+            _ => Self::Pending,
         }
     }
 }
@@ -99,13 +120,7 @@ impl TaskStore {
         )?;
         let rows = stmt.query_map([], |row| {
             let status_str: String = row.get(2)?;
-            let status = match status_str.as_str() {
-                "pending" => TaskStatus::Pending,
-                "running" => TaskStatus::Running,
-                "completed" => TaskStatus::Completed,
-                "failed" => TaskStatus::Failed,
-                _ => TaskStatus::Pending,
-            };
+            let status = TaskStatus::from_str(&status_str);
             Ok(Task {
                 id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or(Uuid::nil()),
                 parent_task_id: row.get::<_, Option<String>>(1)?.and_then(|s| Uuid::parse_str(&s).ok()),
@@ -126,7 +141,12 @@ impl TaskStore {
         self.get_all().map(|tasks| {
             tasks
                 .into_iter()
-                .filter(|t| matches!(t.status, TaskStatus::Pending | TaskStatus::Running))
+                .filter(|t| {
+                    matches!(
+                        t.status,
+                        TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running
+                    )
+                })
                 .collect()
         })
     }
@@ -138,13 +158,7 @@ impl TaskStore {
         let mut rows = stmt.query([id.to_string()])?;
         if let Some(row) = rows.next()? {
             let status_str: String = row.get(2)?;
-            let status = match status_str.as_str() {
-                "pending" => TaskStatus::Pending,
-                "running" => TaskStatus::Running,
-                "completed" => TaskStatus::Completed,
-                "failed" => TaskStatus::Failed,
-                _ => TaskStatus::Pending,
-            };
+            let status = TaskStatus::from_str(&status_str);
             return Ok(Some(Task {
                 id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or(Uuid::nil()),
                 parent_task_id: row.get::<_, Option<String>>(1)?.and_then(|s| Uuid::parse_str(&s).ok()),
@@ -167,13 +181,7 @@ impl TaskStore {
         )?;
         let rows = stmt.query_map([parent_id.to_string()], |row| {
             let status_str: String = row.get(2)?;
-            let status = match status_str.as_str() {
-                "pending" => TaskStatus::Pending,
-                "running" => TaskStatus::Running,
-                "completed" => TaskStatus::Completed,
-                "failed" => TaskStatus::Failed,
-                _ => TaskStatus::Pending,
-            };
+            let status = TaskStatus::from_str(&status_str);
             Ok(Task {
                 id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or(Uuid::nil()),
                 parent_task_id: Some(parent_id),

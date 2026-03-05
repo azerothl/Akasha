@@ -206,6 +206,25 @@ body {
   font-style: italic;
 }
 
+.chat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  margin: 0 1rem 0.5rem;
+  background: #18181b;
+  border-radius: 8px;
+  border: 1px solid #27272a;
+}
+
+.task-chip {
+  font-size: 0.8125rem;
+  color: #a1a1aa;
+  padding: 0.25rem 0.5rem;
+  background: #27272a;
+  border-radius: 6px;
+}
+
 .input-area {
   display: flex;
   gap: 0.5rem;

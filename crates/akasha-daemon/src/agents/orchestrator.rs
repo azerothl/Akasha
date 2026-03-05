@@ -142,6 +142,13 @@ async fn process_root_task(
     }
     let store = TaskStore::open(store_path)?;
     store.update_status(root_task_id, TaskStatus::Running)?;
+    let _ = bus.send(
+        EventEnvelope::new(
+            EventType::TaskStarted,
+            Some(serde_json::json!({ "task_id": root_task_id.to_string() })),
+        )
+        .with_correlation(root_task_id),
+    );
 
     // Progress immédiat pour que la TUI affiche un retour avant le premier appel LLM (chargement modèle possible).
     let _ = bus.send(

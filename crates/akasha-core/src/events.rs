@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Event types from the specification
+/// Event types from the specification (spec 09_event_model.yaml)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventType {
@@ -25,6 +25,24 @@ pub enum EventType {
     DegradedModeEnabled,
     PluginReputationUpdated,
     ImmutableLogEntryAdded,
+    // Task lifecycle (live UX)
+    TaskStarted,
+    TaskProgressUpdated,
+    TaskStepCompleted,
+    TaskWaitingUserInput,
+    TaskPaused,
+    TaskResumed,
+    TaskCancelRequested,
+    TaskCancelled,
+    // Runs / recurrence
+    TaskRunCreated,
+    TaskRunScheduled,
+    TaskRunSkipped,
+    SchedulerTick,
+    // Schedules
+    ScheduleCreated,
+    ScheduleUpdated,
+    ScheduleDeleted,
 }
 
 impl EventType {
@@ -46,6 +64,21 @@ impl EventType {
             Self::DegradedModeEnabled => "degraded_mode_enabled",
             Self::PluginReputationUpdated => "plugin_reputation_updated",
             Self::ImmutableLogEntryAdded => "immutable_log_entry_added",
+            Self::TaskStarted => "task_started",
+            Self::TaskProgressUpdated => "task_progress_updated",
+            Self::TaskStepCompleted => "task_step_completed",
+            Self::TaskWaitingUserInput => "task_waiting_user_input",
+            Self::TaskPaused => "task_paused",
+            Self::TaskResumed => "task_resumed",
+            Self::TaskCancelRequested => "task_cancel_requested",
+            Self::TaskCancelled => "task_cancelled",
+            Self::TaskRunCreated => "task_run_created",
+            Self::TaskRunScheduled => "task_run_scheduled",
+            Self::TaskRunSkipped => "task_run_skipped",
+            Self::SchedulerTick => "scheduler_tick",
+            Self::ScheduleCreated => "schedule_created",
+            Self::ScheduleUpdated => "schedule_updated",
+            Self::ScheduleDeleted => "schedule_deleted",
         }
     }
 
@@ -67,6 +100,21 @@ impl EventType {
             "degraded_mode_enabled" => Some(Self::DegradedModeEnabled),
             "plugin_reputation_updated" => Some(Self::PluginReputationUpdated),
             "immutable_log_entry_added" => Some(Self::ImmutableLogEntryAdded),
+            "task_started" => Some(Self::TaskStarted),
+            "task_progress_updated" => Some(Self::TaskProgressUpdated),
+            "task_step_completed" => Some(Self::TaskStepCompleted),
+            "task_waiting_user_input" => Some(Self::TaskWaitingUserInput),
+            "task_paused" => Some(Self::TaskPaused),
+            "task_resumed" => Some(Self::TaskResumed),
+            "task_cancel_requested" => Some(Self::TaskCancelRequested),
+            "task_cancelled" => Some(Self::TaskCancelled),
+            "task_run_created" => Some(Self::TaskRunCreated),
+            "task_run_scheduled" => Some(Self::TaskRunScheduled),
+            "task_run_skipped" => Some(Self::TaskRunSkipped),
+            "scheduler_tick" => Some(Self::SchedulerTick),
+            "schedule_created" => Some(Self::ScheduleCreated),
+            "schedule_updated" => Some(Self::ScheduleUpdated),
+            "schedule_deleted" => Some(Self::ScheduleDeleted),
             _ => None,
         }
     }
