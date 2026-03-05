@@ -304,6 +304,7 @@ async fn compact_short_term_if_needed(
         prompt: summary_prompt,
         max_tokens: Some(512),
         temperature: Some(0.2),
+        preferred_task_type: None,
     };
     match llm_router.complete(&req).await {
         Ok(resp) => {
@@ -476,6 +477,7 @@ pub(crate) async fn run_message_via_llm(
             prompt: format!("{}{}", current_prompt, tool_instruction),
             max_tokens: Some(max_tokens),
             temperature: Some(0.7),
+            preferred_task_type: None,
         };
         // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
         // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
@@ -684,6 +686,7 @@ N'écris que des lignes FACT: ou NOTHING si aucun fait. Pas d'autre texte.\n\nUt
                 prompt: extract_prompt,
                 max_tokens: Some(256),
                 temperature: Some(0.1),
+                preferred_task_type: Some("system".to_string()),
             };
             if let Ok(Ok(resp)) = tokio::time::timeout(
                 std::time::Duration::from_secs(30),
@@ -1113,6 +1116,7 @@ pub async fn handle_api(
             prompt,
             max_tokens: body.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32),
             temperature: body.get("temperature").and_then(|v| v.as_f64()).map(|f| f as f32),
+            preferred_task_type: None,
         };
         match llm_router.complete(&req).await {
             Ok(resp) => {
@@ -1416,6 +1420,7 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
             prompt,
             max_tokens: Some(512),
             temperature: Some(0.3),
+            preferred_task_type: None,
         };
         let advice_timeout = std::time::Duration::from_secs(120);
         match tokio::time::timeout(advice_timeout, llm_router.complete(&req)).await {

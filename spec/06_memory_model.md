@@ -112,3 +112,22 @@ Le backend d’embeddings utilise **fastembed** (ONNX Runtime). Sous Windows, le
    cargo build -p akasha-daemon --no-default-features --features embedded
    ```  
    Mémoire court terme et RAG actifs ; recherche par similarité et promotion long terme désactivées.
+
+---
+
+## Modèle système Akasha (route « system »)
+
+Pour éviter que l’**extraction de faits** (et la décomposition de tâches) dépende du modèle choisi par le routeur pour la conversation (souvent un modèle « chat » peu adapté au format structuré `FACT:`), une **catégorie dédiée** est utilisée : **`system`**.
+
+### Comportement
+
+- **Extraction mémoire** : l’appel LLM qui extrait les faits personnels (nom, préférences, etc.) utilise **toujours** la route `system` (via `CompletionRequest.preferred_task_type = "system"`), et non la classification du prompt.
+- **Décomposition** : l’orchestrateur utilise aussi la route `system` pour décomposer la requête utilisateur en sous-tâches (conversation / code / search).
+- **Configuration par défaut** : la route `system` pointe vers **akasha_embedded** (modèle intégré type Baguettotron), avec repli sur **akasha_core** si besoin. Ainsi, extraction et décomposition fonctionnent de manière prévisible, y compris sans Ollama ni provider externe.
+- **Personnalisation** : l’utilisateur peut définir une autre route pour `system` (Ollama, OpenAI, etc.) via la config du routeur ou la TUI (catégorie « system »), par exemple pour utiliser un petit modèle local plus performant pour les tâches structurées.
+
+### Intérêt
+
+- **Routage fiable** : les tâches « internes » (extraction, décomposition) ne sont plus envoyées au modèle de conversation par défaut, qui peut mal respecter le format `FACT:`.
+- **Mise et récupération en mémoire** : l’extraction des faits est déléguée à un modèle dédié (local, Ollama ou provider externe selon la config), ce qui améliore le remplissage de la mémoire long terme.
+- **Cohérence** : un seul type de tâche « system » pour tout ce qui relève du fonctionnement interne d’Akasha (router, ajout/extraction mémoire), configurable de façon centralisée.

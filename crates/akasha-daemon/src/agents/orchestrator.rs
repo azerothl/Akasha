@@ -28,6 +28,7 @@ async fn decompose_request(
         prompt,
         max_tokens: Some(512),
         temperature: Some(0.2),
+        preferred_task_type: Some("system".to_string()),
     };
     let decompose_timeout = std::time::Duration::from_secs(120);
     match tokio::time::timeout(decompose_timeout, llm_router.complete(&request)).await {

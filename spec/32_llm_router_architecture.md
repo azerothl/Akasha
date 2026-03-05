@@ -67,6 +67,8 @@ Analyse la requête utilisateur et détermine le type de tâche.
 }
 ```
 
+**Routage forcé (`preferred_task_type`)** : la `CompletionRequest` peut contenir un champ optionnel `preferred_task_type` (ex. `"system"`). Lorsqu’il est renseigné, le routeur **ne classe pas** le prompt et utilise directement cette catégorie. Utilisé pour l’extraction de faits mémoire et la décomposition (orchestrateur), qui doivent toujours passer par la route dédiée « system » (voir spec 06 — mémoire long terme, modèle système Akasha).
+
 ### 2. Routing Config Manager
 
 Gère la configuration du routing pour chaque type de tâche.
@@ -77,24 +79,24 @@ Gère la configuration du routing pour chaque type de tâche.
 - Override dynamique si nécessaire
 - Cache des configurations actives
 
-**Schéma de configuration:**
+**Schéma de configuration (extrait pour un type de tâche).** Fichier complet : [llm_router.example.yaml](llm_router.example.yaml). Référence détaillée : [35_configuration_reference.md](35_configuration_reference.md).
+
 ```yaml
-task_type: code_generation
-primary:
-  provider: anthropic
-  model: claude-3.5-sonnet-20241022
-  config:
-    max_tokens: 4096
-    temperature: 0.7
-fallback_chain:
-  - provider: openai
-    model: gpt-4-turbo
-  - provider: ollama
-    model: deepseek-coder:33b
-constraints:
-  max_cost_per_request: 0.05  # USD
-  max_latency: 30  # secondes
-  require_streaming: true
+# Racine : global, providers, model_options, task_types
+task_types:
+  code_generation:
+    primary:
+      provider: anthropic
+      model: claude-3.5-sonnet-20241022
+      config: {}   # optionnel, objet libre (max_tokens, temperature, etc.)
+    fallback:      # liste d'entrées (clé réelle = fallback, pas fallback_chain)
+      - provider: openai
+        model: gpt-4-turbo
+      - provider: ollama
+        model: deepseek-coder:33b
+    constraints:   # optionnel
+      max_cost_per_request: 0.05   # nombre (USD)
+      max_latency_secs: 30         # entier (secondes)
 ```
 
 ### 3. Provider Manager
@@ -326,11 +328,11 @@ Akasha UI propose un panneau de configuration visuel:
 ```yaml
 version: "1.0"
 
-# Configuration globale
+# Configuration globale (clés réelles : default_timeout_secs, default_max_retries)
 global:
   enable_metrics: true
   enable_fallback: true
-  default_timeout: 30
+  default_timeout_secs: 300
   default_max_retries: 2
 
 # Configuration par type de tâche
@@ -348,8 +350,8 @@ task_types:
       - provider: ollama
         model: deepseek-coder:33b
     constraints:
-      max_cost: 0.05
-      max_latency: 30
+      max_cost_per_request: 0.05
+      max_latency_secs: 30
 
   creative_writing:
     primary:

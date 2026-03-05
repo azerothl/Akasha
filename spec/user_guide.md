@@ -148,6 +148,8 @@ Les variables définies via `akasha config env set` sont enregistrées dans `dat
 
 ### Fichiers de configuration
 
+Pour les **formats, types de données et exemples** de chaque fichier, voir [35_configuration_reference.md](35_configuration_reference.md).
+
 - **llm_router.yaml** : recherché dans l'ordre : data_dir, puis racine du projet. Définit les providers (Ollama, OpenAI, OpenRouter) et les modèles par type de tâche. **Section `providers` vide** : ce n'est pas la cause de timeouts. Le daemon enregistre quand même Ollama (URL = `OLLAMA_HOST` ou découverte auto ou `http://localhost:11434`) et le modèle embarqué. Pour éviter les timeouts : vérifier qu'Ollama tourne si vous l'utilisez ; pour le modèle local, le premier appel peut être long (téléchargement + chargement) — précharge au démarrage ou augmenter `default_timeout_secs` / `AKASHA_LLM_TIMEOUT_SECS`. Ajouter une section `providers` avec au moins `ollama.base_url` rend la config explicite (voir `spec/llm_router.example.yaml`).
 - **connectors.env** : variables d'activation des connecteurs (chargé par `akasha start`).
 - **akasha.env** : variables persistantes (chargé après connectors.env).

@@ -102,10 +102,12 @@ Voir aussi les documents listés en [§1](#1-vision-et-périmètre) (scope, FR, 
 | [onboarding.md](onboarding.md) | Premier lancement pas à pas : build, init, vault, Ollama, daemon, doctor, canaux, evals. |
 | [distribution.md](distribution.md) | **Distribution** : télécharger les binaires précompilés (sans compiler), créer une release, option Tauri desktop. |
 
+**Référence complète** (formats, types de données, cas d’usage) : [35_configuration_reference.md](35_configuration_reference.md).
+
 Exemples de configuration :
 
-- [llm_router.example.yaml](llm_router.example.yaml) — Routeur LLM (providers, task_types)
-- [tools_policy.example.yaml](tools_policy.example.yaml) — Politique des outils machine (chemins, commandes autorisées)
+- [llm_router.example.yaml](llm_router.example.yaml) — Routeur LLM (global, providers, task_types, system)
+- [tools_policy.example.yaml](tools_policy.example.yaml) — Politique des outils machine (chemins, commandes, timeout)
 - [cluster.example.yaml](cluster.example.yaml) — Configuration cluster (NATS, mTLS) si présent
 
 ---
@@ -145,6 +147,7 @@ Ces fichiers sont conservés pour référence mais pointent vers la version à j
 |--------|----------|
 | Comprendre le projet en une page | [00_vision.md](00_vision.md) |
 | Utiliser Akasha (commandes, config, UI) | [user_guide.md](user_guide.md) |
+| Formats et types des fichiers de config | [35_configuration_reference.md](35_configuration_reference.md) |
 | Premier lancement | [onboarding.md](onboarding.md) |
 | Architecture LLM (router, fallback) | [32_llm_router_architecture.md](32_llm_router_architecture.md) |
 | Agents, outils, skills, orchestrateur | [33_agents_tools_orchestrator_skills.md](33_agents_tools_orchestrator_skills.md) |

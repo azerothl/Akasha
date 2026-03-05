@@ -136,11 +136,21 @@ impl LLMRouter {
         Arc::new(move |name: &str| providers.get(name).cloned())
     }
 
-    /// Complete using classifier to get task type, then routing config and fallback.
+    /// Complete using preferred_task_type if set, else classifier on prompt; then routing config and fallback.
     pub async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, String> {
-        let (task_type, _confidence) = classify_task_type(&request.prompt);
-        let task_type_str = task_type.as_str();
-        info!(task_type = task_type_str, "Router classify");
+        let task_type_str = request
+            .preferred_task_type
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                let (task_type, _) = classify_task_type(&request.prompt);
+                task_type.as_str()
+            });
+        if request.preferred_task_type.is_some() {
+            info!(task_type = task_type_str, "Router using preferred task type (system/memory)");
+        } else {
+            info!(task_type = task_type_str, "Router classify");
+        }
 
         let task_config = self
             .config
@@ -176,14 +186,20 @@ impl LLMRouter {
             .await
     }
 
-    /// Complete with streaming: chunks are sent to `chunk_tx`. Uses primary provider's complete_stream if it supports streaming, else falls back to complete() and sends full text once. Idle timeout is the caller's responsibility.
+    /// Complete with streaming: chunks are sent to `chunk_tx`. Uses preferred_task_type if set, else classifier.
     pub async fn complete_stream(
         &self,
         request: &CompletionRequest,
         chunk_tx: std::sync::mpsc::Sender<String>,
     ) -> Result<CompletionResponse, String> {
-        let (task_type, _) = classify_task_type(&request.prompt);
-        let task_type_str = task_type.as_str();
+        let task_type_str = request
+            .preferred_task_type
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                let (task_type, _) = classify_task_type(&request.prompt);
+                task_type.as_str()
+            });
         info!(task_type = task_type_str, "Router classify (stream)");
 
         let task_config = self
