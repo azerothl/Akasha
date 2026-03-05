@@ -760,53 +760,57 @@ function App() {
               </p>
             )}
             {!tasksLoading && (
-              <>
-                <h3>Liste des tâches</h3>
-                {tasksList.length === 0 ? (
-                  <p className="empty-state">Aucune tâche. Envoyez un message dans le Chat.</p>
-                ) : (
-                  <ul className="activity-task-list" role="list">
-                    {tasksList.map((t, i) => (
-                      <li
-                        key={t.id}
-                        className={i === tasksSelected ? "selected" : ""}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => setTasksSelected(i)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            setTasksSelected(i);
-                          }
-                          if (e.key === "ArrowDown" && i < tasksList.length - 1)
-                            setTasksSelected(i + 1);
-                          if (e.key === "ArrowUp" && i > 0) setTasksSelected(i - 1);
-                        }}
-                      >
-                        <span className="task-id">{t.id.slice(-8)}</span>{" "}
-                        <span className="task-status">{t.status}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <h3>Événements</h3>
-                {tasksEvents.length === 0 ? (
-                  <p className="empty-state">
-                    {tasksList.length > 0 ? "Aucun événement pour cette tâche." : "Sélectionnez une tâche."}
-                  </p>
-                ) : (
-                  <ul className="activity-events-list" role="list">
-                    {tasksEvents.map((e, i) => (
-                      <li key={i}>
-                        <strong>{eventTypeLabel(e.event_type)}</strong> @ {e.at}
-                        {e.payload != null && (
-                          <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </>
+              <div className="activity-panel-body">
+                <div className="activity-tasks-block">
+                  <h3>Liste des tâches</h3>
+                  {tasksList.length === 0 ? (
+                    <p className="empty-state">Aucune tâche. Envoyez un message dans le Chat.</p>
+                  ) : (
+                    <ul className="activity-task-list" role="list">
+                      {tasksList.map((t, i) => (
+                        <li
+                          key={t.id}
+                          className={i === tasksSelected ? "selected" : ""}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => setTasksSelected(i)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              setTasksSelected(i);
+                            }
+                            if (e.key === "ArrowDown" && i < tasksList.length - 1)
+                              setTasksSelected(i + 1);
+                            if (e.key === "ArrowUp" && i > 0) setTasksSelected(i - 1);
+                          }}
+                        >
+                          <span className="task-id">{t.id.slice(-8)}</span>{" "}
+                          <span className="task-status">{t.status}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div className="activity-events-block">
+                  <h3>Événements</h3>
+                  {tasksEvents.length === 0 ? (
+                    <p className="empty-state">
+                      {tasksList.length > 0 ? "Aucun événement pour cette tâche." : "Sélectionnez une tâche."}
+                    </p>
+                  ) : (
+                    <ul className="activity-events-list" role="list">
+                      {tasksEvents.map((e, i) => (
+                        <li key={i}>
+                          <strong>{eventTypeLabel(e.event_type)}</strong> @ {e.at}
+                          {e.payload != null && (
+                            <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
             )}
           </section>
         )}
