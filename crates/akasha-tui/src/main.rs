@@ -146,6 +146,12 @@ struct App {
     port: u16,
     /// (content, session_id, pending_task_id). When pending_task_id is Some, reply will follow later.
     tx: mpsc::Sender<Result<(String, String, Option<String>), String>>,
+    /// Scroll offset for input area when text wraps to more lines than visible (Ctrl+↑/↓).
+    input_scroll: usize,
+    /// Set by ui(): inner height of input area for clamping input_scroll.
+    input_inner_height: usize,
+    /// Set by ui(): wrapped line count of input text.
+    input_wrapped_lines: usize,
 }
 
 impl App {
@@ -180,6 +186,34 @@ impl App {
             theme: ThemeName::default(),
             port,
             tx,
+            input_scroll: 0,
+            input_inner_height: 3,
+            input_wrapped_lines: 0,
+        }
+    }
+
+    /// Number of wrapped lines for a string given line width (chars).
+    fn wrapped_line_count(text: &str, width: usize) -> usize {
+        if width == 0 {
+            return 1;
+        }
+        text.lines()
+            .map(|line| {
+                let w = unicode_width::UnicodeWidthStr::width(line).max(1);
+                (w + width - 1) / width
+            })
+            .sum::<usize>()
+            .max(1)
+    }
+
+    fn input_scroll_up(&mut self) {
+        self.input_scroll = self.input_scroll.saturating_sub(1);
+    }
+
+    fn input_scroll_down(&mut self) {
+        let max = self.input_wrapped_lines.saturating_sub(self.input_inner_height);
+        if self.input_scroll < max {
+            self.input_scroll += 1;
         }
     }
 
@@ -1134,7 +1168,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(0),
-            Constraint::Length(3),
+            Constraint::Min(4),
         ])
         .split(f.area());
 
@@ -1232,7 +1266,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                     Style::default().fg(theme.palette().warning).add_modifier(Modifier::ITALIC),
                 )));
             }
-            let content_height = chunks[1].height;
+            let content_height = chunks[1].height.saturating_sub(2); // inner height (block borders)
             app.last_content_lines = lines.len();
             app.last_content_area_height = content_height;
             // Wrap-aware row count so scrolling shows full content (Paragraph wraps to area width).
@@ -1320,7 +1354,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 Some(content_width as u16),
             );
             let lines = marked.to_flat_lines();
-            let content_height = chunks[1].height;
+            let content_height = chunks[1].height.saturating_sub(2);
             app.last_content_lines = lines.len();
             app.last_content_area_height = content_height;
             app.last_content_rendered_rows = 0;
@@ -1482,7 +1516,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                     lines.push(Line::from(format!("  {}  {}  {}  task {}", short_id, status, planned, short_task)));
                 }
             }
-            let content_height = chunks[1].height;
+            let content_height = chunks[1].height.saturating_sub(2);
             app.last_content_lines = lines.len();
             app.last_content_area_height = content_height;
             app.last_content_rendered_rows = 0;
@@ -1543,7 +1577,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             if app.memory_long_term.is_empty() && app.memory_long_term_available {
                 lines.push(Line::from(Span::styled("  (aucune entrée)", Style::default().fg(theme.palette().muted))));
             }
-            let content_height = chunks[1].height;
+            let content_height = chunks[1].height.saturating_sub(2);
             app.last_content_lines = lines.len();
             app.last_content_area_height = content_height;
             app.last_content_rendered_rows = 0;
@@ -1563,22 +1597,31 @@ fn ui(f: &mut Frame, app: &mut App) {
     }
 
     let input_label = match app.mode {
-        Mode::Chat => " Message (/ pour commandes: /help, /status, /config… Entrée = envoyer, Tab = onglet, Échap ou Ctrl+Q = quitter) ",
-        Mode::Router => " Tab = onglet, R = rafraîchir métriques, Échap ou Ctrl+Q = quitter ",
-        Mode::Doc => " Tab = onglet, ↑↓ PgUp/PgDn = défilement, R = actualiser doc, Échap ou Ctrl+Q = quitter ",
-        Mode::Tasks => " Tab = onglet, ↑↓ = tâche, PgUp/PgDn = défiler détails, R = actualiser, Échap ou Ctrl+Q = quitter ",
-        Mode::Calendar => " Tab = onglet, R = actualiser récurrences/runs, Échap ou Ctrl+Q = quitter ",
-        Mode::Memory => " Tab = onglet, R = actualiser, ↑↓ PgUp/PgDn = défilement, Échap ou Ctrl+Q = quitter ",
+        Mode::Chat => " Message (Entrée = envoyer, Maj+Entrée = nouvelle ligne, ↑↓ = chat, Ctrl+↑↓ = défilement saisie, Tab = onglet) ",
+        Mode::Router => " Tab = onglet, R = rafraîchir, Échap = quitter ",
+        Mode::Doc => " Tab = onglet, ↑↓ PgUp/PgDn = défilement, R = actualiser, Échap = quitter ",
+        Mode::Tasks => " Tab = onglet, ↑↓ = tâche, PgUp/PgDn = détails, R = actualiser, Échap = quitter ",
+        Mode::Calendar => " Tab = onglet, R = actualiser, Échap = quitter ",
+        Mode::Memory => " Tab = onglet, ↑↓ PgUp/PgDn = défilement, R = actualiser, Échap = quitter ",
     };
-    let input = Paragraph::new(app.input.as_str())
+    let input_area_width = chunks[2].width.saturating_sub(2) as usize;
+    app.input_inner_height = chunks[2].height.saturating_sub(2) as usize;
+    app.input_wrapped_lines = App::wrapped_line_count(&app.input, input_area_width.max(1));
+    let max_input_scroll = app.input_wrapped_lines.saturating_sub(app.input_inner_height);
+    if app.input_scroll > max_input_scroll {
+        app.input_scroll = max_input_scroll;
+    }
+    let input_para = Paragraph::new(app.input.as_str())
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(input_label)
                 .border_style(theme.block_border()),
         )
+        .wrap(Wrap { trim: true })
+        .scroll((app.input_scroll as u16, 0))
         .style(Style::default().fg(theme.palette().fg));
-    f.render_widget(input, chunks[2]);
+    f.render_widget(input_para, chunks[2]);
 }
 
 fn run_app(
@@ -1656,17 +1699,21 @@ fn run_app(
                             app.fetch_memory();
                         }
                     }
-                    (Mode::Chat, KeyCode::Enter, _) => {
-                        let msg = app.input.trim().to_string();
-                        if msg.is_empty() {
-                            continue;
-                        }
-                        app.messages.push(ChatMessage {
-                            role: "Vous".into(),
-                            text: msg.clone(),
-                            is_error: false,
-                        });
-                        app.input.clear();
+                    (Mode::Chat, KeyCode::Enter, mods) => {
+                        if mods.contains(KeyModifiers::SHIFT) {
+                            app.input.push('\n');
+                        } else {
+                            let msg = app.input.trim_end().to_string();
+                            if msg.is_empty() {
+                                continue;
+                            }
+                            app.messages.push(ChatMessage {
+                                role: "Vous".into(),
+                                text: msg.clone(),
+                                is_error: false,
+                            });
+                            app.input.clear();
+                            app.input_scroll = 0;
                         if msg.starts_with('/') {
                             let cmd_lower = msg.trim().to_lowercase();
                             if cmd_lower == "/newsession" || cmd_lower == "/nouvelle session" {
@@ -1711,6 +1758,13 @@ fn run_app(
                                 App::send_message_non_blocking(tx, msg, port, session_id, new_session);
                             });
                         }
+                        }
+                    }
+                    (Mode::Chat, KeyCode::Up, KeyModifiers::CONTROL) => {
+                        app.input_scroll_up();
+                    }
+                    (Mode::Chat, KeyCode::Down, KeyModifiers::CONTROL) => {
+                        app.input_scroll_down();
                     }
                     (Mode::Chat, KeyCode::Up, _) => {
                         app.scroll_up();
