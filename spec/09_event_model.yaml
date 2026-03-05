@@ -15,3 +15,21 @@ events:
   - id: degraded_mode_enabled
   - id: plugin_reputation_updated
   - id: immutable_log_entry_added
+  # Cycle de vie tâche (live UX)
+  - id: task_started
+  - id: task_progress_updated
+  - id: task_step_completed
+  - id: task_waiting_user_input
+  - id: task_paused
+  - id: task_resumed
+  - id: task_cancel_requested
+  - id: task_cancelled
+  # Runs / récurrence
+  - id: task_run_created
+  - id: task_run_scheduled
+  - id: task_run_skipped
+  - id: scheduler_tick
+  # Schedules
+  - id: schedule_created
+  - id: schedule_updated
+  - id: schedule_deleted
