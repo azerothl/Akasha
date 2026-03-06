@@ -38,29 +38,43 @@ pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, per
             }
             continue;
         }
-        // When a task completes, fails or is cancelled, always add a final progress entry with 100%
-        // so the UI shows a clear "Terminé" / "Échec" / "Annulé" line.
+        // When a task completes, fails or is cancelled, add a final progress entry with 100%
+        // so the UI shows a clear completion line. For TaskCompleted, keep the sub-agent's reply
+        // when present (last progress message) so the chat interface shows the actual response.
         if ev.event_type == EventType::TaskCompleted
             || ev.event_type == EventType::TaskFailed
             || ev.event_type == EventType::TaskCancelled
         {
             let task_id = payload.get("task_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
             let Some(task_id) = task_id else { continue };
-            let message = if ev.event_type == EventType::TaskCompleted {
-                "Terminé."
+            let message: String = if ev.event_type == EventType::TaskCompleted {
+                let mut g = progress.write().await;
+                let q = g.entry(task_id).or_insert_with(VecDeque::new);
+                let last_msg = q.back().map(|e| e.message.trim()).unwrap_or("");
+                let generic = ["Terminé.", "Done.", "Échec.", "Annulé."];
+                if !last_msg.is_empty() && !generic.contains(&last_msg) {
+                    last_msg.to_string()
+                } else {
+                    "Terminé.".to_string()
+                }
             } else if ev.event_type == EventType::TaskFailed {
-                "Échec."
+                "Échec.".to_string()
             } else {
-                "Annulé."
+                "Annulé.".to_string()
             };
             if let Some(ref tx) = persistence_tx {
-                let _ = tx.send((task_id, 100, message.to_string()));
+                let _ = tx.send((task_id, 100, message.clone()));
             }
             let mut g = progress.write().await;
             let q = g.entry(task_id).or_insert_with(VecDeque::new);
+            // Replace last entry if it was already 100% with same-ish content to avoid duplicate; else push.
+            let replace_last = q.back().map(|e| e.progress_pct == 100).unwrap_or(false);
+            if replace_last {
+                q.pop_back();
+            }
             q.push_back(ProgressEntry {
                 progress_pct: 100,
-                message: message.to_string(),
+                message,
             });
             while q.len() > MAX_PROGRESS_PER_TASK {
                 q.pop_front();

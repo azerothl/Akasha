@@ -343,7 +343,7 @@ async fn process_root_task(
         return Ok(());
     }
 
-    // Multiple subtasks: create child tasks and delegate each (future: aggregate when all done).
+    // Multiple subtasks: create child tasks and delegate each; aggregator below collects all replies into one response.
     for (agent_type, sub_message) in &steps {
         let child_id = Uuid::new_v4();
         let task = Task {
@@ -369,9 +369,10 @@ async fn process_root_task(
         // Delegate to conversation worker for all types (code/search handled as conversation for now). Pass same session_id for memory.
         let _ = conversation_tx.send((child_id, sub_message.clone(), session_id.clone())).await;
     }
-    // Aggregator: when all children are done, collect their progress messages, push aggregated ProgressUpdate for root, then complete root.
+    // Aggregator: when all children are done, collect every child's reply (in order), aggregate into one response for the user.
     let store_path_buf = store_path.to_path_buf();
     let steps_count = steps.len();
+    const GENERIC_MESSAGES: &[&str] = &["Done.", "Terminé.", "Échec.", "Annulé."];
     tokio::spawn(async move {
         let store = match TaskStore::open(&store_path_buf) {
             Ok(s) => s,
@@ -389,24 +390,52 @@ async fn process_root_task(
             }
             let all_done = children.iter().all(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Failed));
             if all_done {
-                // Aggregate last progress message from each child for the root so the UI shows combined result.
+                // Give progress_subscriber time to process the last child's ProgressUpdate.
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 let mut parts: Vec<String> = Vec::new();
                 {
                     let g = progress.read().await;
                     for child in &children {
-                        if let Some(q) = g.get(&child.id) {
-                            if let Some(last) = q.back() {
-                                if !last.message.is_empty() && last.message != "Done." {
-                                    parts.push(last.message.clone());
+                        let content = g.get(&child.id).and_then(|q| q.back().map(|e| e.message.trim().to_string()));
+                        let content = match content {
+                            Some(ref s) if !s.is_empty() && !GENERIC_MESSAGES.contains(&s.as_str()) => s.clone(),
+                            _ => {
+                                if child.status == TaskStatus::Failed {
+                                    "(Sous-tâche en échec)".to_string()
+                                } else {
+                                    "(Aucune réponse)".to_string()
                                 }
                             }
-                        }
+                        };
+                        parts.push(format!("**{}**\n\n{}", child.assigned_agent, content));
+                    }
+                }
+                // Retry once if we might have missed the last child's progress (race).
+                if parts.len() < children.len() {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    let g = progress.read().await;
+                    parts.clear();
+                    for child in &children {
+                        let content = g.get(&child.id).and_then(|q| q.back().map(|e| e.message.trim().to_string()));
+                        let content = match content {
+                            Some(ref s) if !s.is_empty() && !GENERIC_MESSAGES.contains(&s.as_str()) => s.clone(),
+                            _ => {
+                                if child.status == TaskStatus::Failed {
+                                    "(Sous-tâche en échec)".to_string()
+                                } else {
+                                    "(Aucune réponse)".to_string()
+                                }
+                            }
+                        };
+                        parts.push(format!("**{}**\n\n{}", child.assigned_agent, content));
                     }
                 }
                 let aggregated = if parts.is_empty() {
-                    "Done.".to_string()
+                    "Aucune réponse des sous-agents.".to_string()
+                } else if parts.len() == 1 {
+                    parts.into_iter().next().unwrap()
                 } else {
-                    parts.join("\n\n---\n\n")
+                    format!("Réponses des sous-agents :\n\n{}", parts.join("\n\n---\n\n"))
                 };
                 let _ = bus.send(
                     EventEnvelope::new(
