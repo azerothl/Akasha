@@ -633,6 +633,78 @@ body {
   white-space: pre-wrap;
 }
 
+/* Calendar panel: scrollable runs list and clickable schedules */
+.calendar-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.calendar-panel h3 {
+  margin: 1rem 0 0.5rem;
+  font-size: 1rem;
+  color: #a1a1aa;
+}
+
+.calendar-panel h3:first-of-type {
+  margin-top: 0;
+}
+
+.calendar-schedule-list,
+.calendar-runs-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 1rem;
+  border: 1px solid #27272a;
+  border-radius: 6px;
+}
+
+.calendar-schedule-list li,
+.calendar-runs-list li {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #27272a;
+  font-size: 0.875rem;
+}
+
+.calendar-schedule-list li:last-child,
+.calendar-runs-list li:last-child {
+  border-bottom: none;
+}
+
+.calendar-schedule-list li {
+  cursor: pointer;
+}
+
+.calendar-schedule-list li:hover,
+.calendar-runs-list li:hover {
+  background: #27272a;
+}
+
+.calendar-runs-list li[role="button"] {
+  cursor: pointer;
+}
+
+.calendar-runs-list li.selected {
+  background: #3f3f46;
+}
+
+.calendar-runs-list-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin-bottom: 1rem;
+}
+
+.calendar-runs-list-wrap .calendar-runs-list {
+  margin-bottom: 0;
+}
+
+.calendar-runs-list .run-meta {
+  font-size: 0.8125rem;
+  color: #71717a;
+  margin-top: 0.15rem;
+}
+
 /* Calendar task detail modal (popup) */
 .calendar-detail-modal-overlay {
   position: fixed;
@@ -702,6 +774,21 @@ body {
   overflow-x: hidden;
   flex: 1;
   min-height: 0;
+}
+
+.calendar-detail-modal-body .task-detail-reply {
+  margin-top: 1rem;
+}
+
+.calendar-detail-modal-body .task-detail-reply-content {
+  margin-top: 0.35rem;
+  padding: 0.75rem;
+  background: #27272a;
+  border-radius: 6px;
+  border: 1px solid #3f3f46;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.875rem;
 }
 
 .calendar-detail-modal-body .task-detail-progress {

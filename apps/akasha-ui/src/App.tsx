@@ -30,6 +30,14 @@ function eventTypeLabel(typ: string): string {
   return labels[typ] ?? typ;
 }
 
+/** Format duration in seconds as "X min Y s" or "Y s". */
+function formatDurationSec(sec: number): string {
+  if (sec < 60) return `${Math.round(sec)} s`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return s > 0 ? `${m} min ${s} s` : `${m} min`;
+}
+
 interface HealthState {
   ok: boolean;
   port?: number;
@@ -70,10 +78,33 @@ function App() {
   const [tasksLoading, setTasksLoading] = useState(false);
   const [runningTaskChips, setRunningTaskChips] = useState<Record<string, { pct?: number; message?: string }>>({});
   const [schedules, setSchedules] = useState<Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>>([]);
-  const [taskRuns, setTaskRuns] = useState<Array<{ id: string; schedule_id?: string; task_id: string; status: string; planned_for: string }>>([]);
+  const [taskRuns, setTaskRuns] = useState<Array<{
+    id: string;
+    schedule_id?: string;
+    task_id: string;
+    status: string;
+    planned_for: string;
+    started_at?: string;
+    ended_at?: string;
+  }>>([]);
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [calendarSelectedTaskId, setCalendarSelectedTaskId] = useState<string | null>(null);
-  const [calendarTaskDetail, setCalendarTaskDetail] = useState<{ status: string; progress?: Array<{ progress_pct?: number; message?: string }> } | null>(null);
+  const [calendarTaskDetail, setCalendarTaskDetail] = useState<{
+    status: string;
+    created_at?: string;
+    updated_at?: string;
+    progress?: Array<{ progress_pct?: number; message?: string }>;
+  } | null>(null);
+  const [calendarSelectedScheduleId, setCalendarSelectedScheduleId] = useState<string | null>(null);
+  const [scheduleDetail, setScheduleDetail] = useState<{
+    id: string;
+    name: string;
+    description: string;
+    enabled: boolean;
+    interval_seconds?: number;
+    timezone?: string;
+    rrule?: string;
+  } | null>(null);
   const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -185,10 +216,18 @@ function App() {
     try {
       const [schedData, runsData] = await Promise.all([
         invoke<{ schedules?: Array<{ id?: string; name?: string; enabled?: boolean; interval_seconds?: number }> }>("get_schedules", { port: DAEMON_PORT }),
-        invoke<{ task_runs?: Array<{ id?: string; schedule_id?: string; task_id?: string; status?: string; planned_for?: string }> }>("get_task_runs", { port: DAEMON_PORT }),
+        invoke<{ task_runs?: Array<{ id?: string; schedule_id?: string; task_id?: string; status?: string; planned_for?: string; started_at?: string; ended_at?: string }> }>("get_task_runs", { port: DAEMON_PORT }),
       ]);
       setSchedules((schedData?.schedules ?? []).map((s) => ({ id: s.id ?? "", name: s.name ?? "", enabled: s.enabled ?? false, interval_seconds: s.interval_seconds })));
-      setTaskRuns((runsData?.task_runs ?? []).map((r) => ({ id: r.id ?? "", schedule_id: r.schedule_id, task_id: r.task_id ?? "", status: r.status ?? "?", planned_for: r.planned_for ?? "" })));
+      setTaskRuns((runsData?.task_runs ?? []).map((r) => ({
+        id: r.id ?? "",
+        schedule_id: r.schedule_id,
+        task_id: r.task_id ?? "",
+        status: r.status ?? "?",
+        planned_for: r.planned_for ?? "",
+        started_at: r.started_at,
+        ended_at: r.ended_at,
+      })));
     } catch {
       setSchedules([]);
       setTaskRuns([]);
@@ -234,8 +273,13 @@ function App() {
       try {
         const raw = await invoke<string>("get_task_status", { taskId: calendarSelectedTaskId, port: DAEMON_PORT });
         if (cancelled) return;
-        const st = JSON.parse(raw) as { status?: string; progress?: Array<{ progress_pct?: number; message?: string }> };
-        setCalendarTaskDetail({ status: st?.status ?? "?", progress: st?.progress });
+        const st = JSON.parse(raw) as { status?: string; created_at?: string; updated_at?: string; progress?: Array<{ progress_pct?: number; message?: string }> };
+        setCalendarTaskDetail({
+          status: st?.status ?? "?",
+          created_at: st?.created_at,
+          updated_at: st?.updated_at,
+          progress: st?.progress,
+        });
       } catch {
         if (!cancelled) setCalendarTaskDetail(null);
       }
@@ -251,6 +295,44 @@ function App() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [calendarSelectedTaskId]);
+
+  useEffect(() => {
+    if (!calendarSelectedScheduleId) {
+      setScheduleDetail(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await invoke<{ id?: string; name?: string; description?: string; enabled?: boolean; interval_seconds?: number; timezone?: string; rrule?: string }>("get_schedule_by_id", {
+          schedule_id: calendarSelectedScheduleId,
+          port: DAEMON_PORT,
+        });
+        if (cancelled) return;
+        setScheduleDetail({
+          id: data?.id ?? "",
+          name: data?.name ?? "",
+          description: data?.description ?? "",
+          enabled: data?.enabled ?? false,
+          interval_seconds: data?.interval_seconds,
+          timezone: data?.timezone,
+          rrule: data?.rrule,
+        });
+      } catch {
+        if (!cancelled) setScheduleDetail(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [calendarSelectedScheduleId]);
+
+  useEffect(() => {
+    if (!calendarSelectedScheduleId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setCalendarSelectedScheduleId(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [calendarSelectedScheduleId]);
 
   const runSlashCommand = async (input: string): Promise<string> => {
     const parts = input.replace(/^\//, "").trim().split(/\s+/);
@@ -845,7 +927,13 @@ function App() {
                 ) : (
                   <ul className="calendar-schedule-list" role="list">
                     {schedules.map((s) => (
-                      <li key={s.id}>
+                      <li
+                        key={s.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setCalendarSelectedScheduleId(s.id)}
+                        onKeyDown={(e) => e.key === "Enter" && setCalendarSelectedScheduleId(s.id)}
+                      >
                         <strong>{s.name || s.id.slice(0, 8)}</strong>{" "}
                         {s.enabled ? "(activée)" : "(en pause)"}
                         {s.interval_seconds != null && ` — toutes les ${s.interval_seconds}s`}
@@ -853,25 +941,46 @@ function App() {
                     ))}
                   </ul>
                 )}
-                <h3>Runs récents</h3>
+                <h3>Lancements récents</h3>
                 {taskRuns.length === 0 ? (
                   <p className="empty-state">Aucun run.</p>
                 ) : (
-                  <ul className="calendar-runs-list" role="list">
-                    {taskRuns.slice(0, 20).map((r) => (
-                      <li
-                        key={r.id}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => setCalendarSelectedTaskId(r.task_id)}
-                        onKeyDown={(e) => e.key === "Enter" && setCalendarSelectedTaskId(r.task_id)}
-                        className={calendarSelectedTaskId === r.task_id ? "selected" : ""}
-                      >
-                        <span className="run-id">{r.id.slice(-8)}</span> {r.status} —{" "}
-                        {r.planned_for ? new Date(r.planned_for).toLocaleString() : ""} (task: {r.task_id.slice(-8)})
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="calendar-runs-list-wrap">
+                    <ul className="calendar-runs-list" role="list">
+                      {taskRuns.map((r) => {
+                        const endedAt = r.ended_at ? new Date(r.ended_at) : null;
+                        const startedAt = r.started_at ? new Date(r.started_at) : null;
+                        const durationSec = endedAt && startedAt ? (endedAt.getTime() - startedAt.getTime()) / 1000 : null;
+                        return (
+                          <li
+                            key={r.id}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => setCalendarSelectedTaskId(r.task_id)}
+                            onKeyDown={(e) => e.key === "Enter" && setCalendarSelectedTaskId(r.task_id)}
+                            className={calendarSelectedTaskId === r.task_id ? "selected" : ""}
+                          >
+                            <span className="run-id">{r.id.slice(-8)}</span> {r.status}
+                            {r.planned_for && (
+                              <> — prévu: {new Date(r.planned_for).toLocaleString()}</>
+                            )}
+                            {endedAt && (
+                              <div className="run-meta">
+                                Terminé à {endedAt.toLocaleString()}
+                                {durationSec != null && durationSec > 0 && ` · Durée: ${formatDurationSec(durationSec)}`}
+                              </div>
+                            )}
+                            <div className="run-meta">task: {r.task_id.slice(-8)}
+                              {r.schedule_id && (() => {
+                                const parent = schedules.find((s) => s.id === r.schedule_id);
+                                return parent ? ` · Récurrence: ${parent.name || parent.id.slice(0, 8)}` : "";
+                              })()}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
                 )}
                 {calendarSelectedTaskId && (
                   <div
@@ -900,9 +1009,36 @@ function App() {
                         {calendarTaskDetail ? (
                           <>
                             <p><strong>Statut:</strong> {calendarTaskDetail.status}</p>
+                            {(() => {
+                              const run = taskRuns.find((r) => r.task_id === calendarSelectedTaskId);
+                              const parent = run?.schedule_id ? schedules.find((s) => s.id === run.schedule_id) : null;
+                              return parent ? <p><strong>Récurrence parente:</strong> {parent.name || parent.id.slice(0, 8)}</p> : null;
+                            })()}
+                            {calendarTaskDetail.updated_at && (
+                              <p><strong>Dernière mise à jour:</strong> {new Date(calendarTaskDetail.updated_at).toLocaleString()}</p>
+                            )}
+                            {(() => {
+                              const run = taskRuns.find((r) => r.task_id === calendarSelectedTaskId);
+                              return run?.ended_at ? <p><strong>Terminé à:</strong> {new Date(run.ended_at).toLocaleString()}</p> : null;
+                            })()}
+                            {(() => {
+                              const run = taskRuns.find((r) => r.task_id === calendarSelectedTaskId);
+                              if (!run?.started_at || !run?.ended_at) return null;
+                              const sec = (new Date(run.ended_at).getTime() - new Date(run.started_at).getTime()) / 1000;
+                              return sec > 0 ? <p><strong>Durée:</strong> {formatDurationSec(sec)}</p> : null;
+                            })()}
+                            {calendarTaskDetail.progress && calendarTaskDetail.progress.length > 0 && (() => {
+                              const last = calendarTaskDetail.progress[calendarTaskDetail.progress.length - 1]?.message;
+                              return last ? (
+                                <div className="task-detail-reply">
+                                  <strong>Réponse de l'agent:</strong>
+                                  <div className="task-detail-reply-content">{last}</div>
+                                </div>
+                              ) : null;
+                            })()}
                             {calendarTaskDetail.progress && calendarTaskDetail.progress.length > 0 && (
                               <div className="task-detail-progress">
-                                <strong>Progression / résultat:</strong>
+                                <strong>Progression / étapes:</strong>
                                 <p className="task-detail-progress-hint">
                                   Les lignes « État » sont des étapes intermédiaires ; le pourcentage indique l’avancement.
                                 </p>
@@ -917,6 +1053,57 @@ function App() {
                                   ))}
                                 </ul>
                               </div>
+                            )}
+                          </>
+                        ) : (
+                          <p className="loading-inline">Chargement…</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {calendarSelectedScheduleId && (
+                  <div
+                    className="calendar-detail-modal-overlay"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="schedule-detail-title"
+                    onClick={() => setCalendarSelectedScheduleId(null)}
+                  >
+                    <div
+                      className="calendar-detail-modal"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="calendar-detail-modal-header">
+                        <h2 id="schedule-detail-title">Détail récurrence</h2>
+                        <button
+                          type="button"
+                          className="calendar-detail-modal-close"
+                          onClick={() => setCalendarSelectedScheduleId(null)}
+                          aria-label="Fermer"
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <div className="calendar-detail-modal-body">
+                        {scheduleDetail ? (
+                          <>
+                            <p><strong>Nom:</strong> {scheduleDetail.name}</p>
+                            <p><strong>État:</strong> {scheduleDetail.enabled ? "Activée" : "En pause"}</p>
+                            {scheduleDetail.interval_seconds != null && (
+                              <p><strong>Intervalle:</strong> toutes les {scheduleDetail.interval_seconds} s</p>
+                            )}
+                            {scheduleDetail.timezone && (
+                              <p><strong>Fuseau:</strong> {scheduleDetail.timezone}</p>
+                            )}
+                            {scheduleDetail.description && (
+                              <div className="task-detail-reply">
+                                <strong>Demande envoyée aux agents à chaque itération:</strong>
+                                <div className="task-detail-reply-content">{scheduleDetail.description}</div>
+                              </div>
+                            )}
+                            {scheduleDetail.rrule && (
+                              <p className="schedule-rrule"><strong>Règle:</strong> <code>{scheduleDetail.rrule}</code></p>
                             )}
                           </>
                         ) : (

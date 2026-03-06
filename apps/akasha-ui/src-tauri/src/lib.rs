@@ -493,6 +493,23 @@ async fn get_schedules(port: Option<u16>) -> Result<serde_json::Value, String> {
     Ok(json)
 }
 
+/// Schedule by id: GET /api/schedules/:id (détail d'une récurrence).
+#[tauri::command]
+async fn get_schedule_by_id(schedule_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/schedules/{}", daemon_base_url(port), schedule_id);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// Task runs: GET /api/task_runs (optionally ?schedule_id=...) for Calendrier.
 #[tauri::command]
 async fn get_task_runs(port: Option<u16>, schedule_id: Option<String>) -> Result<serde_json::Value, String> {
@@ -544,6 +561,7 @@ pub fn run() {
             get_task_events,
             cancel_task,
             get_schedules,
+            get_schedule_by_id,
             get_task_runs,
             get_schedule_run_reports,
             get_docs,
