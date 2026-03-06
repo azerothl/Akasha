@@ -220,6 +220,8 @@ struct App {
     input_inner_height: usize,
     /// Set by ui(): wrapped line count of input text.
     input_wrapped_lines: usize,
+    /// If true, we have already loaded today's chat history from short-term memory (so we don't refetch every frame).
+    chat_history_loaded: bool,
 }
 
 impl App {
@@ -270,7 +272,58 @@ impl App {
             input_scroll: 0,
             input_inner_height: 3,
             input_wrapped_lines: 0,
+            chat_history_loaded: false,
         }
+    }
+
+    /// Load today's conversation from short-term memory (GET /api/memory/short-term without session_id = day-YYYY-MM-DD).
+    fn fetch_chat_history_from_memory(&mut self) {
+        self.chat_history_loaded = true;
+        let url = format!("{}/api/memory/short-term", daemon_base_url(self.port));
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let resp = match client.get(&url).send() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        if !resp.status().is_success() {
+            return;
+        }
+        let json: serde_json::Value = match resp.json() {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let session_id = json.get("session_id").and_then(|v| v.as_str()).map(String::from);
+        let turns = json.get("turns").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+        if let Some(ref sid) = session_id {
+            self.session_id = Some(sid.clone());
+        }
+        if turns.is_empty() {
+            return;
+        }
+        self.messages = turns
+            .iter()
+            .filter_map(|t| {
+                let role = t.get("role")?.as_str()?;
+                let content = t.get("content")?.as_str()?.to_string();
+                let role_label = match role {
+                    "user" => "Vous",
+                    "assistant" => "Akasha",
+                    _ => "Système",
+                };
+                Some(ChatMessage {
+                    role: role_label.to_string(),
+                    text: content,
+                    is_error: false,
+                })
+            })
+            .collect();
+        self.scroll = usize::MAX;
     }
 
     /// Number of wrapped lines for a string given line width (chars).
@@ -2091,6 +2144,9 @@ fn run_app(
 ) -> anyhow::Result<()> {
     let mut last_health = std::time::Instant::now();
     loop {
+        if app.mode == Mode::Chat && !app.chat_history_loaded {
+            app.fetch_chat_history_from_memory();
+        }
         if last_health.elapsed() > Duration::from_secs(5) {
             app.check_health();
             if app.mode == Mode::Chat {

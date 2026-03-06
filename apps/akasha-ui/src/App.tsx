@@ -139,6 +139,36 @@ function App() {
     return () => clearInterval(id);
   }, [checkHealth]);
 
+  // Load today's conversation history on mount (short-term = current day, so it survives UI restart).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await invoke<{ session_id?: string; turns?: Array<{ role: string; content: string }> }>(
+          "get_memory_short_term",
+          { port: DAEMON_PORT }
+        );
+        if (cancelled) return;
+        if (data?.session_id && (data.turns?.length ?? 0) > 0) {
+          setMessages(
+            data.turns!.map((t) => ({
+              role: (t.role === "user" ? "user" : t.role === "assistant" ? "assistant" : "system") as "user" | "assistant" | "system",
+              text: t.content,
+            }))
+          );
+          setSessionId(data.session_id);
+        } else if (data?.session_id) {
+          setSessionId(data.session_id);
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Scroll chat to last message and keep focus on input
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });

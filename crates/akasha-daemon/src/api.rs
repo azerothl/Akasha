@@ -5,9 +5,11 @@ use akasha_vault::Vault;
 use akasha_llm::CompletionRequest;
 use akasha_store::{Schedule, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
+use crate::agent_profile::AgentProfile;
 use crate::agents::{EventBus, OrchestratorTask};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
+use std::path::PathBuf;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
@@ -890,6 +892,53 @@ async fn compact_short_term_if_needed(
     }
 }
 
+/// At daemon startup: if yesterday's short-term file exists, summarize it via LLM and promote to long-term (source "daily_summary").
+pub async fn summarize_yesterday_and_promote(
+    short_term_dir: PathBuf,
+    llm_router: Arc<akasha_llm::LLMRouter>,
+    long_term_client: Option<LongTermMemoryClient>,
+) {
+    let Some(client) = long_term_client else { return };
+    let yesterday = chrono::Utc::now() - chrono::Duration::days(1);
+    let session_id = format!("day-{}", yesterday.format("%Y-%m-%d"));
+    let turns = match ShortTermStore::read_day_from_disk(&session_id, &short_term_dir) {
+        Some(t) if !t.is_empty() => t,
+        _ => return,
+    };
+    let blob = ShortTermStore::turns_to_context(&turns);
+    let summary_prompt = format!(
+        "Résume en un court paragraphe synthétique (5 à 10 lignes) la journée du {} : sujets abordés, décisions, projets ou informations importantes. \
+Réponse en français, factuelle.\n\n{}",
+        session_id.trim_start_matches("day-"),
+        blob
+    );
+    let summary_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(1024);
+    let req = CompletionRequest {
+        prompt: summary_prompt,
+        max_tokens: Some(summary_max_tokens),
+        temperature: Some(0.2),
+        preferred_task_type: Some("system".to_string()),
+    };
+    match llm_router.complete(&req).await {
+        Ok(resp) => {
+            let summary = resp.text.trim();
+            if !summary.is_empty() {
+                let content = format!("Résumé du {} : {}", session_id.trim_start_matches("day-"), summary);
+                let client = client.clone();
+                match tokio::task::spawn_blocking(move || client.promote(content, "daily_summary".to_string())).await {
+                    Ok(Ok(())) => tracing::info!(session_id = %session_id, "Yesterday summarized and stored in long-term memory"),
+                    Ok(Err(e)) => tracing::warn!(error = %e, "Daily summary promote to long-term failed"),
+                    Err(e) => tracing::warn!(error = %e, "Daily summary task join failed"),
+                }
+            }
+        }
+        Err(e) => tracing::debug!(error = %e, "Daily summary LLM call failed"),
+    }
+}
+
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
 pub(crate) async fn run_message_via_llm(
     bus: EventBus,
@@ -974,6 +1023,14 @@ pub(crate) async fn run_message_via_llm(
     // Build prompt with short-term + long-term memory (spec 06)
     let mut context_prefix = String::new();
     context_prefix.push_str(APP_CONTEXT);
+
+    // Agent profile: name, personality, rules, can/cannot (persisted in data_dir/agent_profile.json)
+    let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+    let agent_profile = AgentProfile::load(data_dir);
+    let profile_block = agent_profile.format_for_prompt();
+    if !profile_block.is_empty() {
+        context_prefix.push_str(&profile_block);
+    }
 
     // Long-term: retrieve top-k relevant memories by embedding similarity (current message + optional user-identity for first message)
     if let Some(ref client) = long_term_client {
@@ -1310,31 +1367,37 @@ pub(crate) async fn run_message_via_llm(
             }
         }
 
-        // Then spawn LLM extraction for additional facts (async, bounded concurrency, no wait).
+        // Then spawn LLM extraction for projects, interests, important info, personal facts, and agent profile (async).
         let msg = message.clone();
         let reply = reply_text.clone();
         let client = long_term.clone();
         let router = llm_router.clone();
-        let n_heuristic = heuristic_facts.len();
+        let heuristic_set: std::collections::HashSet<String> = heuristic_facts.iter().cloned().collect();
         let sem = extract_semaphore();
+        let data_dir_for_extract = data_dir.to_path_buf();
         tokio::spawn(async move {
-            // Acquire a permit; if all slots are busy, drop this extraction cycle rather than queuing unbounded work.
             let _permit = match sem.try_acquire() {
                 Ok(p) => p,
                 Err(_) => {
-                    tracing::debug!("Background fact extraction skipped: semaphore full (too many concurrent extractions)");
+                    tracing::debug!("Background fact extraction skipped: semaphore full");
                     return;
                 }
             };
-            let mut facts = heuristic_facts;
             let extract_prompt = format!(
-                "Tu dois extraire UNIQUEMENT les faits personnels à retenir sur l'utilisateur (nom, prénom, préférences, décisions). \
-Une ligne par fait, chaque ligne commence par FACT: (ex: FACT: L'utilisateur s'appelle Jean. FACT: L'utilisateur préfère le café.). \
-N'écris que des lignes FACT: ou NOTHING si aucun fait. Pas d'autre texte.\n\nUtilisateur: {}\n\nAssistant: {}",
+                "Extrais les éléments à retenir. Une ligne par élément, chaque ligne commence par exactement un des préfixes suivants :\n\
+FACT: faits personnels (nom, prénom, préférences, décisions)\n\
+PROJECT: projets créés ou mentionnés\n\
+INTEREST: centres d'intérêt\n\
+IMPORTANT: informations importantes à retenir\n\
+AGENT_NAME: le nom que l'utilisateur donne à l'agent (ex: Tu t'appelles X)\n\
+AGENT_PERSONALITY: personnalité ou ton demandé pour l'agent\n\
+AGENT_RULE: une règle que l'agent doit respecter\n\
+AGENT_CAN: ce que l'agent peut faire (autorisé)\n\
+AGENT_CANNOT: ce que l'agent ne doit pas faire (interdit)\n\
+N'écris que des lignes avec ces préfixes, ou NOTHING si rien. Pas d'autre texte.\n\nUtilisateur: {}\n\nAssistant: {}",
                 msg.trim(),
                 reply.trim()
             );
-            // Allow enough tokens for models that output "thinking" before the FACT: lines (done_reason: length otherwise).
             let extract_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok())
@@ -1345,31 +1408,63 @@ N'écris que des lignes FACT: ou NOTHING si aucun fait. Pas d'autre texte.\n\nUt
                 temperature: Some(0.1),
                 preferred_task_type: Some("system".to_string()),
             };
+            let mut to_promote: Vec<(String, String)> = Vec::new();
+            let mut agent_updates: Vec<(String, String)> = Vec::new();
             if let Ok(Ok(resp)) = tokio::time::timeout(
                 std::time::Duration::from_secs(30),
                 router.complete(&req),
             ).await {
                 for line in resp.text.lines() {
                     let line = line.trim();
-                    if let Some(fact) = line.strip_prefix("FACT:") {
-                        let fact = fact.trim().to_string();
-                        if !fact.is_empty() && !facts.contains(&fact) {
-                            facts.push(fact);
+                    if let Some(rest) = line.strip_prefix("AGENT_NAME:") {
+                        agent_updates.push(("AGENT_NAME".to_string(), rest.trim().to_string()));
+                    } else if let Some(rest) = line.strip_prefix("AGENT_PERSONALITY:") {
+                        agent_updates.push(("AGENT_PERSONALITY".to_string(), rest.trim().to_string()));
+                    } else if let Some(rest) = line.strip_prefix("AGENT_RULE:") {
+                        agent_updates.push(("AGENT_RULE".to_string(), rest.trim().to_string()));
+                    } else if let Some(rest) = line.strip_prefix("AGENT_CAN:") {
+                        agent_updates.push(("AGENT_CAN".to_string(), rest.trim().to_string()));
+                    } else if let Some(rest) = line.strip_prefix("AGENT_CANNOT:") {
+                        agent_updates.push(("AGENT_CANNOT".to_string(), rest.trim().to_string()));
+                    } else {
+                        let (content, source) = if let Some(rest) = line.strip_prefix("FACT:") {
+                            (rest.trim().to_string(), "user_fact".to_string())
+                        } else if let Some(rest) = line.strip_prefix("PROJECT:") {
+                            (rest.trim().to_string(), "project".to_string())
+                        } else if let Some(rest) = line.strip_prefix("INTEREST:") {
+                            (rest.trim().to_string(), "interest".to_string())
+                        } else if let Some(rest) = line.strip_prefix("IMPORTANT:") {
+                            (rest.trim().to_string(), "important".to_string())
+                        } else {
+                            continue;
+                        };
+                        if !content.is_empty() && !heuristic_set.contains(&content) {
+                            to_promote.push((content, source));
                         }
                     }
                 }
             }
-            if facts.is_empty() {
-                tracing::debug!(user_msg = %msg.trim().chars().take(100).collect::<String>(), "No personal facts extracted for long-term memory");
-            } else {
-                tracing::debug!(count = facts.len(), "Promoting extra facts to long-term memory");
+            if !agent_updates.is_empty() {
+                let mut profile = AgentProfile::load(&data_dir_for_extract);
+                for (kind, value) in agent_updates {
+                    profile.apply_extracted(&kind, value);
+                }
+                if let Err(e) = profile.save(&data_dir_for_extract) {
+                    tracing::warn!(error = %e, "Failed to save agent profile");
+                } else {
+                    tracing::info!("Agent profile updated from conversation");
+                }
             }
-            // Promote only facts that weren't already promoted (heuristic ones were done above).
-            for fact in facts.into_iter().skip(n_heuristic) {
+            if !to_promote.is_empty() {
+                tracing::debug!(count = to_promote.len(), "Promoting extracted items to long-term memory");
+            }
+            for (content, source) in to_promote {
                 let client = client.clone();
-                match tokio::task::spawn_blocking(move || client.promote(fact, "user_fact".to_string())).await {
+                let c = content.clone();
+                let s = source.clone();
+                match tokio::task::spawn_blocking(move || client.promote(c, s)).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote user_fact failed"),
+                    Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote failed"),
                     Err(e) => tracing::debug!(error = %e, "Promote task join error"),
                 }
             }
@@ -1428,6 +1523,47 @@ pub async fn handle_api(
 
     if method == "GET" && (path == "/" || path.is_empty()) {
         return json_response("200 OK", r#"{"status":"ok"}"#);
+    }
+
+    // GET /api/agent-profile — read agent profile (name, personality, rules, can_do, cannot_do)
+    if method == "GET" && path == "/api/agent-profile" {
+        let profile = AgentProfile::load(data_dir);
+        let body_json = serde_json::json!({
+            "name": profile.name,
+            "personality": profile.personality,
+            "rules": profile.rules,
+            "can_do": profile.can_do,
+            "cannot_do": profile.cannot_do
+        });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
+    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, rules?, can_do?, cannot_do? }
+    if method == "POST" && path == "/api/agent-profile" {
+        let mut profile = AgentProfile::load(data_dir);
+        if let Some(body) = body.as_deref() {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+                if let Some(s) = v.get("name").and_then(|x| x.as_str()) {
+                    profile.name = Some(s.to_string());
+                }
+                if let Some(s) = v.get("personality").and_then(|x| x.as_str()) {
+                    profile.personality = Some(s.to_string());
+                }
+                if let Some(arr) = v.get("rules").and_then(|x| x.as_array()) {
+                    profile.rules = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+                }
+                if let Some(arr) = v.get("can_do").and_then(|x| x.as_array()) {
+                    profile.can_do = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+                }
+                if let Some(arr) = v.get("cannot_do").and_then(|x| x.as_array()) {
+                    profile.cannot_do = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+                }
+            }
+        }
+        match profile.save(data_dir) {
+            Ok(()) => return json_response("200 OK", r#"{"ok":true,"message":"Profil agent mis à jour"}"#),
+            Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
+        }
     }
 
     // GET /api/memory/short-term?session_id=... — turns for session (default: day-YYYY-MM-DD)
@@ -1696,7 +1832,7 @@ pub async fn handle_api(
             .as_ref()
             .and_then(|v| v.get("message").and_then(|v| v.as_str().map(String::from)))
             .unwrap_or_default();
-        // Session: "new_session" => new UUID; else provided non-empty session_id; else new UUID (isolated context).
+        // Session: "new_session" => new UUID; else provided non-empty session_id; else day-YYYY-MM-DD (short-term = current day, survives UI restart).
         let session_id = {
             let new_session = body_json.as_ref().and_then(|v| v.get("new_session")).and_then(|v| v.as_bool()).unwrap_or(false);
             let provided = body_json.as_ref().and_then(|v| v.get("session_id").and_then(|v| v.as_str().map(String::from)));
@@ -1705,12 +1841,12 @@ pub async fn handle_api(
             } else if let Some(s) = provided {
                 let trimmed = s.trim();
                 if trimmed.is_empty() {
-                    uuid::Uuid::new_v4().to_string()
+                    format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"))
                 } else {
                     trimmed.to_string()
                 }
             } else {
-                uuid::Uuid::new_v4().to_string()
+                format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"))
             }
         };
         if let Err(e) = akasha_core::check_prompt_injection(&message) {

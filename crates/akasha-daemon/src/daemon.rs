@@ -347,7 +347,14 @@ impl Daemon {
                     }
                 });
             }
-            let short_term = Arc::new(ShortTermStore::new(50, 0.75));
+            let short_term_dir = data_dir.join("short_term");
+            let short_term = Arc::new(ShortTermStore::with_persistence(
+                50,
+                0.75,
+                Some(short_term_dir.clone()),
+            ));
+            let today_session = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
+            short_term.load_day_from_disk(&today_session).await;
             let memory_db_path = data_dir.join("memory.db");
             let embedding_cache = data_dir.join("embedding_model");
             let long_term_client = start_memory_actor(&memory_db_path, &embedding_cache)
@@ -356,6 +363,14 @@ impl Daemon {
                     info!(path = %memory_db_path.display(), "Long-term memory actor started");
                     client
                 });
+            if long_term_client.is_some() {
+                let st_dir = short_term_dir.clone();
+                let router = llm_router.clone();
+                let lt_client = long_term_client.clone();
+                tokio::spawn(async move {
+                    crate::api::summarize_yesterday_and_promote(st_dir, router, lt_client).await;
+                });
+            }
             let (orch_tx, orch_rx) = mpsc::channel::<OrchestratorTask>(64);
             let (conv_tx, mut conv_rx) = mpsc::channel::<OrchestratorTask>(64);
             let orch_tx_for_scheduler = orch_tx.clone();
