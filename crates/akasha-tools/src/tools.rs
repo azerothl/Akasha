@@ -155,7 +155,7 @@ pub async fn edit_file(
     let lines: Vec<&str> = content.lines().collect();
     let start_idx = (start_line as usize).saturating_sub(1);
     let end_idx = (end_line as usize).min(lines.len()).saturating_sub(1);
-    if start_idx > lines.len() {
+    if start_idx >= lines.len() {
         return Ok(ToolResult {
             tool: "edit_file".to_string(),
             success: false,
@@ -594,6 +594,7 @@ pub async fn web_fetch(url: &str, policy: &crate::policy::ToolsPolicy) -> Result
     }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("web_fetch build client")?;
     let res = client

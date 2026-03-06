@@ -110,12 +110,14 @@ impl ToolsPolicy {
     /// Check if a URL's host is allowed for web_fetch.
     /// Order: (1) block if host in blocked_web_domains; (2) allow if allowed_web_domains contains "*"; (3) allow if host in allowed_web_domains or subdomain of one.
     pub fn can_fetch_url(&self, url: &str) -> bool {
-        let host = url
-            .split("://")
-            .nth(1)
-            .and_then(|s| s.split('/').next())
-            .unwrap_or("");
-        let host = host.to_lowercase();
+        let parsed = match url::Url::parse(url) {
+            Ok(u) => u,
+            Err(_) => return false,
+        };
+        let host = match parsed.host_str() {
+            Some(h) => h.to_lowercase(),
+            None => return false,
+        };
         if host.is_empty() {
             return false;
         }
