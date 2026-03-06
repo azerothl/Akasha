@@ -1561,7 +1561,10 @@ fn ui(f: &mut Frame, app: &mut App) {
                 lines.push(Line::from(""));
                 let style_muted = Style::default().fg(theme.palette().muted).add_modifier(Modifier::BOLD);
                 lines.push(Line::from(Span::styled("  ─── Rappel exécuté ───", style_muted)));
-                lines.push(Line::from(Span::styled(format!("  « {} » — {}", name, msg), Style::default().fg(theme.palette().muted))));
+                lines.push(Line::from(Span::styled(format!("  « {} »", name), Style::default().fg(theme.palette().muted))));
+                let md_styles = theme.markdown_styles();
+                let marked = markdown::from_str_with_width(msg, &md_styles, Some(content_width.saturating_sub(2) as u16));
+                lines.extend(marked.to_flat_lines());
             }
             for m in &app.messages {
                 let (role_style, _base_style) = if m.role == "Vous" {
@@ -1814,11 +1817,12 @@ fn ui(f: &mut Frame, app: &mut App) {
                     detail_lines.push(Line::from(""));
                 }
                 if let Some(last) = d.progress.last() {
-                    let reply_preview = if last.1.len() > 200 { format!("{}…", &last.1[..200]) } else { last.1.clone() };
+                    let reply_preview = if last.1.len() > 2000 { format!("{}…", &last.1[..2000]) } else { last.1.clone() };
                     detail_lines.push(Line::from(Span::styled(" Réponse : ", Style::default().fg(theme.palette().success))));
-                    for line in reply_preview.lines() {
-                        detail_lines.push(Line::from(format!("   {}", line)));
-                    }
+                    let md_styles = theme.markdown_styles();
+                    let detail_width = detail_area.width.saturating_sub(4) as u16;
+                    let marked = markdown::from_str_with_width(&reply_preview, &md_styles, Some(detail_width));
+                    detail_lines.extend(marked.to_flat_lines());
                     detail_lines.push(Line::from(""));
                 }
                 detail_lines.push(Line::from(format!("  Créé : {}  │  Mis à jour : {}  │  Statut : {}  │  Agent : {}", d.created_at, d.updated_at, d.status, d.assigned_agent)));
@@ -1952,9 +1956,10 @@ fn ui(f: &mut Frame, app: &mut App) {
                 }
                 if let Some((_, last_msg)) = d.progress.last().map(|(p, m)| (*p, m.as_str())) {
                     lines.push(Line::from(Span::styled("  Réponse agent :", Style::default().fg(theme.palette().success))));
-                    for line in last_msg.lines().take(6) {
-                        lines.push(Line::from(format!("    {}", line)));
-                    }
+                    let md_styles = theme.markdown_styles();
+                    let cal_width = content_area.width.saturating_sub(4) as u16;
+                    let marked = markdown::from_str_with_width(last_msg, &md_styles, Some(cal_width));
+                    lines.extend(marked.to_flat_lines());
                 }
             }
             let content_height = content_area.height.saturating_sub(2);

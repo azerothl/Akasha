@@ -84,20 +84,30 @@ pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, per
 }
 
 /// Subscribes to event bus and fills events cache (all events with correlation_id) for GET /api/tasks/:id/events.
+/// Resilient to Lagged: continues processing instead of exiting so root task events are never lost.
 pub async fn run_events_subscriber(bus: EventBus, events: EventsCache) {
     let mut rx = bus.subscribe();
-    while let Ok(ev) = rx.recv().await {
-        let Some(task_id) = ev.correlation_id else { continue };
-        let entry = TaskEventEntry {
-            event_type: ev.event_type.as_str().to_string(),
-            payload: ev.payload.clone(),
-            at: Utc::now().to_rfc3339(),
-        };
-        let mut g = events.write().await;
-        let q = g.entry(task_id).or_insert_with(VecDeque::new);
-        q.push_back(entry);
-        if q.len() > MAX_EVENTS_PER_TASK {
-            q.pop_front();
+    loop {
+        match rx.recv().await {
+            Ok(ev) => {
+                let Some(task_id) = ev.correlation_id else { continue };
+                let entry = TaskEventEntry {
+                    event_type: ev.event_type.as_str().to_string(),
+                    payload: ev.payload.clone(),
+                    at: Utc::now().to_rfc3339(),
+                    task_id: Some(task_id.to_string()),
+                };
+                let mut g = events.write().await;
+                let q = g.entry(task_id).or_insert_with(VecDeque::new);
+                q.push_back(entry);
+                if q.len() > MAX_EVENTS_PER_TASK {
+                    q.pop_front();
+                }
+            }
+            Err(_) => {
+                // Lagged or closed: keep running to not miss future events
+                continue;
+            }
         }
     }
 }

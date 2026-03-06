@@ -78,8 +78,8 @@ function App() {
   const [tasksEvents, setTasksEvents] = useState<Array<{ event_type: string; payload?: unknown; at: string }>>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
   const [runningTaskChips, setRunningTaskChips] = useState<Record<string, { pct?: number; message?: string }>>({});
-  /** Events (sub_agent_spawned, progress_update, etc.) per running task for collapsible sub-agent panel. */
-  const [runningTaskEvents, setRunningTaskEvents] = useState<Record<string, Array<{ event_type: string; payload?: unknown; at: string }>>>({});
+  /** Events (sub_agent_spawned, progress_update, etc.) per running task for collapsible sub-agent panel. Each event may have task_id (root or child). */
+  const [runningTaskEvents, setRunningTaskEvents] = useState<Record<string, Array<{ event_type: string; payload?: unknown; at: string; task_id?: string }>>>({});
   const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(true);
   const [schedules, setSchedules] = useState<Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>>([]);
   const [taskRuns, setTaskRuns] = useState<Array<{
@@ -608,7 +608,7 @@ function App() {
             try {
               const [raw, eventsData] = await Promise.all([
                 invoke<string>("get_task_status", { taskId, port: DAEMON_PORT }),
-                invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string }> }>("get_task_events", { task_id: taskId, port: DAEMON_PORT }).catch(() => ({ events: [] })),
+                invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> }>("get_task_events", { task_id: taskId, port: DAEMON_PORT }).catch(() => ({ events: [] })),
               ]);
               const status = JSON.parse(raw) as { status?: string; progress?: Array<{ progress_pct?: number; message?: string }> };
               const pct = status?.progress?.slice(-1)[0]?.progress_pct ?? 0;
@@ -618,6 +618,7 @@ function App() {
                 event_type: e.event_type ?? "?",
                 payload: e.payload,
                 at: e.at ?? "",
+                task_id: e.task_id,
               }));
               setRunningTaskEvents((prev) => (prev[taskId] !== undefined ? { ...prev, [taskId]: events } : prev));
               if (status?.status === "completed") {
@@ -858,13 +859,23 @@ function App() {
                           Aucune étape reçue pour le moment. Les événements (délégation, sous-agents, progression) s’afficheront ici au fur et à mesure.
                         </p>
                       ) : (
-                        Object.entries(runningTaskEvents).map(([taskId, events]) =>
-                          events.length === 0 ? null : (
-                            <div key={taskId} className="chat-subagents-task">
-                              <div className="chat-subagents-task-id">Task #{taskId.slice(-8)}</div>
+                        Object.entries(runningTaskEvents).map(([rootTaskId, events]) => {
+                          if (events.length === 0) return null;
+                          // Group by task_id (root vs child) so we show "Tâche racine" and "Sous-tâche #xxx"
+                          const byTask: Record<string, typeof events> = {};
+                          for (const ev of events) {
+                            const tid = ev.task_id ?? rootTaskId;
+                            if (!byTask[tid]) byTask[tid] = [];
+                            byTask[tid].push(ev);
+                          }
+                          return Object.entries(byTask).map(([tid, evs]) => (
+                            <div key={`${rootTaskId}-${tid}`} className="chat-subagents-task">
+                              <div className="chat-subagents-task-id">
+                                {tid === rootTaskId ? `Tâche racine #${tid.slice(-8)}` : `Sous-tâche #${tid.slice(-8)}`}
+                              </div>
                               <ul className="chat-subagents-events">
-                                {events.map((ev, idx) => (
-                                  <li key={`${taskId}-${idx}`} className="chat-subagents-event" data-type={ev.event_type}>
+                                {evs.map((ev, idx) => (
+                                  <li key={`${tid}-${idx}`} className="chat-subagents-event" data-type={ev.event_type}>
                                     <span className="chat-subagents-event-type">{eventTypeLabel(ev.event_type)}</span>
                                     {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload && (
                                       <span className="chat-subagents-event-agent"> → {(ev.payload as { agent?: string }).agent}</span>
@@ -874,8 +885,8 @@ function App() {
                                 ))}
                               </ul>
                             </div>
-                          )
-                        )
+                          ));
+                        })
                       )}
                     </div>
                   )}

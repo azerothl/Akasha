@@ -50,13 +50,27 @@ async fn get_task_list(store_path: &Path) -> String {
     json_response("200 OK", &body.to_string())
 }
 
-async fn get_task_events(events: &EventsCache, id: Uuid) -> String {
-    let list: Vec<TaskEventEntry> = {
+async fn get_task_events(events: &EventsCache, store_path: &Path, id: Uuid) -> String {
+    let mut list: Vec<TaskEventEntry> = {
         let g = events.read().await;
         g.get(&id)
             .map(|q| q.iter().cloned().collect())
             .unwrap_or_default()
     };
+    // Include child task events so the UI shows sub-agent activity (children emit with their own correlation_id).
+    if let Ok(store) = TaskStore::open(store_path) {
+        if let Ok(children) = store.get_children(id) {
+            let g = events.read().await;
+            for child in &children {
+                if let Some(q) = g.get(&child.id) {
+                    for e in q.iter().cloned() {
+                        list.push(e);
+                    }
+                }
+            }
+        }
+    }
+    list.sort_by(|a, b| a.at.cmp(&b.at));
     let body = serde_json::json!({ "task_id": id.to_string(), "events": list });
     json_response("200 OK", &body.to_string())
 }
@@ -76,6 +90,9 @@ pub struct TaskEventEntry {
     pub event_type: String,
     pub payload: Option<serde_json::Value>,
     pub at: String,
+    /// When present, indicates which task this event belongs to (for merged root+child responses).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 pub type EventsCache =
@@ -1728,7 +1745,7 @@ pub async fn handle_api(
                     return cancel_task(store_path, id, main_agent).await;
                 }
                 if method == "GET" && parts.get(1) == Some(&"events") {
-                    return get_task_events(events, id).await;
+                    return get_task_events(events, store_path, id).await;
                 }
                 if method == "GET" {
                     return get_task_status(store_path, progress, id).await;
