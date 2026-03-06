@@ -28,7 +28,7 @@ akasha-plugin-api = { path = "../akasha-plugin-api" }
 akasha-plugin-host = { path = "../akasha-plugin-host" }
 akasha-llm = { path = "../akasha-llm" }
 akasha-rag = { path = "../akasha-rag" }
-akasha-tools = { path = "../akasha-tools" }
+akasha-tools = { path = "../akasha-tools", features = ["web", "container"] }
 akasha-cluster = { path = "../akasha-cluster" }
 futures-util = "0.3"
 tokio = { version = "1.0", features = ["full"] }

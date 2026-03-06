@@ -63,7 +63,8 @@ Les secrets (tokens Slack, Discord, Telegram, clés API LLM) sont stockés dans 
 
 - **Lister les clés** : `akasha vault list`
 - **Enregistrer un secret** : `akasha vault set NOM_CLE [valeur]`  
-  Si vous omettez la valeur, elle est lue depuis l’entrée standard.
+  Si vous omettez la valeur, elle est lue depuis l'entrée standard.
+- **Supprimer une clé** : `akasha vault delete NOM_CLE`
 
 Exemples :
 

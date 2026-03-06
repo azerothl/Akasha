@@ -3,14 +3,15 @@
 use akasha_core::{EventEnvelope, EventType};
 use akasha_vault::Vault;
 use akasha_llm::CompletionRequest;
-use akasha_store::{Schedule, ScheduleStore, TaskRunStatus, TaskStatus, TaskStore};
+use akasha_store::{Schedule, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
-use crate::agents::EventBus;
+use crate::agents::{EventBus, OrchestratorTask};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -88,6 +89,16 @@ pub fn new_events_cache() -> EventsCache {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
 }
 
+/// Per-session result cell for background commands. The spawned task writes the result when done.
+type BackgroundResultCell = Arc<RwLock<Option<anyhow::Result<(std::process::Output, akasha_tools::ToolResult)>>>>;
+
+/// Registry of background command sessions: session_id -> (task handle to abort, result cell).
+pub type ProcessRegistry = Arc<RwLock<std::collections::HashMap<Uuid, (tokio::task::JoinHandle<()>, BackgroundResultCell)>>>;
+
+pub fn new_process_registry() -> ProcessRegistry {
+    Arc::new(RwLock::new(std::collections::HashMap::new()))
+}
+
 /// Parsed HTTP request: method, path, body, and lowercase header map.
 pub fn parse_request(buf: &[u8]) -> (String, String, Option<Vec<u8>>, std::collections::HashMap<String, String>) {
     let mut method = String::new();
@@ -140,18 +151,45 @@ pub fn json_response(status: &str, body: &str) -> String {
 
 /// Liste des outils disponibles (source unique pour le prompt et la doc).
 /// Format: une ligne par outil "nom — usage".
+/// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_file", "read_file <path> — lire le contenu d'un fichier texte"),
     ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (path puis contenu)"),
     ("search_files", "search_files <dir> <pattern> — chercher des fichiers (glob) sous un répertoire"),
+    ("grep_content", "grep_content <dir> <pattern> [file_glob] — chercher le motif dans le contenu des fichiers (ex. grep_content . \"fn \" \"*.rs\")"),
     ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
+    ("run_terminal", "run_terminal <cmd> [args...] — exécuter une commande (même que run_command)"),
+    ("run_command_background", "run_command_background <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
+    ("process", "process list | process poll <session_id> | process kill <session_id> — lister, consulter ou arrêter des commandes en arrière-plan"),
     ("file_diff", "file_diff <path_a> <path_b> — diff texte entre deux fichiers"),
+    ("edit_file", "edit_file <path> <start_line> <end_line> <new_content> — remplacer les lignes start..end par new_content (lignes 1-based)"),
+    ("apply_patch", "apply_patch <path> <patch_content> — appliquer un patch unifié (contenu du patch après le path)"),
+    ("search_replace", "search_replace <path> <search> | <replace> — remplacer toutes les occurrences de search par replace dans le fichier (séparateur \" | \")"),
+    ("web_fetch", "web_fetch <url> — récupérer le contenu d'une URL (domaine autorisé dans tools_policy allowed_web_domains)"),
+    ("web_search", "web_search <query> [max_results] — rechercher sur le web (Brave API; BRAVE_API_KEY, web_search_enabled)"),
+    ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
+    ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
+    ("memory_store", "memory_store <content> <source> — stocker/promouvoir un contenu en mémoire long terme"),
+    ("sessions_list", "sessions_list [limit] — lister les tâches/sessions récentes"),
+    ("sessions_spawn", "sessions_spawn <message> [session_id] — créer une sous-tâche et la lancer"),
+    ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
+    ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
+    ("browser", "browser navigate <url> | browser screenshot | browser snapshot — automation navigateur (non implémenté, prévu phase 3)"),
+    ("image", "image <path|url> [prompt] — analyse d'image par modèle vision (non implémenté, prévu phase 3)"),
+    ("pdf", "pdf <path|url> — extraire le texte d'un PDF (non implémenté, prévu phase 3)"),
 ];
 
-fn available_tools_instruction() -> String {
-    AVAILABLE_TOOLS
-        .iter()
-        .map(|(_, desc)| *desc)
+fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
+    let iter: Box<dyn Iterator<Item = &(&str, &str)>> = if let Some(allowed) = allowed_tools {
+        Box::new(
+            AVAILABLE_TOOLS
+                .iter()
+                .filter(move |(name, _)| allowed.iter().any(|a| a == *name)),
+        )
+    } else {
+        Box::new(AVAILABLE_TOOLS.iter())
+    };
+    iter.map(|(_, desc)| *desc)
         .collect::<Vec<_>>()
         .join(" ; ")
 }
@@ -164,45 +202,116 @@ commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
 Réponds en français sauf si l'utilisateur utilise une autre langue.\n\n";
 
+/// If AKASHA_TOOLS_JOURNAL_PATH is set, append a line for write tool invocations (Phase 4 modification journal).
+async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: &str) {
+    const WRITE_TOOLS: &[&str] = &["write_file", "search_replace", "edit_file", "apply_patch"];
+    if !WRITE_TOOLS.contains(&tool) {
+        return;
+    }
+    if let Ok(path) = std::env::var("AKASHA_TOOLS_JOURNAL_PATH") {
+        let line = format!(
+            "{} {} {} {}\n",
+            chrono::Utc::now().to_rfc3339(),
+            tool,
+            args.join(" ").replace('\n', " "),
+            result_preview.replace('\n', " ").chars().take(200).collect::<String>()
+        );
+        if let Ok(mut f) = tokio::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&path)
+            .await
+        {
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut f, line.as_bytes()).await;
+        }
+    }
+}
+
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
 fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
-    for line in response.lines() {
-        let line = line.trim();
+    let lines: Vec<&str> = response.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim();
         if let Some(rest) = line.strip_prefix("TOOL:") {
             let rest = rest.trim();
+            // Split the header line by whitespace for tool name + fixed positional args
             let parts: Vec<String> = rest.split_whitespace().map(String::from).collect();
-            if let Some((name, args)) = parts.split_first() {
-                out.push((name.clone(), args.to_vec()));
+            if let Some((name, fixed_args)) = parts.split_first() {
+                let mut args = fixed_args.to_vec();
+                // Only certain tools support a multi-line body argument.
+                let tool_name_lc = name.to_lowercase();
+                let supports_body = matches!(
+                    tool_name_lc.as_str(),
+                    "apply_patch" | "edit_file" | "write_file"
+                );
+
+                if supports_body {
+                    // Collect subsequent non-TOOL: lines as a raw multi-line body (for
+                    // tools like apply_patch / edit_file that need preserved whitespace).
+                    i += 1;
+                    let body_start = i;
+                    while i < lines.len() && !lines[i].trim_start().starts_with("TOOL:") {
+                        i += 1;
+                    }
+                    // Trim trailing blank lines from the body
+                    let mut body_end = i;
+                    while body_end > body_start && lines[body_end - 1].trim().is_empty() {
+                        body_end -= 1;
+                    }
+                    if body_end > body_start {
+                        args.push(lines[body_start..body_end].join("\n"));
+                    }
+                    out.push((name.clone(), args));
+                    continue;
+                } else {
+                    // For other tools, only use the header line arguments and
+                    // do not consume following lines as a body.
+                    out.push((name.clone(), args));
+                    i += 1;
+                    continue;
+                }
             }
         }
+        i += 1;
     }
     out
 }
 
-/// Execute one tool call via ToolExecutor. Returns a short result string for the LLM context.
+/// Execute one tool call via ToolExecutor. Returns `(success, display_string)` for structured events.
 async fn execute_tool_call(
     executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
     tool_name: &str,
     args: &[String],
-) -> String {
+    process_registry: Option<&ProcessRegistry>,
+    long_term_client: Option<&LongTermMemoryClient>,
+    task_id: Uuid,
+    store_path: Option<&std::path::Path>,
+    conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
+    message_webhook_url: Option<&str>,
+) -> (bool, String) {
     use std::path::Path;
+    if !executor.policy.can_use_tool(tool_name) {
+        return (false, format!("[{}] tool not allowed by current profile", tool_name));
+    }
     let path_arg = |i: usize| args.get(i).map(|s| Path::new(s.as_str()));
-    match tool_name {
+    let result = match tool_name {
         "read_file" => {
             if let Some(p) = path_arg(0) {
                 match executor.read_file(p).await {
                     Ok((content, res)) => {
-                        if res.success {
+                        let msg = if res.success {
                             format!("[read_file {}] {} chars: {}", p.display(), content.len(), if content.len() <= 500 { content.as_str() } else { &content[..500] })
                         } else {
                             format!("[read_file] denied or error: {}", res.summary)
-                        }
+                        };
+                        (res.success, msg)
                     }
-                    Err(e) => format!("[read_file] error: {}", e),
+                    Err(e) => (false, format!("[read_file] error: {}", e)),
                 }
             } else {
-                "[read_file] usage: read_file <path>".to_string()
+                (false, "[read_file] usage: read_file <path>".to_string())
             }
         }
         "run_command" => {
@@ -212,45 +321,396 @@ async fn execute_tool_call(
                 Ok((out, res)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let stderr = String::from_utf8_lossy(&out.stderr);
-                    if res.success {
+                    let msg = if res.success {
                         format!("[run_command {}] stdout: {} stderr: {}", cmd, stdout.trim(), stderr.trim())
                     } else {
                         format!("[run_command] {} stderr: {}", res.summary, stderr.trim())
-                    }
+                    };
+                    (res.success, msg)
                 }
-                Err(e) => format!("[run_command] error: {}", e),
+                Err(e) => (false, format!("[run_command] error: {}", e)),
             }
         }
+        "run_terminal" => {
+            let cmd = args.get(0).map(String::as_str).unwrap_or("");
+            let cmd_args: Vec<String> = args.iter().skip(1).cloned().collect();
+            match executor.run_command(cmd, &cmd_args, None).await {
+                Ok((out, res)) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let msg = if res.success {
+                        format!("[run_terminal {}] stdout: {} stderr: {}", cmd, stdout.trim(), stderr.trim())
+                    } else {
+                        format!("[run_terminal] {} stderr: {}", res.summary, stderr.trim())
+                    };
+                    (res.success, msg)
+                }
+                Err(e) => (false, format!("[run_terminal] error: {}", e)),
+            }
+        }
+        "run_command_background" => {
+            let cmd = args.get(0).cloned().unwrap_or_default();
+            let cmd_args: Vec<String> = args.iter().skip(1).cloned().collect();
+            let cmd_display = format!("{} {}", cmd, cmd_args.join(" "));
+            match process_registry {
+                Some(reg) => {
+                    let session_id = Uuid::new_v4();
+                    let exec = executor.clone();
+                    let cell: BackgroundResultCell = Arc::new(RwLock::new(None));
+                    let cell_clone = cell.clone();
+                    let reg_clone = reg.clone();
+                    let task = tokio::spawn(async move {
+                        let result = exec.run_command(&cmd, &cmd_args, None).await;
+                        *cell_clone.write().await = Some(result);
+                        // Auto-cleanup after a TTL to prevent leaking sessions the client never polls.
+                        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                        reg_clone.write().await.remove(&session_id);
+                    });
+                    reg.write().await.insert(session_id, (task, cell));
+                    (true, format!("[run_command_background] session_id: {} (cmd: {})", session_id, cmd_display))
+                }
+                None => (false, "[run_command_background] process registry not available".to_string()),
+            }
+        }
+        "process" => {
+            let sub = args.get(0).map(String::as_str).unwrap_or("");
+            match (process_registry, sub) {
+                (Some(reg), "list") => {
+                    let ids: Vec<String> = reg.read().await.keys().map(|u| u.to_string()).collect();
+                    (true, format!("[process list] {} session(s): {:?}", ids.len(), ids))
+                }
+                (Some(reg), "poll") => {
+                    let session_id = args.get(1).and_then(|s| Uuid::parse_str(s).ok());
+                    match session_id {
+                        Some(id) => {
+                            let cell_opt = {
+                                let g = reg.read().await;
+                                g.get(&id).map(|(_task, cell)| cell.clone())
+                            };
+                            let Some(cell) = cell_opt else {
+                                return (false, format!("[process poll] unknown session_id: {}", id));
+                            };
+                            let result_opt = cell.write().await.take();
+                            match result_opt {
+                                Some(Ok((out, res))) => {
+                                    reg.write().await.remove(&id);
+                                    let stdout = String::from_utf8_lossy(&out.stdout);
+                                    let stderr = String::from_utf8_lossy(&out.stderr);
+                                    let base_msg = format!(
+                                        "[process poll {}] done — exit {} stdout: {} stderr: {}",
+                                        id,
+                                        out.status.code().unwrap_or(-1),
+                                        stdout.trim(),
+                                        stderr.trim()
+                                    );
+                                    if res.success {
+                                        (true, base_msg)
+                                    } else {
+                                        (false, format!("{} | summary: {}", base_msg, res.summary))
+                                    }
+                                }
+                                Some(Err(e)) => {
+                                    reg.write().await.remove(&id);
+                                    (false, format!("[process poll {}] error: {}", id, e))
+                                }
+                                None => (true, format!("[process poll {}] still running", id)),
+                            }
+                        }
+                        None => (false, "[process poll] usage: process poll <session_id>".to_string()),
+                    }
+                }
+                (Some(reg), "kill") => {
+                    let session_id = args.get(1).and_then(|s| Uuid::parse_str(s).ok());
+                    match session_id {
+                        Some(id) => {
+                            let mut g = reg.write().await;
+                            if let Some((task, _cell)) = g.remove(&id) {
+                                task.abort();
+                                (true, format!("[process kill {}] aborted", id))
+                            } else {
+                                (false, format!("[process kill] unknown session_id: {}", id))
+                            }
+                        }
+                        None => (false, "[process kill] usage: process kill <session_id>".to_string()),
+                    }
+                }
+                (_, _) => (false, "[process] usage: process list | process poll <session_id> | process kill <session_id>".to_string()),
+            }
+        }
+        "memory_search" => {
+            let query_str = args.get(0).map(|a| a.as_str()).unwrap_or("").trim();
+            let top_k = args.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(5).min(20);
+            if query_str.is_empty() {
+                return (false, "[memory_search] usage: memory_search <query> [top_k]".to_string());
+            }
+            match long_term_client {
+                Some(client) => {
+                    let client = client.clone();
+                    let query = query_str.to_string();
+                    let results = tokio::task::spawn_blocking(move || client.search(query, top_k))
+                        .await
+                        .ok()
+                        .unwrap_or_default();
+                    if results.is_empty() {
+                        (true, format!("[memory_search] no results for \"{}\"", query_str))
+                    } else {
+                        let preview: Vec<String> = results.iter().take(5).map(|s| s.replace('\n', " ")).collect();
+                        (true, format!("[memory_search] {} result(s): {}", results.len(), preview.join(" | ")))
+                    }
+                }
+                None => (false, "[memory_search] long-term memory not available".to_string()),
+            }
+        }
+        "memory_store" => {
+            let content = args.get(0).map(|a| a.as_str()).unwrap_or("");
+            let source = args.get(1).map(|a| a.as_str()).unwrap_or("agent");
+            if content.is_empty() {
+                return (false, "[memory_store] usage: memory_store <content> <source>".to_string());
+            }
+            match long_term_client {
+                Some(client) => {
+                    let client = client.clone();
+                    let content = content.to_string();
+                    let source = source.to_string();
+                    let out = tokio::task::spawn_blocking(move || client.promote(content, source))
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok());
+                    match out {
+                        Some(()) => (true, "[memory_store] stored".to_string()),
+                        None => (false, "[memory_store] failed or memory not available".to_string()),
+                    }
+                }
+                None => (false, "[memory_store] long-term memory not available".to_string()),
+            }
+        }
+        "sessions_list" => {
+            let limit = args.get(0).and_then(|s| s.parse::<usize>().ok()).unwrap_or(20).min(50);
+            match store_path {
+                Some(path) => match TaskStore::open(path) {
+                    Ok(store) => match store.get_all() {
+                        Ok(tasks) => {
+                            let list: Vec<String> = tasks
+                                .into_iter()
+                                .rev()
+                                .take(limit)
+                                .map(|t| format!("{} {} {}", t.id, t.status.as_str(), t.assigned_agent))
+                                .collect();
+                            (true, format!("[sessions_list] {} task(s): {}", list.len(), list.join(" ; ")))
+                        }
+                        Err(e) => (false, format!("[sessions_list] error: {}", e)),
+                    },
+                    Err(e) => (false, format!("[sessions_list] store error: {}", e)),
+                },
+                None => (false, "[sessions_list] store not available".to_string()),
+            }
+        }
+        "session_status" => {
+            let task_id_str = args.get(0).map(String::as_str).unwrap_or("");
+            let id = task_id_str.parse::<Uuid>().ok();
+            match (store_path, id) {
+                (Some(path), Some(id)) => match TaskStore::open(path) {
+                    Ok(store) => match store.get(id) {
+                        Ok(Some(t)) => (true, format!(
+                            "[session_status] {} status={} agent={}",
+                            t.id,
+                            t.status.as_str(),
+                            t.assigned_agent
+                        )),
+                        Ok(None) => (false, format!("[session_status] task {} not found", id)),
+                        Err(e) => (false, format!("[session_status] error: {}", e)),
+                    },
+                    Err(e) => (false, format!("[session_status] store error: {}", e)),
+                },
+                (_, _) => (false, "[session_status] usage: session_status <task_id>".to_string()),
+            }
+        }
+        "sessions_spawn" => {
+            let message = args.get(0).map(|a| a.as_str()).unwrap_or("").to_string();
+            let child_session_id = args.get(1).map(|a| a.as_str()).unwrap_or("").to_string();
+            if message.is_empty() {
+                return (false, "[sessions_spawn] usage: sessions_spawn <message> [session_id]".to_string());
+            }
+            match (store_path, conv_tx) {
+                (Some(path), Some(tx)) => {
+                    let new_id = Uuid::new_v4();
+                    let now = chrono::Utc::now();
+                    let task = Task {
+                        id: new_id,
+                        parent_task_id: Some(task_id),
+                        status: TaskStatus::Pending,
+                        assigned_agent: "conversation".to_string(),
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    match TaskStore::open(path) {
+                        Ok(store) => {
+                            if store.insert(&task).is_err() {
+                                return (false, "[sessions_spawn] failed to insert task".to_string());
+                            }
+                            let sid = if child_session_id.is_empty() {
+                                new_id.to_string()
+                            } else {
+                                child_session_id
+                            };
+                            if tx.send((new_id, message, sid)).await.is_err() {
+                                return (false, "[sessions_spawn] failed to send to conversation queue".to_string());
+                            }
+                            (true, format!("[sessions_spawn] task_id: {} (queued)", new_id))
+                        }
+                        Err(e) => (false, format!("[sessions_spawn] store error: {}", e)),
+                    }
+                }
+                (_, _) => (false, "[sessions_spawn] store or conversation channel not available".to_string()),
+            }
+        }
+        "message" => {
+            let sub = args.get(0).map(String::as_str).unwrap_or("");
+            if sub != "send" || args.len() < 3 {
+                return (false, "[message] usage: message send <channel> <text>".to_string());
+            }
+            let channel = args.get(1).map(String::as_str).unwrap_or("");
+            let text = args.get(2..).map(|a| a.join(" ")).unwrap_or_default();
+            match message_webhook_url {
+                Some(url) => {
+                    let body = serde_json::json!({ "channel": channel, "text": text });
+                    let client = match reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(10))
+                        .build()
+                    {
+                        Ok(c) => c,
+                        Err(e) => return (false, format!("[message] client error: {}", e)),
+                    };
+                    match client.post(url).json(&body).send().await {
+                        Ok(res) if res.status().is_success() => (true, "[message] sent".to_string()),
+                        Ok(res) => (false, format!("[message] send failed: {}", res.status())),
+                        Err(e) => (false, format!("[message] error: {}", e)),
+                    }
+                }
+                None => (false, "[message] AKASHA_MESSAGE_WEBHOOK_URL not set".to_string()),
+            }
+        }
+        "browser" => (false, "[browser] browser automation not implemented (planned Phase 3)".to_string()),
+        "image" => (false, "[image] image analysis (vision) not implemented (planned Phase 3)".to_string()),
+        "pdf" => (false, "[pdf] PDF extraction not implemented (planned Phase 3)".to_string()),
         "search_files" => {
             let dir = path_arg(0).unwrap_or(Path::new("."));
             let pattern = args.get(1).map(String::as_str).unwrap_or("*");
             match executor.search_files(dir, pattern).await {
                 Ok((paths, res)) => {
-                    if res.success {
+                    let msg = if res.success {
                         let list: Vec<String> = paths.iter().take(20).map(|p| p.display().to_string()).collect();
                         format!("[search_files] found {}: {:?}", paths.len(), list)
                     } else {
                         format!("[search_files] {}", res.summary)
-                    }
+                    };
+                    (res.success, msg)
                 }
-                Err(e) => format!("[search_files] error: {}", e),
+                Err(e) => (false, format!("[search_files] error: {}", e)),
+            }
+        }
+        "grep_content" => {
+            let dir = path_arg(0).unwrap_or(Path::new("."));
+            let pattern = args.get(1).map(String::as_str).unwrap_or("");
+            let file_glob = args.get(2).map(String::as_str).filter(|s| !s.is_empty());
+            if pattern.is_empty() {
+                return (false, "[grep_content] usage: grep_content <dir> <pattern> [file_glob]".to_string());
+            }
+            match executor.grep_content(dir, pattern, file_glob, 50).await {
+                Ok((matches, res)) => {
+                    let msg = if res.success {
+                        let lines: Vec<String> = matches
+                            .iter()
+                            .take(30)
+                            .map(|(p, n, line)| format!("{}:{}: {}", p.display(), n, line.trim()))
+                            .collect();
+                        format!("[grep_content] {} — {}", res.summary, lines.join(" ; "))
+                    } else {
+                        format!("[grep_content] {}", res.summary)
+                    };
+                    (res.success, msg)
+                }
+                Err(e) => (false, format!("[grep_content] error: {}", e)),
             }
         }
         "write_file" => {
             let path = match path_arg(0) {
                 Some(p) => p,
-                None => return "[write_file] usage: write_file <path> <content>".to_string(),
+                None => return (false, "[write_file] usage: write_file <path> <content>".to_string()),
             };
             let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
             match executor.write_file(path, &content).await {
                 Ok(res) => {
-                    if res.success {
+                    let msg = if res.success {
                         format!("[write_file {}] {}", path.display(), res.summary)
                     } else {
                         format!("[write_file] {}", res.summary)
-                    }
+                    };
+                    (res.success, msg)
                 }
-                Err(e) => format!("[write_file] error: {}", e),
+                Err(e) => (false, format!("[write_file] error: {}", e)),
+            }
+        }
+        "search_replace" => {
+            let path = path_arg(0);
+            let rest = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
+            let Some((search, replace)) = rest
+                .split_once('|')
+                .map(|(s, r)| (s.trim().to_string(), r.trim().to_string()))
+            else {
+                return (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string());
+            };
+            match path {
+                Some(p) => match executor.search_replace(p, &search, &replace).await {
+                    Ok(res) => {
+                        let msg = if res.success {
+                            format!("[search_replace {}] {}", p.display(), res.summary)
+                        } else {
+                            format!("[search_replace] {}", res.summary)
+                        };
+                        (res.success, msg)
+                    }
+                    Err(e) => (false, format!("[search_replace] error: {}", e)),
+                },
+                None => (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string()),
+            }
+        }
+        "edit_file" => {
+            let path = path_arg(0);
+            let start_line = args.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let end_line = args.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let new_content = args.get(3..).map(|a| a.join("\n")).unwrap_or_default();
+            match path {
+                Some(p) => match executor.edit_file(p, start_line, end_line, &new_content).await {
+                    Ok(res) => {
+                        let msg = if res.success {
+                            format!("[edit_file {}] {}", p.display(), res.summary)
+                        } else {
+                            format!("[edit_file] {}", res.summary)
+                        };
+                        (res.success, msg)
+                    }
+                    Err(e) => (false, format!("[edit_file] error: {}", e)),
+                },
+                None => (false, "[edit_file] usage: edit_file <path> <start_line> <end_line> <new_content>".to_string()),
+            }
+        }
+        "apply_patch" => {
+            let path = path_arg(0);
+            let patch_content = args.get(1..).map(|a| a.join("\n")).unwrap_or_default();
+            match path {
+                Some(p) => match executor.apply_patch(p, &patch_content).await {
+                    Ok(res) => {
+                        let msg = if res.success {
+                            format!("[apply_patch {}] {}", p.display(), res.summary)
+                        } else {
+                            format!("[apply_patch] {}", res.summary)
+                        };
+                        (res.success, msg)
+                    }
+                    Err(e) => (false, format!("[apply_patch] error: {}", e)),
+                },
+                None => (false, "[apply_patch] usage: apply_patch <path> <patch_content>".to_string()),
             }
         }
         "file_diff" => {
@@ -259,23 +719,95 @@ async fn execute_tool_call(
             match (path_a, path_b) {
                 (Some(a), Some(b)) => match executor.file_diff(a, b).await {
                     Ok((diff, res)) => {
-                        if res.success {
+                        let msg = if res.success {
                             let preview = if diff.len() <= 400 { diff.as_str() } else { &diff[..400] };
                             format!("[file_diff] {} — {}", res.summary, preview)
                         } else {
                             format!("[file_diff] {}", res.summary)
-                        }
+                        };
+                        (res.success, msg)
                     }
-                    Err(e) => format!("[file_diff] error: {}", e),
+                    Err(e) => (false, format!("[file_diff] error: {}", e)),
                 },
-                _ => "[file_diff] usage: file_diff <path_a> <path_b>".to_string(),
+                _ => (false, "[file_diff] usage: file_diff <path_a> <path_b>".to_string()),
+            }
+        }
+        "web_fetch" => {
+            let url = args.get(0).map(String::as_str).unwrap_or("");
+            if url.is_empty() {
+                return (false, "[web_fetch] usage: web_fetch <url>".to_string());
+            }
+            match executor.web_fetch(url).await {
+                Ok((body, res)) => {
+                    let msg = if res.success {
+                        let preview = if body.len() <= 500 { body.as_str() } else { &body[..500] };
+                        format!("[web_fetch] {} — {}", res.summary, preview)
+                    } else {
+                        format!("[web_fetch] {}", res.summary)
+                    };
+                    (res.success, msg)
+                }
+                Err(e) => (false, format!("[web_fetch] error: {}", e)),
+            }
+        }
+        "web_search" => {
+            let (query, max_results) = if args.len() >= 2 {
+                let last = args.last().unwrap();
+                if last.parse::<u32>().is_ok() {
+                    (args[..args.len() - 1].join(" "), last.parse().unwrap_or(5))
+                } else {
+                    (args.join(" "), 5u32)
+                }
+            } else {
+                (args.join(" "), 5u32)
+            };
+            let query = query.trim();
+            if query.is_empty() {
+                return (false, "[web_search] usage: web_search <query> [max_results]".to_string());
+            }
+            match executor.web_search(query.trim(), max_results).await {
+                Ok((body, res)) => {
+                    let msg = if res.success {
+                        let preview = if body.len() <= 600 { body.as_str() } else { &body[..600] };
+                        format!("[web_search] {} — {}", res.summary, preview)
+                    } else {
+                        format!("[web_search] {}", res.summary)
+                    };
+                    (res.success, msg)
+                }
+                Err(e) => (false, format!("[web_search] error: {}", e)),
+            }
+        }
+        "run_in_container" => {
+            let work_dir = path_arg(0);
+            let image = args.get(1).map(String::as_str).unwrap_or("");
+            let command = args.get(2).map(String::as_str).unwrap_or("");
+            if work_dir.is_none() || image.is_empty() || command.is_empty() {
+                return (false, "[run_in_container] usage: run_in_container <work_dir> <image> <command> [args...]".to_string());
+            }
+            let work_dir = work_dir.unwrap();
+            let cmd_args: Vec<String> = args.iter().skip(3).cloned().collect();
+            match executor.run_in_container(work_dir, image, command, &cmd_args, 300, 512).await {
+                Ok((stdout, stderr, exit_code, _res)) => {
+                    let out = String::from_utf8_lossy(&stdout);
+                    let err = String::from_utf8_lossy(&stderr);
+                    let success = exit_code == 0;
+                    (success, format!(
+                        "[run_in_container] exit {} — stdout: {} stderr: {}",
+                        exit_code,
+                        if out.len() > 400 { format!("{}...", &out[..400]) } else { out.to_string() },
+                        if err.len() > 200 { format!("{}...", &err[..200]) } else { err.to_string() }
+                    ))
+                }
+                Err(e) => (false, format!("[run_in_container] error: {}", e)),
             }
         }
         _ => {
             let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
-            format!("[{}] unknown tool. Available: {}.", tool_name, names.join(", "))
+            (false, format!("[{}] unknown tool. Available: {}.", tool_name, names.join(", ")))
         }
-    }
+    };
+    result
 }
 
 /// Compact short-term memory when it would exceed context: summarize oldest turns via LLM and replace in store.
@@ -352,6 +884,9 @@ pub(crate) async fn run_message_via_llm(
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
     tools_executor: Option<std::sync::Arc<akasha_tools::ToolExecutor>>,
+    skill_registry: Option<std::sync::Arc<crate::skills::SkillRegistry>>,
+    process_registry: Option<ProcessRegistry>,
+    conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -361,6 +896,8 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
+
+    let message_webhook_url = std::env::var("AKASHA_MESSAGE_WEBHOOK_URL").ok();
 
     // Emit user message so TUI/API can show "what this task is about"
     let _ = bus.send(
@@ -390,11 +927,28 @@ pub(crate) async fn run_message_via_llm(
         .unwrap_or(4096);
 
     let tool_instruction = if tools_executor.is_some() {
+        let allowed_tools = tools_executor.as_ref().and_then(|e| e.policy.allowed_tool_list());
+        let base = available_tools_instruction(allowed_tools.as_deref());
+        let skills_part = match &skill_registry {
+            Some(reg) => {
+                let list = reg.list().await;
+                if list.is_empty() {
+                    String::new()
+                } else {
+                    let skills_desc: Vec<String> = list
+                        .iter()
+                        .map(|s| format!("{} ({})", s.name, s.description))
+                        .collect();
+                    format!(" ; Skills (use skill name as tool): {}", skills_desc.join(", "))
+                }
+            }
+            None => String::new(),
+        };
         format!(
-            "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}.\nIf you need no tool, reply normally with your answer.\n\
+            "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\nIf you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
-            available_tools_instruction()
+            base, skills_part
         )
     } else {
         String::new()
@@ -468,6 +1022,7 @@ pub(crate) async fn run_message_via_llm(
     let reply_text;
     const MAX_TOOL_ROUNDS: u32 = 3;
     let mut round = 0u32;
+    let mut tool_loop_history: Vec<(String, String)> = Vec::new();
 
     let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
         .ok()
@@ -602,7 +1157,63 @@ pub(crate) async fn run_message_via_llm(
             round += 1;
             let mut tool_results = Vec::new();
             for (name, args) in &calls {
-                let res = execute_tool_call(exec, name, args).await;
+                // Phase D: resolve skill name to tool_ref (spec 33)
+                let actual_tool = match &skill_registry {
+                    Some(reg) => reg.get(name).await.map(|s| s.tool_ref).unwrap_or_else(|| name.clone()),
+                    None => name.clone(),
+                };
+                let args_str = args.join(" ");
+                tool_loop_history.push((actual_tool.clone(), args_str.clone()));
+                // Phase 4: loop detection — same tool+args repeated 3 times
+                if tool_loop_history.len() >= 3 {
+                    let last = tool_loop_history.last().unwrap();
+                    if tool_loop_history.iter().rev().take(3).all(|e| e.0 == last.0 && e.1 == last.1) {
+                        reply_text = "Loop detected: same tool and arguments repeated. Stopping.".to_string();
+                        break 'tool_rounds;
+                    }
+                }
+                let res = execute_tool_call(
+                    exec,
+                    &actual_tool,
+                    args,
+                    process_registry.as_ref(),
+                    long_term_client.as_ref(),
+                    task_id,
+                    Some(store_path.as_path()),
+                    conv_tx.clone(),
+                    message_webhook_url.as_deref(),
+                )
+                .await;
+                // Phase F: emit ToolInvoked for Actions tab (spec 33)
+                let (success, res) = res;
+                // Redact or truncate args in the event to avoid leaking large blobs or secrets.
+                let redacted_args: Vec<String> = if matches!(actual_tool.as_str(), "apply_patch" | "edit_file" | "write_file") {
+                    vec!["[redacted for write-like tool]".to_string()]
+                } else {
+                    const MAX_ARG_PREVIEW_LEN: usize = 512;
+                    args.iter()
+                        .map(|arg| {
+                            if arg.len() > MAX_ARG_PREVIEW_LEN {
+                                format!("{}...[truncated {} chars]", &arg[..MAX_ARG_PREVIEW_LEN], arg.len().saturating_sub(MAX_ARG_PREVIEW_LEN))
+                            } else {
+                                arg.clone()
+                            }
+                        })
+                        .collect()
+                };
+                let payload = serde_json::json!({
+                    "tool": actual_tool,
+                    "skill": if &actual_tool != name { Some(name.as_str()) } else { None::<&str> },
+                    "args": redacted_args,
+                    "result_preview": if res.len() > 300 { format!("{}...", &res[..300]) } else { res.clone() },
+                    "success": success
+                });
+                let _ = bus.send(
+                    EventEnvelope::new(EventType::ToolInvoked, Some(payload)).with_correlation(task_id),
+                );
+                if success {
+                    log_tool_journal_if_write(&actual_tool, args, &res).await;
+                }
                 tool_results.push(res);
             }
             let results_blob = tool_results.join("\n");
@@ -993,6 +1604,27 @@ pub async fn handle_api(
             body_json.len(),
             body_json
         );
+    }
+
+    // DELETE /api/vault — remove one key (body: {"key": "KEY_NAME"})
+    if method == "DELETE" && path == "/api/vault" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let key = body_json.as_ref().and_then(|j| j.get("key")).and_then(|v| v.as_str()).map(String::from);
+        match key {
+            Some(k) if !k.is_empty() => {
+                match akasha_vault::open_vault(data_dir) {
+                    Ok(v) => match v.delete(&k) {
+                        Ok(()) => return json_response("200 OK", &serde_json::json!({ "ok": true, "key": k }).to_string()),
+                        Err(akasha_vault::VaultError::NotFound(_)) => return json_response("404 Not Found", &serde_json::json!({ "error": "not_found", "key": k }).to_string()),
+                        Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
+                    },
+                    Err(e) => return json_response("503 Service Unavailable", &serde_json::json!({ "error": e.to_string() }).to_string()),
+                }
+            }
+            _ => return json_response("400 Bad Request", r#"{"error":"missing or empty key"}"#),
+        }
     }
 
     // POST /api/restart — signal daemon to exit (supervisor restarts it)

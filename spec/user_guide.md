@@ -60,6 +60,7 @@ Pour l'interface TUI : `cargo build -p akasha-cli -p akasha-tui`
 | `akasha vault list` | Liste les clés secrètes (noms uniquement) |
 | `akasha vault set KEY [value]` | Enregistre un secret ; si `value` est omis, lu depuis l'entrée standard |
 | `akasha vault get KEY` | Affiche la valeur d'une clé (à utiliser avec précaution) |
+| `akasha vault delete KEY` | Supprime une clé du vault |
 
 ### Config (modèles + variables d'environnement)
 
@@ -243,7 +244,7 @@ Dans le chat, les messages commençant par **/** sont interprétés comme des co
 | `/reload` | Recharger les plugins |
 | `/restart` | Redémarrer le daemon (superviseur) |
 
-Pour ajouter une clé au vault : utiliser le CLI `akasha vault set KEY [value]` (pas d’équivalent slash pour la sécurité).
+Pour ajouter une clé au vault : utiliser le CLI `akasha vault set KEY [value]`. Pour supprimer : `akasha vault delete KEY` ou `DELETE /api/vault` avec body `{"key": "KEY"}` (pas d’équivalent slash pour la sécurité).
 
 ### Suite d'évals
 
