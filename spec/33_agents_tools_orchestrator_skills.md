@@ -52,6 +52,22 @@ Liste exposée dans le code (`AVAILABLE_TOOLS`) et via **GET /api/tools** (JSON 
 | `search_replace` | `search_replace <path> <search> \| <replace>` | Remplacer toutes les occurrences de `search` par `replace` dans le fichier (séparateur « \| »). |
 | `web_fetch` | `web_fetch <url>` | Récupérer le contenu d’une URL (domaine autorisé dans `allowed_web_domains`). |
 | `run_in_container` | `run_in_container <work_dir> <image> <command> [args...]` | Exécuter une commande dans un conteneur (work_dir monté, image Docker/podman). |
+| `grep_content` | `grep_content <dir> <pattern> [file_glob]` | Chercher un motif dans le contenu des fichiers. |
+| `edit_file` | `edit_file <path> <start_line> <end_line> <new_content>` | Remplacer les lignes start..end (1-based). |
+| `apply_patch` | `apply_patch <path> <patch_content>` | Appliquer un patch unifié. |
+| `run_terminal` | `run_terminal <cmd> [args...]` | Même sémantique que run_command. |
+| `run_command_background` | `run_command_background <cmd> [args...]` | Lancer en arrière-plan ; retourne session_id. |
+| `process` | `process list \| poll \| kill <session_id>` | Lister, consulter ou arrêter commandes en arrière-plan. |
+| `web_search` | `web_search <query> [max_results]` | Recherche web (Brave API). |
+| `memory_search` | `memory_search <query> [top_k]` | Rechercher en mémoire long terme. |
+| `memory_store` | `memory_store <content> <source>` | Stocker en mémoire long terme. |
+| `sessions_list` | `sessions_list [limit]` | Lister les tâches récentes. |
+| `sessions_spawn` | `sessions_spawn <message> [session_id]` | Créer une sous-tâche. |
+| `session_status` | `session_status <task_id>` | Statut d'une tâche. |
+| `message` | `message send <channel> <text>` | Envoyer un message (webhook). |
+| `browser`, `image`, `pdf` | (stubs) | Prévu phase 3. |
+
+Politique : `tool_profiles`, `default_profile` ; détection de boucle (3 répétitions) ; journal des modifications si `AKASHA_TOOLS_JOURNAL_PATH`.
 
 Activation : placer un fichier **tools_policy.yaml** dans le data_dir (voir `spec/tools_policy.example.yaml`) avec `allowed_read_paths`, `allowed_write_paths`, `allowed_commands`. Sans politique chargée, aucun outil n’est exécuté (conversation sans boucle d’outils).
 

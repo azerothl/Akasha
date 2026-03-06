@@ -179,10 +179,17 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("pdf", "pdf <path|url> — extraire le texte d'un PDF (non implémenté, prévu phase 3)"),
 ];
 
-fn available_tools_instruction() -> String {
-    AVAILABLE_TOOLS
-        .iter()
-        .map(|(_, desc)| *desc)
+fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
+    let iter: Box<dyn Iterator<Item = &(&str, &str)>> = if let Some(allowed) = allowed_tools {
+        Box::new(
+            AVAILABLE_TOOLS
+                .iter()
+                .filter(move |(name, _)| allowed.iter().any(|a| a == *name)),
+        )
+    } else {
+        Box::new(AVAILABLE_TOOLS.iter())
+    };
+    iter.map(|(_, desc)| *desc)
         .collect::<Vec<_>>()
         .join(" ; ")
 }
@@ -194,6 +201,31 @@ commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec ongle
 commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, etc.). \
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
 Réponds en français sauf si l'utilisateur utilise une autre langue.\n\n";
+
+/// If AKASHA_TOOLS_JOURNAL_PATH is set, append a line for write tool invocations (Phase 4 modification journal).
+async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: &str) {
+    const WRITE_TOOLS: &[&str] = &["write_file", "search_replace", "edit_file", "apply_patch"];
+    if !WRITE_TOOLS.contains(&tool) {
+        return;
+    }
+    if let Ok(path) = std::env::var("AKASHA_TOOLS_JOURNAL_PATH") {
+        let line = format!(
+            "{} {} {} {}\n",
+            chrono::Utc::now().to_rfc3339(),
+            tool,
+            args.join(" ").replace('\n', " "),
+            result_preview.replace('\n', " ").chars().take(200).collect::<String>()
+        );
+        if let Ok(mut f) = tokio::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&path)
+            .await
+        {
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut f, line.as_bytes()).await;
+        }
+    }
+}
 
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
 fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
@@ -224,6 +256,9 @@ async fn execute_tool_call(
     message_webhook_url: Option<&str>,
 ) -> String {
     use std::path::Path;
+    if !executor.policy.can_use_tool(tool_name) {
+        return format!("[{}] tool not allowed by current profile", tool_name);
+    }
     let path_arg = |i: usize| args.get(i).map(|s| Path::new(s.as_str()));
     match tool_name {
         "read_file" => {
@@ -826,7 +861,8 @@ pub(crate) async fn run_message_via_llm(
         .unwrap_or(4096);
 
     let tool_instruction = if tools_executor.is_some() {
-        let base = available_tools_instruction();
+        let allowed_tools = tools_executor.as_ref().and_then(|e| e.policy.allowed_tool_list());
+        let base = available_tools_instruction(allowed_tools.as_deref());
         let skills_part = match &skill_registry {
             Some(reg) => {
                 let list = reg.list().await;
@@ -920,6 +956,7 @@ pub(crate) async fn run_message_via_llm(
     let reply_text;
     const MAX_TOOL_ROUNDS: u32 = 3;
     let mut round = 0u32;
+    let mut tool_loop_history: Vec<(String, String)> = Vec::new();
 
     let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
         .ok()
@@ -1059,6 +1096,16 @@ pub(crate) async fn run_message_via_llm(
                     Some(reg) => reg.get(name).await.map(|s| s.tool_ref).unwrap_or_else(|| name.clone()),
                     None => name.clone(),
                 };
+                let args_str = args.join(" ");
+                tool_loop_history.push((actual_tool.clone(), args_str.clone()));
+                // Phase 4: loop detection — same tool+args repeated 3 times
+                if tool_loop_history.len() >= 3 {
+                    let last = tool_loop_history.last().unwrap();
+                    if tool_loop_history.iter().rev().take(3).all(|e| e.0 == last.0 && e.1 == last.1) {
+                        reply_text = "Loop detected: same tool and arguments repeated. Stopping.".to_string();
+                        break 'tool_rounds;
+                    }
+                }
                 let res = execute_tool_call(
                     exec,
                     &actual_tool,
@@ -1083,6 +1130,9 @@ pub(crate) async fn run_message_via_llm(
                 let _ = bus.send(
                     EventEnvelope::new(EventType::ToolInvoked, Some(payload)).with_correlation(task_id),
                 );
+                if success {
+                    log_tool_journal_if_write(&actual_tool, args, &res).await;
+                }
                 tool_results.push(res);
             }
             let results_blob = tool_results.join("\n");

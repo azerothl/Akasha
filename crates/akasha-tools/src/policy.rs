@@ -1,6 +1,7 @@
 //! Security policy for agent tools: allowed paths, commands, timeouts.
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 fn path_normalize(p: &Path) -> PathBuf {
@@ -24,6 +25,12 @@ pub struct ToolsPolicy {
     /// Optional: enable web_search (requires BRAVE_API_KEY env).
     #[serde(default)]
     pub web_search_enabled: bool,
+    /// Optional: tool profiles (profile_name -> list of tool names). If default_profile is set, only tools in that profile are allowed.
+    #[serde(default)]
+    pub tool_profiles: HashMap<String, Vec<String>>,
+    /// Optional: default profile name. When set, only tools listed in tool_profiles[default_profile] are allowed.
+    #[serde(default)]
+    pub default_profile: Option<String>,
 }
 
 impl ToolsPolicy {
@@ -73,6 +80,24 @@ impl ToolsPolicy {
             let a = allowed.trim().to_lowercase();
             name_base == a || name.ends_with(&a)
         })
+    }
+
+    /// If default_profile and tool_profiles are set, returns whether the tool is in the profile. Otherwise true.
+    pub fn can_use_tool(&self, tool_name: &str) -> bool {
+        match (&self.default_profile, &self.tool_profiles) {
+            (Some(profile), map) if !map.is_empty() => map
+                .get(profile)
+                .map(|list| list.iter().any(|t| t == tool_name))
+                .unwrap_or(false),
+            _ => true,
+        }
+    }
+
+    /// When default_profile is set, returns the list of allowed tool names for that profile. None = no profile filter (all tools allowed).
+    pub fn allowed_tool_list(&self) -> Option<Vec<String>> {
+        self.default_profile
+            .as_ref()
+            .and_then(|p| self.tool_profiles.get(p).cloned())
     }
 
     /// Check if a URL's host is allowed for web_fetch.

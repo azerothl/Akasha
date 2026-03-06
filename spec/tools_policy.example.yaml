@@ -23,3 +23,12 @@ command_timeout_secs: 60
 
 # Optionnel : domaines autorisés pour web_fetch (nécessite la feature "web")
 # allowed_web_domains: []
+
+# Optionnel : activer la recherche web (Brave API ; définir BRAVE_API_KEY)
+# web_search_enabled: false
+
+# Optionnel : profils d'outils (default_profile = nom du profil ; tool_profiles[profil] = liste d'outils)
+# default_profile: null
+# tool_profiles: {}
+# Exemple : default_profile: "coding"
+#          tool_profiles: { coding: [read_file, write_file, search_files, grep_content, run_command, edit_file, apply_patch] }
