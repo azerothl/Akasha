@@ -105,6 +105,8 @@ function App() {
     timezone?: string;
     rrule?: string;
   } | null>(null);
+  const [calendarRunsCollapsed, setCalendarRunsCollapsed] = useState(false);
+  const [calendarRunsCollapsed, setCalendarRunsCollapsed] = useState(false);
   const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -342,6 +344,9 @@ function App() {
     if (cmd === "help" || cmd === "?") {
       return `Commandes disponibles:
 /help, /?         — cette aide
+/task create "msg" — créer une tâche (envoie le message au daemon)
+/schedule create NOM INTERVAL_SEC "description" — créer une récurrence
+/schedule delete SCHEDULE_ID — supprimer une récurrence
 /status           — état du daemon
 /stop TASK_ID     — annuler une tâche (en cours ou en attente)
 /cancel TASK_ID   — idem que /stop
@@ -357,6 +362,56 @@ function App() {
 /reload           — recharger les plugins
 /restart          — redémarrer le daemon
 /vault set        — utiliser le CLI : akasha vault set KEY [value]`;
+    }
+    if (cmd === "task") {
+      const sub = parts[1]?.toLowerCase() ?? "";
+      if (sub === "create") {
+        const msg = parts.slice(2).join(" ").replace(/^"|"$/g, "").trim() || parts[2]?.replace(/^"|"$/g, "") ?? "";
+        if (!msg) return "Usage: /task create \"message\"";
+        try {
+          const ack = await invoke<{ message?: string; task_id?: string }>("send_message_ack", {
+            message: msg,
+            session_id: sessionId,
+            port: DAEMON_PORT,
+          });
+          return (ack?.message ?? "Tâche créée.") + (ack?.task_id ? ` Task #${ack.task_id.slice(-8)}` : "");
+        } catch (err) {
+          return `Erreur: ${String(err)}`;
+        }
+      }
+      return "Usage: /task create \"message\"";
+    }
+    if (cmd === "schedule") {
+      const sub = parts[1]?.toLowerCase() ?? "";
+      if (sub === "create") {
+        const name = parts[2] ?? "";
+        const intervalSec = parts[3] ? parseInt(parts[3], 10) : 3600;
+        const description = parts.slice(4).join(" ").replace(/^"|"$/g, "").trim() || parts[4]?.replace(/^"|"$/g, "") ?? "";
+        if (!name) return "Usage: /schedule create NOM INTERVAL_SEC \"description\"";
+        try {
+          const data = await invoke<{ id?: string }>("create_schedule", {
+            name,
+            description,
+            interval_seconds: isNaN(intervalSec) ? 3600 : intervalSec,
+            port: DAEMON_PORT,
+          });
+          const id = data?.id ?? "?";
+          return `Récurrence créée : ${name} (id: ${id.slice(-8)})`;
+        } catch (err) {
+          return `Erreur: ${String(err)}`;
+        }
+      }
+      if (sub === "delete") {
+        const id = parts[2]?.trim();
+        if (!id) return "Usage: /schedule delete SCHEDULE_ID";
+        try {
+          await invoke("delete_schedule", { schedule_id: id, port: DAEMON_PORT });
+          return `Récurrence ${id} supprimée.`;
+        } catch (err) {
+          return `Erreur: ${String(err)}`;
+        }
+      }
+      return "Usage: /schedule create NOM INTERVAL \"desc\" | /schedule delete ID";
     }
     if (cmd === "stop" || cmd === "cancel") {
       const taskId = parts[1]?.trim();
@@ -941,45 +996,74 @@ function App() {
                     ))}
                   </ul>
                 )}
-                <h3>Lancements récents</h3>
+                <h3 className="calendar-runs-header">
+                  Lancements récents
+                  {taskRuns.length > 0 && (
+                    <button
+                      type="button"
+                      className="calendar-runs-toggle"
+                      onClick={() => setCalendarRunsCollapsed((c) => !c)}
+                      aria-expanded={!calendarRunsCollapsed}
+                    >
+                      {calendarRunsCollapsed ? "Déplier" : "Plier"}
+                    </button>
+                  )}
+                </h3>
                 {taskRuns.length === 0 ? (
                   <p className="empty-state">Aucun run.</p>
+                ) : calendarRunsCollapsed ? (
+                  <p className="empty-state">Liste repliée ({taskRuns.length} run(s)). Cliquez sur « Déplier » pour afficher.</p>
                 ) : (
                   <div className="calendar-runs-list-wrap">
-                    <ul className="calendar-runs-list" role="list">
-                      {taskRuns.map((r) => {
-                        const endedAt = r.ended_at ? new Date(r.ended_at) : null;
-                        const startedAt = r.started_at ? new Date(r.started_at) : null;
-                        const durationSec = endedAt && startedAt ? (endedAt.getTime() - startedAt.getTime()) / 1000 : null;
-                        return (
-                          <li
-                            key={r.id}
-                            role="button"
-                            tabIndex={0}
-                            onClick={() => setCalendarSelectedTaskId(r.task_id)}
-                            onKeyDown={(e) => e.key === "Enter" && setCalendarSelectedTaskId(r.task_id)}
-                            className={calendarSelectedTaskId === r.task_id ? "selected" : ""}
-                          >
-                            <span className="run-id">{r.id.slice(-8)}</span> {r.status}
-                            {r.planned_for && (
-                              <> — prévu: {new Date(r.planned_for).toLocaleString()}</>
-                            )}
-                            {endedAt && (
-                              <div className="run-meta">
-                                Terminé à {endedAt.toLocaleString()}
-                                {durationSec != null && durationSec > 0 && ` · Durée: ${formatDurationSec(durationSec)}`}
-                              </div>
-                            )}
-                            <div className="run-meta">task: {r.task_id.slice(-8)}
-                              {r.schedule_id && (() => {
-                                const parent = schedules.find((s) => s.id === r.schedule_id);
-                                return parent ? ` · Récurrence: ${parent.name || parent.id.slice(0, 8)}` : "";
-                              })()}
-                            </div>
-                          </li>
-                        );
-                      })}
-                    </ul>
+                    {(() => {
+                      const byParent = new Map<string, typeof taskRuns>();
+                      for (const r of taskRuns) {
+                        const key = r.schedule_id ?? "__none__";
+                        if (!byParent.has(key)) byParent.set(key, []);
+                        byParent.get(key)!.push(r);
+                      }
+                      const groups: Array<{ key: string; label: string; runs: typeof taskRuns }> = [];
+                      byParent.forEach((runs, key) => {
+                        const label = key === "__none__" ? "Sans récurrence" : (schedules.find((s) => s.id === key)?.name || key.slice(0, 8));
+                        groups.push({ key, label, runs });
+                      });
+                      return (
+                        <ul className="calendar-runs-list" role="list">
+                          {groups.map(({ key, label, runs }) => (
+                            <li key={key} className="calendar-runs-group">
+                              <div className="calendar-runs-group-label">{label}</div>
+                              {runs.map((r) => {
+                                const endedAt = r.ended_at ? new Date(r.ended_at) : null;
+                                const startedAt = r.started_at ? new Date(r.started_at) : null;
+                                const durationSec = endedAt && startedAt ? (endedAt.getTime() - startedAt.getTime()) / 1000 : null;
+                                return (
+                                  <div
+                                    key={r.id}
+                                    role="button"
+                                    tabIndex={0}
+                                    onClick={() => setCalendarSelectedTaskId(r.task_id)}
+                                    onKeyDown={(e) => e.key === "Enter" && setCalendarSelectedTaskId(r.task_id)}
+                                    className={`calendar-run-item ${calendarSelectedTaskId === r.task_id ? "selected" : ""}`}
+                                  >
+                                    <span className="run-id">{r.id.slice(-8)}</span> {r.status}
+                                    {r.planned_for && (
+                                      <> — prévu: {new Date(r.planned_for).toLocaleString()}</>
+                                    )}
+                                    {endedAt && (
+                                      <div className="run-meta">
+                                        Terminé à {endedAt.toLocaleString()}
+                                        {durationSec != null && durationSec > 0 && ` · Durée: ${formatDurationSec(durationSec)}`}
+                                      </div>
+                                    )}
+                                    <div className="run-meta">task: {r.task_id.slice(-8)}</div>
+                                  </div>
+                                );
+                              })}
+                            </li>
+                          ))}
+                        </ul>
+                      );
+                    })()}
                   </div>
                 )}
                 {calendarSelectedTaskId && (

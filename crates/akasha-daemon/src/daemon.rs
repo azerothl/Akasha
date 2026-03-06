@@ -320,6 +320,24 @@ impl Daemon {
             let (bus, _) = crate::agents::new_event_bus();
             let progress = new_progress_cache();
             let events = new_events_cache();
+            let (progress_persistence_tx, progress_persistence_rx) = std::sync::mpsc::channel::<(uuid::Uuid, u8, String)>();
+            {
+                let store_path = db_path.clone();
+                std::thread::spawn(move || {
+                    let store = match akasha_store::TaskStore::open(&store_path) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!(error = %e, "Progress persistence thread: failed to open TaskStore");
+                            return;
+                        }
+                    };
+                    while let Ok((task_id, progress_pct, message)) = progress_persistence_rx.recv() {
+                        if store.insert_progress(task_id, progress_pct, &message).is_err() {
+                            tracing::warn!(task_id = %task_id, "Progress persistence: insert failed");
+                        }
+                    }
+                });
+            }
             let short_term = Arc::new(ShortTermStore::new(50, 0.75));
             let memory_db_path = data_dir.join("memory.db");
             let embedding_cache = data_dir.join("embedding_model");
@@ -374,8 +392,9 @@ impl Daemon {
             tokio::spawn({
                 let bus = bus.clone();
                 let progress = progress.clone();
+                let persistence_tx = Some(progress_persistence_tx);
                 async move {
-                    run_progress_subscriber(bus, progress).await;
+                    run_progress_subscriber(bus, progress, persistence_tx).await;
                 }
             });
             tokio::spawn({

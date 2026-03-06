@@ -705,6 +705,62 @@ body {
   margin-top: 0.15rem;
 }
 
+.calendar-runs-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1rem 0 0.5rem;
+}
+
+.calendar-runs-toggle {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.8125rem;
+  background: #3f3f46;
+  color: #e4e4e7;
+  border: 1px solid #52525b;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.calendar-runs-toggle:hover {
+  background: #52525b;
+}
+
+.calendar-runs-list .calendar-runs-group {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 0.75rem;
+  border: none;
+}
+
+.calendar-runs-group-label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #a1a1aa;
+  margin-bottom: 0.35rem;
+  padding-left: 0.25rem;
+}
+
+.calendar-run-item {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #27272a;
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+
+.calendar-run-item:last-child {
+  border-bottom: none;
+}
+
+.calendar-run-item:hover,
+.calendar-runs-list li.selected .calendar-run-item {
+  background: #27272a;
+}
+
+.calendar-run-item.selected {
+  background: #3f3f46;
+}
+
 /* Calendar task detail modal (popup) */
 .calendar-detail-modal-overlay {
   position: fixed;

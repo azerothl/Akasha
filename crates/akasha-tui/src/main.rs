@@ -74,6 +74,7 @@ struct ActivityTaskRow {
     status: String,
     created_at: String,
     assigned_agent: String,
+    parent_task_id: Option<String>,
 }
 
 /// Full detail for selected task (from GET /api/tasks/:id + user message from events).
@@ -140,6 +141,12 @@ struct App {
     calendar_selected_run: Option<usize>,
     /// Calendar: task detail for selected run (status, last message).
     calendar_run_detail: Option<(String, String)>,
+    /// Tasks tab: scroll offset for the task list (so selection stays visible).
+    activity_list_scroll: usize,
+    /// Tasks tab: if true, task list body is collapsed (only header visible; Space/Enter to expand).
+    activity_list_collapsed: bool,
+    /// Tasks tab: list widget rect (for mouse click to select task).
+    activity_list_rect: Option<ratatui::prelude::Rect>,
     /// Session id for short-term memory (returned by daemon, send back on next message).
     session_id: Option<String>,
     /// If true, next message will request a new session (context reset).
@@ -193,6 +200,9 @@ impl App {
             schedule_reports: Vec::new(),
             calendar_selected_run: None,
             calendar_run_detail: None,
+            activity_list_scroll: 0,
+            activity_list_collapsed: false,
+            activity_list_rect: None,
             session_id: None,
             force_new_session: false,
             memory_short_term: Vec::new(),
@@ -250,7 +260,8 @@ impl App {
                             let status = t.get("status").and_then(|v| v.as_str()).unwrap_or("?").to_string();
                             let created_at = t.get("created_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
                             let assigned_agent = t.get("assigned_agent").and_then(|v| v.as_str()).unwrap_or("—").to_string();
-                            Some(ActivityTaskRow { id, status, created_at, assigned_agent })
+                            let parent_task_id = t.get("parent_task_id").and_then(|v| v.as_str()).map(String::from);
+                            Some(ActivityTaskRow { id, status, created_at, assigned_agent, parent_task_id })
                         })
                         .collect();
                     if self.activity_selected >= self.activity_tasks.len() && !self.activity_tasks.is_empty() {
@@ -811,6 +822,9 @@ impl App {
             "help" | "?" => {
                 return r#"Commandes disponibles:
   /help, /?         — cette aide
+  /task create "msg" — créer une tâche (envoie le message au daemon, comme un message chat)
+  /schedule create NAME INTERVAL_SEC "description" — créer une récurrence
+  /schedule delete SCHEDULE_ID — supprimer une récurrence
   /stop TASK_ID     — annuler une tâche (en cours ou en attente)
   /cancel TASK_ID   — idem que /stop
   /newsession       — repartir de zéro (nouvelle session, contexte court terme effacé)
@@ -832,6 +846,88 @@ impl App {
   /reload           — recharger les plugins
   /restart          — redémarrer le daemon (superviseur)
   /vault set        — utiliser le CLI : akasha vault set KEY [value]"#.to_string();
+            }
+            "task" => {
+                let sub = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+                if sub == "create" {
+                    let msg = if parts.len() > 2 {
+                        parts[2..].join(" ").trim_matches('"').to_string()
+                    } else {
+                        parts.get(2).map(|s| s.trim_matches('"').to_string()).unwrap_or_default()
+                    };
+                    if msg.is_empty() {
+                        return "Usage: /task create \"votre message\"".to_string();
+                    }
+                    let url = format!("{}/api/message", base);
+                    let body = serde_json::json!({ "message": msg });
+                    match client.post(&url).json(&body).timeout(Duration::from_secs(30)).send() {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(json) = r.json::<serde_json::Value>() {
+                                let task_id = json.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+                                let ack = json.get("message").and_then(|v| v.as_str()).unwrap_or("Tâche créée.");
+                                return format!("{} Task #{}", ack, if task_id.len() > 8 { &task_id[task_id.len()-8..] } else { task_id });
+                            }
+                            return "Tâche créée.".to_string();
+                        }
+                        Ok(r) => return format!("Erreur : {}", r.status()),
+                        Err(e) => return format!("Erreur : {}", e),
+                    }
+                }
+                return "Usage: /task create \"message\"".to_string();
+            }
+            "schedule" => {
+                let sub = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+                if sub == "create" {
+                    let name = parts.get(2).map(|s| s.to_string()).unwrap_or_default();
+                    let interval_s = parts.get(3).and_then(|s| s.parse::<u64>().ok());
+                    let description = if parts.len() > 4 {
+                        parts[4..].join(" ").trim_matches('"').to_string()
+                    } else {
+                        parts.get(4).map(|s| s.trim_matches('"').to_string()).unwrap_or_default()
+                    };
+                    if name.is_empty() {
+                        return "Usage: /schedule create NOM INTERVAL_SEC \"description\"".to_string();
+                    }
+                    let interval_seconds = interval_s.unwrap_or(3600);
+                    let now = chrono::Utc::now();
+                    let url = format!("{}/api/schedules", base);
+                    let body = serde_json::json!({
+                        "name": name,
+                        "description": description,
+                        "enabled": true,
+                        "timezone": "UTC",
+                        "rrule": "",
+                        "interval_seconds": interval_seconds,
+                        "start_at": now.to_rfc3339(),
+                        "channel_context": description
+                    });
+                    match client.post(&url).json(&body).send() {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(json) = r.json::<serde_json::Value>() {
+                                let id = json.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                                return format!("Récurrence créée : {} (id: {})", name, if id.len() > 8 { &id[id.len()-8..] } else { id });
+                            }
+                            return format!("Récurrence {} créée.", name);
+                        }
+                        Ok(r) => return format!("Erreur : {}", r.status()),
+                        Err(e) => return format!("Erreur : {}", e),
+                    }
+                }
+                if sub == "delete" {
+                    let id = parts.get(2).map(|s| s.trim()).filter(|s| !s.is_empty());
+                    match id {
+                        Some(sid) => {
+                            let url = format!("{}/api/schedules/{}", base, sid);
+                            match client.delete(&url).send() {
+                                Ok(r) if r.status().is_success() => return format!("Récurrence {} supprimée.", sid),
+                                Ok(r) => return format!("Erreur : {}", r.status()),
+                                Err(e) => return format!("Erreur : {}", e),
+                            }
+                        }
+                        None => return "Usage: /schedule delete SCHEDULE_ID".to_string(),
+                    }
+                }
+                return "Usage: /schedule create NOM INTERVAL \"desc\" | /schedule delete ID".to_string();
             }
             "stop" | "cancel" => {
                 let task_id = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty());
@@ -1516,47 +1612,73 @@ fn ui(f: &mut Frame, app: &mut App) {
                 (area, area)
             };
 
+            let list_inner_h = list_area.height.saturating_sub(2) as usize;
             let mut list_lines: Vec<Line<'static>> = vec![
                 Line::from(""),
                 Line::from(Span::styled(
-                    " Tâches récentes — ↑↓ sélectionner, R actualiser. ID = identifiant de la demande envoyée.",
+                    " Tâches récentes — ↑↓ sélectionner, clic = sélection, Espace = plier/déplier, R = actualiser.",
                     Style::default().fg(theme.palette().accent),
                 )),
                 Line::from(Span::styled(
-                    " Date       │ Statut    │ Agent  │ ID (extrait) ",
+                    " Date       │ Statut    │ Agent  │ Parent  │ ID (extrait) ",
                     Style::default().fg(theme.palette().muted),
                 )),
             ];
-            for (i, row) in app.activity_tasks.iter().enumerate() {
-                let short_date = if row.created_at.len() >= 16 {
-                    format!("{} {}", &row.created_at[5..10], &row.created_at[11..16])
-                } else {
-                    row.created_at.clone()
-                };
-                let short_id = if row.id.len() > 8 {
-                    format!("…{}", &row.id[row.id.len()-8..])
-                } else {
-                    row.id.clone()
-                };
-                let style = if i == app.activity_selected {
-                    Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.palette().fg)
-                };
+            if app.activity_list_collapsed {
                 list_lines.push(Line::from(Span::styled(
-                    format!("  {} {} │ {:9} │ {:6} │ {}", if i == app.activity_selected { "►" } else { " " }, short_date, row.status, row.assigned_agent, short_id),
-                    style,
+                    "  [ Liste repliée — Espace ou Entrée pour déplier ]",
+                    Style::default().fg(theme.palette().muted),
                 )));
-            }
-            if app.activity_tasks.is_empty() {
-                list_lines.push(Line::from("  Aucune tâche. Envoyez un message dans Chat pour en créer."));
+            } else {
+                for (i, row) in app.activity_tasks.iter().enumerate() {
+                    let short_date = if row.created_at.len() >= 16 {
+                        format!("{} {}", &row.created_at[5..10], &row.created_at[11..16])
+                    } else {
+                        row.created_at.clone()
+                    };
+                    let short_id = if row.id.len() > 8 {
+                        format!("…{}", &row.id[row.id.len()-8..])
+                    } else {
+                        row.id.clone()
+                    };
+                    let parent_short = row.parent_task_id.as_ref()
+                        .map(|p| if p.len() > 8 { format!("…{}", &p[p.len()-8..]) } else { p.clone() })
+                        .unwrap_or_else(|| "—".to_string());
+                    let style = if i == app.activity_selected {
+                        Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.palette().fg)
+                    };
+                    list_lines.push(Line::from(Span::styled(
+                        format!("  {} {} │ {:9} │ {:6} │ {:8} │ {}", if i == app.activity_selected { "►" } else { " " }, short_date, row.status, row.assigned_agent, parent_short, short_id),
+                        style,
+                    )));
+                }
+                if app.activity_tasks.is_empty() {
+                    list_lines.push(Line::from("  Aucune tâche. Envoyez un message dans Chat ou /task create \"message\"."));
+                }
             }
             let list_len = list_lines.len();
+            if !app.activity_tasks.is_empty() {
+                let selected_line = 3 + app.activity_selected.min(app.activity_tasks.len() - 1);
+                if selected_line >= app.activity_list_scroll + list_inner_h && list_inner_h > 0 {
+                    app.activity_list_scroll = selected_line - list_inner_h + 1;
+                }
+                if selected_line < app.activity_list_scroll {
+                    app.activity_list_scroll = selected_line;
+                }
+            }
+            let max_scroll = list_len.saturating_sub(list_inner_h).max(0);
+            app.activity_list_scroll = app.activity_list_scroll.min(max_scroll);
             let list_block = Block::default()
                 .borders(Borders::ALL)
                 .title(" Liste des tâches ")
                 .border_style(theme.block_border());
-            f.render_widget(Paragraph::new(list_lines).block(list_block), list_area);
+            app.activity_list_rect = Some(list_area);
+            f.render_widget(
+                Paragraph::new(list_lines).block(list_block).scroll((app.activity_list_scroll as u16, 0)),
+                list_area,
+            );
 
             let mut detail_lines: Vec<Line<'static>> = vec![Line::from("")];
             if let Some(d) = &app.activity_task_detail {
@@ -1817,7 +1939,33 @@ fn run_app(
         terminal.draw(|f| ui(f, app))?;
 
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
+            match event::read()? {
+                Event::Mouse(mouse) => {
+                    if app.mode == Mode::Tasks
+                        && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                        && !app.activity_tasks.is_empty()
+                        && !app.activity_list_collapsed
+                    {
+                        if let Some(rect) = app.activity_list_rect {
+                            let x = mouse.column;
+                            let y = mouse.row;
+                            if x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height {
+                                let inner_y = (y - rect.y).saturating_sub(1);
+                                let content_line = app.activity_list_scroll + inner_y as usize;
+                                if content_line >= 3 {
+                                    let task_idx = content_line - 3;
+                                    if task_idx < app.activity_tasks.len() {
+                                        app.activity_selected = task_idx;
+                                        app.activity_detail_scroll = 0;
+                                        app.fetch_activity_events_for_selected();
+                                        app.fetch_activity_task_detail();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Event::Key(key) => {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
@@ -1989,6 +2137,12 @@ fn run_app(
                     (Mode::Tasks, KeyCode::End, _) => {
                         app.activity_detail_scroll = usize::MAX;
                     }
+                    (Mode::Tasks, KeyCode::Char(' '), _) => {
+                        app.activity_list_collapsed = !app.activity_list_collapsed;
+                    }
+                    (Mode::Tasks, KeyCode::Enter, m) if m.is_empty() => {
+                        app.activity_list_collapsed = !app.activity_list_collapsed;
+                    }
                     (Mode::Calendar, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_calendar();
                     }
@@ -2038,6 +2192,8 @@ fn run_app(
                     }
                     _ => {}
                 }
+                }
+                _ => {}
             }
         }
     }

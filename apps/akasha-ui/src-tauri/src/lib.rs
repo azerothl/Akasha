@@ -530,6 +530,59 @@ async fn get_task_runs(port: Option<u16>, schedule_id: Option<String>) -> Result
     Ok(json)
 }
 
+/// Create schedule: POST /api/schedules.
+#[tauri::command]
+async fn create_schedule(
+    name: String,
+    description: String,
+    interval_seconds: Option<u64>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/schedules", daemon_base_url(port));
+    let body = serde_json::json!({
+        "name": name,
+        "description": description,
+        "enabled": true,
+        "timezone": "UTC",
+        "rrule": "",
+        "interval_seconds": interval_seconds.unwrap_or(3600),
+        "channel_context": description
+    });
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(format!("{}", status));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Delete schedule: DELETE /api/schedules/:id.
+#[tauri::command]
+async fn delete_schedule(schedule_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/schedules/{}", daemon_base_url(port), schedule_id);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    Ok(serde_json::json!({ "deleted": schedule_id }))
+}
+
 /// Schedule run reports: GET /api/schedule_run_reports — completed schedule runs with message (for chat).
 #[tauri::command]
 async fn get_schedule_run_reports(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -562,6 +615,8 @@ pub fn run() {
             cancel_task,
             get_schedules,
             get_schedule_by_id,
+            create_schedule,
+            delete_schedule,
             get_task_runs,
             get_schedule_run_reports,
             get_docs,

@@ -1575,12 +1575,19 @@ async fn get_task_status(store_path: &Path, progress: &ProgressCache, id: Uuid) 
         Ok(None) => return json_response("404 Not Found", r#"{"error":"task_not_found"}"#),
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
-    let progress_list: Vec<ProgressEntry> = {
+    let mut progress_list: Vec<ProgressEntry> = store
+        .get_progress(id)
+        .map(|v| v.into_iter().map(|(pct, msg)| ProgressEntry { progress_pct: pct, message: msg }).collect())
+        .unwrap_or_default();
+    let mem_entries: Vec<ProgressEntry> = {
         let g = progress.read().await;
         g.get(&id)
             .map(|q| q.iter().cloned().collect::<Vec<_>>())
             .unwrap_or_default()
     };
+    if !mem_entries.is_empty() {
+        progress_list.extend(mem_entries);
+    }
     let body = serde_json::json!({
         "task_id": task.id.to_string(),
         "status": task.status.as_str(),

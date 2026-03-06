@@ -13,120 +13,124 @@ const TICK_INTERVAL_SECS: u64 = 30;
 /// Maximum number of missed occurrences to catch up per schedule per tick.
 const MAX_CATCHUP: usize = 10;
 
+/// Pending item: (run_id, task_id, message, session_id) — sent to orchestrator then run marked Running.
+type PendingRun = (Uuid, Uuid, String, String);
+
 /// Run the scheduler loop: every TICK_INTERVAL_SECS, evaluate enabled schedules,
 /// create task_runs with dedup_key, create tasks and push to orchestrator.
+/// Stores are opened per tick and never held across await so the future stays Send.
 pub async fn run_scheduler(
     store_path: PathBuf,
     orch_tx: mpsc::Sender<OrchestratorTask>,
     bus: crate::agents::EventBus,
 ) {
-    let schedule_store = match ScheduleStore::open(&store_path) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = %e, "Scheduler failed to open ScheduleStore");
-            return;
-        }
-    };
-    let task_store = match TaskStore::open(&store_path) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = %e, "Scheduler failed to open TaskStore");
-            return;
-        }
-    };
-
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(TICK_INTERVAL_SECS));
     interval.tick().await;
     loop {
         interval.tick().await;
-        if let Err(e) = tick(&schedule_store, &task_store, &orch_tx, &bus).await {
+        if let Err(e) = tick(&store_path, &orch_tx, &bus).await {
             tracing::warn!(error = %e, "Scheduler tick failed");
         }
     }
 }
 
 async fn tick(
-    schedule_store: &ScheduleStore,
-    task_store: &TaskStore,
+    store_path: &PathBuf,
     orch_tx: &mpsc::Sender<OrchestratorTask>,
     bus: &crate::agents::EventBus,
 ) -> anyhow::Result<()> {
     let now = Utc::now();
 
-    sync_terminal_task_run_statuses(&schedule_store, &task_store, now)?;
+    // Do all DB work and collect pending (run_id, task_id, message, session_id). No await here
+    // so we never hold ScheduleStore/TaskStore (non-Send) across an await.
+    let pending: Vec<PendingRun> = {
+        let schedule_store = ScheduleStore::open(store_path)?;
+        let task_store = TaskStore::open(store_path)?;
 
-    let _ = bus.send(EventEnvelope::new(
-        EventType::SchedulerTick,
-        Some(serde_json::json!({ "at": now.to_rfc3339() })),
-    ));
+        sync_terminal_task_run_statuses(&schedule_store, &task_store, now)?;
 
-    let enabled = schedule_store.list_enabled_schedules()?;
-    for schedule in enabled {
-        let Some(interval_secs) = schedule.interval_seconds else {
-            continue;
-        };
-        let slots = due_slots(schedule_store, &schedule, now, interval_secs)?;
-        for planned_for in slots.into_iter().take(MAX_CATCHUP) {
-            let dedup_key = format!("{}:{}", schedule.id, planned_for.timestamp());
-            if schedule_store.dedup_key_exists(&dedup_key)? {
+        let _ = bus.send(EventEnvelope::new(
+            EventType::SchedulerTick,
+            Some(serde_json::json!({ "at": now.to_rfc3339() })),
+        ));
+
+        let enabled = schedule_store.list_enabled_schedules()?;
+        let mut pending = Vec::new();
+        for schedule in enabled {
+            let Some(interval_secs) = schedule.interval_seconds else {
                 continue;
-            }
-            let task_id = Uuid::new_v4();
-            let run_id = Uuid::new_v4();
-            let task = Task {
-                id: task_id,
-                parent_task_id: None,
-                status: TaskStatus::Pending,
-                assigned_agent: "conversation".to_string(),
-                created_at: now,
-                updated_at: now,
             };
-            task_store.insert(&task)?;
-            let task_run = TaskRun {
-                id: run_id,
-                schedule_id: Some(schedule.id),
-                task_id,
-                status: TaskRunStatus::Queued,
-                planned_for,
-                started_at: None,
-                ended_at: None,
-                dedup_key: dedup_key.clone(),
-            };
-            schedule_store.insert_task_run(&task_run)?;
-            let _ = bus.send(
-                EventEnvelope::new(
-                    EventType::TaskRunCreated,
-                    Some(serde_json::json!({
-                        "task_run_id": run_id.to_string(),
-                        "schedule_id": schedule.id.to_string(),
-                        "task_id": task_id.to_string(),
-                        "planned_for": planned_for.to_rfc3339(),
-                        "dedup_key": dedup_key
-                    })),
-                )
-                .with_correlation(task_id),
-            );
-            let message = schedule
-                .channel_context
-                .as_deref()
-                .unwrap_or("Exécution planifiée.")
-                .to_string();
-            let session_id = format!("schedule:{}", schedule.id);
-            match orch_tx.send((task_id, message, session_id)).await {
-                Ok(()) => {
-                    schedule_store.update_task_run_status(
-                        run_id,
-                        TaskRunStatus::Running,
-                        Some(now),
-                        None,
-                    )?;
+            let slots = due_slots(&schedule_store, &schedule, now, interval_secs)?;
+            for planned_for in slots.into_iter().take(MAX_CATCHUP) {
+                let dedup_key = format!("{}:{}", schedule.id, planned_for.timestamp());
+                if schedule_store.dedup_key_exists(&dedup_key)? {
+                    continue;
                 }
-                Err(_) => {
-                    tracing::warn!(task_id = %task_id, "Scheduler: orchestrator channel closed");
-                }
+                let task_id = Uuid::new_v4();
+                let run_id = Uuid::new_v4();
+                let task = Task {
+                    id: task_id,
+                    parent_task_id: None,
+                    status: TaskStatus::Pending,
+                    assigned_agent: "conversation".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                };
+                task_store.insert(&task)?;
+                let task_run = TaskRun {
+                    id: run_id,
+                    schedule_id: Some(schedule.id),
+                    task_id,
+                    status: TaskRunStatus::Queued,
+                    planned_for,
+                    started_at: None,
+                    ended_at: None,
+                    dedup_key: dedup_key.clone(),
+                };
+                schedule_store.insert_task_run(&task_run)?;
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::TaskRunCreated,
+                        Some(serde_json::json!({
+                            "task_run_id": run_id.to_string(),
+                            "schedule_id": schedule.id.to_string(),
+                            "task_id": task_id.to_string(),
+                            "planned_for": planned_for.to_rfc3339(),
+                            "dedup_key": dedup_key
+                        })),
+                    )
+                    .with_correlation(task_id),
+                );
+                let message = schedule
+                    .channel_context
+                    .as_deref()
+                    .unwrap_or("Exécution planifiée.")
+                    .to_string();
+                let session_id = format!("schedule:{}", schedule.id);
+                pending.push((run_id, task_id, message, session_id));
             }
         }
+        pending
+    };
+
+    // Send to orchestrator (await) — no store references held.
+    for (_run_id, task_id, message, session_id) in &pending {
+        if let Err(_) = orch_tx.send((*task_id, message.clone(), session_id.clone())).await {
+            tracing::warn!(task_id = %task_id, "Scheduler: orchestrator channel closed");
+        }
     }
+
+    // Reopen schedule_store only to mark runs as Running.
+    let schedule_store = ScheduleStore::open(store_path)?;
+    for (run_id, _, _, _) in &pending {
+        let _ = schedule_store.update_task_run_status(
+            *run_id,
+            TaskRunStatus::Running,
+            Some(now),
+            None,
+        );
+    }
+
     Ok(())
 }
 

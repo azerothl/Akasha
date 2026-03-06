@@ -3,6 +3,7 @@
 use akasha_core::EventType;
 use chrono::Utc;
 use std::collections::VecDeque;
+use std::sync::mpsc;
 use uuid::Uuid;
 
 use super::EventBus;
@@ -10,7 +11,10 @@ use crate::api::{
     EventsCache, ProgressCache, ProgressEntry, TaskEventEntry, MAX_EVENTS_PER_TASK, MAX_PROGRESS_PER_TASK,
 };
 
-pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache) {
+/// Optional sender to persist progress to DB (daemon passes this for fast GET /api/tasks/:id).
+pub type ProgressPersistenceTx = Option<mpsc::Sender<(Uuid, u8, String)>>;
+
+pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, persistence_tx: ProgressPersistenceTx) {
     let mut rx = bus.subscribe();
     while let Ok(ev) = rx.recv().await {
         let payload = match &ev.payload {
@@ -22,6 +26,9 @@ pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache) {
             let progress_pct = payload.get("progress_pct").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
             let message = payload.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let Some(task_id) = task_id else { continue };
+            if let Some(ref tx) = persistence_tx {
+                let _ = tx.send((task_id, progress_pct, message.clone()));
+            }
             let entry = ProgressEntry { progress_pct, message };
             let mut g = progress.write().await;
             let q = g.entry(task_id).or_insert_with(VecDeque::new);
@@ -46,6 +53,9 @@ pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache) {
             } else {
                 "Annulé."
             };
+            if let Some(ref tx) = persistence_tx {
+                let _ = tx.send((task_id, 100, message.to_string()));
+            }
             let mut g = progress.write().await;
             let q = g.entry(task_id).or_insert_with(VecDeque::new);
             q.push_back(ProgressEntry {
