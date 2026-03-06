@@ -1848,7 +1848,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             let mut lines: Vec<Line<'static>> = vec![
                 Line::from(""),
                 Line::from(Span::styled(
-                    " Récurrences (schedules) — Tab = basculer ↑↓ = sélectionner · R = actualiser ",
+                    " Récurrences (schedules) — ← → = récurrences / runs · ↑↓ = sélectionner · PgUp/PgDn = défiler · R = actualiser ",
                     Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
@@ -1954,11 +1954,18 @@ fn ui(f: &mut Frame, app: &mut App) {
             app.last_content_lines = lines.len();
             app.last_content_area_height = content_height;
             app.last_content_rendered_rows = 0;
+            let max_scroll = app.max_scroll();
+            if app.scroll > max_scroll {
+                app.scroll = max_scroll;
+            }
             let cal_block = Block::default()
                 .borders(Borders::ALL)
                 .title(" Calendrier (récurrences et runs) ")
                 .border_style(theme.block_border());
-            f.render_widget(Paragraph::new(lines).block(cal_block).wrap(Wrap { trim: true }), content_area);
+            f.render_widget(
+                Paragraph::new(lines).block(cal_block).wrap(Wrap { trim: true }).scroll((app.scroll as u16, 0)),
+                content_area,
+            );
         }
         Mode::Memory => {
             let mut lines: Vec<Line<'static>> = vec![
@@ -2141,17 +2148,23 @@ fn run_app(
                 }
                 match (app.mode, key.code, key.modifiers) {
                     (_, KeyCode::Esc, _) | (_, KeyCode::Char('q'), KeyModifiers::CONTROL) => return Ok(()),
-                    (Mode::Calendar, KeyCode::Tab, _) => {
-                        app.calendar_focus_schedules = !app.calendar_focus_schedules;
-                        if app.calendar_focus_schedules {
-                            app.calendar_schedule_index = app.calendar_schedule_index.min(app.calendar_schedules.len().saturating_sub(1));
-                            let id_opt = app.calendar_schedules.get(app.calendar_schedule_index).map(|(id, _, _, _)| id.clone());
-                            if let Some(id) = id_opt {
-                                app.fetch_schedule_detail(&id);
-                            } else {
-                                app.calendar_schedule_detail = None;
-                            }
-                        } else if let Some(i) = app.calendar_selected_run {
+                    (Mode::Calendar, KeyCode::Left, _) => {
+                        app.calendar_focus_schedules = true;
+                        app.calendar_schedule_index = app.calendar_schedule_index.min(app.calendar_schedules.len().saturating_sub(1));
+                        let id_opt = app.calendar_schedules.get(app.calendar_schedule_index).map(|(id, _, _, _)| id.clone());
+                        if let Some(id) = id_opt {
+                            app.fetch_schedule_detail(&id);
+                        } else {
+                            app.calendar_schedule_detail = None;
+                        }
+                    }
+                    (Mode::Calendar, KeyCode::Right, _) => {
+                        app.calendar_focus_schedules = false;
+                        if app.calendar_task_runs.is_empty() {
+                            app.calendar_run_detail = None;
+                        } else {
+                            let i = app.calendar_selected_run.unwrap_or(0).min(app.calendar_task_runs.len() - 1);
+                            app.calendar_selected_run = Some(i);
                             let run_opt = app.calendar_task_runs.get(i).cloned();
                             if let Some(run) = run_opt {
                                 app.fetch_calendar_run_detail(&run);
@@ -2178,6 +2191,18 @@ fn run_app(
                         }
                         if app.mode == Mode::Calendar {
                             app.fetch_calendar();
+                            app.scroll = 0;
+                            if !app.calendar_task_runs.is_empty() {
+                                app.calendar_focus_schedules = false;
+                                app.calendar_selected_run = Some(0);
+                                let run = app.calendar_task_runs[0].clone();
+                                app.fetch_calendar_run_detail(&run);
+                            } else if !app.calendar_schedules.is_empty() {
+                                app.calendar_focus_schedules = true;
+                                app.calendar_schedule_index = 0;
+                                let id = app.calendar_schedules[0].0.clone();
+                                app.fetch_schedule_detail(&id);
+                            }
                         }
                         if app.mode == Mode::Chat {
                             app.fetch_schedule_reports();
@@ -2386,6 +2411,18 @@ fn run_app(
                                 }
                             }
                         }
+                    }
+                    (Mode::Calendar, KeyCode::PageUp, _) => {
+                        app.scroll_page_up();
+                    }
+                    (Mode::Calendar, KeyCode::PageDown, _) => {
+                        app.scroll_page_down();
+                    }
+                    (Mode::Calendar, KeyCode::Home, _) => {
+                        app.scroll = 0;
+                    }
+                    (Mode::Calendar, KeyCode::End, _) => {
+                        app.scroll_to_bottom();
                     }
                     (Mode::Memory, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_memory();
