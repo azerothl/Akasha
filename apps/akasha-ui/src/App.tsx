@@ -392,23 +392,29 @@ function App() {
     if (cmd === "help" || cmd === "?") {
       return `Commandes disponibles:
 /help, /?         — cette aide
-/task create "msg" — créer une tâche (envoie le message au daemon)
+/task create "msg" — créer une tâche (envoie le message au daemon, comme un message chat)
 /schedule create NOM INTERVAL_SEC "description" — créer une récurrence
 /schedule delete SCHEDULE_ID — supprimer une récurrence
-/status           — état du daemon
 /stop TASK_ID     — annuler une tâche (en cours ou en attente)
 /cancel TASK_ID   — idem que /stop
+/newsession       — repartir de zéro (nouvelle session, contexte court terme effacé)
+/status           — état du daemon
 /doctor           — diagnostic (daemon, ollama, vault, spec)
 /advice           — conseil diagnostic (RAG + modèle)
+/embedded         — statut du modèle local embarqué
+/embedded reload  — décharger le modèle (rechargé au prochain appel)
 /metrics          — métriques du routeur LLM
 /models           — liste des modèles (tous les providers)
+/models list      — modèles par catégorie (primary + fallback)
+/models set CAT PROV MODÈLE — définir le modèle pour une catégorie (ex. conversation ollama llama3.2)
+/routes           — modèles par catégorie (primary + fallback)
 /config list      — variables (akasha.env)
 /config get KEY   — valeur d'une variable
-/config set K V   — définir variable
+/config set K V   — définir variable (K=V dans akasha.env)
 /vault list       — clés du vault (noms uniquement)
 /plugins          — liste des plugins
 /reload           — recharger les plugins
-/restart          — redémarrer le daemon
+/restart          — redémarrer le daemon (superviseur)
 /vault set        — utiliser le CLI : akasha vault set KEY [value]`;
     }
     if (cmd === "task") {
@@ -471,6 +477,9 @@ function App() {
         return `Erreur: ${String(err)}`;
       }
     }
+    if (cmd === "newsession" || cmd === "nouvelle" || (cmd === "session" && parts[1]?.toLowerCase() === "nouvelle")) {
+      return "Nouvelle session demandée. Votre prochain message repartira de zéro (contexte court terme effacé).";
+    }
     if (cmd === "status") {
       const r = await invoke<{ ok: boolean }>("check_health", { port });
       return r?.ok ? "Daemon : OK" : "Daemon : déconnecté ou erreur";
@@ -488,6 +497,27 @@ function App() {
       const model = adviceResp?.model_used ?? "?";
       if (!advice) return `(Aucun conseil retourné. Modèle utilisé : ${model}.)`;
       return `Conseil diagnostic (modèle: ${model})\n\n${advice}`;
+    }
+    if (cmd === "embedded") {
+      const sub = parts[1]?.toLowerCase() ?? "";
+      if (sub === "reload") {
+        try {
+          const json = await invoke<{ message?: string }>("embedded_reload", { port });
+          return json?.message ?? "Modèle déchargé.";
+        } catch {
+          return "Impossible de recharger (daemon ou routeur).";
+        }
+      }
+      try {
+        const json = await invoke<{ embedded_available?: boolean; embedded_loaded?: boolean; hint?: string }>("get_embedded_status", { port });
+        const available = json?.embedded_available ?? false;
+        const loaded = json?.embedded_loaded ?? false;
+        const hint = json?.hint ?? "";
+        const status = !available ? "non disponible" : loaded ? "disponible et chargé (prêt)" : "disponible (chargement au 1ᵉʳ appel, 5–15 min possibles)";
+        return `Modèle embarqué : ${status}\n${hint}`;
+      } catch {
+        return "Impossible de joindre le daemon ou routeur.";
+      }
     }
     if (cmd === "plugins") {
       const list = await invoke<Array<{ id?: string; name?: string; version?: string }>>("get_plugins", { port });
@@ -509,6 +539,34 @@ function App() {
         .join("\n");
     }
     if (cmd === "models") {
+      const sub = parts[1]?.toLowerCase() ?? "";
+      if (sub === "list") {
+        const routes = await invoke<Record<string, { primary?: { provider?: string; model?: string }; fallback?: Array<{ provider?: string; model?: string }> }>>("get_router_routes", { port });
+        if (!routes || Object.keys(routes).length === 0) return "Aucune route configurée.";
+        const lines: string[] = ["Modèles par catégorie (primary + fallback)\n"];
+        for (const cat of Object.keys(routes).sort()) {
+          const t = routes[cat];
+          const primary = t?.primary ? `${t.primary.provider ?? "?"} / ${t.primary.model ?? "?"}` : "(aucun)";
+          lines.push(`  ${cat}:`);
+          lines.push(`    primary: ${primary}`);
+          const fallback = t?.fallback ?? [];
+          if (fallback.length === 0) lines.push("    fallback: (aucun)");
+          else fallback.forEach((f, i) => lines.push(`    fallback[${i}]: ${f?.provider ?? "?"} / ${f?.model ?? "?"}`));
+        }
+        return lines.join("\n");
+      }
+      if (sub === "set") {
+        const category = parts[2];
+        const provider = parts[3];
+        const model = parts.slice(4).join(" ")?.trim() ?? "";
+        if (!category || !provider || !model) return "Usage: /models set CATÉGORIE PROVIDER MODÈLE (ex. /models set conversation ollama llama3.2)";
+        try {
+          const json = await invoke<{ message?: string; category?: string }>("set_router_route", { category, provider, model, port });
+          return `${json?.category ?? ""} — ${json?.message ?? "Route mise à jour."}`;
+        } catch (err) {
+          return `Erreur: ${String(err)}`;
+        }
+      }
       const providers = await invoke<Record<string, string[]>>("get_router_models", { port });
       if (!providers || Object.keys(providers).length === 0) return "Aucun modèle configuré.";
       const lines: string[] = [];
@@ -519,6 +577,21 @@ function App() {
         }
       }
       return lines.length ? lines.join("\n") : "Aucun modèle listé.";
+    }
+    if (cmd === "routes") {
+      const routes = await invoke<Record<string, { primary?: { provider?: string; model?: string }; fallback?: Array<{ provider?: string; model?: string }> }>>("get_router_routes", { port });
+      if (!routes || Object.keys(routes).length === 0) return "Aucune route configurée.";
+      const lines: string[] = ["Modèles par catégorie (primary + fallback)\n"];
+      for (const cat of Object.keys(routes).sort()) {
+        const t = routes[cat];
+        const primary = t?.primary ? `${t.primary.provider ?? "?"} / ${t.primary.model ?? "?"}` : "(aucun)";
+        lines.push(`  ${cat}:`);
+        lines.push(`    primary: ${primary}`);
+        const fallback = t?.fallback ?? [];
+        if (fallback.length === 0) lines.push("    fallback: (aucun)");
+        else fallback.forEach((f, i) => lines.push(`    fallback[${i}]: ${f?.provider ?? "?"} / ${f?.model ?? "?"}`));
+      }
+      return lines.join("\n");
     }
     if (cmd === "config") {
       const sub = parts[1]?.toLowerCase() ?? "";
@@ -571,6 +644,10 @@ function App() {
     chatInputRef.current?.focus();
 
     if (userMessage.startsWith("/")) {
+      const cmdLower = userMessage.replace(/^\//, "").trim().toLowerCase().split(/\s+/)[0] ?? "";
+      if (cmdLower === "newsession" || cmdLower === "nouvelle" || (cmdLower === "session" && userMessage.toLowerCase().includes("nouvelle"))) {
+        setSessionId(null);
+      }
       setLoading(true);
       try {
         const result = await runSlashCommand(userMessage);
@@ -802,11 +879,17 @@ function App() {
                       <span className="role" aria-hidden>
                         {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : "Akasha"}
                       </span>
-                      <div className="text markdown-rendered">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {m.role === "system" ? (
+                        <div className="text system-text" style={{ whiteSpace: "pre-wrap" }}>
                           {m.text}
-                        </ReactMarkdown>
-                      </div>
+                        </div>
+                      ) : (
+                        <div className="text markdown-rendered">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {m.text}
+                          </ReactMarkdown>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </>

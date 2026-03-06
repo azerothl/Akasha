@@ -1593,9 +1593,19 @@ fn ui(f: &mut Frame, app: &mut App) {
                     format!("  ─── {} ───", m.role),
                     role_style,
                 )));
-                let md_styles = theme.markdown_styles();
-                let marked = markdown::from_str_with_width(&m.text, &md_styles, Some(content_width as u16));
-                lines.extend(marked.to_flat_lines());
+                if m.role == "Système" {
+                    for line in m.text.lines() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {}", line),
+                            Style::default().fg(theme.palette().muted),
+                        )));
+                    }
+                } else {
+                    let md_styles = theme.markdown_styles();
+                    let marked = markdown::from_str_with_width(&m.text, &md_styles, Some(content_width as u16));
+                    lines.extend(marked.to_flat_lines());
+                }
+                lines.push(Line::from(""));
             }
             if let Some(ref tid) = app.pending_reply_task_id {
                 lines.push(Line::from(""));
