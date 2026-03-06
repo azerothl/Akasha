@@ -20,8 +20,11 @@ pub struct ToolsPolicy {
     pub allowed_commands: Vec<String>,
     /// Default timeout in seconds for run_command.
     pub command_timeout_secs: u64,
-    /// Optional: domains allowed for web_fetch.
+    /// Optional: domains allowed for web_fetch. Use ["*"] to allow all domains (subject to blocked_web_domains).
     pub allowed_web_domains: Vec<String>,
+    /// Optional: domains blocked for web_fetch; takes precedence over allowed_web_domains.
+    #[serde(default)]
+    pub blocked_web_domains: Vec<String>,
     /// Optional: enable web_search (requires BRAVE_API_KEY env).
     #[serde(default)]
     pub web_search_enabled: bool,
@@ -102,16 +105,32 @@ impl ToolsPolicy {
     }
 
     /// Check if a URL's host is allowed for web_fetch.
+    /// Order: (1) block if host in blocked_web_domains; (2) allow if allowed_web_domains contains "*"; (3) allow if host in allowed_web_domains or subdomain of one.
     pub fn can_fetch_url(&self, url: &str) -> bool {
-        if self.allowed_web_domains.is_empty() {
-            return false;
-        }
         let host = url
             .split("://")
             .nth(1)
             .and_then(|s| s.split('/').next())
             .unwrap_or("");
         let host = host.to_lowercase();
+        if host.is_empty() {
+            return false;
+        }
+        // Blacklist: host matches or is subdomain of a blocked domain
+        if self.blocked_web_domains.iter().any(|d| {
+            let d = d.trim().to_lowercase();
+            host == d || host.ends_with(&format!(".{}", d))
+        }) {
+            return false;
+        }
+        // Allow-all: "*" in allowed_web_domains
+        if self.allowed_web_domains.iter().any(|d| d.trim().eq_ignore_ascii_case("*")) {
+            return true;
+        }
+        // Whitelist: host matches or is subdomain of an allowed domain
+        if self.allowed_web_domains.is_empty() {
+            return false;
+        }
         self.allowed_web_domains.iter().any(|d| {
             let d = d.trim().to_lowercase();
             host == d || host.ends_with(&format!(".{}", d))

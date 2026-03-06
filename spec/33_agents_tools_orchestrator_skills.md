@@ -67,7 +67,7 @@ Liste exposée dans le code (`AVAILABLE_TOOLS`) et via **GET /api/tools** (JSON 
 | `message` | `message send <channel> <text>` | Envoyer un message (webhook). |
 | `browser`, `image`, `pdf` | (stubs) | Prévu phase 3. |
 
-Politique : `tool_profiles`, `default_profile` ; détection de boucle (3 répétitions) ; journal des modifications si `AKASHA_TOOLS_JOURNAL_PATH`.
+Politique : `tool_profiles`, `default_profile` ; détection de boucle (3 répétitions) ; journal des modifications si `AKASHA_TOOLS_JOURNAL_PATH`. Pour web_fetch : `allowed_web_domains` peut contenir `"*"` pour autoriser tous les domaines ; `blocked_web_domains` liste les domaines (et sous-domaines) interdits, prioritaire sur l'autorisation.
 
 Activation : placer un fichier **tools_policy.yaml** dans le data_dir (voir `spec/tools_policy.example.yaml`) avec `allowed_read_paths`, `allowed_write_paths`, `allowed_commands`. Sans politique chargée, aucun outil n’est exécuté (conversation sans boucle d’outils).
 

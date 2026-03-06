@@ -23,6 +23,11 @@ command_timeout_secs: 60
 
 # Optionnel : domaines autorisés pour web_fetch (nécessite la feature "web")
 # allowed_web_domains: []
+# Pour tout autoriser : allowed_web_domains: ["*"]  (sous réserve de blocked_web_domains)
+
+# Optionnel : domaines interdits pour web_fetch (prioritaire sur allowed_web_domains)
+# blocked_web_domains: []
+# Exemple : blocked_web_domains: ["evil.com", "tracker.example.org"]
 
 # Optionnel : activer la recherche web (Brave API ; définir BRAVE_API_KEY)
 # web_search_enabled: false
