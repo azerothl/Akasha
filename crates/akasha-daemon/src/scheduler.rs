@@ -114,21 +114,32 @@ async fn tick(
     };
 
     // Send to orchestrator (await) — no store references held.
-    for (_run_id, task_id, message, session_id) in &pending {
-        if let Err(_) = orch_tx.send((*task_id, message.clone(), session_id.clone())).await {
-            tracing::warn!(task_id = %task_id, "Scheduler: orchestrator channel closed");
+    // Only track runs whose send succeeded so we don't mark failed sends as Running.
+    let mut successful_run_ids: Vec<uuid::Uuid> = Vec::new();
+    for (run_id, task_id, message, session_id) in &pending {
+        match orch_tx.send((*task_id, message.clone(), session_id.clone())).await {
+            Ok(()) => {
+                successful_run_ids.push(*run_id);
+            }
+            Err(_) => {
+                tracing::warn!(task_id = %task_id, "Scheduler: orchestrator channel closed");
+            }
         }
     }
 
-    // Reopen schedule_store only to mark runs as Running.
-    let schedule_store = ScheduleStore::open(store_path)?;
-    for (run_id, _, _, _) in &pending {
-        let _ = schedule_store.update_task_run_status(
-            *run_id,
-            TaskRunStatus::Running,
-            Some(now),
-            None,
-        );
+    // Reopen schedule_store only to mark successfully sent runs as Running.
+    if !successful_run_ids.is_empty() {
+        let schedule_store = ScheduleStore::open(store_path)?;
+        for run_id in successful_run_ids {
+            if let Err(e) = schedule_store.update_task_run_status(
+                run_id,
+                TaskRunStatus::Running,
+                Some(now),
+                None,
+            ) {
+                tracing::warn!(run_id = %run_id, error = %e, "Scheduler: failed to update task_run status to Running");
+            }
+        }
     }
 
     Ok(())

@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;
 
+/// Maximum number of progress entries retained per task (in both store and in-memory cache).
+pub const MAX_PROGRESS_PER_TASK: usize = 32;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
@@ -108,16 +111,16 @@ impl TaskStore {
             "INSERT INTO task_progress (task_id, seq, progress_pct, message, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![task_id.to_string(), seq, progress_pct as i32, message, now],
         )?;
-        const MAX_PROGRESS_PER_TASK: i64 = 64;
+        let max_progress: i64 = MAX_PROGRESS_PER_TASK as i64;
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM task_progress WHERE task_id = ?1",
             [task_id.to_string()],
             |row| row.get(0),
         )?;
-        if count > MAX_PROGRESS_PER_TASK {
+        if count > max_progress {
             self.conn.execute(
                 "DELETE FROM task_progress WHERE task_id = ?1 AND seq IN (SELECT seq FROM task_progress WHERE task_id = ?1 ORDER BY seq ASC LIMIT ?2)",
-                rusqlite::params![task_id.to_string(), count - MAX_PROGRESS_PER_TASK],
+                rusqlite::params![task_id.to_string(), count - max_progress],
             )?;
         }
         Ok(())

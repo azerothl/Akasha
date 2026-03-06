@@ -106,7 +106,6 @@ function App() {
     rrule?: string;
   } | null>(null);
   const [calendarRunsCollapsed, setCalendarRunsCollapsed] = useState(false);
-  const [calendarRunsCollapsed, setCalendarRunsCollapsed] = useState(false);
   const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -987,7 +986,12 @@ function App() {
                         role="button"
                         tabIndex={0}
                         onClick={() => setCalendarSelectedScheduleId(s.id)}
-                        onKeyDown={(e) => e.key === "Enter" && setCalendarSelectedScheduleId(s.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setCalendarSelectedScheduleId(s.id);
+                          }
+                        }}
                       >
                         <strong>{s.name || s.id.slice(0, 8)}</strong>{" "}
                         {s.enabled ? "(activée)" : "(en pause)"}
@@ -1042,7 +1046,12 @@ function App() {
                                     role="button"
                                     tabIndex={0}
                                     onClick={() => setCalendarSelectedTaskId(r.task_id)}
-                                    onKeyDown={(e) => e.key === "Enter" && setCalendarSelectedTaskId(r.task_id)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" || e.key === " ") {
+                                        e.preventDefault();
+                                        setCalendarSelectedTaskId(r.task_id);
+                                      }
+                                    }}
                                     className={`calendar-run-item ${calendarSelectedTaskId === r.task_id ? "selected" : ""}`}
                                   >
                                     <span className="run-id">{r.id.slice(-8)}</span> {r.status}
