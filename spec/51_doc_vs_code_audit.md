@@ -92,6 +92,7 @@ La doc utilisateur (spec/user_guide.md) contient un tableau plus complet ; le RE
 | GET /api/config | ✅ (vars depuis akasha.env) |
 | POST /api/config | ✅ (écrit akasha.env) |
 | GET /api/vault/keys | ✅ |
+| DELETE /api/vault | ✅ (body `{"key": "KEY"}`) |
 | POST /api/restart | ✅ |
 | GET /api/docs | ✅ (guide utilisateur) |
 | POST /channels/slack/command | ✅ |

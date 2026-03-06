@@ -25,9 +25,12 @@ pub struct ToolsPolicy {
     /// Optional: domains blocked for web_fetch; takes precedence over allowed_web_domains.
     #[serde(default)]
     pub blocked_web_domains: Vec<String>,
-    /// Optional: enable web_search (requires BRAVE_API_KEY env).
+    /// Optional: enable web_search (requires brave_api_key from vault or BRAVE_API_KEY env).
     #[serde(default)]
     pub web_search_enabled: bool,
+    /// Brave Search API key (set by daemon from vault "brave_api_key"; not in YAML). Takes precedence over BRAVE_API_KEY env.
+    #[serde(skip)]
+    pub brave_api_key: Option<String>,
     /// Optional: tool profiles (profile_name -> list of tool names). If default_profile is set, only tools in that profile are allowed.
     #[serde(default)]
     pub tool_profiles: HashMap<String, Vec<String>>,

@@ -1565,6 +1565,27 @@ pub async fn handle_api(
         );
     }
 
+    // DELETE /api/vault — remove one key (body: {"key": "KEY_NAME"})
+    if method == "DELETE" && path == "/api/vault" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let key = body_json.as_ref().and_then(|j| j.get("key")).and_then(|v| v.as_str()).map(String::from);
+        match key {
+            Some(k) if !k.is_empty() => {
+                match akasha_vault::open_vault(data_dir) {
+                    Ok(v) => match v.delete(&k) {
+                        Ok(()) => return json_response("200 OK", &serde_json::json!({ "ok": true, "key": k }).to_string()),
+                        Err(akasha_vault::VaultError::NotFound(_)) => return json_response("404 Not Found", &serde_json::json!({ "error": "not_found", "key": k }).to_string()),
+                        Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
+                    },
+                    Err(e) => return json_response("503 Service Unavailable", &serde_json::json!({ "error": e.to_string() }).to_string()),
+                }
+            }
+            _ => return json_response("400 Bad Request", r#"{"error":"missing or empty key"}"#),
+        }
+    }
+
     // POST /api/restart — signal daemon to exit (supervisor restarts it)
     if method == "POST" && path == "/api/restart" {
         if let Some(ref tx) = restart_tx {

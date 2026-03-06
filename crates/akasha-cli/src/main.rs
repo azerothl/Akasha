@@ -169,6 +169,8 @@ enum VaultSub {
     },
     /// Get a secret value (use with care)
     Get { key: String },
+    /// Remove a secret from the vault
+    Delete { key: String },
 }
 
 fn find_daemon_binary() -> Option<PathBuf> {
@@ -463,6 +465,10 @@ fn cmd_vault(sub: VaultSub) -> anyhow::Result<()> {
         VaultSub::Get { key } => {
             let value = vault.get(&key)?;
             println!("{}", value);
+        }
+        VaultSub::Delete { key } => {
+            vault.delete(&key)?;
+            println!("Deleted {}", key);
         }
     }
     Ok(())

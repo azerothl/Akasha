@@ -58,7 +58,7 @@ Liste exposée dans le code (`AVAILABLE_TOOLS`) et via **GET /api/tools** (JSON 
 | `run_terminal` | `run_terminal <cmd> [args...]` | Même sémantique que run_command. |
 | `run_command_background` | `run_command_background <cmd> [args...]` | Lancer en arrière-plan ; retourne session_id. |
 | `process` | `process list \| poll \| kill <session_id>` | Lister, consulter ou arrêter commandes en arrière-plan. |
-| `web_search` | `web_search <query> [max_results]` | Recherche web (Brave API). |
+| `web_search` | `web_search <query> [max_results]` | Recherche web (Brave API). Clé : vault `brave_api_key` ou env `BRAVE_API_KEY`. |
 | `memory_search` | `memory_search <query> [top_k]` | Rechercher en mémoire long terme. |
 | `memory_store` | `memory_store <content> <source>` | Stocker en mémoire long terme. |
 | `sessions_list` | `sessions_list [limit]` | Lister les tâches récentes. |

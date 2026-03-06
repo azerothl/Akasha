@@ -633,7 +633,7 @@ pub async fn web_fetch(url: &str, policy: &crate::policy::ToolsPolicy) -> Result
     ))
 }
 
-/// Web search via Brave Search API. Requires BRAVE_API_KEY env and policy web_search_enabled. Feature "web".
+/// Web search via Brave Search API. Uses policy.brave_api_key (from vault) if set, else BRAVE_API_KEY env. Feature "web".
 #[cfg(feature = "web")]
 pub async fn web_search(
     query: &str,
@@ -651,14 +651,18 @@ pub async fn web_search(
             },
         ));
     }
-    let api_key = std::env::var("BRAVE_API_KEY").unwrap_or_else(|_| String::new());
+    let api_key: String = policy
+        .brave_api_key
+        .clone()
+        .or_else(|| std::env::var("BRAVE_API_KEY").ok())
+        .unwrap_or_default();
     if api_key.is_empty() {
         return Ok((
             String::new(),
             ToolResult {
                 tool: "web_search".to_string(),
                 success: false,
-                summary: "BRAVE_API_KEY not set".to_string(),
+                summary: "BRAVE_API_KEY not set (vault key 'brave_api_key' or env BRAVE_API_KEY)".to_string(),
                 detail: Some(query.to_string()),
             },
         ));

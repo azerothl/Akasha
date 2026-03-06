@@ -142,7 +142,7 @@ impl Daemon {
         llm_router.register_provider(Arc::new(akasha_llm::OllamaProvider::new(ollama_url)));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaCoreProvider::new()));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaEmbeddedProvider::new()));
-        // Resolve API key: vault://key_name → vault; else key_name → vault then env var of that name; else default env.
+        // All API keys / secrets: vault first, then env. (vault://key_name or key_name in vault, else env var.)
         let resolve_api_key = |api_key_ref: Option<&String>, default_env: &str| -> Option<String> {
             let ref_str = api_key_ref
                 .as_ref()
@@ -294,9 +294,17 @@ impl Daemon {
                     }
                 }
             }
-            let tools_executor = akasha_tools::ToolExecutor::load_from_path(&tools_policy_path)
-                .ok()
-                .map(Arc::new);
+            let tools_executor = {
+                match akasha_tools::ToolsPolicy::load_from_path(&tools_policy_path) {
+                    Ok(mut policy) => {
+                        if let Ok(v) = &vault {
+                            policy.brave_api_key = v.get("brave_api_key").ok();
+                        }
+                        Some(Arc::new(akasha_tools::ToolExecutor::new(policy)))
+                    }
+                    Err(_) => None,
+                }
+            };
             if tools_executor.is_some() {
                 info!(path = %tools_policy_path.display(), "Tools policy loaded");
             }
