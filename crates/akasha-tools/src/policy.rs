@@ -82,14 +82,15 @@ impl ToolsPolicy {
         })
     }
 
-    /// If default_profile and tool_profiles are set, returns whether the tool is in the profile. Otherwise true.
+    /// If default_profile is set, returns whether the tool is in the profile. Otherwise true.
     pub fn can_use_tool(&self, tool_name: &str) -> bool {
-        match (&self.default_profile, &self.tool_profiles) {
-            (Some(profile), map) if !map.is_empty() => map
+        match &self.default_profile {
+            Some(profile) => self
+                .tool_profiles
                 .get(profile)
                 .map(|list| list.iter().any(|t| t == tool_name))
                 .unwrap_or(false),
-            _ => true,
+            None => true,
         }
     }
 

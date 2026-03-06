@@ -101,6 +101,14 @@ pub async fn search_replace(
             detail: Some(path.display().to_string()),
         });
     }
+    if search.is_empty() {
+        return Ok(ToolResult {
+            tool: "search_replace".to_string(),
+            success: false,
+            summary: "search string must not be empty".to_string(),
+            detail: Some(path.display().to_string()),
+        });
+    }
     let content = tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("search_replace read {}", path.display()))?;
@@ -223,9 +231,39 @@ pub async fn apply_patch(
                     new_lines.push(l[1..].to_string());
                     i += 1;
                 } else if l.starts_with('-') && !l.starts_with("---") {
+                    let expected = &l[1..];
+                    let actual_idx = start_idx + old_consumed;
+                    if actual_idx >= lines.len() || lines[actual_idx] != expected {
+                        return Ok(ToolResult {
+                            tool: "apply_patch".to_string(),
+                            success: false,
+                            summary: format!(
+                                "patch mismatch at line {}: expected {:?}, found {:?}",
+                                actual_idx + 1,
+                                expected,
+                                lines.get(actual_idx).map(String::as_str).unwrap_or("<eof>")
+                            ),
+                            detail: Some(path.display().to_string()),
+                        });
+                    }
                     old_consumed += 1;
                     i += 1;
                 } else if l.starts_with(' ') {
+                    let expected = &l[1..];
+                    let actual_idx = start_idx + old_consumed;
+                    if actual_idx >= lines.len() || lines[actual_idx] != expected {
+                        return Ok(ToolResult {
+                            tool: "apply_patch".to_string(),
+                            success: false,
+                            summary: format!(
+                                "patch context mismatch at line {}: expected {:?}, found {:?}",
+                                actual_idx + 1,
+                                expected,
+                                lines.get(actual_idx).map(String::as_str).unwrap_or("<eof>")
+                            ),
+                            detail: Some(path.display().to_string()),
+                        });
+                    }
                     new_lines.push(l[1..].to_string());
                     old_consumed += 1;
                     i += 1;
@@ -564,7 +602,20 @@ pub async fn web_fetch(url: &str, policy: &crate::policy::ToolsPolicy) -> Result
         .await
         .context("web_fetch send")?;
     let status = res.status();
-    let body = res.text().await.context("web_fetch body")?;
+    const MAX_BODY_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+    let bytes = res.bytes().await.context("web_fetch body")?;
+    if bytes.len() > MAX_BODY_BYTES {
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: "web_fetch".to_string(),
+                success: false,
+                summary: format!("response body exceeds {} byte limit", MAX_BODY_BYTES),
+                detail: Some(url.to_string()),
+            },
+        ));
+    }
+    let body = String::from_utf8_lossy(&bytes).into_owned();
     let success = status.is_success();
     let summary = if success {
         format!("{} {} bytes", status, body.len())
@@ -630,13 +681,23 @@ pub async fn web_search(
     let status = res.status();
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
+        const PREVIEW_LEN: usize = 200;
+        const DETAIL_LEN: usize = 2000;
+        let body_detail = &body[..body.len().min(DETAIL_LEN)];
+        let summary = if body.is_empty() {
+            format!("{}", status)
+        } else if body.len() > PREVIEW_LEN {
+            format!("{} {}...", status, &body[..PREVIEW_LEN])
+        } else {
+            format!("{} {}", status, &body)
+        };
         return Ok((
             String::new(),
             ToolResult {
                 tool: "web_search".to_string(),
                 success: false,
-                summary: format!("{} {}", status, body),
-                detail: Some(query.to_string()),
+                summary,
+                detail: Some(format!("query: {}\nresponse_body_truncated: {}", query, body_detail)),
             },
         ));
     }
