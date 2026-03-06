@@ -126,7 +126,6 @@ async fn send_message(message: String, session_id: Option<String>, port: Option<
     let deadline = std::time::Instant::now()
         + std::time::Duration::from_secs(TASK_POLL_TIMEOUT_SECS);
     let mut last_message = String::new();
-    let mut session_id = session_id;
     loop {
         if std::time::Instant::now() > deadline {
             return Ok(SendMessageResult {
@@ -468,8 +467,9 @@ async fn cancel_task(task_id: String, port: Option<u16>) -> Result<serde_json::V
         .build()
         .map_err(|e| e.to_string())?;
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
     let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({ "error": "invalid_response" }));
-    if !resp.status().is_success() {
+    if !status.is_success() {
         let detail = json.get("detail").and_then(|v| v.as_str()).unwrap_or(json.get("error").and_then(|v| v.as_str()).unwrap_or("Erreur inconnue"));
         return Err(detail.to_string());
     }
@@ -493,6 +493,23 @@ async fn get_schedules(port: Option<u16>) -> Result<serde_json::Value, String> {
     Ok(json)
 }
 
+/// Schedule by id: GET /api/schedules/:id (détail d'une récurrence).
+#[tauri::command]
+async fn get_schedule_by_id(schedule_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/schedules/{}", daemon_base_url(port), schedule_id);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// Task runs: GET /api/task_runs (optionally ?schedule_id=...) for Calendrier.
 #[tauri::command]
 async fn get_task_runs(port: Option<u16>, schedule_id: Option<String>) -> Result<serde_json::Value, String> {
@@ -501,6 +518,101 @@ async fn get_task_runs(port: Option<u16>, schedule_id: Option<String>) -> Result
         Some(s) if !s.is_empty() => format!("{}/api/task_runs?schedule_id={}", daemon_base_url(port), s),
         _ => format!("{}/api/task_runs", daemon_base_url(port)),
     };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Create schedule: POST /api/schedules.
+#[tauri::command]
+async fn create_schedule(
+    name: String,
+    description: String,
+    interval_seconds: Option<u64>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/schedules", daemon_base_url(port));
+    let body = serde_json::json!({
+        "name": name,
+        "description": description,
+        "enabled": true,
+        "timezone": "UTC",
+        "rrule": "",
+        "interval_seconds": interval_seconds.unwrap_or(3600),
+        "channel_context": description
+    });
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(format!("{}", status));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Delete schedule: DELETE /api/schedules/:id.
+#[tauri::command]
+async fn delete_schedule(schedule_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/schedules/{}", daemon_base_url(port), schedule_id);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    Ok(serde_json::json!({ "deleted": schedule_id }))
+}
+
+/// Memory short-term: GET /api/memory/short-term?session_id=...
+#[tauri::command]
+async fn get_memory_short_term(session_id: Option<String>, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = match session_id.as_deref() {
+        Some(s) if !s.is_empty() => format!(
+            "{}/api/memory/short-term?session_id={}",
+            daemon_base_url(port),
+            urlencoding::encode(s)
+        ),
+        _ => format!("{}/api/memory/short-term", daemon_base_url(port)),
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Memory long-term: GET /api/memory/long-term?limit=50
+#[tauri::command]
+async fn get_memory_long_term(limit: Option<u32>, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let limit = limit.unwrap_or(50).min(200);
+    let url = format!("{}/api/memory/long-term?limit={}", daemon_base_url(port), limit);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
@@ -544,7 +656,12 @@ pub fn run() {
             get_task_events,
             cancel_task,
             get_schedules,
+            get_schedule_by_id,
+            create_schedule,
+            delete_schedule,
             get_task_runs,
+            get_memory_short_term,
+            get_memory_long_term,
             get_schedule_run_reports,
             get_docs,
             get_config,

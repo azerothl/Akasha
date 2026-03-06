@@ -5,7 +5,7 @@ import remarkGfm from "remark-gfm";
 
 const DAEMON_PORT = 3876;
 
-type Tab = "chat" | "router" | "settings" | "docs" | "tasks" | "calendar";
+type Tab = "chat" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
 
 /** French label for Activity event types (delegation, progress, etc.). */
 function eventTypeLabel(typ: string): string {
@@ -28,6 +28,15 @@ function eventTypeLabel(typ: string): string {
     schedule_deleted: "Récurrence supprimée",
   };
   return labels[typ] ?? typ;
+}
+
+/** Format duration in seconds as "X min Y s" or "Y s". */
+function formatDurationSec(sec: number): string {
+  const total = Math.round(sec);
+  if (total < 60) return `${total} s`;
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return s > 0 ? `${m} min ${s} s` : `${m} min`;
 }
 
 interface HealthState {
@@ -70,10 +79,41 @@ function App() {
   const [tasksLoading, setTasksLoading] = useState(false);
   const [runningTaskChips, setRunningTaskChips] = useState<Record<string, { pct?: number; message?: string }>>({});
   const [schedules, setSchedules] = useState<Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>>([]);
-  const [taskRuns, setTaskRuns] = useState<Array<{ id: string; schedule_id?: string; task_id: string; status: string; planned_for: string }>>([]);
+  const [taskRuns, setTaskRuns] = useState<Array<{
+    id: string;
+    schedule_id?: string;
+    task_id: string;
+    status: string;
+    planned_for: string;
+    started_at?: string;
+    ended_at?: string;
+  }>>([]);
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [calendarSelectedTaskId, setCalendarSelectedTaskId] = useState<string | null>(null);
-  const [calendarTaskDetail, setCalendarTaskDetail] = useState<{ status: string; progress?: Array<{ progress_pct?: number; message?: string }> } | null>(null);
+  const [calendarTaskDetail, setCalendarTaskDetail] = useState<{
+    status: string;
+    created_at?: string;
+    updated_at?: string;
+    progress?: Array<{ progress_pct?: number; message?: string }>;
+  } | null>(null);
+  const [calendarSelectedScheduleId, setCalendarSelectedScheduleId] = useState<string | null>(null);
+  const [scheduleDetail, setScheduleDetail] = useState<{
+    id: string;
+    name: string;
+    description: string;
+    enabled: boolean;
+    interval_seconds?: number;
+    timezone?: string;
+    rrule?: string;
+    channel_context?: string | null;
+  } | null>(null);
+  const [scheduleDetailError, setScheduleDetailError] = useState<string | null>(null);
+  const [calendarRunsCollapsed, setCalendarRunsCollapsed] = useState(false);
+  const [memoryShortTerm, setMemoryShortTerm] = useState<Array<{ role: string; content: string }>>([]);
+  const [memoryLongTerm, setMemoryLongTerm] = useState<Array<{ content: string; created_at: string; source: string }>>([]);
+  const [memoryLongTermAvailable, setMemoryLongTermAvailable] = useState(false);
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
   const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -185,10 +225,18 @@ function App() {
     try {
       const [schedData, runsData] = await Promise.all([
         invoke<{ schedules?: Array<{ id?: string; name?: string; enabled?: boolean; interval_seconds?: number }> }>("get_schedules", { port: DAEMON_PORT }),
-        invoke<{ task_runs?: Array<{ id?: string; schedule_id?: string; task_id?: string; status?: string; planned_for?: string }> }>("get_task_runs", { port: DAEMON_PORT }),
+        invoke<{ task_runs?: Array<{ id?: string; schedule_id?: string; task_id?: string; status?: string; planned_for?: string; started_at?: string; ended_at?: string }> }>("get_task_runs", { port: DAEMON_PORT }),
       ]);
       setSchedules((schedData?.schedules ?? []).map((s) => ({ id: s.id ?? "", name: s.name ?? "", enabled: s.enabled ?? false, interval_seconds: s.interval_seconds })));
-      setTaskRuns((runsData?.task_runs ?? []).map((r) => ({ id: r.id ?? "", schedule_id: r.schedule_id, task_id: r.task_id ?? "", status: r.status ?? "?", planned_for: r.planned_for ?? "" })));
+      setTaskRuns((runsData?.task_runs ?? []).map((r) => ({
+        id: r.id ?? "",
+        schedule_id: r.schedule_id,
+        task_id: r.task_id ?? "",
+        status: r.status ?? "?",
+        planned_for: r.planned_for ?? "",
+        started_at: r.started_at,
+        ended_at: r.ended_at,
+      })));
     } catch {
       setSchedules([]);
       setTaskRuns([]);
@@ -210,6 +258,37 @@ function App() {
   useEffect(() => {
     if (tab === "calendar") fetchCalendar();
   }, [tab, fetchCalendar]);
+
+  const fetchMemory = useCallback(async () => {
+    setMemoryLoading(true);
+    setMemoryError(null);
+    try {
+      const [shortRes, longRes] = await Promise.all([
+        invoke<{ session_id?: string; turns?: Array<{ role: string; content: string }> }>("get_memory_short_term", {
+          sessionId: sessionId ?? undefined,
+          port: DAEMON_PORT,
+        }),
+        invoke<{ entries?: Array<{ content: string; created_at: string; source: string }>; long_term_available?: boolean }>("get_memory_long_term", {
+          limit: 50,
+          port: DAEMON_PORT,
+        }),
+      ]);
+      setMemoryShortTerm(shortRes?.turns ?? []);
+      setMemoryLongTerm(longRes?.entries ?? []);
+      setMemoryLongTermAvailable(longRes?.long_term_available ?? false);
+    } catch (e) {
+      setMemoryError(String(e));
+      setMemoryShortTerm([]);
+      setMemoryLongTerm([]);
+      setMemoryLongTermAvailable(false);
+    } finally {
+      setMemoryLoading(false);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (tab === "memory") fetchMemory();
+  }, [tab, fetchMemory]);
 
   const fetchScheduleReports = useCallback(async () => {
     try {
@@ -234,8 +313,13 @@ function App() {
       try {
         const raw = await invoke<string>("get_task_status", { taskId: calendarSelectedTaskId, port: DAEMON_PORT });
         if (cancelled) return;
-        const st = JSON.parse(raw) as { status?: string; progress?: Array<{ progress_pct?: number; message?: string }> };
-        setCalendarTaskDetail({ status: st?.status ?? "?", progress: st?.progress });
+        const st = JSON.parse(raw) as { status?: string; created_at?: string; updated_at?: string; progress?: Array<{ progress_pct?: number; message?: string }> };
+        setCalendarTaskDetail({
+          status: st?.status ?? "?",
+          created_at: st?.created_at,
+          updated_at: st?.updated_at,
+          progress: st?.progress,
+        });
       } catch {
         if (!cancelled) setCalendarTaskDetail(null);
       }
@@ -252,6 +336,51 @@ function App() {
     return () => document.removeEventListener("keydown", onKey);
   }, [calendarSelectedTaskId]);
 
+  useEffect(() => {
+    if (!calendarSelectedScheduleId) {
+      setScheduleDetail(null);
+      setScheduleDetailError(null);
+      return;
+    }
+    setScheduleDetailError(null);
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await invoke<{ id?: string; name?: string; description?: string; enabled?: boolean; interval_seconds?: number; timezone?: string; rrule?: string; channel_context?: string | null }>("get_schedule_by_id", {
+          scheduleId: calendarSelectedScheduleId,
+          port: DAEMON_PORT,
+        });
+        if (cancelled) return;
+        setScheduleDetail({
+          id: data?.id ?? "",
+          name: data?.name ?? "",
+          description: data?.description ?? "",
+          enabled: data?.enabled ?? false,
+          interval_seconds: data?.interval_seconds,
+          timezone: data?.timezone,
+          rrule: data?.rrule,
+          channel_context: data?.channel_context ?? null,
+        });
+        setScheduleDetailError(null);
+      } catch (err) {
+        if (!cancelled) {
+          setScheduleDetail(null);
+          setScheduleDetailError(err instanceof Error ? err.message : String(err));
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [calendarSelectedScheduleId]);
+
+  useEffect(() => {
+    if (!calendarSelectedScheduleId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setCalendarSelectedScheduleId(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [calendarSelectedScheduleId]);
+
   const runSlashCommand = async (input: string): Promise<string> => {
     const parts = input.replace(/^\//, "").trim().split(/\s+/);
     const cmd = parts[0]?.toLowerCase() ?? "";
@@ -260,6 +389,9 @@ function App() {
     if (cmd === "help" || cmd === "?") {
       return `Commandes disponibles:
 /help, /?         — cette aide
+/task create "msg" — créer une tâche (envoie le message au daemon)
+/schedule create NOM INTERVAL_SEC "description" — créer une récurrence
+/schedule delete SCHEDULE_ID — supprimer une récurrence
 /status           — état du daemon
 /stop TASK_ID     — annuler une tâche (en cours ou en attente)
 /cancel TASK_ID   — idem que /stop
@@ -275,6 +407,56 @@ function App() {
 /reload           — recharger les plugins
 /restart          — redémarrer le daemon
 /vault set        — utiliser le CLI : akasha vault set KEY [value]`;
+    }
+    if (cmd === "task") {
+      const sub = parts[1]?.toLowerCase() ?? "";
+      if (sub === "create") {
+        const msg = (parts.slice(2).join(" ").replace(/^"|"$/g, "").trim() || parts[2]?.replace(/^"|"$/g, "")) ?? "";
+        if (!msg) return "Usage: /task create \"message\"";
+        try {
+          const ack = await invoke<{ message?: string; task_id?: string }>("send_message_ack", {
+            message: msg,
+            sessionId: sessionId,
+            port: DAEMON_PORT,
+          });
+          return (ack?.message ?? "Tâche créée.") + (ack?.task_id ? ` Task #${ack.task_id.slice(-8)}` : "");
+        } catch (err) {
+          return `Erreur: ${String(err)}`;
+        }
+      }
+      return "Usage: /task create \"message\"";
+    }
+    if (cmd === "schedule") {
+      const sub = parts[1]?.toLowerCase() ?? "";
+      if (sub === "create") {
+        const name = parts[2] ?? "";
+        const intervalSec = parts[3] ? parseInt(parts[3], 10) : 3600;
+        const description = (parts.slice(4).join(" ").replace(/^"|"$/g, "").trim() || parts[4]?.replace(/^"|"$/g, "")) ?? "";
+        if (!name) return "Usage: /schedule create NOM INTERVAL_SEC \"description\"";
+        try {
+          const data = await invoke<{ id?: string }>("create_schedule", {
+            name,
+            description,
+            intervalSeconds: isNaN(intervalSec) ? 3600 : intervalSec,
+            port: DAEMON_PORT,
+          });
+          const id = data?.id ?? "?";
+          return `Récurrence créée : ${name} (id: ${id.slice(-8)})`;
+        } catch (err) {
+          return `Erreur: ${String(err)}`;
+        }
+      }
+      if (sub === "delete") {
+        const id = parts[2]?.trim();
+        if (!id) return "Usage: /schedule delete SCHEDULE_ID";
+        try {
+          await invoke("delete_schedule", { scheduleId: id, port: DAEMON_PORT });
+          return `Récurrence ${id} supprimée.`;
+        } catch (err) {
+          return `Erreur: ${String(err)}`;
+        }
+      }
+      return "Usage: /schedule create NOM INTERVAL \"desc\" | /schedule delete ID";
     }
     if (cmd === "stop" || cmd === "cancel") {
       const taskId = parts[1]?.trim();
@@ -526,6 +708,16 @@ function App() {
             onClick={() => setTab("calendar")}
           >
             Calendrier
+          </button>
+          <button
+            role="tab"
+            aria-selected={tab === "memory"}
+            aria-controls="panel-memory"
+            id="tab-memory"
+            className={tab === "memory" ? "active" : ""}
+            onClick={() => setTab("memory")}
+          >
+            Mémoire
           </button>
           <button
             role="tab"
@@ -845,7 +1037,18 @@ function App() {
                 ) : (
                   <ul className="calendar-schedule-list" role="list">
                     {schedules.map((s) => (
-                      <li key={s.id}>
+                      <li
+                        key={s.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setCalendarSelectedScheduleId(s.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setCalendarSelectedScheduleId(s.id);
+                          }
+                        }}
+                      >
                         <strong>{s.name || s.id.slice(0, 8)}</strong>{" "}
                         {s.enabled ? "(activée)" : "(en pause)"}
                         {s.interval_seconds != null && ` — toutes les ${s.interval_seconds}s`}
@@ -853,25 +1056,80 @@ function App() {
                     ))}
                   </ul>
                 )}
-                <h3>Runs récents</h3>
+                <h3 className="calendar-runs-header">
+                  Lancements récents
+                  {taskRuns.length > 0 && (
+                    <button
+                      type="button"
+                      className="calendar-runs-toggle"
+                      onClick={() => setCalendarRunsCollapsed((c) => !c)}
+                      aria-expanded={!calendarRunsCollapsed}
+                    >
+                      {calendarRunsCollapsed ? "Déplier" : "Plier"}
+                    </button>
+                  )}
+                </h3>
                 {taskRuns.length === 0 ? (
                   <p className="empty-state">Aucun run.</p>
+                ) : calendarRunsCollapsed ? (
+                  <p className="empty-state">Liste repliée ({taskRuns.length} run(s)). Cliquez sur « Déplier » pour afficher.</p>
                 ) : (
-                  <ul className="calendar-runs-list" role="list">
-                    {taskRuns.slice(0, 20).map((r) => (
-                      <li
-                        key={r.id}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => setCalendarSelectedTaskId(r.task_id)}
-                        onKeyDown={(e) => e.key === "Enter" && setCalendarSelectedTaskId(r.task_id)}
-                        className={calendarSelectedTaskId === r.task_id ? "selected" : ""}
-                      >
-                        <span className="run-id">{r.id.slice(-8)}</span> {r.status} —{" "}
-                        {r.planned_for ? new Date(r.planned_for).toLocaleString() : ""} (task: {r.task_id.slice(-8)})
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="calendar-runs-list-wrap">
+                    {(() => {
+                      const byParent = new Map<string, typeof taskRuns>();
+                      for (const r of taskRuns) {
+                        const key = r.schedule_id ?? "__none__";
+                        if (!byParent.has(key)) byParent.set(key, []);
+                        byParent.get(key)!.push(r);
+                      }
+                      const groups: Array<{ key: string; label: string; runs: typeof taskRuns }> = [];
+                      byParent.forEach((runs, key) => {
+                        const label = key === "__none__" ? "Sans récurrence" : (schedules.find((s) => s.id === key)?.name || key.slice(0, 8));
+                        groups.push({ key, label, runs });
+                      });
+                      return (
+                        <ul className="calendar-runs-list" role="list">
+                          {groups.map(({ key, label, runs }) => (
+                            <li key={key} className="calendar-runs-group">
+                              <div className="calendar-runs-group-label">{label}</div>
+                              {runs.map((r) => {
+                                const endedAt = r.ended_at ? new Date(r.ended_at) : null;
+                                const startedAt = r.started_at ? new Date(r.started_at) : null;
+                                const durationSec = endedAt && startedAt ? (endedAt.getTime() - startedAt.getTime()) / 1000 : null;
+                                return (
+                                  <div
+                                    key={r.id}
+                                    role="button"
+                                    tabIndex={0}
+                                    onClick={() => setCalendarSelectedTaskId(r.task_id)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" || e.key === " ") {
+                                        e.preventDefault();
+                                        setCalendarSelectedTaskId(r.task_id);
+                                      }
+                                    }}
+                                    className={`calendar-run-item ${calendarSelectedTaskId === r.task_id ? "selected" : ""}`}
+                                  >
+                                    <span className="run-id">{r.id.slice(-8)}</span> {r.status}
+                                    {r.planned_for && (
+                                      <> — prévu: {new Date(r.planned_for).toLocaleString()}</>
+                                    )}
+                                    {endedAt && (
+                                      <div className="run-meta">
+                                        Terminé à {endedAt.toLocaleString()}
+                                        {durationSec != null && durationSec > 0 && ` · Durée: ${formatDurationSec(durationSec)}`}
+                                      </div>
+                                    )}
+                                    <div className="run-meta">task: {r.task_id.slice(-8)}</div>
+                                  </div>
+                                );
+                              })}
+                            </li>
+                          ))}
+                        </ul>
+                      );
+                    })()}
+                  </div>
                 )}
                 {calendarSelectedTaskId && (
                   <div
@@ -899,10 +1157,54 @@ function App() {
                       <div className="calendar-detail-modal-body">
                         {calendarTaskDetail ? (
                           <>
-                            <p><strong>Statut:</strong> {calendarTaskDetail.status}</p>
+                            {(() => {
+                              const run = taskRuns.find((r) => r.task_id === calendarSelectedTaskId);
+                              const runStatus = run?.status ?? "?";
+                              const taskStatus = calendarTaskDetail.status;
+                              const runDone = runStatus === "completed" || runStatus === "failed" || runStatus === "cancelled" || runStatus === "skipped";
+                              const statusLabel = runStatus === "completed" ? "Terminé" : runStatus === "failed" ? "Échec" : runStatus === "cancelled" ? "Annulé" : runStatus === "running" ? "En cours" : runStatus === "queued" ? "En attente" : runStatus;
+                              return (
+                                <>
+                                  <p><strong>Exécution planifiée (run):</strong> {statusLabel}</p>
+                                  {runDone && taskStatus === "running" && (
+                                    <p className="task-detail-hint">
+                                      Le run est marqué « {statusLabel} » mais la tâche côté orchestrateur affiche encore « running ». Cela peut indiquer un décalage de mise à jour ou une tâche bloquée.
+                                    </p>
+                                  )}
+                                  <p><strong>Statut tâche (orchestrateur):</strong> {taskStatus}</p>
+                                </>
+                              );
+                            })()}
+                            {(() => {
+                              const run = taskRuns.find((r) => r.task_id === calendarSelectedTaskId);
+                              const parent = run?.schedule_id ? schedules.find((s) => s.id === run.schedule_id) : null;
+                              return parent ? <p><strong>Récurrence parente:</strong> {parent.name || parent.id.slice(0, 8)}</p> : null;
+                            })()}
+                            {calendarTaskDetail.updated_at && (
+                              <p><strong>Dernière mise à jour:</strong> {new Date(calendarTaskDetail.updated_at).toLocaleString()}</p>
+                            )}
+                            {(() => {
+                              const run = taskRuns.find((r) => r.task_id === calendarSelectedTaskId);
+                              return run?.ended_at ? <p><strong>Terminé à:</strong> {new Date(run.ended_at).toLocaleString()}</p> : null;
+                            })()}
+                            {(() => {
+                              const run = taskRuns.find((r) => r.task_id === calendarSelectedTaskId);
+                              if (!run?.started_at || !run?.ended_at) return null;
+                              const sec = (new Date(run.ended_at).getTime() - new Date(run.started_at).getTime()) / 1000;
+                              return sec > 0 ? <p><strong>Durée:</strong> {formatDurationSec(sec)}</p> : null;
+                            })()}
+                            {calendarTaskDetail.progress && calendarTaskDetail.progress.length > 0 && (() => {
+                              const last = calendarTaskDetail.progress[calendarTaskDetail.progress.length - 1]?.message;
+                              return last ? (
+                                <div className="task-detail-reply">
+                                  <strong>Réponse de l'agent:</strong>
+                                  <div className="task-detail-reply-content">{last}</div>
+                                </div>
+                              ) : null;
+                            })()}
                             {calendarTaskDetail.progress && calendarTaskDetail.progress.length > 0 && (
                               <div className="task-detail-progress">
-                                <strong>Progression / résultat:</strong>
+                                <strong>Progression / étapes:</strong>
                                 <p className="task-detail-progress-hint">
                                   Les lignes « État » sont des étapes intermédiaires ; le pourcentage indique l’avancement.
                                 </p>
@@ -925,6 +1227,139 @@ function App() {
                       </div>
                     </div>
                   </div>
+                )}
+                {calendarSelectedScheduleId && (
+                  <div
+                    className="calendar-detail-modal-overlay"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="schedule-detail-title"
+                    onClick={() => setCalendarSelectedScheduleId(null)}
+                  >
+                    <div
+                      className="calendar-detail-modal"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="calendar-detail-modal-header">
+                        <h2 id="schedule-detail-title">Détail récurrence</h2>
+                        <button
+                          type="button"
+                          className="calendar-detail-modal-close"
+                          onClick={() => setCalendarSelectedScheduleId(null)}
+                          aria-label="Fermer"
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <div className="calendar-detail-modal-body">
+                        {scheduleDetailError ? (
+                          <p className="error-inline" role="alert">
+                            Impossible de charger le détail : {scheduleDetailError}
+                            <br />
+                            <small>Vérifiez que le daemon tourne et que l’app est lancée via Tauri (pas uniquement en navigateur).</small>
+                          </p>
+                        ) : scheduleDetail ? (
+                          <>
+                            <p><strong>ID (pour supprimer):</strong>{" "}
+                              <code className="schedule-id-copy">{scheduleDetail.id}</code>
+                              <br />
+                              <small className="muted">Commande : /schedule delete {scheduleDetail.id}</small>
+                            </p>
+                            <p><strong>Nom:</strong> {scheduleDetail.name}</p>
+                            <p><strong>État:</strong> {scheduleDetail.enabled ? "Activée" : "En pause"}</p>
+                            {scheduleDetail.interval_seconds != null && (
+                              <p><strong>Intervalle:</strong> toutes les {scheduleDetail.interval_seconds} s</p>
+                            )}
+                            {scheduleDetail.timezone && (
+                              <p><strong>Fuseau:</strong> {scheduleDetail.timezone}</p>
+                            )}
+                            {(scheduleDetail.channel_context ?? scheduleDetail.description) ? (
+                              <div className="task-detail-reply">
+                                <strong>Demande envoyée aux agents à chaque itération:</strong>
+                                <div className="task-detail-reply-content">
+                                  {scheduleDetail.channel_context ?? scheduleDetail.description}
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="muted">Aucune demande configurée pour cette récurrence (channel_context et description vides).</p>
+                            )}
+                            {scheduleDetail.rrule && (
+                              <p className="schedule-rrule"><strong>Règle:</strong> <code>{scheduleDetail.rrule}</code></p>
+                            )}
+                          </>
+                        ) : (
+                          <p className="loading-inline">Chargement…</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+        )}
+
+        {tab === "memory" && (
+          <section
+            id="panel-memory"
+            role="tabpanel"
+            aria-labelledby="tab-memory"
+            className="panel memory-panel"
+          >
+            <h2 className="panel-title">Mémoire</h2>
+            <button
+              type="button"
+              className="refresh-btn"
+              onClick={fetchMemory}
+              aria-label="Rafraîchir la mémoire"
+              disabled={memoryLoading}
+            >
+              Rafraîchir
+            </button>
+            {memoryError && (
+              <p className="error-inline" role="alert">
+                {memoryError}
+              </p>
+            )}
+            {memoryLoading && (
+              <p className="loading-inline" aria-busy="true">
+                Chargement…
+              </p>
+            )}
+            {!memoryLoading && !memoryError && (
+              <>
+                <h3 className="memory-section-title">Court terme (session)</h3>
+                <p className="muted">
+                  Derniers échanges de la session courante (utilisée par l’orchestrateur pour le contexte).
+                </p>
+                {memoryShortTerm.length === 0 ? (
+                  <p className="empty-state">Aucun tour en mémoire court terme.</p>
+                ) : (
+                  <ul className="memory-turns-list">
+                    {memoryShortTerm.map((t, i) => (
+                      <li key={i} className={`memory-turn memory-turn-${t.role}`}>
+                        <span className="memory-turn-role">{t.role}</span>
+                        <div className="memory-turn-content">{t.content}</div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <h3 className="memory-section-title">Long terme</h3>
+                {!memoryLongTermAvailable ? (
+                  <p className="muted">Mémoire long terme non disponible (embeddings non configurés ou désactivés).</p>
+                ) : memoryLongTerm.length === 0 ? (
+                  <p className="empty-state">Aucune entrée en mémoire long terme.</p>
+                ) : (
+                  <ul className="memory-long-term-list">
+                    {memoryLongTerm.map((e, i) => (
+                      <li key={i} className="memory-long-term-item">
+                        <div className="memory-long-term-content">{e.content}</div>
+                        <div className="memory-long-term-meta">
+                          {e.created_at} {e.source ? ` · ${e.source}` : ""}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </>
             )}

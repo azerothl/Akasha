@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;
 
+/// Maximum number of progress entries retained per task (in both store and in-memory cache).
+pub const MAX_PROGRESS_PER_TASK: usize = 32;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
@@ -82,9 +85,56 @@ impl TaskStore {
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
             CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
+            CREATE TABLE IF NOT EXISTS task_progress (
+                task_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                progress_pct INTEGER NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (task_id, seq)
+            );
+            CREATE INDEX IF NOT EXISTS idx_task_progress_task_id ON task_progress(task_id);
             "#,
         )?;
         Ok(Self { conn })
+    }
+
+    /// Append a progress entry for a task (used by daemon to persist progress for fast GET /api/tasks/:id).
+    pub fn insert_progress(&self, task_id: Uuid, progress_pct: u8, message: &str) -> anyhow::Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let seq: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM task_progress WHERE task_id = ?1",
+            [task_id.to_string()],
+            |row| row.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT INTO task_progress (task_id, seq, progress_pct, message, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![task_id.to_string(), seq, progress_pct as i32, message, now],
+        )?;
+        let max_progress: i64 = MAX_PROGRESS_PER_TASK as i64;
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM task_progress WHERE task_id = ?1",
+            [task_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if count > max_progress {
+            self.conn.execute(
+                "DELETE FROM task_progress WHERE task_id = ?1 AND seq IN (SELECT seq FROM task_progress WHERE task_id = ?1 ORDER BY seq ASC LIMIT ?2)",
+                rusqlite::params![task_id.to_string(), count - max_progress],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Get persisted progress entries for a task (chronological order).
+    pub fn get_progress(&self, task_id: Uuid) -> anyhow::Result<Vec<(u8, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT progress_pct, message FROM task_progress WHERE task_id = ?1 ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map([task_id.to_string()], |row| {
+            Ok((row.get::<_, i32>(0)? as u8, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn insert(&self, task: &Task) -> anyhow::Result<()> {
