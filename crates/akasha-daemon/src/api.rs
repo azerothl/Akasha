@@ -230,20 +230,41 @@ async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: 
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
 fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
-    for line in response.lines() {
-        let line = line.trim();
+    let lines: Vec<&str> = response.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim();
         if let Some(rest) = line.strip_prefix("TOOL:") {
             let rest = rest.trim();
+            // Split the header line by whitespace for tool name + fixed positional args
             let parts: Vec<String> = rest.split_whitespace().map(String::from).collect();
-            if let Some((name, args)) = parts.split_first() {
-                out.push((name.clone(), args.to_vec()));
+            if let Some((name, fixed_args)) = parts.split_first() {
+                let mut args = fixed_args.to_vec();
+                // Collect subsequent non-TOOL: lines as a raw multi-line body (for
+                // tools like apply_patch / edit_file that need preserved whitespace).
+                i += 1;
+                let body_start = i;
+                while i < lines.len() && !lines[i].trim_start().starts_with("TOOL:") {
+                    i += 1;
+                }
+                // Trim trailing blank lines from the body
+                let mut body_end = i;
+                while body_end > body_start && lines[body_end - 1].trim().is_empty() {
+                    body_end -= 1;
+                }
+                if body_end > body_start {
+                    args.push(lines[body_start..body_end].join("\n"));
+                }
+                out.push((name.clone(), args));
+                continue;
             }
         }
+        i += 1;
     }
     out
 }
 
-/// Execute one tool call via ToolExecutor. Returns a short result string for the LLM context.
+/// Execute one tool call via ToolExecutor. Returns `(success, display_string)` for structured events.
 async fn execute_tool_call(
     executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
     tool_name: &str,
@@ -254,27 +275,28 @@ async fn execute_tool_call(
     store_path: Option<&std::path::Path>,
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     message_webhook_url: Option<&str>,
-) -> String {
+) -> (bool, String) {
     use std::path::Path;
     if !executor.policy.can_use_tool(tool_name) {
-        return format!("[{}] tool not allowed by current profile", tool_name);
+        return (false, format!("[{}] tool not allowed by current profile", tool_name));
     }
     let path_arg = |i: usize| args.get(i).map(|s| Path::new(s.as_str()));
-    match tool_name {
+    let result = match tool_name {
         "read_file" => {
             if let Some(p) = path_arg(0) {
                 match executor.read_file(p).await {
                     Ok((content, res)) => {
-                        if res.success {
+                        let msg = if res.success {
                             format!("[read_file {}] {} chars: {}", p.display(), content.len(), if content.len() <= 500 { content.as_str() } else { &content[..500] })
                         } else {
                             format!("[read_file] denied or error: {}", res.summary)
-                        }
+                        };
+                        (res.success, msg)
                     }
-                    Err(e) => format!("[read_file] error: {}", e),
+                    Err(e) => (false, format!("[read_file] error: {}", e)),
                 }
             } else {
-                "[read_file] usage: read_file <path>".to_string()
+                (false, "[read_file] usage: read_file <path>".to_string())
             }
         }
         "run_command" => {
@@ -284,13 +306,14 @@ async fn execute_tool_call(
                 Ok((out, res)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let stderr = String::from_utf8_lossy(&out.stderr);
-                    if res.success {
+                    let msg = if res.success {
                         format!("[run_command {}] stdout: {} stderr: {}", cmd, stdout.trim(), stderr.trim())
                     } else {
                         format!("[run_command] {} stderr: {}", res.summary, stderr.trim())
-                    }
+                    };
+                    (res.success, msg)
                 }
-                Err(e) => format!("[run_command] error: {}", e),
+                Err(e) => (false, format!("[run_command] error: {}", e)),
             }
         }
         "run_terminal" => {
@@ -300,13 +323,14 @@ async fn execute_tool_call(
                 Ok((out, res)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let stderr = String::from_utf8_lossy(&out.stderr);
-                    if res.success {
+                    let msg = if res.success {
                         format!("[run_terminal {}] stdout: {} stderr: {}", cmd, stdout.trim(), stderr.trim())
                     } else {
                         format!("[run_terminal] {} stderr: {}", res.summary, stderr.trim())
-                    }
+                    };
+                    (res.success, msg)
                 }
-                Err(e) => format!("[run_terminal] error: {}", e),
+                Err(e) => (false, format!("[run_terminal] error: {}", e)),
             }
         }
         "run_command_background" => {
@@ -319,14 +343,18 @@ async fn execute_tool_call(
                     let exec = executor.clone();
                     let cell: BackgroundResultCell = Arc::new(RwLock::new(None));
                     let cell_clone = cell.clone();
+                    let reg_clone = reg.clone();
                     let task = tokio::spawn(async move {
                         let result = exec.run_command(&cmd, &cmd_args, None).await;
                         *cell_clone.write().await = Some(result);
+                        // Auto-cleanup after a TTL to prevent leaking sessions the client never polls.
+                        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                        reg_clone.write().await.remove(&session_id);
                     });
                     reg.write().await.insert(session_id, (task, cell));
-                    format!("[run_command_background] session_id: {} (cmd: {})", session_id, cmd_display)
+                    (true, format!("[run_command_background] session_id: {} (cmd: {})", session_id, cmd_display))
                 }
-                None => "[run_command_background] process registry not available".to_string(),
+                None => (false, "[run_command_background] process registry not available".to_string()),
             }
         }
         "process" => {
@@ -334,39 +362,35 @@ async fn execute_tool_call(
             match (process_registry, sub) {
                 (Some(reg), "list") => {
                     let ids: Vec<String> = reg.read().await.keys().map(|u| u.to_string()).collect();
-                    format!("[process list] {} session(s): {:?}", ids.len(), ids)
+                    (true, format!("[process list] {} session(s): {:?}", ids.len(), ids))
                 }
                 (Some(reg), "poll") => {
                     let session_id = args.get(1).and_then(|s| Uuid::parse_str(s).ok());
                     match session_id {
                         Some(id) => {
-                            let (has_entry, result_opt) = {
-                                let g = reg.write().await;
-                                if let Some((_task, cell)) = g.get(&id) {
-                                    let taken = cell.write().await.take();
-                                    (true, taken)
-                                } else {
-                                    (false, None)
-                                }
+                            let cell_opt = {
+                                let g = reg.read().await;
+                                g.get(&id).map(|(_task, cell)| cell.clone())
                             };
-                            if !has_entry {
-                                return format!("[process poll] unknown session_id: {}", id);
-                            }
+                            let Some(cell) = cell_opt else {
+                                return (false, format!("[process poll] unknown session_id: {}", id));
+                            };
+                            let result_opt = cell.write().await.take();
                             match result_opt {
                                 Some(Ok((out, _res))) => {
                                     reg.write().await.remove(&id);
                                     let stdout = String::from_utf8_lossy(&out.stdout);
                                     let stderr = String::from_utf8_lossy(&out.stderr);
-                                    format!("[process poll {}] done — exit {} stdout: {} stderr: {}", id, out.status.code().unwrap_or(-1), stdout.trim(), stderr.trim())
+                                    (true, format!("[process poll {}] done — exit {} stdout: {} stderr: {}", id, out.status.code().unwrap_or(-1), stdout.trim(), stderr.trim()))
                                 }
                                 Some(Err(e)) => {
                                     reg.write().await.remove(&id);
-                                    format!("[process poll {}] error: {}", id, e)
+                                    (false, format!("[process poll {}] error: {}", id, e))
                                 }
-                                None => format!("[process poll {}] still running", id),
+                                None => (true, format!("[process poll {}] still running", id)),
                             }
                         }
-                        None => "[process poll] usage: process poll <session_id>".to_string(),
+                        None => (false, "[process poll] usage: process poll <session_id>".to_string()),
                     }
                 }
                 (Some(reg), "kill") => {
@@ -376,22 +400,22 @@ async fn execute_tool_call(
                             let mut g = reg.write().await;
                             if let Some((task, _cell)) = g.remove(&id) {
                                 task.abort();
-                                format!("[process kill {}] aborted", id)
+                                (true, format!("[process kill {}] aborted", id))
                             } else {
-                                format!("[process kill] unknown session_id: {}", id)
+                                (false, format!("[process kill] unknown session_id: {}", id))
                             }
                         }
-                        None => "[process kill] usage: process kill <session_id>".to_string(),
+                        None => (false, "[process kill] usage: process kill <session_id>".to_string()),
                     }
                 }
-                (_, _) => "[process] usage: process list | process poll <session_id> | process kill <session_id>".to_string(),
+                (_, _) => (false, "[process] usage: process list | process poll <session_id> | process kill <session_id>".to_string()),
             }
         }
         "memory_search" => {
             let query_str = args.get(0).map(|a| a.as_str()).unwrap_or("").trim();
             let top_k = args.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(5).min(20);
             if query_str.is_empty() {
-                return "[memory_search] usage: memory_search <query> [top_k]".to_string();
+                return (false, "[memory_search] usage: memory_search <query> [top_k]".to_string());
             }
             match long_term_client {
                 Some(client) => {
@@ -402,20 +426,20 @@ async fn execute_tool_call(
                         .ok()
                         .unwrap_or_default();
                     if results.is_empty() {
-                        format!("[memory_search] no results for \"{}\"", query_str)
+                        (true, format!("[memory_search] no results for \"{}\"", query_str))
                     } else {
                         let preview: Vec<String> = results.iter().take(5).map(|s| s.replace('\n', " ")).collect();
-                        format!("[memory_search] {} result(s): {}", results.len(), preview.join(" | "))
+                        (true, format!("[memory_search] {} result(s): {}", results.len(), preview.join(" | ")))
                     }
                 }
-                None => "[memory_search] long-term memory not available".to_string(),
+                None => (false, "[memory_search] long-term memory not available".to_string()),
             }
         }
         "memory_store" => {
             let content = args.get(0).map(|a| a.as_str()).unwrap_or("");
             let source = args.get(1).map(|a| a.as_str()).unwrap_or("agent");
             if content.is_empty() {
-                return "[memory_store] usage: memory_store <content> <source>".to_string();
+                return (false, "[memory_store] usage: memory_store <content> <source>".to_string());
             }
             match long_term_client {
                 Some(client) => {
@@ -427,11 +451,11 @@ async fn execute_tool_call(
                         .ok()
                         .and_then(|r| r.ok());
                     match out {
-                        Some(()) => "[memory_store] stored".to_string(),
-                        None => "[memory_store] failed or memory not available".to_string(),
+                        Some(()) => (true, "[memory_store] stored".to_string()),
+                        None => (false, "[memory_store] failed or memory not available".to_string()),
                     }
                 }
-                None => "[memory_store] long-term memory not available".to_string(),
+                None => (false, "[memory_store] long-term memory not available".to_string()),
             }
         }
         "sessions_list" => {
@@ -446,13 +470,13 @@ async fn execute_tool_call(
                                 .take(limit)
                                 .map(|t| format!("{} {} {}", t.id, t.status.as_str(), t.assigned_agent))
                                 .collect();
-                            format!("[sessions_list] {} task(s): {}", list.len(), list.join(" ; "))
+                            (true, format!("[sessions_list] {} task(s): {}", list.len(), list.join(" ; ")))
                         }
-                        Err(e) => format!("[sessions_list] error: {}", e),
+                        Err(e) => (false, format!("[sessions_list] error: {}", e)),
                     },
-                    Err(e) => format!("[sessions_list] store error: {}", e),
+                    Err(e) => (false, format!("[sessions_list] store error: {}", e)),
                 },
-                None => "[sessions_list] store not available".to_string(),
+                None => (false, "[sessions_list] store not available".to_string()),
             }
         }
         "session_status" => {
@@ -461,25 +485,25 @@ async fn execute_tool_call(
             match (store_path, id) {
                 (Some(path), Some(id)) => match TaskStore::open(path) {
                     Ok(store) => match store.get(id) {
-                        Ok(Some(t)) => format!(
+                        Ok(Some(t)) => (true, format!(
                             "[session_status] {} status={} agent={}",
                             t.id,
                             t.status.as_str(),
                             t.assigned_agent
-                        ),
-                        Ok(None) => format!("[session_status] task {} not found", id),
-                        Err(e) => format!("[session_status] error: {}", e),
+                        )),
+                        Ok(None) => (false, format!("[session_status] task {} not found", id)),
+                        Err(e) => (false, format!("[session_status] error: {}", e)),
                     },
-                    Err(e) => format!("[session_status] store error: {}", e),
+                    Err(e) => (false, format!("[session_status] store error: {}", e)),
                 },
-                (_, _) => "[session_status] usage: session_status <task_id>".to_string(),
+                (_, _) => (false, "[session_status] usage: session_status <task_id>".to_string()),
             }
         }
         "sessions_spawn" => {
             let message = args.get(0).map(|a| a.as_str()).unwrap_or("").to_string();
             let child_session_id = args.get(1).map(|a| a.as_str()).unwrap_or("").to_string();
             if message.is_empty() {
-                return "[sessions_spawn] usage: sessions_spawn <message> [session_id]".to_string();
+                return (false, "[sessions_spawn] usage: sessions_spawn <message> [session_id]".to_string());
             }
             match (store_path, conv_tx) {
                 (Some(path), Some(tx)) => {
@@ -489,14 +513,14 @@ async fn execute_tool_call(
                         id: new_id,
                         parent_task_id: Some(task_id),
                         status: TaskStatus::Pending,
-                        assigned_agent: String::new(),
+                        assigned_agent: "conversation".to_string(),
                         created_at: now,
                         updated_at: now,
                     };
                     match TaskStore::open(path) {
                         Ok(store) => {
                             if store.insert(&task).is_err() {
-                                return "[sessions_spawn] failed to insert task".to_string();
+                                return (false, "[sessions_spawn] failed to insert task".to_string());
                             }
                             let sid = if child_session_id.is_empty() {
                                 new_id.to_string()
@@ -504,20 +528,20 @@ async fn execute_tool_call(
                                 child_session_id
                             };
                             if tx.send((new_id, message, sid)).await.is_err() {
-                                return "[sessions_spawn] failed to send to conversation queue".to_string();
+                                return (false, "[sessions_spawn] failed to send to conversation queue".to_string());
                             }
-                            format!("[sessions_spawn] task_id: {} (queued)", new_id)
+                            (true, format!("[sessions_spawn] task_id: {} (queued)", new_id))
                         }
-                        Err(e) => format!("[sessions_spawn] store error: {}", e),
+                        Err(e) => (false, format!("[sessions_spawn] store error: {}", e)),
                     }
                 }
-                (_, _) => "[sessions_spawn] store or conversation channel not available".to_string(),
+                (_, _) => (false, "[sessions_spawn] store or conversation channel not available".to_string()),
             }
         }
         "message" => {
             let sub = args.get(0).map(String::as_str).unwrap_or("");
             if sub != "send" || args.len() < 3 {
-                return "[message] usage: message send <channel> <text>".to_string();
+                return (false, "[message] usage: message send <channel> <text>".to_string());
             }
             let _channel = args.get(1).map(String::as_str).unwrap_or("");
             let text = args.get(2..).map(|a| a.join(" ")).unwrap_or_default();
@@ -529,33 +553,34 @@ async fn execute_tool_call(
                         .build()
                     {
                         Ok(c) => c,
-                        Err(e) => return format!("[message] client error: {}", e),
+                        Err(e) => return (false, format!("[message] client error: {}", e)),
                     };
                     match client.post(url).json(&body).send().await {
-                        Ok(res) if res.status().is_success() => "[message] sent".to_string(),
-                        Ok(res) => format!("[message] send failed: {}", res.status()),
-                        Err(e) => format!("[message] error: {}", e),
+                        Ok(res) if res.status().is_success() => (true, "[message] sent".to_string()),
+                        Ok(res) => (false, format!("[message] send failed: {}", res.status())),
+                        Err(e) => (false, format!("[message] error: {}", e)),
                     }
                 }
-                None => "[message] AKASHA_MESSAGE_WEBHOOK_URL not set".to_string(),
+                None => (false, "[message] AKASHA_MESSAGE_WEBHOOK_URL not set".to_string()),
             }
         }
-        "browser" => "[browser] browser automation not implemented (planned Phase 3)".to_string(),
-        "image" => "[image] image analysis (vision) not implemented (planned Phase 3)".to_string(),
-        "pdf" => "[pdf] PDF extraction not implemented (planned Phase 3)".to_string(),
+        "browser" => (false, "[browser] browser automation not implemented (planned Phase 3)".to_string()),
+        "image" => (false, "[image] image analysis (vision) not implemented (planned Phase 3)".to_string()),
+        "pdf" => (false, "[pdf] PDF extraction not implemented (planned Phase 3)".to_string()),
         "search_files" => {
             let dir = path_arg(0).unwrap_or(Path::new("."));
             let pattern = args.get(1).map(String::as_str).unwrap_or("*");
             match executor.search_files(dir, pattern).await {
                 Ok((paths, res)) => {
-                    if res.success {
+                    let msg = if res.success {
                         let list: Vec<String> = paths.iter().take(20).map(|p| p.display().to_string()).collect();
                         format!("[search_files] found {}: {:?}", paths.len(), list)
                     } else {
                         format!("[search_files] {}", res.summary)
-                    }
+                    };
+                    (res.success, msg)
                 }
-                Err(e) => format!("[search_files] error: {}", e),
+                Err(e) => (false, format!("[search_files] error: {}", e)),
             }
         }
         "grep_content" => {
@@ -563,11 +588,11 @@ async fn execute_tool_call(
             let pattern = args.get(1).map(String::as_str).unwrap_or("");
             let file_glob = args.get(2).map(String::as_str).filter(|s| !s.is_empty());
             if pattern.is_empty() {
-                return "[grep_content] usage: grep_content <dir> <pattern> [file_glob]".to_string();
+                return (false, "[grep_content] usage: grep_content <dir> <pattern> [file_glob]".to_string());
             }
             match executor.grep_content(dir, pattern, file_glob, 50).await {
                 Ok((matches, res)) => {
-                    if res.success {
+                    let msg = if res.success {
                         let lines: Vec<String> = matches
                             .iter()
                             .take(30)
@@ -576,44 +601,52 @@ async fn execute_tool_call(
                         format!("[grep_content] {} — {}", res.summary, lines.join(" ; "))
                     } else {
                         format!("[grep_content] {}", res.summary)
-                    }
+                    };
+                    (res.success, msg)
                 }
-                Err(e) => format!("[grep_content] error: {}", e),
+                Err(e) => (false, format!("[grep_content] error: {}", e)),
             }
         }
         "write_file" => {
             let path = match path_arg(0) {
                 Some(p) => p,
-                None => return "[write_file] usage: write_file <path> <content>".to_string(),
+                None => return (false, "[write_file] usage: write_file <path> <content>".to_string()),
             };
             let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
             match executor.write_file(path, &content).await {
                 Ok(res) => {
-                    if res.success {
+                    let msg = if res.success {
                         format!("[write_file {}] {}", path.display(), res.summary)
                     } else {
                         format!("[write_file] {}", res.summary)
-                    }
+                    };
+                    (res.success, msg)
                 }
-                Err(e) => format!("[write_file] error: {}", e),
+                Err(e) => (false, format!("[write_file] error: {}", e)),
             }
         }
         "search_replace" => {
             let path = path_arg(0);
             let rest = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
-            let (search, replace) = rest.split_once(" | ").unwrap_or((rest.as_str(), ""));
+            let Some((search, replace)) = rest
+                .split_once('|')
+                .map(|(s, r)| (s.trim().to_string(), r.trim().to_string()))
+            else {
+                return (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string());
+            };
             match path {
-                Some(p) => match executor.search_replace(p, search.trim(), replace.trim()).await {
+                Some(p) => match executor.search_replace(p, &search, &replace).await {
                     Ok(res) => {
-                        if res.success {
+                        let msg = if res.success {
                             format!("[search_replace {}] {}", p.display(), res.summary)
                         } else {
                             format!("[search_replace] {}", res.summary)
-                        }
+                        };
+                        (res.success, msg)
                     }
-                    Err(e) => format!("[search_replace] error: {}", e),
+                    Err(e) => (false, format!("[search_replace] error: {}", e)),
                 },
-                None => "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(),
+                None => (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string()),
             }
         }
         "edit_file" => {
@@ -624,15 +657,16 @@ async fn execute_tool_call(
             match path {
                 Some(p) => match executor.edit_file(p, start_line, end_line, &new_content).await {
                     Ok(res) => {
-                        if res.success {
+                        let msg = if res.success {
                             format!("[edit_file {}] {}", p.display(), res.summary)
                         } else {
                             format!("[edit_file] {}", res.summary)
-                        }
+                        };
+                        (res.success, msg)
                     }
-                    Err(e) => format!("[edit_file] error: {}", e),
+                    Err(e) => (false, format!("[edit_file] error: {}", e)),
                 },
-                None => "[edit_file] usage: edit_file <path> <start_line> <end_line> <new_content>".to_string(),
+                None => (false, "[edit_file] usage: edit_file <path> <start_line> <end_line> <new_content>".to_string()),
             }
         }
         "apply_patch" => {
@@ -641,15 +675,16 @@ async fn execute_tool_call(
             match path {
                 Some(p) => match executor.apply_patch(p, &patch_content).await {
                     Ok(res) => {
-                        if res.success {
+                        let msg = if res.success {
                             format!("[apply_patch {}] {}", p.display(), res.summary)
                         } else {
                             format!("[apply_patch] {}", res.summary)
-                        }
+                        };
+                        (res.success, msg)
                     }
-                    Err(e) => format!("[apply_patch] error: {}", e),
+                    Err(e) => (false, format!("[apply_patch] error: {}", e)),
                 },
-                None => "[apply_patch] usage: apply_patch <path> <patch_content>".to_string(),
+                None => (false, "[apply_patch] usage: apply_patch <path> <patch_content>".to_string()),
             }
         }
         "file_diff" => {
@@ -658,33 +693,35 @@ async fn execute_tool_call(
             match (path_a, path_b) {
                 (Some(a), Some(b)) => match executor.file_diff(a, b).await {
                     Ok((diff, res)) => {
-                        if res.success {
+                        let msg = if res.success {
                             let preview = if diff.len() <= 400 { diff.as_str() } else { &diff[..400] };
                             format!("[file_diff] {} — {}", res.summary, preview)
                         } else {
                             format!("[file_diff] {}", res.summary)
-                        }
+                        };
+                        (res.success, msg)
                     }
-                    Err(e) => format!("[file_diff] error: {}", e),
+                    Err(e) => (false, format!("[file_diff] error: {}", e)),
                 },
-                _ => "[file_diff] usage: file_diff <path_a> <path_b>".to_string(),
+                _ => (false, "[file_diff] usage: file_diff <path_a> <path_b>".to_string()),
             }
         }
         "web_fetch" => {
             let url = args.get(0).map(String::as_str).unwrap_or("");
             if url.is_empty() {
-                return "[web_fetch] usage: web_fetch <url>".to_string();
+                return (false, "[web_fetch] usage: web_fetch <url>".to_string());
             }
             match executor.web_fetch(url).await {
                 Ok((body, res)) => {
-                    if res.success {
+                    let msg = if res.success {
                         let preview = if body.len() <= 500 { body.as_str() } else { &body[..500] };
                         format!("[web_fetch] {} — {}", res.summary, preview)
                     } else {
                         format!("[web_fetch] {}", res.summary)
-                    }
+                    };
+                    (res.success, msg)
                 }
-                Err(e) => format!("[web_fetch] error: {}", e),
+                Err(e) => (false, format!("[web_fetch] error: {}", e)),
             }
         }
         "web_search" => {
@@ -700,18 +737,19 @@ async fn execute_tool_call(
             };
             let query = query.trim();
             if query.is_empty() {
-                return "[web_search] usage: web_search <query> [max_results]".to_string();
+                return (false, "[web_search] usage: web_search <query> [max_results]".to_string());
             }
             match executor.web_search(query.trim(), max_results).await {
                 Ok((body, res)) => {
-                    if res.success {
+                    let msg = if res.success {
                         let preview = if body.len() <= 600 { body.as_str() } else { &body[..600] };
                         format!("[web_search] {} — {}", res.summary, preview)
                     } else {
                         format!("[web_search] {}", res.summary)
-                    }
+                    };
+                    (res.success, msg)
                 }
-                Err(e) => format!("[web_search] error: {}", e),
+                Err(e) => (false, format!("[web_search] error: {}", e)),
             }
         }
         "run_in_container" => {
@@ -719,7 +757,7 @@ async fn execute_tool_call(
             let image = args.get(1).map(String::as_str).unwrap_or("");
             let command = args.get(2).map(String::as_str).unwrap_or("");
             if work_dir.is_none() || image.is_empty() || command.is_empty() {
-                return "[run_in_container] usage: run_in_container <work_dir> <image> <command> [args...]".to_string();
+                return (false, "[run_in_container] usage: run_in_container <work_dir> <image> <command> [args...]".to_string());
             }
             let work_dir = work_dir.unwrap();
             let cmd_args: Vec<String> = args.iter().skip(3).cloned().collect();
@@ -727,21 +765,23 @@ async fn execute_tool_call(
                 Ok((stdout, stderr, exit_code, _res)) => {
                     let out = String::from_utf8_lossy(&stdout);
                     let err = String::from_utf8_lossy(&stderr);
-                    format!(
+                    let success = exit_code == 0;
+                    (success, format!(
                         "[run_in_container] exit {} — stdout: {} stderr: {}",
                         exit_code,
                         if out.len() > 400 { format!("{}...", &out[..400]) } else { out.to_string() },
                         if err.len() > 200 { format!("{}...", &err[..200]) } else { err.to_string() }
-                    )
+                    ))
                 }
-                Err(e) => format!("[run_in_container] error: {}", e),
+                Err(e) => (false, format!("[run_in_container] error: {}", e)),
             }
         }
         _ => {
             let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
-            format!("[{}] unknown tool. Available: {}.", tool_name, names.join(", "))
+            (false, format!("[{}] unknown tool. Available: {}.", tool_name, names.join(", ")))
         }
-    }
+    };
+    result
 }
 
 /// Compact short-term memory when it would exceed context: summarize oldest turns via LLM and replace in store.
@@ -1119,7 +1159,7 @@ pub(crate) async fn run_message_via_llm(
                 )
                 .await;
                 // Phase F: emit ToolInvoked for Actions tab (spec 33)
-                let success = !res.contains("denied") && !res.contains(" error:");
+                let (success, res) = res;
                 let payload = serde_json::json!({
                     "tool": actual_tool,
                     "skill": if &actual_tool != name { Some(name.as_str()) } else { None::<&str> },
