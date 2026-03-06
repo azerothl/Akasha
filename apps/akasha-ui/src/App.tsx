@@ -32,9 +32,10 @@ function eventTypeLabel(typ: string): string {
 
 /** Format duration in seconds as "X min Y s" or "Y s". */
 function formatDurationSec(sec: number): string {
-  if (sec < 60) return `${Math.round(sec)} s`;
-  const m = Math.floor(sec / 60);
-  const s = Math.round(sec % 60);
+  const total = Math.round(sec);
+  if (total < 60) return `${total} s`;
+  const m = Math.floor(total / 60);
+  const s = total % 60;
   return s > 0 ? `${m} min ${s} s` : `${m} min`;
 }
 
@@ -415,7 +416,7 @@ function App() {
         try {
           const ack = await invoke<{ message?: string; task_id?: string }>("send_message_ack", {
             message: msg,
-            session_id: sessionId,
+            sessionId: sessionId,
             port: DAEMON_PORT,
           });
           return (ack?.message ?? "Tâche créée.") + (ack?.task_id ? ` Task #${ack.task_id.slice(-8)}` : "");
@@ -436,7 +437,7 @@ function App() {
           const data = await invoke<{ id?: string }>("create_schedule", {
             name,
             description,
-            interval_seconds: isNaN(intervalSec) ? 3600 : intervalSec,
+            intervalSeconds: isNaN(intervalSec) ? 3600 : intervalSec,
             port: DAEMON_PORT,
           });
           const id = data?.id ?? "?";
