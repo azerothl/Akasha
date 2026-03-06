@@ -5,7 +5,7 @@ import remarkGfm from "remark-gfm";
 
 const DAEMON_PORT = 3876;
 
-type Tab = "chat" | "router" | "settings" | "docs" | "tasks" | "calendar";
+type Tab = "chat" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
 
 /** French label for Activity event types (delegation, progress, etc.). */
 function eventTypeLabel(typ: string): string {
@@ -104,8 +104,15 @@ function App() {
     interval_seconds?: number;
     timezone?: string;
     rrule?: string;
+    channel_context?: string | null;
   } | null>(null);
+  const [scheduleDetailError, setScheduleDetailError] = useState<string | null>(null);
   const [calendarRunsCollapsed, setCalendarRunsCollapsed] = useState(false);
+  const [memoryShortTerm, setMemoryShortTerm] = useState<Array<{ role: string; content: string }>>([]);
+  const [memoryLongTerm, setMemoryLongTerm] = useState<Array<{ content: string; created_at: string; source: string }>>([]);
+  const [memoryLongTermAvailable, setMemoryLongTermAvailable] = useState(false);
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
   const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -251,6 +258,37 @@ function App() {
     if (tab === "calendar") fetchCalendar();
   }, [tab, fetchCalendar]);
 
+  const fetchMemory = useCallback(async () => {
+    setMemoryLoading(true);
+    setMemoryError(null);
+    try {
+      const [shortRes, longRes] = await Promise.all([
+        invoke<{ session_id?: string; turns?: Array<{ role: string; content: string }> }>("get_memory_short_term", {
+          sessionId: sessionId ?? undefined,
+          port: DAEMON_PORT,
+        }),
+        invoke<{ entries?: Array<{ content: string; created_at: string; source: string }>; long_term_available?: boolean }>("get_memory_long_term", {
+          limit: 50,
+          port: DAEMON_PORT,
+        }),
+      ]);
+      setMemoryShortTerm(shortRes?.turns ?? []);
+      setMemoryLongTerm(longRes?.entries ?? []);
+      setMemoryLongTermAvailable(longRes?.long_term_available ?? false);
+    } catch (e) {
+      setMemoryError(String(e));
+      setMemoryShortTerm([]);
+      setMemoryLongTerm([]);
+      setMemoryLongTermAvailable(false);
+    } finally {
+      setMemoryLoading(false);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (tab === "memory") fetchMemory();
+  }, [tab, fetchMemory]);
+
   const fetchScheduleReports = useCallback(async () => {
     try {
       const data = await invoke<{ reports?: Array<{ schedule_name?: string; message?: string; ended_at?: string }> }>("get_schedule_run_reports", { port: DAEMON_PORT });
@@ -300,13 +338,15 @@ function App() {
   useEffect(() => {
     if (!calendarSelectedScheduleId) {
       setScheduleDetail(null);
+      setScheduleDetailError(null);
       return;
     }
+    setScheduleDetailError(null);
     let cancelled = false;
     (async () => {
       try {
-        const data = await invoke<{ id?: string; name?: string; description?: string; enabled?: boolean; interval_seconds?: number; timezone?: string; rrule?: string }>("get_schedule_by_id", {
-          schedule_id: calendarSelectedScheduleId,
+        const data = await invoke<{ id?: string; name?: string; description?: string; enabled?: boolean; interval_seconds?: number; timezone?: string; rrule?: string; channel_context?: string | null }>("get_schedule_by_id", {
+          scheduleId: calendarSelectedScheduleId,
           port: DAEMON_PORT,
         });
         if (cancelled) return;
@@ -318,9 +358,14 @@ function App() {
           interval_seconds: data?.interval_seconds,
           timezone: data?.timezone,
           rrule: data?.rrule,
+          channel_context: data?.channel_context ?? null,
         });
-      } catch {
-        if (!cancelled) setScheduleDetail(null);
+        setScheduleDetailError(null);
+      } catch (err) {
+        if (!cancelled) {
+          setScheduleDetail(null);
+          setScheduleDetailError(err instanceof Error ? err.message : String(err));
+        }
       }
     })();
     return () => { cancelled = true; };
@@ -365,7 +410,7 @@ function App() {
     if (cmd === "task") {
       const sub = parts[1]?.toLowerCase() ?? "";
       if (sub === "create") {
-        const msg = parts.slice(2).join(" ").replace(/^"|"$/g, "").trim() || parts[2]?.replace(/^"|"$/g, "") ?? "";
+        const msg = (parts.slice(2).join(" ").replace(/^"|"$/g, "").trim() || parts[2]?.replace(/^"|"$/g, "")) ?? "";
         if (!msg) return "Usage: /task create \"message\"";
         try {
           const ack = await invoke<{ message?: string; task_id?: string }>("send_message_ack", {
@@ -385,7 +430,7 @@ function App() {
       if (sub === "create") {
         const name = parts[2] ?? "";
         const intervalSec = parts[3] ? parseInt(parts[3], 10) : 3600;
-        const description = parts.slice(4).join(" ").replace(/^"|"$/g, "").trim() || parts[4]?.replace(/^"|"$/g, "") ?? "";
+        const description = (parts.slice(4).join(" ").replace(/^"|"$/g, "").trim() || parts[4]?.replace(/^"|"$/g, "")) ?? "";
         if (!name) return "Usage: /schedule create NOM INTERVAL_SEC \"description\"";
         try {
           const data = await invoke<{ id?: string }>("create_schedule", {
@@ -404,7 +449,7 @@ function App() {
         const id = parts[2]?.trim();
         if (!id) return "Usage: /schedule delete SCHEDULE_ID";
         try {
-          await invoke("delete_schedule", { schedule_id: id, port: DAEMON_PORT });
+          await invoke("delete_schedule", { scheduleId: id, port: DAEMON_PORT });
           return `Récurrence ${id} supprimée.`;
         } catch (err) {
           return `Erreur: ${String(err)}`;
@@ -662,6 +707,16 @@ function App() {
             onClick={() => setTab("calendar")}
           >
             Calendrier
+          </button>
+          <button
+            role="tab"
+            aria-selected={tab === "memory"}
+            aria-controls="panel-memory"
+            id="tab-memory"
+            className={tab === "memory" ? "active" : ""}
+            onClick={() => setTab("memory")}
+          >
+            Mémoire
           </button>
           <button
             role="tab"
@@ -1101,7 +1156,24 @@ function App() {
                       <div className="calendar-detail-modal-body">
                         {calendarTaskDetail ? (
                           <>
-                            <p><strong>Statut:</strong> {calendarTaskDetail.status}</p>
+                            {(() => {
+                              const run = taskRuns.find((r) => r.task_id === calendarSelectedTaskId);
+                              const runStatus = run?.status ?? "?";
+                              const taskStatus = calendarTaskDetail.status;
+                              const runDone = runStatus === "completed" || runStatus === "failed" || runStatus === "cancelled" || runStatus === "skipped";
+                              const statusLabel = runStatus === "completed" ? "Terminé" : runStatus === "failed" ? "Échec" : runStatus === "cancelled" ? "Annulé" : runStatus === "running" ? "En cours" : runStatus === "queued" ? "En attente" : runStatus;
+                              return (
+                                <>
+                                  <p><strong>Exécution planifiée (run):</strong> {statusLabel}</p>
+                                  {runDone && taskStatus === "running" && (
+                                    <p className="task-detail-hint">
+                                      Le run est marqué « {statusLabel} » mais la tâche côté orchestrateur affiche encore « running ». Cela peut indiquer un décalage de mise à jour ou une tâche bloquée.
+                                    </p>
+                                  )}
+                                  <p><strong>Statut tâche (orchestrateur):</strong> {taskStatus}</p>
+                                </>
+                              );
+                            })()}
                             {(() => {
                               const run = taskRuns.find((r) => r.task_id === calendarSelectedTaskId);
                               const parent = run?.schedule_id ? schedules.find((s) => s.id === run.schedule_id) : null;
@@ -1179,8 +1251,19 @@ function App() {
                         </button>
                       </div>
                       <div className="calendar-detail-modal-body">
-                        {scheduleDetail ? (
+                        {scheduleDetailError ? (
+                          <p className="error-inline" role="alert">
+                            Impossible de charger le détail : {scheduleDetailError}
+                            <br />
+                            <small>Vérifiez que le daemon tourne et que l’app est lancée via Tauri (pas uniquement en navigateur).</small>
+                          </p>
+                        ) : scheduleDetail ? (
                           <>
+                            <p><strong>ID (pour supprimer):</strong>{" "}
+                              <code className="schedule-id-copy">{scheduleDetail.id}</code>
+                              <br />
+                              <small className="muted">Commande : /schedule delete {scheduleDetail.id}</small>
+                            </p>
                             <p><strong>Nom:</strong> {scheduleDetail.name}</p>
                             <p><strong>État:</strong> {scheduleDetail.enabled ? "Activée" : "En pause"}</p>
                             {scheduleDetail.interval_seconds != null && (
@@ -1189,11 +1272,15 @@ function App() {
                             {scheduleDetail.timezone && (
                               <p><strong>Fuseau:</strong> {scheduleDetail.timezone}</p>
                             )}
-                            {scheduleDetail.description && (
+                            {(scheduleDetail.channel_context ?? scheduleDetail.description) ? (
                               <div className="task-detail-reply">
                                 <strong>Demande envoyée aux agents à chaque itération:</strong>
-                                <div className="task-detail-reply-content">{scheduleDetail.description}</div>
+                                <div className="task-detail-reply-content">
+                                  {scheduleDetail.channel_context ?? scheduleDetail.description}
+                                </div>
                               </div>
+                            ) : (
+                              <p className="muted">Aucune demande configurée pour cette récurrence (channel_context et description vides).</p>
                             )}
                             {scheduleDetail.rrule && (
                               <p className="schedule-rrule"><strong>Règle:</strong> <code>{scheduleDetail.rrule}</code></p>
@@ -1205,6 +1292,73 @@ function App() {
                       </div>
                     </div>
                   </div>
+                )}
+              </>
+            )}
+          </section>
+        )}
+
+        {tab === "memory" && (
+          <section
+            id="panel-memory"
+            role="tabpanel"
+            aria-labelledby="tab-memory"
+            className="panel memory-panel"
+          >
+            <h2 className="panel-title">Mémoire</h2>
+            <button
+              type="button"
+              className="refresh-btn"
+              onClick={fetchMemory}
+              aria-label="Rafraîchir la mémoire"
+              disabled={memoryLoading}
+            >
+              Rafraîchir
+            </button>
+            {memoryError && (
+              <p className="error-inline" role="alert">
+                {memoryError}
+              </p>
+            )}
+            {memoryLoading && (
+              <p className="loading-inline" aria-busy="true">
+                Chargement…
+              </p>
+            )}
+            {!memoryLoading && !memoryError && (
+              <>
+                <h3 className="memory-section-title">Court terme (session)</h3>
+                <p className="muted">
+                  Derniers échanges de la session courante (utilisée par l’orchestrateur pour le contexte).
+                </p>
+                {memoryShortTerm.length === 0 ? (
+                  <p className="empty-state">Aucun tour en mémoire court terme.</p>
+                ) : (
+                  <ul className="memory-turns-list">
+                    {memoryShortTerm.map((t, i) => (
+                      <li key={i} className={`memory-turn memory-turn-${t.role}`}>
+                        <span className="memory-turn-role">{t.role}</span>
+                        <div className="memory-turn-content">{t.content}</div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <h3 className="memory-section-title">Long terme</h3>
+                {!memoryLongTermAvailable ? (
+                  <p className="muted">Mémoire long terme non disponible (embeddings non configurés ou désactivés).</p>
+                ) : memoryLongTerm.length === 0 ? (
+                  <p className="empty-state">Aucune entrée en mémoire long terme.</p>
+                ) : (
+                  <ul className="memory-long-term-list">
+                    {memoryLongTerm.map((e, i) => (
+                      <li key={i} className="memory-long-term-item">
+                        <div className="memory-long-term-content">{e.content}</div>
+                        <div className="memory-long-term-meta">
+                          {e.created_at} {e.source ? ` · ${e.source}` : ""}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </>
             )}
