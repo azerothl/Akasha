@@ -370,6 +370,7 @@ impl Daemon {
                 let llm_router = llm_router.clone();
                 let store_path = db_path.clone();
                 let tools_executor = tools_executor.clone();
+                let skill_registry = skill_registry.clone();
                 let short_term = short_term.clone();
                 let long_term_client = long_term_client.clone();
                 async move {
@@ -384,6 +385,7 @@ impl Daemon {
                             Some(short_term.clone()),
                             long_term_client.clone(),
                             tools_executor.clone(),
+                            Some(skill_registry.clone()),
                         )
                         .await;
                     }

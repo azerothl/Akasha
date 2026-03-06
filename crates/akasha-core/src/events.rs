@@ -43,6 +43,10 @@ pub enum EventType {
     ScheduleCreated,
     ScheduleUpdated,
     ScheduleDeleted,
+    // Phase F: tools and agent delegation (spec 33)
+    ToolInvoked,
+    AgentDelegated,
+    AgentReplied,
 }
 
 impl EventType {
@@ -79,6 +83,9 @@ impl EventType {
             Self::ScheduleCreated => "schedule_created",
             Self::ScheduleUpdated => "schedule_updated",
             Self::ScheduleDeleted => "schedule_deleted",
+            Self::ToolInvoked => "tool_invoked",
+            Self::AgentDelegated => "agent_delegated",
+            Self::AgentReplied => "agent_replied",
         }
     }
 
@@ -115,6 +122,9 @@ impl EventType {
             "schedule_created" => Some(Self::ScheduleCreated),
             "schedule_updated" => Some(Self::ScheduleUpdated),
             "schedule_deleted" => Some(Self::ScheduleDeleted),
+            "tool_invoked" => Some(Self::ToolInvoked),
+            "agent_delegated" => Some(Self::AgentDelegated),
+            "agent_replied" => Some(Self::AgentReplied),
             _ => None,
         }
     }

@@ -140,12 +140,16 @@ pub fn json_response(status: &str, body: &str) -> String {
 
 /// Liste des outils disponibles (source unique pour le prompt et la doc).
 /// Format: une ligne par outil "nom — usage".
+/// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_file", "read_file <path> — lire le contenu d'un fichier texte"),
     ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (path puis contenu)"),
     ("search_files", "search_files <dir> <pattern> — chercher des fichiers (glob) sous un répertoire"),
     ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
     ("file_diff", "file_diff <path_a> <path_b> — diff texte entre deux fichiers"),
+    ("search_replace", "search_replace <path> <search> | <replace> — remplacer toutes les occurrences de search par replace dans le fichier (séparateur \" | \")"),
+    ("web_fetch", "web_fetch <url> — récupérer le contenu d'une URL (domaine autorisé dans tools_policy allowed_web_domains)"),
+    ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
 ];
 
 fn available_tools_instruction() -> String {
@@ -253,6 +257,24 @@ async fn execute_tool_call(
                 Err(e) => format!("[write_file] error: {}", e),
             }
         }
+        "search_replace" => {
+            let path = path_arg(0);
+            let rest = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
+            let (search, replace) = rest.split_once(" | ").unwrap_or((rest.as_str(), ""));
+            match path {
+                Some(p) => match executor.search_replace(p, search.trim(), replace.trim()).await {
+                    Ok(res) => {
+                        if res.success {
+                            format!("[search_replace {}] {}", p.display(), res.summary)
+                        } else {
+                            format!("[search_replace] {}", res.summary)
+                        }
+                    }
+                    Err(e) => format!("[search_replace] error: {}", e),
+                },
+                None => "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(),
+            }
+        }
         "file_diff" => {
             let path_a = path_arg(0);
             let path_b = path_arg(1);
@@ -269,6 +291,46 @@ async fn execute_tool_call(
                     Err(e) => format!("[file_diff] error: {}", e),
                 },
                 _ => "[file_diff] usage: file_diff <path_a> <path_b>".to_string(),
+            }
+        }
+        "web_fetch" => {
+            let url = args.get(0).map(String::as_str).unwrap_or("");
+            if url.is_empty() {
+                return "[web_fetch] usage: web_fetch <url>".to_string();
+            }
+            match executor.web_fetch(url).await {
+                Ok((body, res)) => {
+                    if res.success {
+                        let preview = if body.len() <= 500 { body.as_str() } else { &body[..500] };
+                        format!("[web_fetch] {} — {}", res.summary, preview)
+                    } else {
+                        format!("[web_fetch] {}", res.summary)
+                    }
+                }
+                Err(e) => format!("[web_fetch] error: {}", e),
+            }
+        }
+        "run_in_container" => {
+            let work_dir = path_arg(0);
+            let image = args.get(1).map(String::as_str).unwrap_or("");
+            let command = args.get(2).map(String::as_str).unwrap_or("");
+            if work_dir.is_none() || image.is_empty() || command.is_empty() {
+                return "[run_in_container] usage: run_in_container <work_dir> <image> <command> [args...]".to_string();
+            }
+            let work_dir = work_dir.unwrap();
+            let cmd_args: Vec<String> = args.iter().skip(3).cloned().collect();
+            match executor.run_in_container(work_dir, image, command, &cmd_args, 300, 512).await {
+                Ok((stdout, stderr, exit_code, _res)) => {
+                    let out = String::from_utf8_lossy(&stdout);
+                    let err = String::from_utf8_lossy(&stderr);
+                    format!(
+                        "[run_in_container] exit {} — stdout: {} stderr: {}",
+                        exit_code,
+                        if out.len() > 400 { format!("{}...", &out[..400]) } else { out.to_string() },
+                        if err.len() > 200 { format!("{}...", &err[..200]) } else { err.to_string() }
+                    )
+                }
+                Err(e) => format!("[run_in_container] error: {}", e),
             }
         }
         _ => {
@@ -352,6 +414,7 @@ pub(crate) async fn run_message_via_llm(
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
     tools_executor: Option<std::sync::Arc<akasha_tools::ToolExecutor>>,
+    skill_registry: Option<std::sync::Arc<crate::skills::SkillRegistry>>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -390,11 +453,27 @@ pub(crate) async fn run_message_via_llm(
         .unwrap_or(4096);
 
     let tool_instruction = if tools_executor.is_some() {
+        let base = available_tools_instruction();
+        let skills_part = match &skill_registry {
+            Some(reg) => {
+                let list = reg.list().await;
+                if list.is_empty() {
+                    String::new()
+                } else {
+                    let skills_desc: Vec<String> = list
+                        .iter()
+                        .map(|s| format!("{} ({})", s.name, s.description))
+                        .collect();
+                    format!(" ; Skills (use skill name as tool): {}", skills_desc.join(", "))
+                }
+            }
+            None => String::new(),
+        };
         format!(
-            "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}.\nIf you need no tool, reply normally with your answer.\n\
+            "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\nIf you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
-            available_tools_instruction()
+            base, skills_part
         )
     } else {
         String::new()
@@ -602,7 +681,24 @@ pub(crate) async fn run_message_via_llm(
             round += 1;
             let mut tool_results = Vec::new();
             for (name, args) in &calls {
-                let res = execute_tool_call(exec, name, args).await;
+                // Phase D: resolve skill name to tool_ref (spec 33)
+                let actual_tool = match &skill_registry {
+                    Some(reg) => reg.get(name).await.map(|s| s.tool_ref).unwrap_or_else(|| name.clone()),
+                    None => name.clone(),
+                };
+                let res = execute_tool_call(exec, &actual_tool, args).await;
+                // Phase F: emit ToolInvoked for Actions tab (spec 33)
+                let success = !res.contains("denied") && !res.contains(" error:");
+                let payload = serde_json::json!({
+                    "tool": actual_tool,
+                    "skill": if &actual_tool != name { Some(name.as_str()) } else { None::<&str> },
+                    "args": args,
+                    "result_preview": if res.len() > 300 { format!("{}...", &res[..300]) } else { res.clone() },
+                    "success": success
+                });
+                let _ = bus.send(
+                    EventEnvelope::new(EventType::ToolInvoked, Some(payload)).with_correlation(task_id),
+                );
                 tool_results.push(res);
             }
             let results_blob = tool_results.join("\n");

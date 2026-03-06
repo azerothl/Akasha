@@ -49,6 +49,9 @@ Liste exposée dans le code (`AVAILABLE_TOOLS`) et via **GET /api/tools** (JSON 
 | `search_files` | `search_files <dir> <pattern>` | Chercher des fichiers par motif glob sous un répertoire. |
 | `run_command` | `run_command <cmd> [arg1 arg2 ...]` | Exécuter une commande (liste de commandes autorisées dans `tools_policy.yaml`). |
 | `file_diff` | `file_diff <path_a> <path_b>` | Diff texte entre deux fichiers. |
+| `search_replace` | `search_replace <path> <search> \| <replace>` | Remplacer toutes les occurrences de `search` par `replace` dans le fichier (séparateur « \| »). |
+| `web_fetch` | `web_fetch <url>` | Récupérer le contenu d’une URL (domaine autorisé dans `allowed_web_domains`). |
+| `run_in_container` | `run_in_container <work_dir> <image> <command> [args...]` | Exécuter une commande dans un conteneur (work_dir monté, image Docker/podman). |
 
 Activation : placer un fichier **tools_policy.yaml** dans le data_dir (voir `spec/tools_policy.example.yaml`) avec `allowed_read_paths`, `allowed_write_paths`, `allowed_commands`. Sans politique chargée, aucun outil n’est exécuté (conversation sans boucle d’outils).
 
@@ -198,9 +201,10 @@ Ce document sert de référence pour les implémentations futures ; chaque phase
 
 | Phase | Statut | Détail |
 |-------|--------|--------|
-| **A** | Fait | `ToolExecutor` branché dans le flux conversation : `run_message_via_llm` accepte `tools_executor` optionnel, parse les lignes `TOOL: tool_name args` dans la réponse LLM, exécute read_file / run_command / search_files et réinjecte les résultats (boucle agentique, max 3 tours). |
+| **A** | Fait | `ToolExecutor` branché dans le flux conversation : `run_message_via_llm` accepte `tools_executor` optionnel, parse les lignes `TOOL: tool_name args`, exécute read_file, write_file, search_files, run_command, file_diff, search_replace, web_fetch (feature web), run_in_container (feature container) et réinjecte les résultats (boucle agentique, max 3 tours). |
 | **B** | Fait | Orchestrateur seul point d’entrée ; ack immédiat ; délégation non bloquante via conversation worker. |
-| **C** | Fait | Module `container` dans `akasha-tools` (feature `container`) : `run_container`, `run_code_in_container`. Non utilisé par le flux conversation. |
-| **D** | Fait | Module `skills` : `SkillRegistry`, chargement YAML, `GET /api/skills`. Les skills ne sont pas encore invoqués par les agents (pas de liaison skill → outil dans le flux). |
+| **C** | Fait | Module `container` dans `akasha-tools` (feature `container`) : `run_container`, `run_code_in_container`. Outil **run_in_container** exposé aux agents (work_dir, image, commande, args) ; exécution dans le flux conversation. |
+| **D** | Fait | Module `skills` : `SkillRegistry`, chargement YAML, `GET /api/skills`. Liaison skill → outil : les skills sont listés dans le prompt ; lors de l’invocation par le LLM, le nom du skill est résolu en `tool_ref` et l’outil sous-jacent est exécuté. |
 | **E** | Fait | `decompose_request` appelle le LLM pour décomposer la demande en sous-tâches (format `agent_type|message`) ; multi-enfants délégués au worker conversation ; agrégateur remonte les messages des enfants vers la tâche racine (ProgressUpdate) puis marque la racine complétée. |
-| **F** | Fait | Cache d’événements, `GET /api/tasks`, `GET /api/tasks/:id/events`. Onglet **Activité** dans la TUI (liste tâches, ↑↓ sélection, événements de la tâche) et dans l’UI web (onglet Activité, liste tâches, événements). |
+| **F** | Fait | Cache d’événements, `GET /api/tasks`, `GET /api/tasks/:id/events`. Événements **ToolInvoked** émis à chaque appel d’outil (tool, args, result_preview, success) pour l’onglet Actions. Onglet **Activité** dans la TUI et l’UI web (liste tâches, événements). |
+| **Session terminal** | Prévu | « Utiliser le terminal » (session stdin/stdout/stderr) est optionnel dans la spec ; non implémenté, prévu pour une version ultérieure. |

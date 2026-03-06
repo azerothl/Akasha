@@ -7,7 +7,9 @@ mod tools;
 mod container;
 
 pub use policy::ToolsPolicy;
-pub use tools::{file_diff, read_file, run_command, search_files, write_file, ToolResult};
+pub use tools::{file_diff, read_file, run_command, search_files, search_replace, write_file, ToolResult};
+#[cfg(feature = "web")]
+pub use tools::web_fetch;
 
 #[cfg(feature = "container")]
 pub use container::{run_container, run_code_in_container, ContainerRunOptions, ContainerRunResult};
@@ -38,6 +40,15 @@ impl ToolExecutor {
         write_file(path, content, &self.policy).await
     }
 
+    pub async fn search_replace(
+        &self,
+        path: &Path,
+        search: &str,
+        replace: &str,
+    ) -> anyhow::Result<ToolResult> {
+        search_replace(path, search, replace, &self.policy).await
+    }
+
     pub async fn search_files(
         &self,
         dir: &Path,
@@ -61,5 +72,38 @@ impl ToolExecutor {
         path_b: &Path,
     ) -> anyhow::Result<(String, ToolResult)> {
         file_diff(path_a, path_b, &self.policy).await
+    }
+
+    #[cfg(feature = "web")]
+    pub async fn web_fetch(&self, url: &str) -> anyhow::Result<(String, ToolResult)> {
+        web_fetch(url, &self.policy).await
+    }
+
+    /// Run a command in a container (work_dir must be allowed for read). Feature "container".
+    #[cfg(feature = "container")]
+    pub async fn run_in_container(
+        &self,
+        work_dir: &Path,
+        image: &str,
+        command: &str,
+        args: &[String],
+        timeout_secs: u64,
+        memory_mb: u64,
+    ) -> anyhow::Result<(Vec<u8>, Vec<u8>, i32, container::ContainerRunResult)> {
+        if !self.policy.can_read(work_dir) {
+            anyhow::bail!("work_dir not allowed by policy: {}", work_dir.display());
+        }
+        let work_dir = work_dir.canonicalize()?;
+        let opts = container::ContainerRunOptions {
+            image: image.to_string(),
+            command: command.to_string(),
+            args: args.to_vec(),
+            work_dir,
+            timeout_secs: if timeout_secs == 0 { 300 } else { timeout_secs },
+            memory_mb: if memory_mb == 0 { 512 } else { memory_mb },
+            prefer_podman: false,
+        };
+        let (stdout, stderr, exit_code, result) = container::run_container(&opts).await?;
+        Ok((stdout, stderr, exit_code, result))
     }
 }

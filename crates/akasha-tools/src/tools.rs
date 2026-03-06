@@ -86,6 +86,37 @@ pub async fn write_file(
     })
 }
 
+/// Replace all occurrences of `search` with `replace` in a file. Path must be allowed for read and write.
+pub async fn search_replace(
+    path: &Path,
+    search: &str,
+    replace: &str,
+    policy: &ToolsPolicy,
+) -> Result<ToolResult> {
+    if !policy.can_read(path) || !policy.can_write(path) {
+        return Ok(ToolResult {
+            tool: "search_replace".to_string(),
+            success: false,
+            summary: "path not allowed by policy (read and write)".to_string(),
+            detail: Some(path.display().to_string()),
+        });
+    }
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("search_replace read {}", path.display()))?;
+    let count = content.matches(search).count();
+    let new_content = content.replace(search, replace);
+    tokio::fs::write(path, &new_content)
+        .await
+        .with_context(|| format!("search_replace write {}", path.display()))?;
+    Ok(ToolResult {
+        tool: "search_replace".to_string(),
+        success: true,
+        summary: format!("replaced {} occurrence(s)", count),
+        detail: Some(path.display().to_string()),
+    })
+}
+
 /// Search for files by glob pattern under a directory. Directory must be allowed for read.
 pub async fn search_files(
     dir: &Path,
@@ -270,4 +301,46 @@ fn diff_lines(a: &str, b: &str) -> String {
         out.push_str("(no diff)");
     }
     out
+}
+
+/// Fetch a URL (GET). Host must be allowed by policy (allowed_web_domains). Feature "web".
+#[cfg(feature = "web")]
+pub async fn web_fetch(url: &str, policy: &crate::policy::ToolsPolicy) -> Result<(String, ToolResult)> {
+    if !policy.can_fetch_url(url) {
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: "web_fetch".to_string(),
+                success: false,
+                summary: "url host not allowed by policy (allowed_web_domains)".to_string(),
+                detail: Some(url.to_string()),
+            },
+        ));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("web_fetch build client")?;
+    let res = client
+        .get(url)
+        .send()
+        .await
+        .context("web_fetch send")?;
+    let status = res.status();
+    let body = res.text().await.context("web_fetch body")?;
+    let success = status.is_success();
+    let summary = if success {
+        format!("{} {} bytes", status, body.len())
+    } else {
+        format!("{} body {} bytes", status, body.len())
+    };
+    Ok((
+        body,
+        ToolResult {
+            tool: "web_fetch".to_string(),
+            success,
+            summary,
+            detail: Some(url.to_string()),
+        },
+    ))
 }
