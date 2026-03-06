@@ -78,6 +78,9 @@ function App() {
   const [tasksEvents, setTasksEvents] = useState<Array<{ event_type: string; payload?: unknown; at: string }>>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
   const [runningTaskChips, setRunningTaskChips] = useState<Record<string, { pct?: number; message?: string }>>({});
+  /** Events (sub_agent_spawned, progress_update, etc.) per running task for collapsible sub-agent panel. */
+  const [runningTaskEvents, setRunningTaskEvents] = useState<Record<string, Array<{ event_type: string; payload?: unknown; at: string }>>>({});
+  const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(true);
   const [schedules, setSchedules] = useState<Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>>([]);
   const [taskRuns, setTaskRuns] = useState<Array<{
     id: string;
@@ -581,17 +584,21 @@ function App() {
     }
 
     // Non-blocking: ACK + task_id, then poll in background (FR-025)
+    setLoading(true);
     try {
       const ack = await invoke<{ task_id: string; session_id: string; message: string }>("send_message_ack", {
         message: userMessage,
         session_id: sessionId,
         port: DAEMON_PORT,
       });
+      setLoading(false);
       if (ack?.session_id) setSessionId(ack.session_id);
       const ackText = ack?.message ?? "Je prends en compte votre demande.";
       setMessages((prev) => [...prev, { role: "assistant", text: ackText + (ack?.task_id ? " Tu peux suivre l'avancement dans l'onglet Tâches." : "") }]);
       if (ack?.task_id) {
         setRunningTaskChips((prev) => ({ ...prev, [ack.task_id]: { pct: 0, message: "en cours…" } }));
+        setRunningTaskEvents((prev) => ({ ...prev, [ack.task_id]: [] }));
+        setSubAgentPanelCollapsed(false);
         fetchTasksList();
         const taskId = ack.task_id;
         const pollUntilDone = async () => {
@@ -599,13 +606,27 @@ function App() {
           for (let i = 0; i < maxWait; i++) {
             await new Promise((r) => setTimeout(r, 1500));
             try {
-              const raw = await invoke<string>("get_task_status", { taskId, port: DAEMON_PORT });
+              const [raw, eventsData] = await Promise.all([
+                invoke<string>("get_task_status", { taskId, port: DAEMON_PORT }),
+                invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string }> }>("get_task_events", { task_id: taskId, port: DAEMON_PORT }).catch(() => ({ events: [] })),
+              ]);
               const status = JSON.parse(raw) as { status?: string; progress?: Array<{ progress_pct?: number; message?: string }> };
               const pct = status?.progress?.slice(-1)[0]?.progress_pct ?? 0;
               const msg = status?.progress?.slice(-1)[0]?.message ?? "";
               setRunningTaskChips((prev) => (prev[taskId] !== undefined ? { ...prev, [taskId]: { pct, message: msg } } : prev));
+              const events = (eventsData?.events ?? []).map((e) => ({
+                event_type: e.event_type ?? "?",
+                payload: e.payload,
+                at: e.at ?? "",
+              }));
+              setRunningTaskEvents((prev) => (prev[taskId] !== undefined ? { ...prev, [taskId]: events } : prev));
               if (status?.status === "completed") {
                 setRunningTaskChips((prev) => {
+                  const next = { ...prev };
+                  delete next[taskId];
+                  return next;
+                });
+                setRunningTaskEvents((prev) => {
                   const next = { ...prev };
                   delete next[taskId];
                   return next;
@@ -616,6 +637,11 @@ function App() {
               }
               if (status?.status === "failed") {
                 setRunningTaskChips((prev) => {
+                  const next = { ...prev };
+                  delete next[taskId];
+                  return next;
+                });
+                setRunningTaskEvents((prev) => {
                   const next = { ...prev };
                   delete next[taskId];
                   return next;
@@ -632,11 +658,17 @@ function App() {
             delete next[taskId];
             return next;
           });
+          setRunningTaskEvents((prev) => {
+            const next = { ...prev };
+            delete next[taskId];
+            return next;
+          });
           setMessages((prev) => [...prev, { role: "assistant", text: "Délai dépassé. Consultez l'onglet Tâches." }]);
         };
         pollUntilDone();
       }
     } catch (err) {
+      setLoading(false);
       setMessages((prev) => [...prev, { role: "assistant", text: `Erreur : ${String(err)}`, error: true }]);
     }
     chatInputRef.current?.focus();
@@ -778,13 +810,64 @@ function App() {
                   ))}
                 </>
               )}
-              {Object.keys(runningTaskChips).length > 0 && (
-                <div className="chat-chips" role="status">
-                  {Object.entries(runningTaskChips).map(([tid, { pct, message }]) => (
-                    <span key={tid} className="task-chip">
-                      Task #{tid.slice(-8)} {pct != null ? `(${pct}%)` : ""} {message ?? "en cours"}
+              {(loading || Object.keys(runningTaskChips).length > 0) && (
+                <div className="chat-loading-row" role="status" aria-live="polite">
+                  {loading && (
+                    <div className="chat-loader" aria-hidden>
+                      <span className="chat-loader-spinner" />
+                      <span>Envoi en cours…</span>
+                    </div>
+                  )}
+                  {Object.keys(runningTaskChips).length > 0 && (
+                    <div className="chat-chips">
+                      {Object.entries(runningTaskChips).map(([tid, { pct, message }]) => (
+                        <span key={tid} className="task-chip">
+                          <span className="task-chip-spinner" aria-hidden />
+                          Task #{tid.slice(-8)} {pct != null ? `(${pct}%)` : ""} {message ?? "en cours"}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              {Object.keys(runningTaskEvents).length > 0 && Object.values(runningTaskEvents).some((ev) => ev.length > 0) && (
+                <div className="chat-subagents-panel">
+                  <button
+                    type="button"
+                    className="chat-subagents-toggle"
+                    onClick={() => setSubAgentPanelCollapsed((c) => !c)}
+                    aria-expanded={!subAgentPanelCollapsed}
+                    aria-controls="subagents-detail"
+                  >
+                    <span className="chat-subagents-toggle-icon" aria-hidden>{subAgentPanelCollapsed ? "▶" : "▼"}</span>
+                    <span>
+                      {subAgentPanelCollapsed
+                        ? `Détail des sous-agents (${Object.values(runningTaskEvents).flat().length} étape(s))`
+                        : "Masquer le détail des sous-agents"}
                     </span>
-                  ))}
+                  </button>
+                  {!subAgentPanelCollapsed && (
+                    <div id="subagents-detail" className="chat-subagents-detail" role="region" aria-label="Actions des sous-agents">
+                      {Object.entries(runningTaskEvents).map(([taskId, events]) =>
+                        events.length === 0 ? null : (
+                          <div key={taskId} className="chat-subagents-task">
+                            <div className="chat-subagents-task-id">Task #{taskId.slice(-8)}</div>
+                            <ul className="chat-subagents-events">
+                              {events.map((ev, idx) => (
+                                <li key={`${taskId}-${idx}`} className="chat-subagents-event" data-type={ev.event_type}>
+                                  <span className="chat-subagents-event-type">{eventTypeLabel(ev.event_type)}</span>
+                                  {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload && (
+                                    <span className="chat-subagents-event-agent"> → {(ev.payload as { agent?: string }).agent}</span>
+                                  )}
+                                  {ev.at && <span className="chat-subagents-event-at"> {ev.at.slice(0, 19)}</span>}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
               <div ref={chatEndRef} aria-hidden />

@@ -193,6 +193,8 @@ struct App {
     activity_list_collapsed: bool,
     /// Tasks tab: list widget rect (for mouse click to select task).
     activity_list_rect: Option<ratatui::prelude::Rect>,
+    /// Tabs bar rect (for mouse click to switch tab).
+    tabs_rect: Option<ratatui::prelude::Rect>,
     /// Session id for short-term memory (returned by daemon, send back on next message).
     session_id: Option<String>,
     /// If true, next message will request a new session (context reset).
@@ -252,6 +254,7 @@ impl App {
             activity_list_scroll: 0,
             activity_list_collapsed: false,
             activity_list_rect: None,
+            tabs_rect: None,
             session_id: None,
             force_new_session: false,
             memory_short_term: Vec::new(),
@@ -1540,11 +1543,12 @@ fn ui(f: &mut Frame, app: &mut App) {
         Mode::Memory => 5,
     };
     let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::BOTTOM).border_style(theme.block_border()))
+        .block(Block::default().borders(Borders::BOTTOM).title(" Clic ou Tab pour changer d'onglet ").border_style(theme.block_border()))
         .select(tab_index)
         .style(theme.tab_inactive())
         .highlight_style(theme.tab_active());
     f.render_widget(tabs, top_chunks[1]);
+    app.tabs_rect = Some(top_chunks[1]);
 
     match app.mode {
         Mode::Chat => {
@@ -1630,7 +1634,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Chat (↑↓ PgUp/PgDn défilement, F2 thème) ")
+                        .title(" Chat (↑↓ PgUp/PgDn ou molette, F2 thème) ")
                         .border_style(theme.block_border()),
                 )
                 .wrap(Wrap { trim: true })
@@ -1703,7 +1707,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Documentation (↑↓ PgUp/PgDn, R: actualiser, F2: thème) ")
+                        .title(" Documentation (↑↓ PgUp/PgDn ou molette, R: actualiser, F2: thème) ")
                         .border_style(theme.block_border()),
                 )
                 .wrap(Wrap { trim: true })
@@ -2028,7 +2032,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             }
             let mem_block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Mémoire agent (R = actualiser, Tab = onglet) ")
+                .title(" Mémoire agent (↑↓ ou molette, R = actualiser, Tab ou clic = onglet) ")
                 .border_style(theme.block_border());
             f.render_widget(
                 Paragraph::new(lines).block(mem_block).wrap(Wrap { trim: true }).scroll((app.scroll as u16, 0)),
@@ -2118,6 +2122,87 @@ fn run_app(
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Mouse(mouse) => {
+                    // Click on tabs bar to switch tab
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        if let Some(rect) = app.tabs_rect {
+                            let x = mouse.column;
+                            let y = mouse.row;
+                            if x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height {
+                                const N_TABS: u16 = 6;
+                                let tab_w = (rect.width / N_TABS).max(1);
+                                let col = x.saturating_sub(rect.x);
+                                let tab_idx = (col / tab_w).min(N_TABS - 1) as usize;
+                                let new_mode = match tab_idx {
+                                    0 => Mode::Chat,
+                                    1 => Mode::Router,
+                                    2 => Mode::Doc,
+                                    3 => Mode::Tasks,
+                                    4 => Mode::Calendar,
+                                    _ => Mode::Memory,
+                                };
+                                if app.mode != new_mode {
+                                    app.mode = new_mode;
+                                    if app.mode == Mode::Router {
+                                        app.fetch_metrics();
+                                    }
+                                    if app.mode == Mode::Doc && app.doc_content.is_empty() {
+                                        app.fetch_doc();
+                                    }
+                                    if app.mode == Mode::Tasks {
+                                        app.fetch_activity_tasks();
+                                    }
+                                    if app.mode == Mode::Calendar {
+                                        app.fetch_calendar();
+                                        app.scroll = 0;
+                                        if !app.calendar_task_runs.is_empty() {
+                                            app.calendar_focus_schedules = false;
+                                            app.calendar_selected_run = Some(0);
+                                            let run = app.calendar_task_runs[0].clone();
+                                            app.fetch_calendar_run_detail(&run);
+                                        } else if !app.calendar_schedules.is_empty() {
+                                            app.calendar_focus_schedules = true;
+                                            app.calendar_schedule_index = 0;
+                                            let id = app.calendar_schedules[0].0.clone();
+                                            app.fetch_schedule_detail(&id);
+                                        }
+                                    }
+                                    if app.mode == Mode::Chat {
+                                        app.fetch_schedule_reports();
+                                    }
+                                    if app.mode == Mode::Memory {
+                                        app.fetch_memory();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Mouse wheel: scroll in Chat, Doc, Memory
+                    if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                        match app.mode {
+                            Mode::Chat | Mode::Doc | Mode::Memory => {
+                                if mouse.kind == MouseEventKind::ScrollUp {
+                                    app.scroll_up();
+                                } else {
+                                    app.scroll_down();
+                                }
+                            }
+                            Mode::Tasks => {
+                                if app.activity_list_collapsed {
+                                    if mouse.kind == MouseEventKind::ScrollUp {
+                                        app.scroll_up();
+                                    } else {
+                                        app.scroll_down();
+                                    }
+                                } else if mouse.kind == MouseEventKind::ScrollUp {
+                                    app.activity_detail_scroll = app.activity_detail_scroll.saturating_sub(1);
+                                } else {
+                                    app.activity_detail_scroll = app.activity_detail_scroll.saturating_add(1);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Click on task list row (Tasks tab)
                     if app.mode == Mode::Tasks
                         && mouse.kind == MouseEventKind::Down(MouseButton::Left)
                         && !app.activity_tasks.is_empty()
