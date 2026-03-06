@@ -240,23 +240,38 @@ fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
             let parts: Vec<String> = rest.split_whitespace().map(String::from).collect();
             if let Some((name, fixed_args)) = parts.split_first() {
                 let mut args = fixed_args.to_vec();
-                // Collect subsequent non-TOOL: lines as a raw multi-line body (for
-                // tools like apply_patch / edit_file that need preserved whitespace).
-                i += 1;
-                let body_start = i;
-                while i < lines.len() && !lines[i].trim_start().starts_with("TOOL:") {
+                // Only certain tools support a multi-line body argument.
+                let tool_name_lc = name.to_lowercase();
+                let supports_body = matches!(
+                    tool_name_lc.as_str(),
+                    "apply_patch" | "edit_file" | "write_file"
+                );
+
+                if supports_body {
+                    // Collect subsequent non-TOOL: lines as a raw multi-line body (for
+                    // tools like apply_patch / edit_file that need preserved whitespace).
                     i += 1;
+                    let body_start = i;
+                    while i < lines.len() && !lines[i].trim_start().starts_with("TOOL:") {
+                        i += 1;
+                    }
+                    // Trim trailing blank lines from the body
+                    let mut body_end = i;
+                    while body_end > body_start && lines[body_end - 1].trim().is_empty() {
+                        body_end -= 1;
+                    }
+                    if body_end > body_start {
+                        args.push(lines[body_start..body_end].join("\n"));
+                    }
+                    out.push((name.clone(), args));
+                    continue;
+                } else {
+                    // For other tools, only use the header line arguments and
+                    // do not consume following lines as a body.
+                    out.push((name.clone(), args));
+                    i += 1;
+                    continue;
                 }
-                // Trim trailing blank lines from the body
-                let mut body_end = i;
-                while body_end > body_start && lines[body_end - 1].trim().is_empty() {
-                    body_end -= 1;
-                }
-                if body_end > body_start {
-                    args.push(lines[body_start..body_end].join("\n"));
-                }
-                out.push((name.clone(), args));
-                continue;
             }
         }
         i += 1;
@@ -377,11 +392,22 @@ async fn execute_tool_call(
                             };
                             let result_opt = cell.write().await.take();
                             match result_opt {
-                                Some(Ok((out, _res))) => {
+                                Some(Ok((out, res))) => {
                                     reg.write().await.remove(&id);
                                     let stdout = String::from_utf8_lossy(&out.stdout);
                                     let stderr = String::from_utf8_lossy(&out.stderr);
-                                    (true, format!("[process poll {}] done — exit {} stdout: {} stderr: {}", id, out.status.code().unwrap_or(-1), stdout.trim(), stderr.trim()))
+                                    let base_msg = format!(
+                                        "[process poll {}] done — exit {} stdout: {} stderr: {}",
+                                        id,
+                                        out.status.code().unwrap_or(-1),
+                                        stdout.trim(),
+                                        stderr.trim()
+                                    );
+                                    if res.success {
+                                        (true, base_msg)
+                                    } else {
+                                        (false, format!("{} | summary: {}", base_msg, res.summary))
+                                    }
                                 }
                                 Some(Err(e)) => {
                                     reg.write().await.remove(&id);
@@ -543,11 +569,11 @@ async fn execute_tool_call(
             if sub != "send" || args.len() < 3 {
                 return (false, "[message] usage: message send <channel> <text>".to_string());
             }
-            let _channel = args.get(1).map(String::as_str).unwrap_or("");
+            let channel = args.get(1).map(String::as_str).unwrap_or("");
             let text = args.get(2..).map(|a| a.join(" ")).unwrap_or_default();
             match message_webhook_url {
                 Some(url) => {
-                    let body = serde_json::json!({ "text": text });
+                    let body = serde_json::json!({ "channel": channel, "text": text });
                     let client = match reqwest::Client::builder()
                         .timeout(std::time::Duration::from_secs(10))
                         .build()
@@ -1160,10 +1186,25 @@ pub(crate) async fn run_message_via_llm(
                 .await;
                 // Phase F: emit ToolInvoked for Actions tab (spec 33)
                 let (success, res) = res;
+                // Redact or truncate args in the event to avoid leaking large blobs or secrets.
+                let redacted_args: Vec<String> = if matches!(actual_tool.as_str(), "apply_patch" | "edit_file" | "write_file") {
+                    vec!["[redacted for write-like tool]".to_string()]
+                } else {
+                    const MAX_ARG_PREVIEW_LEN: usize = 512;
+                    args.iter()
+                        .map(|arg| {
+                            if arg.len() > MAX_ARG_PREVIEW_LEN {
+                                format!("{}...[truncated {} chars]", &arg[..MAX_ARG_PREVIEW_LEN], arg.len().saturating_sub(MAX_ARG_PREVIEW_LEN))
+                            } else {
+                                arg.clone()
+                            }
+                        })
+                        .collect()
+                };
                 let payload = serde_json::json!({
                     "tool": actual_tool,
                     "skill": if &actual_tool != name { Some(name.as_str()) } else { None::<&str> },
-                    "args": args,
+                    "args": redacted_args,
                     "result_preview": if res.len() > 300 { format!("{}...", &res[..300]) } else { res.clone() },
                     "success": success
                 });

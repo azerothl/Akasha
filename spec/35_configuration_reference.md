@@ -22,7 +22,7 @@ Ce document décrit **tous les fichiers de configuration** utilisés par Akasha 
 | `global.default_max_retries` | entier (u32) | Non | Nombre max de tentatives (défaut : 2). |
 | `providers` | objet | Non | Config par provider (clé = nom : `ollama`, `openai`, `openrouter`). |
 | `providers.<nom>.base_url` | string | Non | URL de base (ex. `http://localhost:11434` pour Ollama). |
-| `providers.<nom>.api_key_ref` | string | Non | Référence Clé API : `vault://nom_cle` (vault), ou nom de clé sans préfixe (vault puis env), ex. `openrouter_api_key` ; sinon variable. Toutes les clés API : vault d'abord, puis variable d'environnement d’env. |
+| `providers.<nom>.api_key_ref` | string | Non | Référence de la clé API : `vault://nom_cle` (résolution via vault en priorité), ou nom de clé sans préfixe (résolution via variable d'environnement, ex. `openrouter_api_key`). |
 | `providers.<nom>.organization` | string | Non | Ex. OpenAI organization. |
 | `providers.<nom>.version` | string | Non | Ex. version API. |
 | `model_options` | objet | Non | Métadonnées par modèle (remplies par `akasha config models fetch/add`). |
