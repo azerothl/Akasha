@@ -80,6 +80,11 @@ function App() {
   const [runningTaskChips, setRunningTaskChips] = useState<Record<string, { pct?: number; message?: string }>>({});
   /** Events (sub_agent_spawned, progress_update, etc.) per running task for collapsible sub-agent panel. Each event may have task_id (root or child). */
   const [runningTaskEvents, setRunningTaskEvents] = useState<Record<string, Array<{ event_type: string; payload?: unknown; at: string; task_id?: string }>>>({});
+  /** Human in the loop: when the agent asks for user input, we store question/context/choices per task_id. */
+  const [pendingHumanInput, setPendingHumanInput] = useState<Record<string, { question: string; context: string; choices?: string[] }>>({});
+  /** Task id for which the human-input modal is open (null = closed). */
+  const [humanInputModalTaskId, setHumanInputModalTaskId] = useState<string | null>(null);
+  const [humanInputFreeText, setHumanInputFreeText] = useState("");
   const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(true);
   const [schedules, setSchedules] = useState<Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>>([]);
   const [taskRuns, setTaskRuns] = useState<Array<{
@@ -713,9 +718,10 @@ function App() {
           for (let i = 0; i < maxWait; i++) {
             await new Promise((r) => setTimeout(r, 1500));
             try {
-              const [raw, eventsData] = await Promise.all([
+              const [raw, eventsData, humanInputData] = await Promise.all([
                 invoke<string>("get_task_status", { taskId, port: DAEMON_PORT }),
                 invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> }>("get_task_events", { task_id: taskId, port: DAEMON_PORT }).catch(() => ({ events: [] })),
+                invoke<{ question?: string; context?: string; choices?: string[] }>("get_task_human_input", { taskId, port: DAEMON_PORT }).catch(() => null),
               ]);
               const status = JSON.parse(raw) as { status?: string; progress?: Array<{ progress_pct?: number; message?: string }> };
               const pct = status?.progress?.slice(-1)[0]?.progress_pct ?? 0;
@@ -728,32 +734,29 @@ function App() {
                 task_id: e.task_id,
               }));
               setRunningTaskEvents((prev) => (prev[taskId] !== undefined ? { ...prev, [taskId]: events } : prev));
+              if (humanInputData?.question) {
+                setPendingHumanInput((prev) => ({ ...prev, [taskId]: { question: humanInputData.question ?? "", context: humanInputData.context ?? "", choices: humanInputData.choices } }));
+              } else {
+                setPendingHumanInput((prev) => {
+                  const next = { ...prev };
+                  delete next[taskId];
+                  return next;
+                });
+              }
               if (status?.status === "completed") {
-                setRunningTaskChips((prev) => {
-                  const next = { ...prev };
-                  delete next[taskId];
-                  return next;
-                });
-                setRunningTaskEvents((prev) => {
-                  const next = { ...prev };
-                  delete next[taskId];
-                  return next;
-                });
+                setRunningTaskChips((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+                setRunningTaskEvents((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+                setPendingHumanInput((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+                setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 const finalMsg = status?.progress?.slice(-1)[0]?.message ?? "Terminé.";
                 setMessages((prev) => [...prev, { role: "assistant", text: finalMsg }]);
                 return;
               }
               if (status?.status === "failed") {
-                setRunningTaskChips((prev) => {
-                  const next = { ...prev };
-                  delete next[taskId];
-                  return next;
-                });
-                setRunningTaskEvents((prev) => {
-                  const next = { ...prev };
-                  delete next[taskId];
-                  return next;
-                });
+                setRunningTaskChips((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+                setRunningTaskEvents((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+                setPendingHumanInput((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+                setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 setMessages((prev) => [...prev, { role: "assistant", text: "Tâche en échec.", error: true }]);
                 return;
               }
@@ -938,6 +941,16 @@ function App() {
                         <span key={tid} className="task-chip">
                           <span className="task-chip-spinner" aria-hidden />
                           Task #{tid.slice(-8)} {pct != null ? `(${pct}%)` : ""} {message ?? "en cours"}
+                          {pendingHumanInput[tid] && (
+                            <button
+                              type="button"
+                              className="task-chip-action-required"
+                              onClick={() => { setHumanInputModalTaskId(tid); setHumanInputFreeText(""); }}
+                              title="Une action de votre part est requise"
+                            >
+                              ⚠ Action requise
+                            </button>
+                          )}
                         </span>
                       ))}
                     </div>
@@ -1033,6 +1046,72 @@ function App() {
             <p id="send-hint" className="hint sr-only">
               Entrée pour envoyer
             </p>
+            {humanInputModalTaskId && pendingHumanInput[humanInputModalTaskId] && (
+              <div className="human-input-overlay" role="dialog" aria-labelledby="human-input-title" aria-modal="true">
+                <div className="human-input-modal">
+                  <h2 id="human-input-title">Action requise</h2>
+                  <p className="human-input-question">{pendingHumanInput[humanInputModalTaskId].question}</p>
+                  {pendingHumanInput[humanInputModalTaskId].context && (
+                    <p className="human-input-context">{pendingHumanInput[humanInputModalTaskId].context}</p>
+                  )}
+                  {pendingHumanInput[humanInputModalTaskId].choices?.length ? (
+                    <div className="human-input-choices">
+                      {pendingHumanInput[humanInputModalTaskId].choices!.map((choice, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          className="human-input-choice-btn"
+                          onClick={async () => {
+                            try {
+                              await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: choice, port: DAEMON_PORT });
+                              setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
+                              setHumanInputModalTaskId(null);
+                            } catch (e) {
+                              console.error(e);
+                            }
+                          }}
+                        >
+                          {choice}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="human-input-free">
+                      <label htmlFor="human-input-text">Votre réponse</label>
+                      <input
+                        id="human-input-text"
+                        type="text"
+                        value={humanInputFreeText}
+                        onChange={(e) => setHumanInputFreeText(e.target.value)}
+                        placeholder="Saisissez votre réponse…"
+                        onKeyDown={(e) => e.key === "Enter" && document.getElementById("human-input-submit")?.click()}
+                      />
+                      <button
+                        id="human-input-submit"
+                        type="button"
+                        onClick={async () => {
+                          const text = humanInputFreeText.trim();
+                          if (!text) return;
+                          try {
+                            await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: text, port: DAEMON_PORT });
+                            setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
+                            setHumanInputModalTaskId(null);
+                            setHumanInputFreeText("");
+                          } catch (e) {
+                            console.error(e);
+                          }
+                        }}
+                      >
+                        Envoyer
+                      </button>
+                    </div>
+                  )}
+                  <button type="button" className="human-input-close" onClick={() => setHumanInputModalTaskId(null)} aria-label="Fermer">
+                    Fermer
+                  </button>
+                </div>
+              </div>
+            )}
           </section>
         )}
 

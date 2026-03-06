@@ -222,6 +222,8 @@ struct App {
     input_wrapped_lines: usize,
     /// If true, we have already loaded today's chat history from short-term memory (so we don't refetch every frame).
     chat_history_loaded: bool,
+    /// Human in the loop: when the agent asked for user input, (task_id, question, context, choices).
+    pending_human_input: Option<(String, String, String, Option<Vec<String>>)>,
 }
 
 impl App {
@@ -273,6 +275,62 @@ impl App {
             input_inner_height: 3,
             input_wrapped_lines: 0,
             chat_history_loaded: false,
+            pending_human_input: None,
+        }
+    }
+
+    /// Fetch pending human-input for a task (GET /api/tasks/:id/human-input). Sets pending_human_input if the agent is waiting.
+    fn fetch_pending_human_input(&mut self, task_id: &str) {
+        let url = format!("{}/api/tasks/{}/human-input", daemon_base_url(self.port), task_id);
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let resp = match client.get(&url).send() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        if !resp.status().is_success() {
+            self.pending_human_input = None;
+            return;
+        }
+        let json: serde_json::Value = match resp.json() {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let question = json.get("question").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if question.is_empty() {
+            self.pending_human_input = None;
+            return;
+        }
+        let context = json.get("context").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let choices = json.get("choices").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+        self.pending_human_input = Some((task_id.to_string(), question, context, choices));
+    }
+
+    /// Submit user reply for human-in-the-loop (POST /api/tasks/:id/human-reply).
+    fn submit_human_reply(&mut self, task_id: &str, response: &str) -> bool {
+        let url = format!("{}/api/tasks/{}/human-reply", daemon_base_url(self.port), task_id);
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        let body = serde_json::json!({ "response": response });
+        let resp = match client.post(&url).json(&body).send() {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        if resp.status().is_success() {
+            self.pending_human_input = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -1551,14 +1609,26 @@ fn ui(f: &mut Frame, app: &mut App) {
         ])
         .split(f.area());
 
-    let (content_area, input_area_opt) = if app.mode == Mode::Chat {
-        let vert = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(3)])
-            .split(chunks[1]);
-        (vert[0], Some(vert[1]))
+    let (content_area, input_area_opt, human_input_area_opt) = if app.mode == Mode::Chat {
+        if app.pending_human_input.is_some() {
+            let vert = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(0),
+                    Constraint::Length(4),
+                    Constraint::Length(3),
+                ])
+                .split(chunks[1]);
+            (vert[0], Some(vert[2]), Some(vert[1]))
+        } else {
+            let vert = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(3)])
+                .split(chunks[1]);
+            (vert[0], Some(vert[1]), None)
+        }
     } else {
-        (chunks[1], None)
+        (chunks[1], None, None)
     };
 
     let top_chunks = Layout::default()
@@ -2113,8 +2183,33 @@ fn ui(f: &mut Frame, app: &mut App) {
         }
     }
 
+    if let (Some(rect), Some((_, ref question, ref context, ref choices))) = (human_input_area_opt, &app.pending_human_input) {
+        let theme = Theme::new(app.theme);
+        let style_warning = Style::default().fg(theme.palette().error).add_modifier(Modifier::BOLD);
+        let mut banner_lines = vec![
+            Line::from(Span::styled("⚠ Action requise — répondez ci-dessous (Entrée pour envoyer)", style_warning)),
+            Line::from(question.as_str()),
+        ];
+        if !context.is_empty() {
+            banner_lines.push(Line::from(""));
+            banner_lines.push(Line::from(Span::styled(context.as_str(), Style::default().fg(theme.palette().muted))));
+        }
+        if let Some(ref c) = choices {
+            let choice_preview = c.iter().enumerate().map(|(i, s)| format!("{}) {}", i + 1, s)).take(4).collect::<Vec<_>>().join("  ");
+            banner_lines.push(Line::from(Span::styled(choice_preview, Style::default().fg(theme.palette().muted))));
+        }
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Réponse pour l'agent ")
+            .border_style(theme.block_border());
+        f.render_widget(Paragraph::new(banner_lines).block(block).wrap(Wrap { trim: true }), rect);
+    }
     if let Some(input_rect) = input_area_opt {
-        let input_label = " Message (Entrée = envoyer, Maj+Entrée = nouvelle ligne, ↑↓ = chat, Ctrl+↑↓ = saisie, Tab = onglet) ";
+        let input_label = if app.pending_human_input.is_some() {
+            " Votre réponse (Entrée = envoyer à l'agent) "
+        } else {
+            " Message (Entrée = envoyer, Maj+Entrée = nouvelle ligne, ↑↓ = chat, Ctrl+↑↓ = saisie, Tab = onglet) "
+        };
         let input_area_width = input_rect.width.saturating_sub(2) as usize;
         app.input_inner_height = input_rect.height.saturating_sub(2) as usize;
         app.input_wrapped_lines = App::wrapped_line_count(&app.input, input_area_width.max(1));
@@ -2151,6 +2246,9 @@ fn run_app(
             app.check_health();
             if app.mode == Mode::Chat {
                 app.fetch_schedule_reports();
+                if let Some(task_id) = app.pending_reply_task_id.clone() {
+                    app.fetch_pending_human_input(&task_id);
+                }
             }
             last_health = std::time::Instant::now();
         }
@@ -2173,6 +2271,7 @@ fn run_app(
                     app.pending_reply_task_id = pending_task_id.clone();
                     if pending_task_id.is_none() {
                         app.pending_reply_pct = None;
+                        app.pending_human_input = None;
                     }
                     app.messages.push(ChatMessage {
                         role: role.into(),
@@ -2182,6 +2281,7 @@ fn run_app(
                 }
                 Err(e) => {
                     app.pending_reply_task_id = None;
+                    app.pending_human_input = None;
                     app.messages.push(ChatMessage {
                         role: "Erreur".into(),
                         text: e,
@@ -2411,6 +2511,36 @@ fn run_app(
                         } else {
                             let msg = app.input.trim_end().to_string();
                             if msg.is_empty() {
+                                continue;
+                            }
+                            // Human in the loop: if the agent is waiting for a reply, send it and don't send as normal message
+                            let pending = app.pending_human_input.clone();
+                            if let Some((task_id, _, _, choices)) = pending {
+                                let response = if let Some(ref c) = choices {
+                                    if msg == "1" && c.len() >= 1 {
+                                        c[0].clone()
+                                    } else if msg == "2" && c.len() >= 2 {
+                                        c[1].clone()
+                                    } else if msg == "3" && c.len() >= 3 {
+                                        c[2].clone()
+                                    } else if msg == "4" && c.len() >= 4 {
+                                        c[3].clone()
+                                    } else {
+                                        msg.clone()
+                                    }
+                                } else {
+                                    msg.clone()
+                                };
+                                if app.submit_human_reply(&task_id, &response) {
+                                    app.messages.push(ChatMessage {
+                                        role: "Vous".into(),
+                                        text: msg,
+                                        is_error: false,
+                                    });
+                                    app.input.clear();
+                                    app.input_scroll = 0;
+                                    app.scroll = usize::MAX;
+                                }
                                 continue;
                             }
                             app.messages.push(ChatMessage {

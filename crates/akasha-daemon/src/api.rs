@@ -118,6 +118,21 @@ pub fn new_process_registry() -> ProcessRegistry {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
 }
 
+/// Pending "human in the loop" request: agent is waiting for the user to answer.
+pub struct PendingHumanInput {
+    pub question: String,
+    pub context: String,
+    pub choices: Option<Vec<String>>,
+    pub response_tx: tokio::sync::oneshot::Sender<String>,
+}
+
+/// Store of pending human-input requests by task_id. Used by the conversation worker (to register and wait) and by the API (to return question/context/choices and to submit the reply).
+pub type HumanInputStore = Arc<RwLock<std::collections::HashMap<Uuid, PendingHumanInput>>>;
+
+pub fn new_human_input_store() -> HumanInputStore {
+    Arc::new(RwLock::new(std::collections::HashMap::new()))
+}
+
 /// Parsed HTTP request: method, path, body, and lowercase header map.
 pub fn parse_request(buf: &[u8]) -> (String, String, Option<Vec<u8>>, std::collections::HashMap<String, String>) {
     let mut method = String::new();
@@ -196,6 +211,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("browser", "browser navigate <url> | browser screenshot | browser snapshot — automation navigateur (non implémenté, prévu phase 3)"),
     ("image", "image <path|url> [prompt] — analyse d'image par modèle vision (non implémenté, prévu phase 3)"),
     ("pdf", "pdf <path|url> — extraire le texte d'un PDF (non implémenté, prévu phase 3)"),
+    ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
 ];
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -263,7 +279,7 @@ fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
                 let tool_name_lc = name.to_lowercase();
                 let supports_body = matches!(
                     tool_name_lc.as_str(),
-                    "apply_patch" | "edit_file" | "write_file"
+                    "apply_patch" | "edit_file" | "write_file" | "ask_user"
                 );
 
                 if supports_body {
@@ -953,6 +969,7 @@ pub(crate) async fn run_message_via_llm(
     skill_registry: Option<std::sync::Arc<crate::skills::SkillRegistry>>,
     process_registry: Option<ProcessRegistry>,
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
+    human_input_store: Option<HumanInputStore>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -1011,7 +1028,9 @@ pub(crate) async fn run_message_via_llm(
             None => String::new(),
         };
         format!(
-            "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\nIf you need no tool, reply normally with your answer.\n\
+            "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
+             When you need the user to provide information (choice, confirmation, or free text), use TOOL: ask_user then on the next line a single JSON: {{\"question\":\"...\", \"context\":\"...\", \"choices\":[\"a\",\"b\"]}} (context and choices optional).\n\
+             If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
             base, skills_part
@@ -1246,20 +1265,71 @@ pub(crate) async fn run_message_via_llm(
                         break 'tool_rounds;
                     }
                 }
-                let res = execute_tool_call(
-                    exec,
-                    &actual_tool,
-                    args,
-                    process_registry.as_ref(),
-                    long_term_client.as_ref(),
-                    task_id,
-                    Some(store_path.as_path()),
-                    conv_tx.clone(),
-                    message_webhook_url.as_deref(),
-                )
-                .await;
+                let (success, res) = if actual_tool == "ask_user" {
+                    // Human in the loop: register pending request, emit event, wait for user reply.
+                    match &human_input_store {
+                        Some(store) => {
+                            let body = args.first().map(String::as_str).unwrap_or("{}");
+                            let v = serde_json::from_str::<serde_json::Value>(body).ok();
+                            let (question, context, choices) = match &v {
+                                Some(v) => (
+                                    v.get("question").and_then(|q| q.as_str()).unwrap_or("").to_string(),
+                                    v.get("context").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                                    v.get("choices").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>()),
+                                ),
+                                None => (body.to_string(), String::new(), None),
+                            };
+                            if question.is_empty() {
+                                (false, format!("[ask_user] invalid JSON: question required. Got: {}", body.chars().take(100).collect::<String>()))
+                            } else {
+                                let (tx, rx) = tokio::sync::oneshot::channel();
+                                let pending = PendingHumanInput {
+                                    question: question.clone(),
+                                    context: context.clone(),
+                                    choices: choices.clone(),
+                                    response_tx: tx,
+                                };
+                                {
+                                    let mut g = store.write().await;
+                                    g.insert(task_id, pending);
+                                }
+                                let payload = serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "question": question,
+                                    "context": context,
+                                    "choices": choices
+                                });
+                                let _ = bus.send(
+                                    EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload)).with_correlation(task_id),
+                                );
+                                const HUMAN_INPUT_TIMEOUT_SECS: u64 = 3600;
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(HUMAN_INPUT_TIMEOUT_SECS),
+                                    rx,
+                                ).await {
+                                    Ok(Ok(reply)) => (true, format!("[ask_user] User replied: {}", reply)),
+                                    Ok(Err(_)) => (false, "[ask_user] Channel closed.".to_string()),
+                                    Err(_) => (false, format!("[ask_user] Timeout after {}s; no user reply.", HUMAN_INPUT_TIMEOUT_SECS)),
+                                }
+                            }
+                        }
+                        None => (false, "[ask_user] Human-in-the-loop not available.".to_string()),
+                    }
+                } else {
+                    execute_tool_call(
+                        exec,
+                        &actual_tool,
+                        args,
+                        process_registry.as_ref(),
+                        long_term_client.as_ref(),
+                        task_id,
+                        Some(store_path.as_path()),
+                        conv_tx.clone(),
+                        message_webhook_url.as_deref(),
+                    )
+                    .await
+                };
                 // Phase F: emit ToolInvoked for Actions tab (spec 33)
-                let (success, res) = res;
                 // Redact or truncate args in the event to avoid leaking large blobs or secrets.
                 let redacted_args: Vec<String> = if matches!(actual_tool.as_str(), "apply_patch" | "edit_file" | "write_file") {
                     vec!["[redacted for write-like tool]".to_string()]
@@ -1518,6 +1588,7 @@ pub async fn handle_api(
     skill_registry: &std::sync::Arc<crate::skills::SkillRegistry>,
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
+    human_input_store: Option<HumanInputStore>,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
@@ -1882,6 +1953,40 @@ pub async fn handle_api(
                 }
                 if method == "GET" && parts.get(1) == Some(&"events") {
                     return get_task_events(events, store_path, id).await;
+                }
+                // Human in the loop: GET pending question/context/choices for the task
+                if method == "GET" && parts.get(1) == Some(&"human-input") {
+                    if let Some(ref store) = human_input_store {
+                        let g = store.read().await;
+                        if let Some(pending) = g.get(&id) {
+                            let body = serde_json::json!({
+                                "task_id": id.to_string(),
+                                "question": pending.question,
+                                "context": pending.context,
+                                "choices": pending.choices
+                            });
+                            return json_response("200 OK", &body.to_string());
+                        }
+                    }
+                    return json_response("404 Not Found", &serde_json::json!({ "error": "no_pending_human_input", "task_id": id.to_string() }).to_string());
+                }
+                // Human in the loop: POST user reply to unblock the agent
+                if method == "POST" && parts.get(1) == Some(&"human-reply") {
+                    let response_text = body.as_deref()
+                        .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+                        .and_then(|v| v.get("response").and_then(|r| r.as_str().map(String::from)))
+                        .unwrap_or_else(|| String::new());
+                    if let Some(ref store) = human_input_store {
+                        let pending = {
+                            let mut g = store.write().await;
+                            g.remove(&id)
+                        };
+                        if let Some(pending) = pending {
+                            let _ = pending.response_tx.send(response_text);
+                            return json_response("200 OK", &serde_json::json!({ "ok": true, "message": "Réponse transmise à l'agent." }).to_string());
+                        }
+                    }
+                    return json_response("404 Not Found", &serde_json::json!({ "error": "no_pending_human_input", "task_id": id.to_string() }).to_string());
                 }
                 if method == "GET" {
                     return get_task_status(store_path, progress, id).await;

@@ -263,6 +263,135 @@ body {
   border-radius: 6px;
   display: inline-flex;
   align-items: center;
+  gap: 0.5rem;
+}
+
+.task-chip-action-required {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.75rem;
+  background: #b45309;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.task-chip-action-required:hover {
+  background: #d97706;
+}
+
+/* Human-in-the-loop modal */
+.human-input-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.human-input-modal {
+  background: #18181b;
+  border: 1px solid #27272a;
+  border-radius: 12px;
+  padding: 1.5rem;
+  max-width: 480px;
+  width: 90%;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+}
+
+.human-input-modal h2 {
+  margin: 0 0 1rem;
+  font-size: 1.125rem;
+}
+
+.human-input-question {
+  margin: 0 0 0.5rem;
+  font-weight: 500;
+  color: #e4e4e7;
+}
+
+.human-input-context {
+  margin: 0 0 1rem;
+  font-size: 0.875rem;
+  color: #a1a1aa;
+}
+
+.human-input-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.human-input-choice-btn {
+  padding: 0.5rem 1rem;
+  text-align: left;
+  background: #27272a;
+  border: 1px solid #3f3f46;
+  color: #e4e4e7;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+
+.human-input-choice-btn:hover {
+  background: #3f3f46;
+}
+
+.human-input-free {
+  margin-bottom: 1rem;
+}
+
+.human-input-free label {
+  display: block;
+  font-size: 0.875rem;
+  margin-bottom: 0.25rem;
+  color: #a1a1aa;
+}
+
+.human-input-free input {
+  width: 100%;
+  padding: 0.5rem;
+  margin-bottom: 0.5rem;
+  background: #27272a;
+  border: 1px solid #3f3f46;
+  color: #e4e4e7;
+  border-radius: 6px;
+  font-size: 0.875rem;
+}
+
+.human-input-free button {
+  padding: 0.5rem 1rem;
+  background: #6366f1;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+
+.human-input-free button:hover {
+  background: #4f46e5;
+}
+
+.human-input-close {
+  display: block;
+  margin-top: 0.5rem;
+  padding: 0.35rem 0.75rem;
+  background: transparent;
+  border: 1px solid #3f3f46;
+  color: #a1a1aa;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8125rem;
+}
+
+.human-input-close:hover {
+  background: #27272a;
+  color: #e4e4e7;
 }
 
 .chat-subagents-panel {

@@ -546,6 +546,41 @@ async fn cancel_task(task_id: String, port: Option<u16>) -> Result<serde_json::V
     Ok(json)
 }
 
+/// Human in the loop: GET /api/tasks/:id/human-input — pending question/context/choices for the task (404 if none).
+#[tauri::command]
+async fn get_task_human_input(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/tasks/{}/human-input", daemon_base_url(port), task_id);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Human in the loop: POST /api/tasks/:id/human-reply — submit user response to unblock the agent.
+#[tauri::command]
+async fn post_task_human_reply(task_id: String, response: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/tasks/{}/human-reply", daemon_base_url(port), task_id);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let body = serde_json::json!({ "response": response });
+    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// Schedules: GET /api/schedules (FR-028, Calendrier).
 #[tauri::command]
 async fn get_schedules(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -725,6 +760,8 @@ pub fn run() {
             get_tasks,
             get_task_events,
             cancel_task,
+            get_task_human_input,
+            post_task_human_reply,
             get_schedules,
             get_schedule_by_id,
             create_schedule,
