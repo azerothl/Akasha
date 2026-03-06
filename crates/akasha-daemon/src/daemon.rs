@@ -373,6 +373,7 @@ impl Daemon {
                 let tools_executor = tools_executor.clone();
                 let skill_registry = skill_registry.clone();
                 let process_registry = process_registry.clone();
+                let conv_tx = conv_tx.clone();
                 let short_term = short_term.clone();
                 let long_term_client = long_term_client.clone();
                 async move {
@@ -389,6 +390,7 @@ impl Daemon {
                             tools_executor.clone(),
                             Some(skill_registry.clone()),
                             Some(process_registry.clone()),
+                            Some(conv_tx.clone()),
                         )
                         .await;
                     }

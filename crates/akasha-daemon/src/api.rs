@@ -3,14 +3,15 @@
 use akasha_core::{EventEnvelope, EventType};
 use akasha_vault::Vault;
 use akasha_llm::CompletionRequest;
-use akasha_store::{Schedule, ScheduleStore, TaskRunStatus, TaskStatus, TaskStore};
+use akasha_store::{Schedule, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
-use crate::agents::EventBus;
+use crate::agents::{EventBus, OrchestratorTask};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -167,6 +168,15 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("web_fetch", "web_fetch <url> — récupérer le contenu d'une URL (domaine autorisé dans tools_policy allowed_web_domains)"),
     ("web_search", "web_search <query> [max_results] — rechercher sur le web (Brave API; BRAVE_API_KEY, web_search_enabled)"),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
+    ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
+    ("memory_store", "memory_store <content> <source> — stocker/promouvoir un contenu en mémoire long terme"),
+    ("sessions_list", "sessions_list [limit] — lister les tâches/sessions récentes"),
+    ("sessions_spawn", "sessions_spawn <message> [session_id] — créer une sous-tâche et la lancer"),
+    ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
+    ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
+    ("browser", "browser navigate <url> | browser screenshot | browser snapshot — automation navigateur (non implémenté, prévu phase 3)"),
+    ("image", "image <path|url> [prompt] — analyse d'image par modèle vision (non implémenté, prévu phase 3)"),
+    ("pdf", "pdf <path|url> — extraire le texte d'un PDF (non implémenté, prévu phase 3)"),
 ];
 
 fn available_tools_instruction() -> String {
@@ -207,6 +217,11 @@ async fn execute_tool_call(
     tool_name: &str,
     args: &[String],
     process_registry: Option<&ProcessRegistry>,
+    long_term_client: Option<&LongTermMemoryClient>,
+    task_id: Uuid,
+    store_path: Option<&std::path::Path>,
+    conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
+    message_webhook_url: Option<&str>,
 ) -> String {
     use std::path::Path;
     let path_arg = |i: usize| args.get(i).map(|s| Path::new(s.as_str()));
@@ -337,6 +352,162 @@ async fn execute_tool_call(
                 (_, _) => "[process] usage: process list | process poll <session_id> | process kill <session_id>".to_string(),
             }
         }
+        "memory_search" => {
+            let query_str = args.get(0).map(|a| a.as_str()).unwrap_or("").trim();
+            let top_k = args.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(5).min(20);
+            if query_str.is_empty() {
+                return "[memory_search] usage: memory_search <query> [top_k]".to_string();
+            }
+            match long_term_client {
+                Some(client) => {
+                    let client = client.clone();
+                    let query = query_str.to_string();
+                    let results = tokio::task::spawn_blocking(move || client.search(query, top_k))
+                        .await
+                        .ok()
+                        .unwrap_or_default();
+                    if results.is_empty() {
+                        format!("[memory_search] no results for \"{}\"", query_str)
+                    } else {
+                        let preview: Vec<String> = results.iter().take(5).map(|s| s.replace('\n', " ")).collect();
+                        format!("[memory_search] {} result(s): {}", results.len(), preview.join(" | "))
+                    }
+                }
+                None => "[memory_search] long-term memory not available".to_string(),
+            }
+        }
+        "memory_store" => {
+            let content = args.get(0).map(|a| a.as_str()).unwrap_or("");
+            let source = args.get(1).map(|a| a.as_str()).unwrap_or("agent");
+            if content.is_empty() {
+                return "[memory_store] usage: memory_store <content> <source>".to_string();
+            }
+            match long_term_client {
+                Some(client) => {
+                    let client = client.clone();
+                    let content = content.to_string();
+                    let source = source.to_string();
+                    let out = tokio::task::spawn_blocking(move || client.promote(content, source))
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok());
+                    match out {
+                        Some(()) => "[memory_store] stored".to_string(),
+                        None => "[memory_store] failed or memory not available".to_string(),
+                    }
+                }
+                None => "[memory_store] long-term memory not available".to_string(),
+            }
+        }
+        "sessions_list" => {
+            let limit = args.get(0).and_then(|s| s.parse::<usize>().ok()).unwrap_or(20).min(50);
+            match store_path {
+                Some(path) => match TaskStore::open(path) {
+                    Ok(store) => match store.get_all() {
+                        Ok(tasks) => {
+                            let list: Vec<String> = tasks
+                                .into_iter()
+                                .rev()
+                                .take(limit)
+                                .map(|t| format!("{} {} {}", t.id, t.status.as_str(), t.assigned_agent))
+                                .collect();
+                            format!("[sessions_list] {} task(s): {}", list.len(), list.join(" ; "))
+                        }
+                        Err(e) => format!("[sessions_list] error: {}", e),
+                    },
+                    Err(e) => format!("[sessions_list] store error: {}", e),
+                },
+                None => "[sessions_list] store not available".to_string(),
+            }
+        }
+        "session_status" => {
+            let task_id_str = args.get(0).map(String::as_str).unwrap_or("");
+            let id = task_id_str.parse::<Uuid>().ok();
+            match (store_path, id) {
+                (Some(path), Some(id)) => match TaskStore::open(path) {
+                    Ok(store) => match store.get(id) {
+                        Ok(Some(t)) => format!(
+                            "[session_status] {} status={} agent={}",
+                            t.id,
+                            t.status.as_str(),
+                            t.assigned_agent
+                        ),
+                        Ok(None) => format!("[session_status] task {} not found", id),
+                        Err(e) => format!("[session_status] error: {}", e),
+                    },
+                    Err(e) => format!("[session_status] store error: {}", e),
+                },
+                (_, _) => "[session_status] usage: session_status <task_id>".to_string(),
+            }
+        }
+        "sessions_spawn" => {
+            let message = args.get(0).map(|a| a.as_str()).unwrap_or("").to_string();
+            let child_session_id = args.get(1).map(|a| a.as_str()).unwrap_or("").to_string();
+            if message.is_empty() {
+                return "[sessions_spawn] usage: sessions_spawn <message> [session_id]".to_string();
+            }
+            match (store_path, conv_tx) {
+                (Some(path), Some(tx)) => {
+                    let new_id = Uuid::new_v4();
+                    let now = chrono::Utc::now();
+                    let task = Task {
+                        id: new_id,
+                        parent_task_id: Some(task_id),
+                        status: TaskStatus::Pending,
+                        assigned_agent: String::new(),
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    match TaskStore::open(path) {
+                        Ok(store) => {
+                            if store.insert(&task).is_err() {
+                                return "[sessions_spawn] failed to insert task".to_string();
+                            }
+                            let sid = if child_session_id.is_empty() {
+                                new_id.to_string()
+                            } else {
+                                child_session_id
+                            };
+                            if tx.send((new_id, message, sid)).await.is_err() {
+                                return "[sessions_spawn] failed to send to conversation queue".to_string();
+                            }
+                            format!("[sessions_spawn] task_id: {} (queued)", new_id)
+                        }
+                        Err(e) => format!("[sessions_spawn] store error: {}", e),
+                    }
+                }
+                (_, _) => "[sessions_spawn] store or conversation channel not available".to_string(),
+            }
+        }
+        "message" => {
+            let sub = args.get(0).map(String::as_str).unwrap_or("");
+            if sub != "send" || args.len() < 3 {
+                return "[message] usage: message send <channel> <text>".to_string();
+            }
+            let _channel = args.get(1).map(String::as_str).unwrap_or("");
+            let text = args.get(2..).map(|a| a.join(" ")).unwrap_or_default();
+            match message_webhook_url {
+                Some(url) => {
+                    let body = serde_json::json!({ "text": text });
+                    let client = match reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(10))
+                        .build()
+                    {
+                        Ok(c) => c,
+                        Err(e) => return format!("[message] client error: {}", e),
+                    };
+                    match client.post(url).json(&body).send().await {
+                        Ok(res) if res.status().is_success() => "[message] sent".to_string(),
+                        Ok(res) => format!("[message] send failed: {}", res.status()),
+                        Err(e) => format!("[message] error: {}", e),
+                    }
+                }
+                None => "[message] AKASHA_MESSAGE_WEBHOOK_URL not set".to_string(),
+            }
+        }
+        "browser" => "[browser] browser automation not implemented (planned Phase 3)".to_string(),
+        "image" => "[image] image analysis (vision) not implemented (planned Phase 3)".to_string(),
+        "pdf" => "[pdf] PDF extraction not implemented (planned Phase 3)".to_string(),
         "search_files" => {
             let dir = path_arg(0).unwrap_or(Path::new("."));
             let pattern = args.get(1).map(String::as_str).unwrap_or("*");
@@ -614,6 +785,7 @@ pub(crate) async fn run_message_via_llm(
     tools_executor: Option<std::sync::Arc<akasha_tools::ToolExecutor>>,
     skill_registry: Option<std::sync::Arc<crate::skills::SkillRegistry>>,
     process_registry: Option<ProcessRegistry>,
+    conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -623,6 +795,8 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
+
+    let message_webhook_url = std::env::var("AKASHA_MESSAGE_WEBHOOK_URL").ok();
 
     // Emit user message so TUI/API can show "what this task is about"
     let _ = bus.send(
@@ -885,7 +1059,18 @@ pub(crate) async fn run_message_via_llm(
                     Some(reg) => reg.get(name).await.map(|s| s.tool_ref).unwrap_or_else(|| name.clone()),
                     None => name.clone(),
                 };
-                let res = execute_tool_call(exec, &actual_tool, args, process_registry.as_ref()).await;
+                let res = execute_tool_call(
+                    exec,
+                    &actual_tool,
+                    args,
+                    process_registry.as_ref(),
+                    long_term_client.as_ref(),
+                    task_id,
+                    Some(store_path.as_path()),
+                    conv_tx.clone(),
+                    message_webhook_url.as_deref(),
+                )
+                .await;
                 // Phase F: emit ToolInvoked for Actions tab (spec 33)
                 let success = !res.contains("denied") && !res.contains(" error:");
                 let payload = serde_json::json!({
