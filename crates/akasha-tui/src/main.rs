@@ -6,8 +6,10 @@ mod markdown;
 mod theme;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
-    execute,
+    event::{
+        self, EnableMouseCapture, DisableMouseCapture, Event, KeyCode, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEventKind,
+    },
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
@@ -2211,7 +2213,7 @@ fn main() -> anyhow::Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen)?;
+    crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -2219,7 +2221,7 @@ fn main() -> anyhow::Result<()> {
     let result = run_app(&mut terminal, &mut app, &rx, &progress_rx);
 
     disable_raw_mode()?;
-    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
 
     result

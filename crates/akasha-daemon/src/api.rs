@@ -4,6 +4,7 @@ use akasha_core::{EventEnvelope, EventType};
 use akasha_vault::Vault;
 use akasha_llm::CompletionRequest;
 use akasha_store::{Schedule, ScheduleStore, TaskRunStatus, TaskStatus, TaskStore};
+pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use crate::agents::EventBus;
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
@@ -59,7 +60,6 @@ async fn get_task_events(events: &EventsCache, id: Uuid) -> String {
     json_response("200 OK", &body.to_string())
 }
 
-pub const MAX_PROGRESS_PER_TASK: usize = 32;
 pub const MAX_EVENTS_PER_TASK: usize = 64;
 
 #[derive(Clone, serde::Serialize)]
@@ -1579,14 +1579,15 @@ async fn get_task_status(store_path: &Path, progress: &ProgressCache, id: Uuid) 
         .get_progress(id)
         .map(|v| v.into_iter().map(|(pct, msg)| ProgressEntry { progress_pct: pct, message: msg }).collect())
         .unwrap_or_default();
-    let mem_entries: Vec<ProgressEntry> = {
-        let g = progress.read().await;
-        g.get(&id)
-            .map(|q| q.iter().cloned().collect::<Vec<_>>())
-            .unwrap_or_default()
-    };
-    if !mem_entries.is_empty() {
-        progress_list.extend(mem_entries);
+    // Prefer persisted progress when available; fall back to in-memory progress if none is stored.
+    if progress_list.is_empty() {
+        let mem_entries: Vec<ProgressEntry> = {
+            let g = progress.read().await;
+            g.get(&id)
+                .map(|q| q.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        progress_list = mem_entries;
     }
     let body = serde_json::json!({
         "task_id": task.id.to_string(),
