@@ -7,9 +7,9 @@ mod tools;
 mod container;
 
 pub use policy::ToolsPolicy;
-pub use tools::{file_diff, read_file, run_command, search_files, search_replace, write_file, ToolResult};
+pub use tools::{apply_patch, edit_file, file_diff, grep_content, read_file, run_command, search_files, search_replace, write_file, ToolResult};
 #[cfg(feature = "web")]
-pub use tools::web_fetch;
+pub use tools::{web_fetch, web_search};
 
 #[cfg(feature = "container")]
 pub use container::{run_container, run_code_in_container, ContainerRunOptions, ContainerRunResult};
@@ -49,6 +49,30 @@ impl ToolExecutor {
         search_replace(path, search, replace, &self.policy).await
     }
 
+    pub async fn edit_file(
+        &self,
+        path: &Path,
+        start_line: u32,
+        end_line: u32,
+        new_content: &str,
+    ) -> anyhow::Result<ToolResult> {
+        edit_file(path, start_line, end_line, new_content, &self.policy).await
+    }
+
+    pub async fn apply_patch(&self, path: &Path, patch_content: &str) -> anyhow::Result<ToolResult> {
+        apply_patch(path, patch_content, &self.policy).await
+    }
+
+    pub async fn grep_content(
+        &self,
+        dir: &Path,
+        pattern: &str,
+        file_glob: Option<&str>,
+        max_results: usize,
+    ) -> anyhow::Result<(Vec<(std::path::PathBuf, u32, String)>, ToolResult)> {
+        grep_content(dir, pattern, file_glob, max_results, &self.policy).await
+    }
+
     pub async fn search_files(
         &self,
         dir: &Path,
@@ -77,6 +101,11 @@ impl ToolExecutor {
     #[cfg(feature = "web")]
     pub async fn web_fetch(&self, url: &str) -> anyhow::Result<(String, ToolResult)> {
         web_fetch(url, &self.policy).await
+    }
+
+    #[cfg(feature = "web")]
+    pub async fn web_search(&self, query: &str, max_results: u32) -> anyhow::Result<(String, ToolResult)> {
+        web_search(query, max_results, &self.policy).await
     }
 
     /// Run a command in a container (work_dir must be allowed for read). Feature "container".

@@ -88,6 +88,16 @@ pub fn new_events_cache() -> EventsCache {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
 }
 
+/// Per-session result cell for background commands. The spawned task writes the result when done.
+type BackgroundResultCell = Arc<RwLock<Option<anyhow::Result<(std::process::Output, akasha_tools::ToolResult)>>>>;
+
+/// Registry of background command sessions: session_id -> (task handle to abort, result cell).
+pub type ProcessRegistry = Arc<RwLock<std::collections::HashMap<Uuid, (tokio::task::JoinHandle<()>, BackgroundResultCell)>>>;
+
+pub fn new_process_registry() -> ProcessRegistry {
+    Arc::new(RwLock::new(std::collections::HashMap::new()))
+}
+
 /// Parsed HTTP request: method, path, body, and lowercase header map.
 pub fn parse_request(buf: &[u8]) -> (String, String, Option<Vec<u8>>, std::collections::HashMap<String, String>) {
     let mut method = String::new();
@@ -145,10 +155,17 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_file", "read_file <path> — lire le contenu d'un fichier texte"),
     ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (path puis contenu)"),
     ("search_files", "search_files <dir> <pattern> — chercher des fichiers (glob) sous un répertoire"),
+    ("grep_content", "grep_content <dir> <pattern> [file_glob] — chercher le motif dans le contenu des fichiers (ex. grep_content . \"fn \" \"*.rs\")"),
     ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
+    ("run_terminal", "run_terminal <cmd> [args...] — exécuter une commande (même que run_command)"),
+    ("run_command_background", "run_command_background <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
+    ("process", "process list | process poll <session_id> | process kill <session_id> — lister, consulter ou arrêter des commandes en arrière-plan"),
     ("file_diff", "file_diff <path_a> <path_b> — diff texte entre deux fichiers"),
+    ("edit_file", "edit_file <path> <start_line> <end_line> <new_content> — remplacer les lignes start..end par new_content (lignes 1-based)"),
+    ("apply_patch", "apply_patch <path> <patch_content> — appliquer un patch unifié (contenu du patch après le path)"),
     ("search_replace", "search_replace <path> <search> | <replace> — remplacer toutes les occurrences de search par replace dans le fichier (séparateur \" | \")"),
     ("web_fetch", "web_fetch <url> — récupérer le contenu d'une URL (domaine autorisé dans tools_policy allowed_web_domains)"),
+    ("web_search", "web_search <query> [max_results] — rechercher sur le web (Brave API; BRAVE_API_KEY, web_search_enabled)"),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
 ];
 
@@ -189,6 +206,7 @@ async fn execute_tool_call(
     executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
     tool_name: &str,
     args: &[String],
+    process_registry: Option<&ProcessRegistry>,
 ) -> String {
     use std::path::Path;
     let path_arg = |i: usize| args.get(i).map(|s| Path::new(s.as_str()));
@@ -225,6 +243,100 @@ async fn execute_tool_call(
                 Err(e) => format!("[run_command] error: {}", e),
             }
         }
+        "run_terminal" => {
+            let cmd = args.get(0).map(String::as_str).unwrap_or("");
+            let cmd_args: Vec<String> = args.iter().skip(1).cloned().collect();
+            match executor.run_command(cmd, &cmd_args, None).await {
+                Ok((out, res)) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    if res.success {
+                        format!("[run_terminal {}] stdout: {} stderr: {}", cmd, stdout.trim(), stderr.trim())
+                    } else {
+                        format!("[run_terminal] {} stderr: {}", res.summary, stderr.trim())
+                    }
+                }
+                Err(e) => format!("[run_terminal] error: {}", e),
+            }
+        }
+        "run_command_background" => {
+            let cmd = args.get(0).cloned().unwrap_or_default();
+            let cmd_args: Vec<String> = args.iter().skip(1).cloned().collect();
+            let cmd_display = format!("{} {}", cmd, cmd_args.join(" "));
+            match process_registry {
+                Some(reg) => {
+                    let session_id = Uuid::new_v4();
+                    let exec = executor.clone();
+                    let cell: BackgroundResultCell = Arc::new(RwLock::new(None));
+                    let cell_clone = cell.clone();
+                    let task = tokio::spawn(async move {
+                        let result = exec.run_command(&cmd, &cmd_args, None).await;
+                        *cell_clone.write().await = Some(result);
+                    });
+                    reg.write().await.insert(session_id, (task, cell));
+                    format!("[run_command_background] session_id: {} (cmd: {})", session_id, cmd_display)
+                }
+                None => "[run_command_background] process registry not available".to_string(),
+            }
+        }
+        "process" => {
+            let sub = args.get(0).map(String::as_str).unwrap_or("");
+            match (process_registry, sub) {
+                (Some(reg), "list") => {
+                    let ids: Vec<String> = reg.read().await.keys().map(|u| u.to_string()).collect();
+                    format!("[process list] {} session(s): {:?}", ids.len(), ids)
+                }
+                (Some(reg), "poll") => {
+                    let session_id = args.get(1).and_then(|s| Uuid::parse_str(s).ok());
+                    match session_id {
+                        Some(id) => {
+                            let (has_entry, result_opt) = {
+                                let g = reg.write().await;
+                                if let Some((_task, cell)) = g.get(&id) {
+                                    let taken = cell.write().await.take();
+                                    (true, taken)
+                                } else {
+                                    (false, None)
+                                }
+                            };
+                            if !has_entry {
+                                return format!("[process poll] unknown session_id: {}", id);
+                            }
+                            match result_opt {
+                                Some(Ok((out, _res))) => {
+                                    reg.write().await.remove(&id);
+                                    let stdout = String::from_utf8_lossy(&out.stdout);
+                                    let stderr = String::from_utf8_lossy(&out.stderr);
+                                    format!("[process poll {}] done — exit {} stdout: {} stderr: {}", id, out.status.code().unwrap_or(-1), stdout.trim(), stderr.trim())
+                                }
+                                Some(Err(e)) => {
+                                    reg.write().await.remove(&id);
+                                    format!("[process poll {}] error: {}", id, e)
+                                }
+                                None => format!("[process poll {}] still running", id),
+                            }
+                        }
+                        None => "[process poll] usage: process poll <session_id>".to_string(),
+                    }
+                }
+                (Some(reg), "kill") => {
+                    let session_id = args.get(1).and_then(|s| Uuid::parse_str(s).ok());
+                    match session_id {
+                        Some(id) => {
+                            let mut g = reg.write().await;
+                            if let Some((task, _cell)) = g.remove(&id) {
+                                task.abort();
+                                format!("[process kill {}] aborted", id)
+                            } else {
+                                format!("[process kill] unknown session_id: {}", id)
+                            }
+                        }
+                        None => "[process kill] usage: process kill <session_id>".to_string(),
+                    }
+                }
+                (_, _) => "[process] usage: process list | process poll <session_id> | process kill <session_id>".to_string(),
+            }
+        }
         "search_files" => {
             let dir = path_arg(0).unwrap_or(Path::new("."));
             let pattern = args.get(1).map(String::as_str).unwrap_or("*");
@@ -238,6 +350,29 @@ async fn execute_tool_call(
                     }
                 }
                 Err(e) => format!("[search_files] error: {}", e),
+            }
+        }
+        "grep_content" => {
+            let dir = path_arg(0).unwrap_or(Path::new("."));
+            let pattern = args.get(1).map(String::as_str).unwrap_or("");
+            let file_glob = args.get(2).map(String::as_str).filter(|s| !s.is_empty());
+            if pattern.is_empty() {
+                return "[grep_content] usage: grep_content <dir> <pattern> [file_glob]".to_string();
+            }
+            match executor.grep_content(dir, pattern, file_glob, 50).await {
+                Ok((matches, res)) => {
+                    if res.success {
+                        let lines: Vec<String> = matches
+                            .iter()
+                            .take(30)
+                            .map(|(p, n, line)| format!("{}:{}: {}", p.display(), n, line.trim()))
+                            .collect();
+                        format!("[grep_content] {} — {}", res.summary, lines.join(" ; "))
+                    } else {
+                        format!("[grep_content] {}", res.summary)
+                    }
+                }
+                Err(e) => format!("[grep_content] error: {}", e),
             }
         }
         "write_file" => {
@@ -275,6 +410,42 @@ async fn execute_tool_call(
                 None => "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(),
             }
         }
+        "edit_file" => {
+            let path = path_arg(0);
+            let start_line = args.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let end_line = args.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let new_content = args.get(3..).map(|a| a.join("\n")).unwrap_or_default();
+            match path {
+                Some(p) => match executor.edit_file(p, start_line, end_line, &new_content).await {
+                    Ok(res) => {
+                        if res.success {
+                            format!("[edit_file {}] {}", p.display(), res.summary)
+                        } else {
+                            format!("[edit_file] {}", res.summary)
+                        }
+                    }
+                    Err(e) => format!("[edit_file] error: {}", e),
+                },
+                None => "[edit_file] usage: edit_file <path> <start_line> <end_line> <new_content>".to_string(),
+            }
+        }
+        "apply_patch" => {
+            let path = path_arg(0);
+            let patch_content = args.get(1..).map(|a| a.join("\n")).unwrap_or_default();
+            match path {
+                Some(p) => match executor.apply_patch(p, &patch_content).await {
+                    Ok(res) => {
+                        if res.success {
+                            format!("[apply_patch {}] {}", p.display(), res.summary)
+                        } else {
+                            format!("[apply_patch] {}", res.summary)
+                        }
+                    }
+                    Err(e) => format!("[apply_patch] error: {}", e),
+                },
+                None => "[apply_patch] usage: apply_patch <path> <patch_content>".to_string(),
+            }
+        }
         "file_diff" => {
             let path_a = path_arg(0);
             let path_b = path_arg(1);
@@ -308,6 +479,33 @@ async fn execute_tool_call(
                     }
                 }
                 Err(e) => format!("[web_fetch] error: {}", e),
+            }
+        }
+        "web_search" => {
+            let (query, max_results) = if args.len() >= 2 {
+                let last = args.last().unwrap();
+                if last.parse::<u32>().is_ok() {
+                    (args[..args.len() - 1].join(" "), last.parse().unwrap_or(5))
+                } else {
+                    (args.join(" "), 5u32)
+                }
+            } else {
+                (args.join(" "), 5u32)
+            };
+            let query = query.trim();
+            if query.is_empty() {
+                return "[web_search] usage: web_search <query> [max_results]".to_string();
+            }
+            match executor.web_search(query.trim(), max_results).await {
+                Ok((body, res)) => {
+                    if res.success {
+                        let preview = if body.len() <= 600 { body.as_str() } else { &body[..600] };
+                        format!("[web_search] {} — {}", res.summary, preview)
+                    } else {
+                        format!("[web_search] {}", res.summary)
+                    }
+                }
+                Err(e) => format!("[web_search] error: {}", e),
             }
         }
         "run_in_container" => {
@@ -415,6 +613,7 @@ pub(crate) async fn run_message_via_llm(
     long_term_client: Option<LongTermMemoryClient>,
     tools_executor: Option<std::sync::Arc<akasha_tools::ToolExecutor>>,
     skill_registry: Option<std::sync::Arc<crate::skills::SkillRegistry>>,
+    process_registry: Option<ProcessRegistry>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -686,7 +885,7 @@ pub(crate) async fn run_message_via_llm(
                     Some(reg) => reg.get(name).await.map(|s| s.tool_ref).unwrap_or_else(|| name.clone()),
                     None => name.clone(),
                 };
-                let res = execute_tool_call(exec, &actual_tool, args).await;
+                let res = execute_tool_call(exec, &actual_tool, args, process_registry.as_ref()).await;
                 // Phase F: emit ToolInvoked for Actions tab (spec 33)
                 let success = !res.contains("denied") && !res.contains(" error:");
                 let payload = serde_json::json!({

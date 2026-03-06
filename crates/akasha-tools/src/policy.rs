@@ -21,6 +21,9 @@ pub struct ToolsPolicy {
     pub command_timeout_secs: u64,
     /// Optional: domains allowed for web_fetch.
     pub allowed_web_domains: Vec<String>,
+    /// Optional: enable web_search (requires BRAVE_API_KEY env).
+    #[serde(default)]
+    pub web_search_enabled: bool,
 }
 
 impl ToolsPolicy {
