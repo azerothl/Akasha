@@ -195,6 +195,8 @@ struct App {
     activity_list_rect: Option<ratatui::prelude::Rect>,
     /// Tabs bar rect (for mouse click to switch tab).
     tabs_rect: Option<ratatui::prelude::Rect>,
+    /// Calendar tab: content area rect (for mouse click to select schedule or run).
+    calendar_content_rect: Option<ratatui::prelude::Rect>,
     /// Session id for short-term memory (returned by daemon, send back on next message).
     session_id: Option<String>,
     /// If true, next message will request a new session (context reset).
@@ -255,6 +257,7 @@ impl App {
             activity_list_collapsed: false,
             activity_list_rect: None,
             tabs_rect: None,
+            calendar_content_rect: None,
             session_id: None,
             force_new_session: false,
             memory_short_term: Vec::new(),
@@ -1852,7 +1855,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             let mut lines: Vec<Line<'static>> = vec![
                 Line::from(""),
                 Line::from(Span::styled(
-                    " Récurrences (schedules) — ← → = récurrences / runs · ↑↓ = sélectionner · PgUp/PgDn = défiler · R = actualiser ",
+                    " Récurrences (schedules) — clic ou ↑↓ = sélectionner · ← → = récurrences / runs · molette = défiler · R = actualiser ",
                     Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
@@ -1964,8 +1967,9 @@ fn ui(f: &mut Frame, app: &mut App) {
             }
             let cal_block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Calendrier (récurrences et runs) ")
+                .title(" Calendrier (clic = sélectionner, molette = défiler) ")
                 .border_style(theme.block_border());
+            app.calendar_content_rect = Some(content_area);
             f.render_widget(
                 Paragraph::new(lines).block(cal_block).wrap(Wrap { trim: true }).scroll((app.scroll as u16, 0)),
                 content_area,
@@ -2176,10 +2180,44 @@ fn run_app(
                             }
                         }
                     }
-                    // Mouse wheel: scroll in Chat, Doc, Memory
+                    // Click in Calendar content to select schedule or run
+                    if app.mode == Mode::Calendar
+                        && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                    {
+                        if let Some(rect) = app.calendar_content_rect {
+                            let inner_y = mouse.row.saturating_sub(rect.y + 1);
+                            if inner_y < rect.height.saturating_sub(2) {
+                                let actual_line = app.scroll + inner_y as usize;
+                                let n_sched = app.calendar_schedules.len();
+                                let n_runs = app.calendar_task_runs.len();
+                                const SCHEDULE_START: usize = 4;
+                                let schedule_end = SCHEDULE_START + n_sched;
+                                let runs_start = 7 + n_sched;
+                                let runs_end = runs_start + n_runs;
+                                if actual_line >= SCHEDULE_START && actual_line < schedule_end && n_sched > 0 {
+                                    let idx = actual_line - SCHEDULE_START;
+                                    app.calendar_focus_schedules = true;
+                                    app.calendar_schedule_index = idx;
+                                    if let Some((id, _, _, _)) = app.calendar_schedules.get(idx) {
+                                        let id = id.clone();
+                                        app.fetch_schedule_detail(&id);
+                                    }
+                                } else if actual_line >= runs_start && actual_line < runs_end && n_runs > 0 {
+                                    let idx = actual_line - runs_start;
+                                    app.calendar_focus_schedules = false;
+                                    app.calendar_selected_run = Some(idx);
+                                    if let Some(run) = app.calendar_task_runs.get(idx) {
+                                        let run = run.clone();
+                                        app.fetch_calendar_run_detail(&run);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Mouse wheel: scroll in Chat, Doc, Memory, Calendar
                     if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
                         match app.mode {
-                            Mode::Chat | Mode::Doc | Mode::Memory => {
+                            Mode::Chat | Mode::Doc | Mode::Memory | Mode::Calendar => {
                                 if mouse.kind == MouseEventKind::ScrollUp {
                                     app.scroll_up();
                                 } else {

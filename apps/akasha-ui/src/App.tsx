@@ -830,7 +830,7 @@ function App() {
                   )}
                 </div>
               )}
-              {Object.keys(runningTaskEvents).length > 0 && Object.values(runningTaskEvents).some((ev) => ev.length > 0) && (
+              {Object.keys(runningTaskChips).length > 0 && (
                 <div className="chat-subagents-panel">
                   <button
                     type="button"
@@ -842,28 +842,39 @@ function App() {
                     <span className="chat-subagents-toggle-icon" aria-hidden>{subAgentPanelCollapsed ? "▶" : "▼"}</span>
                     <span>
                       {subAgentPanelCollapsed
-                        ? `Détail des sous-agents (${Object.values(runningTaskEvents).flat().length} étape(s))`
+                        ? (() => {
+                            const total = Object.values(runningTaskEvents).flat().length;
+                            return total > 0
+                              ? `Détail des sous-agents (${total} étape(s))`
+                              : "Détail des sous-agents (cliquez pour afficher)";
+                          })()
                         : "Masquer le détail des sous-agents"}
                     </span>
                   </button>
                   {!subAgentPanelCollapsed && (
                     <div id="subagents-detail" className="chat-subagents-detail" role="region" aria-label="Actions des sous-agents">
-                      {Object.entries(runningTaskEvents).map(([taskId, events]) =>
-                        events.length === 0 ? null : (
-                          <div key={taskId} className="chat-subagents-task">
-                            <div className="chat-subagents-task-id">Task #{taskId.slice(-8)}</div>
-                            <ul className="chat-subagents-events">
-                              {events.map((ev, idx) => (
-                                <li key={`${taskId}-${idx}`} className="chat-subagents-event" data-type={ev.event_type}>
-                                  <span className="chat-subagents-event-type">{eventTypeLabel(ev.event_type)}</span>
-                                  {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload && (
-                                    <span className="chat-subagents-event-agent"> → {(ev.payload as { agent?: string }).agent}</span>
-                                  )}
-                                  {ev.at && <span className="chat-subagents-event-at"> {ev.at.slice(0, 19)}</span>}
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
+                      {Object.entries(runningTaskEvents).filter(([, ev]) => ev.length > 0).length === 0 ? (
+                        <p className="chat-subagents-empty">
+                          Aucune étape reçue pour le moment. Les événements (délégation, sous-agents, progression) s’afficheront ici au fur et à mesure.
+                        </p>
+                      ) : (
+                        Object.entries(runningTaskEvents).map(([taskId, events]) =>
+                          events.length === 0 ? null : (
+                            <div key={taskId} className="chat-subagents-task">
+                              <div className="chat-subagents-task-id">Task #{taskId.slice(-8)}</div>
+                              <ul className="chat-subagents-events">
+                                {events.map((ev, idx) => (
+                                  <li key={`${taskId}-${idx}`} className="chat-subagents-event" data-type={ev.event_type}>
+                                    <span className="chat-subagents-event-type">{eventTypeLabel(ev.event_type)}</span>
+                                    {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload && (
+                                      <span className="chat-subagents-event-agent"> → {(ev.payload as { agent?: string }).agent}</span>
+                                    )}
+                                    {ev.at && <span className="chat-subagents-event-at"> {ev.at.slice(0, 19)}</span>}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )
                         )
                       )}
                     </div>

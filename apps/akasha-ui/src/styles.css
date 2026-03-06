@@ -316,6 +316,13 @@ body {
   margin-bottom: 0;
 }
 
+.chat-subagents-empty {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: #71717a;
+  font-style: italic;
+}
+
 .chat-subagents-task-id {
   color: #71717a;
   margin-bottom: 0.25rem;
