@@ -92,6 +92,44 @@ struct ActivityTaskDetail {
     user_message: Option<String>,
 }
 
+/// One task run in the calendar (from GET /api/task_runs).
+#[derive(Clone)]
+struct CalendarTaskRun {
+    id: String,
+    status: String,
+    planned_for: String,
+    task_id: String,
+    schedule_id: Option<String>,
+    started_at: Option<String>,
+    ended_at: Option<String>,
+}
+
+/// Full detail for selected calendar run (run metadata + GET /api/tasks/:id).
+#[derive(Clone, Default)]
+struct CalendarRunDetail {
+    run_status: String,
+    run_started_at: Option<String>,
+    run_ended_at: Option<String>,
+    task_status: String,
+    created_at: String,
+    updated_at: String,
+    progress: Vec<(u8, String)>,
+    schedule_id: Option<String>,
+}
+
+/// Detail for selected schedule (from GET /api/schedules/:id).
+#[derive(Clone, Default)]
+struct ScheduleDetail {
+    id: String,
+    name: String,
+    description: String,
+    channel_context: Option<String>,
+    enabled: bool,
+    interval_seconds: Option<u64>,
+    timezone: Option<String>,
+    rrule: Option<String>,
+}
+
 #[derive(Clone, Default, serde::Deserialize)]
 struct ModelMetrics {
     total_requests: u64,
@@ -130,7 +168,7 @@ struct App {
     activity_detail_scroll: usize,
     /// Calendar tab: schedules and task_runs (FR-029).
     calendar_schedules: Vec<(String, String, bool, Option<u64>)>,
-    calendar_task_runs: Vec<(String, String, String, String)>,
+    calendar_task_runs: Vec<CalendarTaskRun>,
     #[allow(dead_code)]
     calendar_scroll: usize,
     /// Pending task id after ack (show "En cours: Task #xxx" in chat).
@@ -139,10 +177,16 @@ struct App {
     pending_reply_pct: Option<u8>,
     /// Schedule run reports to show in chat (Rappel « X » exécuté : …).
     schedule_reports: Vec<(String, String)>,
-    /// Calendar: selected task_run index to show task detail.
+    /// Calendar: focus on schedules (true) or runs (false). Tab toggles.
+    calendar_focus_schedules: bool,
+    /// Calendar: selected schedule index (when focus on schedules).
+    calendar_schedule_index: usize,
+    /// Calendar: selected task_run index (when focus on runs).
     calendar_selected_run: Option<usize>,
-    /// Calendar: task detail for selected run (status, last message).
-    calendar_run_detail: Option<(String, String)>,
+    /// Calendar: detail for selected run (run + task status, progress, parent).
+    calendar_run_detail: Option<CalendarRunDetail>,
+    /// Calendar: detail for selected schedule (id, name, description, channel_context).
+    calendar_schedule_detail: Option<ScheduleDetail>,
     /// Tasks tab: scroll offset for the task list (so selection stays visible).
     activity_list_scroll: usize,
     /// Tasks tab: if true, task list body is collapsed (only header visible; Space/Enter to expand).
@@ -200,8 +244,11 @@ impl App {
             pending_reply_task_id: None,
             pending_reply_pct: None,
             schedule_reports: Vec::new(),
+            calendar_focus_schedules: false,
+            calendar_schedule_index: 0,
             calendar_selected_run: None,
             calendar_run_detail: None,
+            calendar_schedule_detail: None,
             activity_list_scroll: 0,
             activity_list_collapsed: false,
             activity_list_rect: None,
@@ -386,23 +433,75 @@ impl App {
         }
     }
 
-    fn fetch_calendar_run_detail(&mut self, task_id: &str) {
+    fn fetch_calendar_run_detail(&mut self, run: &CalendarTaskRun) {
         let base = daemon_base_url(self.port);
         let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(5))
             .build()
             .unwrap_or_default();
-        if let Ok(resp) = client.get(format!("{}/api/tasks/{}", base, task_id)).send() {
+        if let Ok(resp) = client.get(format!("{}/api/tasks/{}", base, run.task_id)).send() {
             if resp.status().is_success() {
                 if let Ok(json) = resp.json::<serde_json::Value>() {
-                    let status = json.get("status").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-                    let message = json.get("progress").and_then(|p| p.as_array()).and_then(|a| a.last()).and_then(|e| e.get("message").and_then(|m| m.as_str())).unwrap_or("").to_string();
-                    self.calendar_run_detail = Some((status, message));
+                    let task_status = json.get("status").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                    let created_at = json.get("created_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let updated_at = json.get("updated_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let progress: Vec<(u8, String)> = json.get("progress")
+                        .and_then(|p| p.as_array())
+                        .map(|arr| arr.iter().filter_map(|e| {
+                            let pct = e.get("progress_pct").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+                            let msg = e.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            Some((pct, msg))
+                        }).collect())
+                        .unwrap_or_default();
+                    self.calendar_run_detail = Some(CalendarRunDetail {
+                        run_status: run.status.clone(),
+                        run_started_at: run.started_at.clone(),
+                        run_ended_at: run.ended_at.clone(),
+                        task_status,
+                        created_at,
+                        updated_at,
+                        progress,
+                        schedule_id: run.schedule_id.clone(),
+                    });
                     return;
                 }
             }
         }
         self.calendar_run_detail = None;
+    }
+
+    fn fetch_schedule_detail(&mut self, schedule_id: &str) {
+        let base = daemon_base_url(self.port);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_default();
+        if let Ok(resp) = client.get(format!("{}/api/schedules/{}", base, schedule_id)).send() {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>() {
+                    let id = json.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let name = json.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let description = json.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let channel_context = json.get("channel_context").and_then(|v| v.as_str()).map(String::from);
+                    let enabled = json.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let interval_seconds = json.get("interval_seconds").and_then(|v| v.as_u64());
+                    let timezone = json.get("timezone").and_then(|v| v.as_str()).map(String::from);
+                    let rrule = json.get("rrule").and_then(|v| v.as_str()).map(String::from);
+                    self.calendar_schedule_detail = Some(ScheduleDetail {
+                        id,
+                        name,
+                        description,
+                        channel_context,
+                        enabled,
+                        interval_seconds,
+                        timezone,
+                        rrule,
+                    });
+                    return;
+                }
+            }
+        }
+        self.calendar_schedule_detail = None;
     }
 
     fn fetch_calendar(&mut self) {
@@ -415,6 +514,7 @@ impl App {
         self.calendar_task_runs.clear();
         self.calendar_selected_run = None;
         self.calendar_run_detail = None;
+        self.calendar_schedule_detail = None;
         if let Ok(resp) = client.get(format!("{}/api/schedules", base)).send() {
             if resp.status().is_success() {
                 if let Ok(json) = resp.json::<serde_json::Value>() {
@@ -427,9 +527,10 @@ impl App {
                             self.calendar_schedules.push((id, name, enabled, interval_seconds));
                         }
                     }
-                }
-            }
-        }
+                            }
+                        }
+                    }
+        self.calendar_schedule_index = self.calendar_schedule_index.min(self.calendar_schedules.len().saturating_sub(1));
         if let Ok(resp) = client.get(format!("{}/api/task_runs", base)).send() {
             if resp.status().is_success() {
                 if let Ok(json) = resp.json::<serde_json::Value>() {
@@ -439,7 +540,18 @@ impl App {
                             let status = r.get("status").and_then(|v| v.as_str()).unwrap_or("?").to_string();
                             let planned_for = r.get("planned_for").and_then(|v| v.as_str()).unwrap_or("").to_string();
                             let task_id = r.get("task_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            self.calendar_task_runs.push((id, status, planned_for, task_id));
+                            let schedule_id = r.get("schedule_id").and_then(|v| v.as_str()).map(String::from);
+                            let started_at = r.get("started_at").and_then(|v| v.as_str()).map(String::from);
+                            let ended_at = r.get("ended_at").and_then(|v| v.as_str()).map(String::from);
+                            self.calendar_task_runs.push(CalendarTaskRun {
+                                id,
+                                status,
+                                planned_for,
+                                task_id,
+                                schedule_id,
+                                started_at,
+                                ended_at,
+                            });
                         }
                     }
                 }
@@ -1736,7 +1848,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             let mut lines: Vec<Line<'static>> = vec![
                 Line::from(""),
                 Line::from(Span::styled(
-                    " Récurrences (schedules) — R = actualiser ",
+                    " Récurrences (schedules) — Tab = basculer ↑↓ = sélectionner · R = actualiser ",
                     Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
@@ -1744,11 +1856,16 @@ fn ui(f: &mut Frame, app: &mut App) {
             if app.calendar_schedules.is_empty() {
                 lines.push(Line::from(Span::styled("  Aucune récurrence.", Style::default().fg(theme.palette().muted))));
             } else {
-                for (id, name, enabled, interval_secs) in &app.calendar_schedules {
+                for (i, (id, name, enabled, interval_secs)) in app.calendar_schedules.iter().enumerate() {
                     let short_id = if id.len() > 8 { format!("…{}", &id[id.len()-8..]) } else { id.clone() };
                     let status = if *enabled { "activée" } else { "en pause" };
                     let interval = interval_secs.map(|s| format!(" — {}s", s)).unwrap_or_default();
-                    lines.push(Line::from(format!("  {}  {}  {}  {}", short_id, name, status, interval)));
+                    let sel = app.calendar_focus_schedules && app.calendar_schedule_index == i;
+                    let style = if sel { Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme.palette().fg) };
+                    lines.push(Line::from(Span::styled(
+                        format!("  {} {}  {}  {}", if sel { "►" } else { " " }, short_id, name, format!("{} {}", status, interval)),
+                        style,
+                    )));
                 }
             }
             lines.push(Line::from(""));
@@ -1760,25 +1877,76 @@ fn ui(f: &mut Frame, app: &mut App) {
             if app.calendar_task_runs.is_empty() {
                 lines.push(Line::from(Span::styled("  Aucun run. ↑↓ = sélectionner.", Style::default().fg(theme.palette().muted))));
             } else {
-                for (i, (id, status, planned_for, task_id)) in app.calendar_task_runs.iter().enumerate() {
-                    let short_id = if id.len() > 8 { &id[id.len()-8..] } else { id.as_str() };
-                    let short_task = if task_id.len() > 8 { format!("…{}", &task_id[task_id.len()-8..]) } else { task_id.clone() };
-                    let planned = if planned_for.len() >= 19 { &planned_for[..19] } else { planned_for.as_str() };
-                    let sel = app.calendar_selected_run == Some(i);
+                for (i, run) in app.calendar_task_runs.iter().enumerate() {
+                    let short_id = if run.id.len() > 8 { &run.id[run.id.len()-8..] } else { run.id.as_str() };
+                    let short_task = if run.task_id.len() > 8 { format!("…{}", &run.task_id[run.task_id.len()-8..]) } else { run.task_id.clone() };
+                    let planned = if run.planned_for.len() >= 19 { &run.planned_for[..19] } else { run.planned_for.as_str() };
+                    let sel = !app.calendar_focus_schedules && app.calendar_selected_run == Some(i);
                     let style = if sel { Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme.palette().fg) };
                     lines.push(Line::from(Span::styled(
-                        format!("  {} {}  {}  {}  task {}", if sel { "►" } else { " " }, short_id, status, planned, short_task),
+                        format!("  {} {}  {}  {}  task {}  {}", if sel { "►" } else { " " }, short_id, run.status, planned, short_task, run.schedule_id.as_ref().map(|s| format!("sched…{}", if s.len() > 8 { &s[s.len()-8..] } else { s })).unwrap_or_default()),
                         style,
                     )));
                 }
             }
-            if let Some((status, message)) = &app.calendar_run_detail {
+            if let Some(sched) = &app.calendar_schedule_detail {
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled("  Détail tâche sélectionnée", Style::default().fg(theme.palette().accent))));
-                lines.push(Line::from(format!("  Statut : {}", status)));
-                if !message.is_empty() {
-                    for line in message.lines().take(10) {
-                        lines.push(Line::from(format!("  {}", line)));
+                lines.push(Line::from(Span::styled("  Détail récurrence sélectionnée", Style::default().fg(theme.palette().accent))));
+                lines.push(Line::from(format!("  ID (supprimer: /schedule delete <id>) : {}", sched.id)));
+                lines.push(Line::from(format!("  Nom : {}  │  État : {}", sched.name, if sched.enabled { "activée" } else { "en pause" })));
+                if let Some(secs) = sched.interval_seconds {
+                    lines.push(Line::from(format!("  Intervalle : {} s", secs)));
+                }
+                if let Some(ref tz) = sched.timezone {
+                    lines.push(Line::from(format!("  Fuseau : {}", tz)));
+                }
+                if let Some(ref rrule) = sched.rrule {
+                    if !rrule.is_empty() {
+                        lines.push(Line::from(format!("  Règle : {}", rrule)));
+                    }
+                }
+                let demand = sched.channel_context.as_deref().unwrap_or(sched.description.as_str());
+                if !demand.is_empty() {
+                    lines.push(Line::from(Span::styled("  Demande envoyée aux agents :", Style::default().fg(theme.palette().warning))));
+                    for line in demand.lines().take(8) {
+                        lines.push(Line::from(format!("    {}", line)));
+                    }
+                }
+            }
+            if let Some(d) = &app.calendar_run_detail {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("  Détail run/tâche sélectionné", Style::default().fg(theme.palette().accent))));
+                let run_label = match d.run_status.as_str() {
+                    "completed" => "Terminé",
+                    "failed" => "Échec",
+                    "cancelled" => "Annulé",
+                    "running" => "En cours",
+                    "queued" => "En attente",
+                    _ => d.run_status.as_str(),
+                };
+                lines.push(Line::from(format!("  Exécution (run) : {}  │  Tâche (orchestrateur) : {}", run_label, d.task_status)));
+                if let Some(ref sid) = d.schedule_id {
+                    if let Some((_, name, _, _)) = app.calendar_schedules.iter().find(|(id, _, _, _)| id == sid) {
+                        lines.push(Line::from(format!("  Récurrence parente : {}", name)));
+                    }
+                }
+                if !d.created_at.is_empty() {
+                    lines.push(Line::from(format!("  Créé : {}", if d.created_at.len() >= 19 { &d.created_at[..19] } else { &d.created_at })));
+                }
+                if !d.updated_at.is_empty() {
+                    lines.push(Line::from(format!("  Dernière MAJ : {}", if d.updated_at.len() >= 19 { &d.updated_at[..19] } else { &d.updated_at })));
+                }
+                if let (Some(ref st), Some(ref end)) = (&d.run_started_at, &d.run_ended_at) {
+                    if let (Ok(s), Ok(e)) = (chrono::DateTime::parse_from_rfc3339(st), chrono::DateTime::parse_from_rfc3339(end)) {
+                        let secs = (e - s).num_seconds();
+                        let dur = if secs < 60 { format!("{} s", secs) } else { format!("{} min {} s", secs / 60, secs % 60) };
+                        lines.push(Line::from(format!("  Terminé à : {}  │  Durée : {}", &end[..end.len().min(19)], dur)));
+                    }
+                }
+                if let Some((_, last_msg)) = d.progress.last().map(|(p, m)| (*p, m.as_str())) {
+                    lines.push(Line::from(Span::styled("  Réponse agent :", Style::default().fg(theme.palette().success))));
+                    for line in last_msg.lines().take(6) {
+                        lines.push(Line::from(format!("    {}", line)));
                     }
                 }
             }
@@ -1973,6 +2141,23 @@ fn run_app(
                 }
                 match (app.mode, key.code, key.modifiers) {
                     (_, KeyCode::Esc, _) | (_, KeyCode::Char('q'), KeyModifiers::CONTROL) => return Ok(()),
+                    (Mode::Calendar, KeyCode::Tab, _) => {
+                        app.calendar_focus_schedules = !app.calendar_focus_schedules;
+                        if app.calendar_focus_schedules {
+                            app.calendar_schedule_index = app.calendar_schedule_index.min(app.calendar_schedules.len().saturating_sub(1));
+                            let id_opt = app.calendar_schedules.get(app.calendar_schedule_index).map(|(id, _, _, _)| id.clone());
+                            if let Some(id) = id_opt {
+                                app.fetch_schedule_detail(&id);
+                            } else {
+                                app.calendar_schedule_detail = None;
+                            }
+                        } else if let Some(i) = app.calendar_selected_run {
+                            let run_opt = app.calendar_task_runs.get(i).cloned();
+                            if let Some(run) = run_opt {
+                                app.fetch_calendar_run_detail(&run);
+                            }
+                        }
+                    }
                     (_, KeyCode::Tab, _) => {
                         app.mode = match app.mode {
                             Mode::Chat => Mode::Router,
@@ -2149,33 +2334,55 @@ fn run_app(
                         app.fetch_calendar();
                     }
                     (Mode::Calendar, KeyCode::Up, _) => {
-                        let n = app.calendar_task_runs.len();
-                        if n > 0 {
-                            app.calendar_selected_run = Some(match app.calendar_selected_run {
-                                None => n - 1,
-                                Some(i) if i > 0 => i - 1,
-                                Some(i) => i,
-                            });
-                            if let Some(i) = app.calendar_selected_run {
-                                if let Some((_, _, _, ref task_id)) = app.calendar_task_runs.get(i) {
-                                    let tid = task_id.clone();
-                                    app.fetch_calendar_run_detail(&tid);
+                        if app.calendar_focus_schedules {
+                            let n = app.calendar_schedules.len();
+                            if n > 0 {
+                                app.calendar_schedule_index = app.calendar_schedule_index.saturating_sub(1).min(n - 1);
+                                let id_opt = app.calendar_schedules.get(app.calendar_schedule_index).map(|(id, _, _, _)| id.clone());
+                                if let Some(id) = id_opt {
+                                    app.fetch_schedule_detail(&id);
+                                }
+                            }
+                        } else {
+                            let n = app.calendar_task_runs.len();
+                            if n > 0 {
+                                app.calendar_selected_run = Some(match app.calendar_selected_run {
+                                    None => n - 1,
+                                    Some(i) if i > 0 => i - 1,
+                                    Some(i) => i,
+                                });
+                                if let Some(i) = app.calendar_selected_run {
+                                    let run_opt = app.calendar_task_runs.get(i).cloned();
+                                    if let Some(run) = run_opt {
+                                        app.fetch_calendar_run_detail(&run);
+                                    }
                                 }
                             }
                         }
                     }
                     (Mode::Calendar, KeyCode::Down, _) => {
-                        let n = app.calendar_task_runs.len();
-                        if n > 0 {
-                            app.calendar_selected_run = Some(match app.calendar_selected_run {
-                                None => 0,
-                                Some(i) if i + 1 < n => i + 1,
-                                Some(i) => i,
-                            });
-                            if let Some(i) = app.calendar_selected_run {
-                                if let Some((_, _, _, ref task_id)) = app.calendar_task_runs.get(i) {
-                                    let tid = task_id.clone();
-                                    app.fetch_calendar_run_detail(&tid);
+                        if app.calendar_focus_schedules {
+                            let n = app.calendar_schedules.len();
+                            if n > 0 {
+                                app.calendar_schedule_index = (app.calendar_schedule_index + 1).min(n - 1);
+                                let id_opt = app.calendar_schedules.get(app.calendar_schedule_index).map(|(id, _, _, _)| id.clone());
+                                if let Some(id) = id_opt {
+                                    app.fetch_schedule_detail(&id);
+                                }
+                            }
+                        } else {
+                            let n = app.calendar_task_runs.len();
+                            if n > 0 {
+                                app.calendar_selected_run = Some(match app.calendar_selected_run {
+                                    None => 0,
+                                    Some(i) if i + 1 < n => i + 1,
+                                    Some(i) => i,
+                                });
+                                if let Some(i) = app.calendar_selected_run {
+                                    let run_opt = app.calendar_task_runs.get(i).cloned();
+                                    if let Some(run) = run_opt {
+                                        app.fetch_calendar_run_detail(&run);
+                                    }
                                 }
                             }
                         }
