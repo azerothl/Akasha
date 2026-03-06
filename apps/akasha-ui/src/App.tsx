@@ -769,8 +769,10 @@ function App() {
                       <span className="role" aria-hidden>
                         {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : "Akasha"}
                       </span>
-                      <div className="text" style={{ whiteSpace: "pre-wrap" }}>
-                        {m.text}
+                      <div className="text markdown-rendered">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {m.text}
+                        </ReactMarkdown>
                       </div>
                     </div>
                   ))}
@@ -1198,7 +1200,9 @@ function App() {
                               return last ? (
                                 <div className="task-detail-reply">
                                   <strong>Réponse de l'agent:</strong>
-                                  <div className="task-detail-reply-content">{last}</div>
+                                  <div className="task-detail-reply-content markdown-rendered">
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{last}</ReactMarkdown>
+                                  </div>
                                 </div>
                               ) : null;
                             })()}
@@ -1276,8 +1280,10 @@ function App() {
                             {(scheduleDetail.channel_context ?? scheduleDetail.description) ? (
                               <div className="task-detail-reply">
                                 <strong>Demande envoyée aux agents à chaque itération:</strong>
-                                <div className="task-detail-reply-content">
-                                  {scheduleDetail.channel_context ?? scheduleDetail.description}
+                                <div className="task-detail-reply-content markdown-rendered">
+                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                    {scheduleDetail.channel_context ?? scheduleDetail.description}
+                                  </ReactMarkdown>
                                 </div>
                               </div>
                             ) : (

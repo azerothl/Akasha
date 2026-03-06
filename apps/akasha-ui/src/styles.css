@@ -421,6 +421,145 @@ body {
   color: #e4e4e7;
 }
 
+/* Markdown in chat messages and task reply content */
+.chat-panel .message .markdown-rendered,
+.task-detail-reply-content.markdown-rendered {
+  white-space: normal;
+}
+
+.chat-panel .message .markdown-rendered h1,
+.task-detail-reply-content.markdown-rendered h1 {
+  margin: 1rem 0 0.5rem;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #e4e4e7;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid #3f3f46;
+}
+
+.chat-panel .message .markdown-rendered h1:first-child,
+.task-detail-reply-content.markdown-rendered h1:first-child {
+  margin-top: 0;
+}
+
+.chat-panel .message .markdown-rendered h2,
+.task-detail-reply-content.markdown-rendered h2 {
+  margin: 0.85rem 0 0.4rem;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #a1a1aa;
+}
+
+.chat-panel .message .markdown-rendered h3,
+.task-detail-reply-content.markdown-rendered h3 {
+  margin: 0.75rem 0 0.35rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #a1a1aa;
+}
+
+.chat-panel .message .markdown-rendered p,
+.task-detail-reply-content.markdown-rendered p {
+  margin: 0.4rem 0;
+  color: #d4d4d8;
+}
+
+.chat-panel .message .markdown-rendered ul,
+.chat-panel .message .markdown-rendered ol,
+.task-detail-reply-content.markdown-rendered ul,
+.task-detail-reply-content.markdown-rendered ol {
+  margin: 0.4rem 0;
+  padding-left: 1.5rem;
+  color: #d4d4d8;
+}
+
+.chat-panel .message .markdown-rendered li,
+.task-detail-reply-content.markdown-rendered li {
+  margin: 0.2rem 0;
+}
+
+.chat-panel .message .markdown-rendered pre,
+.task-detail-reply-content.markdown-rendered pre {
+  margin: 0.5rem 0;
+  padding: 0.75rem;
+  background: #27272a;
+  border-radius: 6px;
+  border: 1px solid #3f3f46;
+  overflow-x: auto;
+}
+
+.chat-panel .message .markdown-rendered pre code,
+.chat-panel .message .markdown-rendered code,
+.task-detail-reply-content.markdown-rendered pre code,
+.task-detail-reply-content.markdown-rendered code {
+  background: #27272a;
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  font-size: 0.8125rem;
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, monospace;
+}
+
+.chat-panel .message .markdown-rendered pre code,
+.task-detail-reply-content.markdown-rendered pre code {
+  padding: 0;
+  background: transparent;
+  display: block;
+}
+
+.chat-panel .message .markdown-rendered table,
+.task-detail-reply-content.markdown-rendered table {
+  width: 100%;
+  margin: 0.5rem 0;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.chat-panel .message .markdown-rendered th,
+.chat-panel .message .markdown-rendered td,
+.task-detail-reply-content.markdown-rendered th,
+.task-detail-reply-content.markdown-rendered td {
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  border: 1px solid #3f3f46;
+  color: #d4d4d8;
+}
+
+.chat-panel .message .markdown-rendered th,
+.task-detail-reply-content.markdown-rendered th {
+  background: #27272a;
+  font-weight: 600;
+  color: #e4e4e7;
+}
+
+.chat-panel .message .markdown-rendered tr:nth-child(even) td,
+.task-detail-reply-content.markdown-rendered tr:nth-child(even) td {
+  background: rgba(39, 39, 42, 0.5);
+}
+
+.chat-panel .message .markdown-rendered hr,
+.task-detail-reply-content.markdown-rendered hr {
+  margin: 0.75rem 0;
+  border: none;
+  border-top: 1px solid #3f3f46;
+}
+
+.chat-panel .message .markdown-rendered a,
+.task-detail-reply-content.markdown-rendered a {
+  color: #6366f1;
+  text-decoration: none;
+}
+
+.chat-panel .message .markdown-rendered a:hover,
+.task-detail-reply-content.markdown-rendered a:hover {
+  text-decoration: underline;
+}
+
+.chat-panel .message .markdown-rendered strong,
+.task-detail-reply-content.markdown-rendered strong {
+  font-weight: 600;
+  color: #e4e4e7;
+}
+
 .docs-panel .refresh-btn {
   margin-bottom: 1rem;
   padding: 0.5rem 1rem;
