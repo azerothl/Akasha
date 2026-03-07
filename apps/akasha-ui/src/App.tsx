@@ -798,7 +798,7 @@ function App() {
             try {
               const [raw, eventsData, humanInputData] = await Promise.all([
                 invoke<string>("get_task_status", { taskId, port: DAEMON_PORT }),
-                invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> }>("get_task_events", { task_id: taskId, port: DAEMON_PORT }).catch(() => ({ events: [] })),
+                invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> }>("get_task_events", { taskId, port: DAEMON_PORT }).catch(() => ({ events: [] })),
                 invoke<{ question?: string; context?: string; choices?: string[] }>("get_task_human_input", { taskId, port: DAEMON_PORT }).catch(() => null),
               ]);
               const status = JSON.parse(raw) as { status?: string; progress?: Array<{ progress_pct?: number; message?: string }> };
