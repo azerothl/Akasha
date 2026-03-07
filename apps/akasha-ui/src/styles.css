@@ -1464,14 +1464,14 @@ body {
 }
 
 .memory-subtab:hover {
-  color: var(--akasha-text, #fafafa);
-  background: #3f3f46;
+  color: var(--akasha-text);
+  background: var(--akasha-bg-surface-hover);
 }
 
 .memory-subtab.active {
-  color: var(--akasha-text, #fafafa);
-  background: #3f3f46;
-  border-color: #52525b;
+  color: var(--akasha-text);
+  background: var(--akasha-bg-surface-hover);
+  border-color: var(--akasha-bg-surface-hover);
 }
 
 .memory-subpanel {
