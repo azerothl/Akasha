@@ -59,6 +59,42 @@ function formatDurationSec(sec: number): string {
   return s > 0 ? `${m} min ${s} s` : `${m} min`;
 }
 
+/** Parse "TOOL: ask_user" + JSON from assistant message text. Returns null if not present or invalid. */
+function parseAskUserMessage(
+  text: string
+): { question: string; context?: string; choices?: string[] } | null {
+  if (!text?.includes("ask_user")) return null;
+  const i = text.indexOf("{");
+  if (i === -1) return null;
+  let depth = 0;
+  let end = -1;
+  for (let j = i; j < text.length; j++) {
+    if (text[j] === "{") depth++;
+    else if (text[j] === "}") {
+      depth--;
+      if (depth === 0) {
+        end = j;
+        break;
+      }
+    }
+  }
+  if (end === -1) return null;
+  try {
+    const obj = JSON.parse(text.slice(i, end + 1)) as Record<string, unknown>;
+    const question = obj.question ?? "";
+    if (typeof question !== "string" || !question.trim()) return null;
+    return {
+      question: String(question).trim(),
+      context: obj.context != null ? String(obj.context).trim() : undefined,
+      choices: Array.isArray(obj.choices)
+        ? (obj.choices as unknown[]).map((c) => String(c))
+        : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 interface HealthState {
   ok: boolean;
   port?: number;
@@ -106,6 +142,8 @@ function App() {
   /** Task id for which the human-input modal is open (null = closed). */
   const [humanInputModalTaskId, setHumanInputModalTaskId] = useState<string | null>(null);
   const [humanInputFreeText, setHumanInputFreeText] = useState("");
+  /** Reply text for the inline ask_user form in the chat (when modal is not used). */
+  const [inlineHumanReplyText, setInlineHumanReplyText] = useState("");
   const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(true);
   const [schedules, setSchedules] = useState<Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>>([]);
   const [taskRuns, setTaskRuns] = useState<Array<{
@@ -149,6 +187,8 @@ function App() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
+  /** Tasks for which we already auto-opened the human-input modal (avoid re-opening every poll). */
+  const humanInputAutoOpenedRef = useRef<Set<string>>(new Set());
 
   const checkHealth = useCallback(async () => {
     try {
@@ -806,17 +846,23 @@ function App() {
               setRunningTaskEvents((prev) => (prev[taskId] !== undefined ? { ...prev, [taskId]: events } : prev));
               if (humanInputData?.question) {
                 setPendingHumanInput((prev) => ({ ...prev, [taskId]: { question: humanInputData.question ?? "", context: humanInputData.context ?? "", choices: humanInputData.choices } }));
+                if (!humanInputAutoOpenedRef.current.has(taskId)) {
+                  humanInputAutoOpenedRef.current.add(taskId);
+                  setHumanInputModalTaskId(taskId);
+                }
               } else {
                 setPendingHumanInput((prev) => {
                   const next = { ...prev };
                   delete next[taskId];
                   return next;
                 });
+                humanInputAutoOpenedRef.current.delete(taskId);
               }
               if (status?.status === "completed") {
                 setRunningTaskChips((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
                 setRunningTaskEvents((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
                 setPendingHumanInput((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+                humanInputAutoOpenedRef.current.delete(taskId);
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 const finalMsg = status?.progress?.slice(-1)[0]?.message ?? "Terminé.";
                 setMessages((prev) => [...prev, { role: "assistant", text: finalMsg }]);
@@ -826,6 +872,7 @@ function App() {
                 setRunningTaskChips((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
                 setRunningTaskEvents((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
                 setPendingHumanInput((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+                humanInputAutoOpenedRef.current.delete(taskId);
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 setMessages((prev) => [...prev, { role: "assistant", text: "Tâche en échec.", error: true }]);
                 return;
@@ -977,27 +1024,51 @@ function App() {
                       </div>
                     </div>
                   ))}
-                  {messages.map((m, i) => (
-                    <div
-                      key={i}
-                      className={`message ${m.role} ${m.error ? "error" : ""}`}
-                    >
-                      <span className="role" aria-hidden>
-                        {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : "Akasha"}
-                      </span>
-                      {m.role === "system" ? (
-                        <div className="text system-text" style={{ whiteSpace: "pre-wrap" }}>
-                          {m.text}
-                        </div>
-                      ) : (
-                        <div className="text markdown-rendered">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {messages.map((m, i) => {
+                    const askUserData = m.role === "assistant" ? parseAskUserMessage(m.text) : null;
+                    return (
+                      <div
+                        key={i}
+                        className={`message ${m.role} ${m.error ? "error" : ""} ${askUserData ? "message-ask-user" : ""}`}
+                      >
+                        <span className="role" aria-hidden>
+                          {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : "Akasha"}
+                        </span>
+                        {m.role === "system" ? (
+                          <div className="text system-text" style={{ whiteSpace: "pre-wrap" }}>
                             {m.text}
-                          </ReactMarkdown>
-                        </div>
-                      )}
-                    </div>
-                  ))}
+                          </div>
+                        ) : askUserData ? (
+                          <div className="message-ask-user-card">
+                            <div className="message-ask-user-question markdown-rendered">
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                {askUserData.question}
+                              </ReactMarkdown>
+                            </div>
+                            {askUserData.context && (
+                              <p className="message-ask-user-context">{askUserData.context}</p>
+                            )}
+                            {askUserData.choices?.length ? (
+                              <div className="message-ask-user-choices">
+                                {askUserData.choices.map((choice, j) => (
+                                  <span key={j} className="message-ask-user-choice-tag">
+                                    {choice}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null}
+                            <p className="message-ask-user-hint">Répondre dans le formulaire sous le chat ou via « Action requise » sur la tâche.</p>
+                          </div>
+                        ) : (
+                          <div className="text markdown-rendered">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {m.text}
+                            </ReactMarkdown>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </>
               )}
               {(loading || Object.keys(runningTaskChips).length > 0) && (
@@ -1010,10 +1081,15 @@ function App() {
                   )}
                   {Object.keys(runningTaskChips).length > 0 && (
                     <div className="chat-chips">
-                      {Object.entries(runningTaskChips).map(([tid, { pct, message }]) => (
+                      {Object.entries(runningTaskChips).map(([tid, { pct, message }]) => {
+                        const chipAskUser = parseAskUserMessage(message ?? "");
+                        const chipLabel = chipAskUser
+                          ? "Question en attente — répondez ci‑dessous"
+                          : (message ?? "en cours");
+                        return (
                         <span key={tid} className="task-chip">
                           <span className="task-chip-spinner" aria-hidden />
-                          Task #{tid.slice(-8)} {pct != null ? `(${pct}%)` : ""} {message ?? "en cours"}
+                          Task #{tid.slice(-8)} {pct != null ? `(${pct}%)` : ""} {chipLabel}
                           {pendingHumanInput[tid] && (
                             <button
                               type="button"
@@ -1025,7 +1101,8 @@ function App() {
                             </button>
                           )}
                         </span>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -1093,6 +1170,75 @@ function App() {
               )}
               <div ref={chatEndRef} aria-hidden />
             </div>
+            {Object.keys(pendingHumanInput).length > 0 && !humanInputModalTaskId && (
+              <div className="chat-human-input-banner" role="status">
+                Une question vous attend — répondez ci-dessous ou cliquez sur « Action requise » sur la tâche.
+              </div>
+            )}
+            {Object.keys(pendingHumanInput).length > 0 && !humanInputModalTaskId && (() => {
+              const pendingTaskId = Object.keys(pendingHumanInput)[0];
+              const pending = pendingTaskId ? pendingHumanInput[pendingTaskId] : null;
+              if (!pending || !pendingTaskId) return null;
+              return (
+                <div className="chat-inline-human-reply" role="form" aria-labelledby="inline-reply-label">
+                  <h3 id="inline-reply-label" className="chat-inline-human-reply-title">Répondre à l&apos;agent</h3>
+                  <p className="chat-inline-human-reply-question">{pending.question}</p>
+                  {pending.context && <p className="chat-inline-human-reply-context">{pending.context}</p>}
+                  {pending.choices?.length ? (
+                    <div className="chat-inline-human-reply-choices">
+                      {pending.choices.map((choice, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          className="chat-inline-human-reply-choice-btn"
+                          onClick={async () => {
+                            try {
+                              await invoke("post_task_human_reply", { taskId: pendingTaskId, response: choice, port: DAEMON_PORT });
+                              setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskId]; return next; });
+                              setHumanInputModalTaskId((c) => (c === pendingTaskId ? null : c));
+                            } catch (e) {
+                              console.error(e);
+                            }
+                          }}
+                        >
+                          {choice}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="chat-inline-human-reply-free">
+                      <label htmlFor="inline-human-reply-input" className="sr-only">Votre réponse</label>
+                      <input
+                        id="inline-human-reply-input"
+                        type="text"
+                        value={inlineHumanReplyText}
+                        onChange={(e) => setInlineHumanReplyText(e.target.value)}
+                        placeholder="Saisissez votre réponse…"
+                        onKeyDown={(e) => e.key === "Enter" && document.getElementById("inline-human-reply-submit")?.click()}
+                      />
+                      <button
+                        id="inline-human-reply-submit"
+                        type="button"
+                        onClick={async () => {
+                          const text = inlineHumanReplyText.trim();
+                          if (!text) return;
+                          try {
+                            await invoke("post_task_human_reply", { taskId: pendingTaskId, response: text, port: DAEMON_PORT });
+                            setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskId]; return next; });
+                            setHumanInputModalTaskId((c) => (c === pendingTaskId ? null : c));
+                            setInlineHumanReplyText("");
+                          } catch (e) {
+                            console.error(e);
+                          }
+                        }}
+                      >
+                        Envoyer la réponse
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             <div className="input-area">
               <label htmlFor="chat-input" className="sr-only">
                 Votre message
