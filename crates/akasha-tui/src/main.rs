@@ -41,7 +41,7 @@ fn load_theme_from_disk() -> Option<ThemeName> {
     let path = akasha_data_dir().join(TUI_THEME_FILENAME);
     let s = std::fs::read_to_string(&path).ok()?;
     let s = s.trim();
-    ThemeName::from_str(s)
+    ThemeName::parse(s)
 }
 
 fn save_theme_to_disk(theme: ThemeName) {
@@ -2132,7 +2132,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .border_style(theme.block_border());
             app.calendar_content_rect = Some(list_area);
             f.render_widget(
-                Paragraph::new(list_lines).block(list_block).wrap(Wrap { trim: true }).scroll((app.scroll as u16, 0)),
+                Paragraph::new(list_lines).block(list_block).scroll((app.scroll as u16, 0)),
                 list_area,
             );
 
@@ -2402,9 +2402,9 @@ fn run_app(
                                 let actual_line = app.scroll + inner_y as usize;
                                 let n_sched = app.calendar_schedules.len();
                                 let n_runs = app.calendar_task_runs.len();
-                                const SCHEDULE_START: usize = 4;
+                                const SCHEDULE_START: usize = 3;
                                 let schedule_end = SCHEDULE_START + n_sched;
-                                let runs_start = 7 + n_sched;
+                                let runs_start = 6 + n_sched;
                                 let runs_end = runs_start + n_runs;
                                 if actual_line >= SCHEDULE_START && actual_line < schedule_end && n_sched > 0 {
                                     let idx = actual_line - SCHEDULE_START;

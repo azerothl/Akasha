@@ -91,7 +91,7 @@ impl ThemeName {
     }
 
     /// Parse from saved string (e.g. "dracula", "solarized_light").
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "dracula" => Some(Self::Dracula),
             "nord" => Some(Self::Nord),
