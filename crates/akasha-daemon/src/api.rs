@@ -51,22 +51,32 @@ async fn get_task_list(store_path: &Path) -> String {
     json_response("200 OK", &body.to_string())
 }
 
-async fn get_task_events(events: &EventsCache, store_path: &Path, id: Uuid) -> String {
+async fn get_task_events(events: &EventsCache, id: Uuid) -> String {
     let mut list: Vec<TaskEventEntry> = {
         let g = events.read().await;
         g.get(&id)
             .map(|q| q.iter().cloned().collect())
             .unwrap_or_default()
     };
-    // Include child task events so the UI shows sub-agent activity (children emit with their own correlation_id).
-    if let Ok(store) = TaskStore::open(store_path) {
-        if let Ok(children) = store.get_children(id) {
-            let g = events.read().await;
-            for child in &children {
-                if let Some(q) = g.get(&child.id) {
-                    for e in q.iter().cloned() {
-                        list.push(e);
-                    }
+    // Derive child task IDs from SubAgentSpawned events already in the in-memory cache —
+    // avoids reopening SQLite (TaskStore) on every poll cycle (the endpoint is polled ~1.5s).
+    let child_ids: Vec<Uuid> = list
+        .iter()
+        .filter(|e| e.event_type == "sub_agent_spawned")
+        .filter_map(|e| {
+            e.payload
+                .as_ref()
+                .and_then(|p| p.get("task_id"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+        })
+        .collect();
+    if !child_ids.is_empty() {
+        let g = events.read().await;
+        for child_id in child_ids {
+            if let Some(q) = g.get(&child_id) {
+                for e in q.iter().cloned() {
+                    list.push(e);
                 }
             }
         }
@@ -242,11 +252,17 @@ fn message_suggests_external_service(message: &str) -> bool {
         "dépôts",
         " connecte",
         " connect ",
-        " api ",
-        " pr ",
+        // Use specific multi-word phrases to avoid false positives on the bare word "api"
+        // (e.g. "rapide" contains "api" in French, and " pr " matches "prendre", "préparer").
+        "api key",
+        "api token",
+        "rest api",
         "pull request",
-        " issues",
-        "issues ",
+        // Require explicit service context for "issues" to avoid matching everyday French
+        "github issues",
+        "gitlab issues",
+        "open issues",
+        "list issues",
         "token",
         "clé api",
         "credentials",
@@ -2070,7 +2086,7 @@ pub async fn handle_api(
                     return cancel_task(store_path, id, main_agent).await;
                 }
                 if method == "GET" && parts.get(1) == Some(&"events") {
-                    return get_task_events(events, store_path, id).await;
+                    return get_task_events(events, id).await;
                 }
                 // Human in the loop: GET pending question/context/choices for the task
                 if method == "GET" && parts.get(1) == Some(&"human-input") {
