@@ -665,20 +665,46 @@ function App() {
       }
       return lines.length ? lines.join("\n") : "Aucun modèle listé.";
     }
-    if (cmd === "routes") {
-      const routes = await invoke<Record<string, { primary?: { provider?: string; model?: string }; fallback?: Array<{ provider?: string; model?: string }> }>>("get_router_routes", { port });
-      if (!routes || Object.keys(routes).length === 0) return "Aucune route configurée.";
+    function formatRoutes(
+      routes: Record<
+        string,
+        {
+          primary?: { provider?: string; model?: string };
+          fallback?: Array<{ provider?: string; model?: string }>;
+        }
+      >
+    ): string {
       const lines: string[] = ["Modèles par catégorie (primary + fallback)\n"];
       for (const cat of Object.keys(routes).sort()) {
         const t = routes[cat];
-        const primary = t?.primary ? `${t.primary.provider ?? "?"} / ${t.primary.model ?? "?"}` : "(aucun)";
+        const primary = t?.primary
+          ? `${t.primary.provider ?? "?"} / ${t.primary.model ?? "?"}`
+          : "(aucun)";
         lines.push(`  ${cat}:`);
         lines.push(`    primary: ${primary}`);
         const fallback = t?.fallback ?? [];
-        if (fallback.length === 0) lines.push("    fallback: (aucun)");
-        else fallback.forEach((f, i) => lines.push(`    fallback[${i}]: ${f?.provider ?? "?"} / ${f?.model ?? "?"}`));
+        if (fallback.length === 0) {
+          lines.push("    fallback: (aucun)");
+        } else {
+          fallback.forEach((f, i) =>
+            lines.push(`    fallback[${i}]: ${f?.provider ?? "?"} / ${f?.model ?? "?"}`)
+          );
+        }
       }
       return lines.join("\n");
+    }
+    if (cmd === "routes") {
+      const routes = await invoke<
+        Record<
+          string,
+          {
+            primary?: { provider?: string; model?: string };
+            fallback?: Array<{ provider?: string; model?: string }>;
+          }
+        >
+      >("get_router_routes", { port });
+      if (!routes || Object.keys(routes).length === 0) return "Aucune route configurée.";
+      return formatRoutes(routes);
     }
     if (cmd === "config") {
       const sub = parts[1]?.toLowerCase() ?? "";
