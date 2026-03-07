@@ -1471,6 +1471,8 @@ fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
                 organization: None,
                 version: None,
                 always_available: None,
+                site_url: None,
+                app_title: None,
             },
         );
         config.save_to_path(&llm_router_path)?;

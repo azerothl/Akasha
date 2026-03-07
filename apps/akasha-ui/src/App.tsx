@@ -185,8 +185,15 @@ function App() {
   const [memorySubTab, setMemorySubTab] = useState<MemorySubTab>("short");
   const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string }>>([]);
+  const [userRagLoading, setUserRagLoading] = useState(false);
+  const [userRagError, setUserRagError] = useState<string | null>(null);
+  const userRagFileInputRef = useRef<HTMLInputElement>(null);
+  /** Attachments for the next message: images (vision) and documents (text appended to message). */
+  const [attachments, setAttachments] = useState<Array<{ id: string; name: string; typ: "image" | "document"; content_base64: string; mime_type: string }>>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   /** Tasks for which we already auto-opened the human-input modal (avoid re-opening every poll). */
   const humanInputAutoOpenedRef = useRef<Set<string>>(new Set());
 
@@ -434,6 +441,32 @@ function App() {
   useEffect(() => {
     if (tab === "chat") fetchScheduleReports();
   }, [tab, fetchScheduleReports]);
+
+  const fetchUserRagDocuments = useCallback(async () => {
+    setUserRagLoading(true);
+    setUserRagError(null);
+    try {
+      const data = await invoke<{ documents?: Array<{ id?: string; name?: string; mime_type?: string; added_at?: string }> }>(
+        "get_user_rag_documents",
+        { port: DAEMON_PORT }
+      );
+      setUserRagDocuments((data?.documents ?? []).map((d) => ({
+        id: d.id ?? "",
+        name: d.name ?? "",
+        mime_type: d.mime_type ?? "",
+        added_at: d.added_at ?? "",
+      })));
+    } catch (e) {
+      setUserRagError(String(e));
+      setUserRagDocuments([]);
+    } finally {
+      setUserRagLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab === "settings") fetchUserRagDocuments();
+  }, [tab, fetchUserRagDocuments]);
 
   useEffect(() => {
     if (!calendarSelectedTaskId) {
@@ -780,10 +813,48 @@ function App() {
     return `Commande inconnue: /${cmd}. Tapez /help.`;
   };
 
-  const handleSend = async () => {
-    if (!message.trim() || loading) return;
+  const readFileAsBase64 = (file: File): Promise<{ content_base64: string; mime_type: string }> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+        if (match) {
+          resolve({ content_base64: match[2], mime_type: match[1] });
+        } else {
+          reject(new Error("Invalid data URL"));
+        }
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  };
 
-    const userMessage = message.trim();
+  const onAttachFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files?.length) return;
+    const imageMimes = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      try {
+        const { content_base64, mime_type } = await readFileAsBase64(file);
+        const typ = imageMimes.includes(mime_type) ? "image" : "document";
+        setAttachments((prev) => [
+          ...prev,
+          { id: `${Date.now()}-${i}-${file.name}`, name: file.name, typ, content_base64, mime_type },
+        ]);
+      } catch (err) {
+        console.error("Failed to read file", file.name, err);
+      }
+    }
+    e.target.value = "";
+  };
+
+  const handleSend = async () => {
+    const hasContent = message.trim() || attachments.length > 0;
+    if (!hasContent || loading) return;
+
+    const userMessage = message.trim() || "(Pièce(s) jointe(s))";
     setMessages((prev) => [...prev, { role: "user", text: userMessage }]);
     setMessage("");
     chatInputRef.current?.focus();
@@ -806,11 +877,16 @@ function App() {
     }
 
     // Non-blocking: ACK + task_id, then poll in background (FR-025)
+    const attachmentsPayload = attachments.length > 0
+      ? attachments.map((a) => ({ type: a.typ, name: a.name, content_base64: a.content_base64, mime_type: a.mime_type }))
+      : undefined;
+    setAttachments([]);
     setLoading(true);
     try {
       const ack = await invoke<{ task_id: string; session_id: string; message: string }>("send_message_ack", {
         message: userMessage,
         session_id: sessionId,
+        attachments: attachmentsPayload,
         port: DAEMON_PORT,
       });
       setLoading(false);
@@ -1239,7 +1315,40 @@ function App() {
                 </div>
               );
             })()}
+            {attachments.length > 0 && (
+              <div className="chat-attachments">
+                {attachments.map((a) => (
+                  <span key={a.id} className="chat-attachment-chip">
+                    {a.name}
+                    <button
+                      type="button"
+                      aria-label={`Retirer ${a.name}`}
+                      onClick={() => setAttachments((prev) => prev.filter((x) => x.id !== a.id))}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <div className="input-area">
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="image/*,.txt,.md,.pdf,.csv"
+                onChange={onAttachFiles}
+                className="sr-only"
+                aria-hidden
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Joindre un fichier"
+                title="Joindre une image ou un document"
+              >
+                Joindre
+              </button>
               <label htmlFor="chat-input" className="sr-only">
                 Votre message
               </label>
@@ -1256,7 +1365,7 @@ function App() {
               />
               <button
                 onClick={handleSend}
-                disabled={loading || !message.trim()}
+                disabled={loading || (!message.trim() && attachments.length === 0)}
                 aria-label="Envoyer le message"
               >
                 Envoyer
@@ -1995,6 +2104,84 @@ function App() {
                 <code>~/.local/share/akasha</code> (Linux/macOS)
               </dd>
             </dl>
+            <h3 className="settings-subtitle">Mes documents (RAG utilisateur)</h3>
+            <p className="settings-doc muted">
+              Les documents ajoutés ici sont indexés et utilisés par les agents pour répondre à vos questions. Formats supportés : texte (.txt, .md, .csv, .json).
+            </p>
+            {userRagError && (
+              <p className="error-inline" role="alert">{userRagError}</p>
+            )}
+            <input
+              ref={userRagFileInputRef}
+              type="file"
+              accept=".txt,.md,.csv,.json,text/*"
+              className="sr-only"
+              aria-hidden
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                try {
+                  const { content_base64, mime_type } = await new Promise<{ content_base64: string; mime_type: string }>((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                      const dataUrl = reader.result as string;
+                      const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+                      if (match) resolve({ content_base64: match[2], mime_type: match[1] });
+                      else reject(new Error("Invalid file"));
+                    };
+                    reader.onerror = () => reject(reader.error);
+                    reader.readAsDataURL(file);
+                  });
+                  await invoke("add_user_rag_document", {
+                    name: file.name,
+                    content_base64,
+                    mime_type,
+                    port: DAEMON_PORT,
+                  });
+                  fetchUserRagDocuments();
+                } catch (err) {
+                  setUserRagError(String(err));
+                }
+                e.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              className="refresh-btn"
+              onClick={() => userRagFileInputRef.current?.click()}
+              disabled={userRagLoading}
+            >
+              Ajouter un document
+            </button>
+            {userRagLoading && <p className="panel-loading" aria-busy="true">Chargement…</p>}
+            {!userRagLoading && userRagDocuments.length === 0 && (
+              <p className="empty-state">Aucun document. Cliquez sur « Ajouter un document » pour en ajouter.</p>
+            )}
+            {!userRagLoading && userRagDocuments.length > 0 && (
+              <ul className="settings-doc-list" role="list">
+                {userRagDocuments.map((d) => (
+                  <li key={d.id} className="settings-doc-item">
+                    <span className="settings-doc-name">{d.name}</span>
+                    <span className="settings-doc-meta">{d.added_at.slice(0, 10)}</span>
+                    <button
+                      type="button"
+                      className="settings-doc-delete"
+                      aria-label={`Supprimer ${d.name}`}
+                      onClick={async () => {
+                        try {
+                          await invoke("delete_user_rag_document", { id: d.id, port: DAEMON_PORT });
+                          fetchUserRagDocuments();
+                        } catch (err) {
+                          setUserRagError(String(err));
+                        }
+                      }}
+                    >
+                      Supprimer
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
             <p className="settings-doc">
               Configuration : variables d’environnement <code>AKASHA_*</code>,{" "}
               <code>OLLAMA_HOST</code>. Voir l’onglet Documentation pour le guide complet.

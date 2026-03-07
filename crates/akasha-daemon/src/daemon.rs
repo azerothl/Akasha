@@ -187,9 +187,13 @@ impl Daemon {
             .or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
         if let Some(k) = openrouter_key {
             let base_url = openrouter_cfg.as_ref().and_then(|c| c.base_url.clone());
+            let site_url = openrouter_cfg.as_ref().and_then(|c| c.site_url.clone());
+            let app_title = openrouter_cfg.as_ref().and_then(|c| c.app_title.clone());
             llm_router.register_provider(Arc::new(akasha_llm::OpenRouterProvider::new(
                 Some(k),
                 base_url,
+                site_url,
+                app_title,
             )));
             info!("OpenRouter provider registered");
         }
@@ -402,14 +406,15 @@ impl Daemon {
                 let long_term_client = long_term_client.clone();
                 let human_input_store = human_input_store.clone();
                 async move {
-                    while let Some((task_id, message, session_id)) = conv_rx.recv().await {
+                    while let Some(task) = conv_rx.recv().await {
                         run_message_via_llm(
                             bus.clone(),
                             llm_router.clone(),
                             store_path.clone(),
-                            task_id,
-                            message,
-                            session_id,
+                            task.task_id,
+                            task.message,
+                            task.session_id,
+                            task.image_data_urls,
                             Some(short_term.clone()),
                             long_term_client.clone(),
                             tools_executor.clone(),

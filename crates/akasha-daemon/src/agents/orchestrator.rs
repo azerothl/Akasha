@@ -1,7 +1,7 @@
 //! Orchestrator — single entry point: receive (task_id, message), decompose (LLM), delegate to workers, aggregate (Phase E).
 
 use akasha_core::{EventEnvelope, EventType};
-use akasha_llm::{classify_task_type, CompletionRequest, TaskType};
+use akasha_llm::CompletionRequest;
 use akasha_store::{Schedule, ScheduleStore, Task, TaskStatus, TaskStore};
 use chrono::Utc;
 use std::path::Path;
@@ -43,6 +43,7 @@ User request:
         max_tokens: Some(system_max_tokens),
         temperature: Some(0.2),
         preferred_task_type: Some("system".to_string()),
+        image_data_urls: None,
     };
     let decompose_timeout = std::time::Duration::from_secs(120);
     match tokio::time::timeout(decompose_timeout, llm_router.complete(&request)).await {
@@ -110,12 +111,16 @@ impl Orchestrator {
         self: Arc<Self>,
         mut rx: mpsc::Receiver<OrchestratorTask>,
     ) {
-        while let Some((root_task_id, message, session_id)) = rx.recv().await {
+        while let Some(task) = rx.recv().await {
             let bus = self.bus.clone();
             let store_path = self.store_path.clone();
             let conv_tx = self.conversation_tx.clone();
             let progress = self.progress.clone();
             let llm_router = self.llm_router.clone();
+            let root_task_id = task.task_id;
+            let message = task.message;
+            let session_id = task.session_id;
+            let image_data_urls = task.image_data_urls;
             tokio::spawn(async move {
                 if let Err(e) = process_root_task(
                     bus,
@@ -123,6 +128,7 @@ impl Orchestrator {
                     root_task_id,
                     message,
                     session_id,
+                    image_data_urls,
                     conv_tx,
                     progress,
                     llm_router,
@@ -142,6 +148,7 @@ async fn process_root_task(
     root_task_id: Uuid,
     message: String,
     session_id: String,
+    image_data_urls: Option<Vec<String>>,
     conversation_tx: mpsc::Sender<OrchestratorTask>,
     progress: ProgressCache,
     llm_router: Arc<akasha_llm::LLMRouter>,
@@ -165,21 +172,8 @@ async fn process_root_task(
         .with_correlation(root_task_id),
     );
 
-    let mut steps = decompose_request(&llm_router, &message).await;
-    // Align single-step delegation with router classification: if decomposition returned "conversation"
-    // but the user message is classified as code_generation (or other), use that agent type so the UI
-    // and routing stay consistent (e.g. "code moi un hello world" -> agent "code", not "conversation").
-    if steps.len() == 1 && steps[0].0 == "conversation" {
-        let (task_type, _) = classify_task_type(&message);
-        let agent = match task_type {
-            TaskType::CodeGeneration => "code",
-            TaskType::SystemDiagnostic => "search",
-            _ => "conversation",
-        };
-        if agent != "conversation" {
-            steps[0].0 = agent.to_string();
-        }
-    }
+    let steps = decompose_request(&llm_router, &message).await;
+    // Decomposition is fully driven by the LLM; no keyword-based override.
     let _ = bus.send(
         EventEnvelope::new(
             EventType::TaskDecomposed,
@@ -338,7 +332,12 @@ async fn process_root_task(
     // Single subtask (conversation): delegate to conversation worker for root (user sees reply on root_id).
     if steps.len() == 1 && steps[0].0 == "conversation" {
         conversation_tx
-            .send((root_task_id, steps[0].1.clone(), session_id))
+            .send(OrchestratorTask {
+                task_id: root_task_id,
+                message: steps[0].1.clone(),
+                session_id,
+                image_data_urls,
+            })
             .await
             .map_err(|_| anyhow::anyhow!("conversation channel closed"))?;
         return Ok(());
@@ -367,8 +366,15 @@ async fn process_root_task(
             )
             .with_correlation(root_task_id),
         );
-        // Delegate to conversation worker for all types (code/search handled as conversation for now). Pass same session_id for memory.
-        let _ = conversation_tx.send((child_id, sub_message.clone(), session_id.clone())).await;
+        // Delegate to conversation worker for all types (code/search handled as conversation for now). Pass same session_id for memory. No image attachments for sub-steps.
+        let _ = conversation_tx
+            .send(OrchestratorTask {
+                task_id: child_id,
+                message: sub_message.clone(),
+                session_id: session_id.clone(),
+                image_data_urls: None,
+            })
+            .await;
     }
     // Aggregator: when all children are done, collect their replies then ask the conversation LLM to synthesize one structured answer.
     let store_path_buf = store_path.to_path_buf();
@@ -454,6 +460,7 @@ N'ajoute aucune information qui ne figure pas dans les réponses des agents ci-d
                         max_tokens: Some(4096),
                         temperature: Some(0.3),
                         preferred_task_type: Some("conversation".to_string()),
+                        image_data_urls: None,
                     };
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(120),

@@ -58,8 +58,22 @@ struct SendMessageAckResult {
     message: String,
 }
 
+#[derive(serde::Deserialize)]
+struct AttachmentPayload {
+    #[serde(rename = "type")]
+    typ: Option<String>,
+    name: Option<String>,
+    content_base64: Option<String>,
+    mime_type: Option<String>,
+}
+
 #[tauri::command]
-async fn send_message_ack(message: String, session_id: Option<String>, port: Option<u16>) -> Result<SendMessageAckResult, String> {
+async fn send_message_ack(
+    message: String,
+    session_id: Option<String>,
+    attachments: Option<Vec<AttachmentPayload>>,
+    port: Option<u16>,
+) -> Result<SendMessageAckResult, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let base = daemon_base_url(port);
     let url = format!("{}/api/message", base);
@@ -67,10 +81,28 @@ async fn send_message_ack(message: String, session_id: Option<String>, port: Opt
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| e.to_string())?;
-    let body = match session_id.as_deref() {
+    let mut body = match session_id.as_deref() {
         Some(s) if !s.is_empty() => serde_json::json!({ "message": message, "session_id": s }),
         _ => serde_json::json!({ "message": message }),
     };
+    if let Some(ref atts) = attachments {
+        if !atts.is_empty() {
+            let arr: Vec<serde_json::Value> = atts
+                .iter()
+                .map(|a| {
+                    let typ = a.typ.as_deref().unwrap_or("document");
+                    let name = a.name.as_deref().unwrap_or("file");
+                    serde_json::json!({
+                        "type": typ,
+                        "name": name,
+                        "content_base64": a.content_base64.as_deref().unwrap_or(""),
+                        "mime_type": a.mime_type.as_deref().unwrap_or("application/octet-stream")
+                    })
+                })
+                .collect();
+            body["attachments"] = serde_json::Value::Array(arr);
+        }
+    }
     let resp = client
         .post(&url)
         .json(&body)
@@ -769,6 +801,68 @@ async fn get_schedule_run_reports(port: Option<u16>) -> Result<serde_json::Value
     Ok(json)
 }
 
+/// User RAG: GET /api/user-rag/documents
+#[tauri::command]
+async fn get_user_rag_documents(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/user-rag/documents", daemon_base_url(port));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// User RAG: POST /api/user-rag/documents
+#[tauri::command]
+async fn add_user_rag_document(
+    name: String,
+    content_base64: String,
+    mime_type: Option<String>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/user-rag/documents", daemon_base_url(port));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let body = serde_json::json!({
+        "name": name,
+        "content_base64": content_base64,
+        "mime_type": mime_type.unwrap_or_else(|| "application/octet-stream".to_string())
+    });
+    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{} {}", status, text));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// User RAG: DELETE /api/user-rag/documents/:id
+#[tauri::command]
+async fn delete_user_rag_document(id: String, port: Option<u16>) -> Result<(), String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/user-rag/documents/{}", daemon_base_url(port), id.trim());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -793,6 +887,9 @@ pub fn run() {
             get_memory_long_term,
             delete_memory_long_term,
             get_schedule_run_reports,
+            get_user_rag_documents,
+            add_user_rag_document,
+            delete_user_rag_document,
             get_docs,
             get_config,
             set_config,

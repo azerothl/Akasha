@@ -241,101 +241,6 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
         .join(" ; ")
 }
 
-/// True if the user message suggests they want data from an external service (repo, API, etc.).
-fn message_suggests_external_service(message: &str) -> bool {
-    let m = message.to_lowercase();
-    const KEYWORDS: &[&str] = &[
-        " repo ",
-        "github",
-        "gitlab",
-        "dépôt",
-        "dépôts",
-
-    // Keywords that should match as standalone words (case-insensitive).
-    const WHOLE_WORD_KEYWORDS: &[&str] = &[
-        "repo",
-        "github",
-        "gitlab",
-        "dépôt",
-        "dépôts",
-        "api",
-        "pr",
-        "issues",
-        "token",
-        "credentials",
-    ];
-
-    // Substring patterns that are meaningful even inside longer phrases.
-    const SUBSTRING_KEYWORDS: &[&str] = &[
-        " connecte",
-        " connect ",
-        "pull request",
-        "clé api",
-        "authentif",
-    ];
-
-    // Tokenize the message into "words" to detect standalone keywords more reliably.
-    let mut words = Vec::new();
-    let mut current = String::new();
-    for ch in m.chars() {
-        if ch.is_alphanumeric() || ch == '\'' {
-            current.push(ch);
-        } else if !current.is_empty() {
-            words.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        words.push(current);
-    }
-
-    // First, check for whole-word matches.
-    if words
-        .iter()
-        .any(|w| WHOLE_WORD_KEYWORDS.contains(&w.as_str()))
-    {
-        return true;
-    }
-
-    // Then, fall back to substring-based heuristics.
-    SUBSTRING_KEYWORDS.iter().any(|k| m.contains(k))
-}
-
-const EXTERNAL_SERVICE_REMINDER: &str = "\n\n[Rappel] L'utilisateur demande des données depuis un service externe. Tu DOIS répondre UNIQUEMENT par un appel à l'outil TOOL: ask_user (avec le JSON question/context), pas par un message en texte libre. Ainsi la réponse de l'utilisateur reviendra dans la même tâche et tu pourras continuer. Si ask_user n'est pas disponible, explique en message et demande à l'utilisateur de confirmer. Ne réponds pas que tu ne peux pas. Ne invente pas de commandes (ex. /status repo:... n'existe pas) ; les commandes réelles sont dans /help.";
-
-/// True if the user message suggests they want to choose between options or confirm something before the agent continues.
-fn message_suggests_user_choice_or_confirmation(message: &str) -> bool {
-    let m = message.to_lowercase();
-    const KEYWORDS: &[&str] = &[
-        "à choisir",
-        "2 options",
-        "2 différents",
-        "deux options",
-        "plusieurs options",
-        "une fois le choix",
-        "once the choice",
-        "once you",
-        "which one",
-        "lequel ",
-        "laquelle ",
-        "choisir entre",
-        "choose between",
-        "propose moi",
-        "propose-moi",
-        "propose 2",
-        "proposes ",
-        "confirm",
-        "confirme",
-        "confirmer",
-        "demande à l'utilisateur",
-        "ask the user",
-        "avant de continuer",
-        "before continuing",
-    ];
-    KEYWORDS.iter().any(|k| m.contains(k))
-}
-
-const USER_CHOICE_REMINDER: &str = "\n\n[Rappel] L'utilisateur demande des options au choix ou une étape qui nécessite sa réponse. Tu DOIS répondre UNIQUEMENT par un appel à l'outil TOOL: ask_user (JSON avec question et, si pertinent, choices), pas en texte libre.";
-
 /// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
 const APP_CONTEXT: &str = "[Contexte Akasha] Tu es l'assistant intégré à Akasha. Akasha est l'application dans laquelle tu tournes actuellement. \
 Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : \
@@ -344,6 +249,7 @@ commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
 Réponds en français sauf si l'utilisateur utilise une autre langue. \
 Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »). \
+Tu as accès à des outils machine (read_file, write_file, etc.) : tu PEUX écrire et lire des fichiers sur le disque lorsque les chemins sont autorisés par l'utilisateur dans le fichier tools_policy.yaml (allowed_write_paths, allowed_read_paths). Ne dis jamais que tu n'as pas d'accès en écriture ou que c'est impossible par principe — utilise write_file quand l'utilisateur demande d'enregistrer un fichier ; si le chemin est refusé, explique comment ajouter le répertoire dans tools_policy.yaml. \
 Règle importante : dès que tu dois demander à l'utilisateur un choix, une confirmation ou une information (options à choisir, chemin, identifiants, etc.) puis enchaîner dans la même tâche, tu DOIS utiliser l'outil ask_user (TOOL: ask_user puis JSON avec question/context/choices). Ne pose pas la question en texte libre, sinon la réponse ouvrira une nouvelle tâche et tu ne pourras pas continuer. Pour un accès à un service externe (GitHub, API, etc.), ne réponds pas « je ne peux pas » ; utilise ask_user pour demander le token ou explique comment configurer. Si l'utilisateur a déjà confirmé (ex. « clé dans le vault », « c'est configuré »), n'envoie pas une deuxième fois ask_user ; enchaîne. Ne invente pas de commandes (ex. /status repo:... n'existe pas) ; les commandes sont dans /help.\n\n";
 
 /// If AKASHA_TOOLS_JOURNAL_PATH is set, append a line for write tool invocations (Phase 4 modification journal).
@@ -718,7 +624,16 @@ async fn execute_tool_call(
                             } else {
                                 child_session_id
                             };
-                            if tx.send((new_id, message, sid)).await.is_err() {
+                            if tx
+                                .send(OrchestratorTask {
+                                    task_id: new_id,
+                                    message,
+                                    session_id: sid,
+                                    image_data_urls: None,
+                                })
+                                .await
+                                .is_err()
+                            {
                                 return (false, "[sessions_spawn] failed to send to conversation queue".to_string());
                             }
                             (true, format!("[sessions_spawn] task_id: {} (queued)", new_id))
@@ -1013,6 +928,7 @@ async fn compact_short_term_if_needed(
         max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
         preferred_task_type: None,
+        image_data_urls: None,
     };
     match llm_router.complete(&req).await {
         Ok(resp) => {
@@ -1067,6 +983,7 @@ Réponse en français, factuelle.\n\n{}",
         max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
         preferred_task_type: Some("system".to_string()),
+        image_data_urls: None,
     };
     match llm_router.complete(&req).await {
         Ok(resp) => {
@@ -1086,6 +1003,7 @@ Réponse en français, factuelle.\n\n{}",
 }
 
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
+/// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
 pub(crate) async fn run_message_via_llm(
     bus: EventBus,
     llm_router: Arc<akasha_llm::LLMRouter>,
@@ -1093,6 +1011,7 @@ pub(crate) async fn run_message_via_llm(
     task_id: Uuid,
     message: String,
     session_id: String,
+    image_data_urls: Option<Vec<String>>,
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
     tools_executor: Option<std::sync::Arc<akasha_tools::ToolExecutor>>,
@@ -1161,6 +1080,7 @@ pub(crate) async fn run_message_via_llm(
             "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
              Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
+             WRITE RULE: When the user asks you to save or write a file to disk, you MUST use TOOL: write_file with the path and content. Do NOT refuse by saying you have no write access or that it is impossible — you have write_file; if the path is denied by policy, the tool will return an error and you then tell the user to add that path to tools_policy.yaml (allowed_write_paths).\n\
              If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
@@ -1200,6 +1120,21 @@ pub(crate) async fn run_message_via_llm(
             context_prefix.push_str("\n");
         }
     }
+
+    // User RAG: retrieve relevant chunks from user-uploaded documents (keyword match)
+    let user_rag_store = crate::user_rag::UserRagStore::new(data_dir);
+    if let Ok(chunks) = user_rag_store.retrieve(&message, 5) {
+        if !chunks.is_empty() {
+            context_prefix.push_str("[Documents utilisateur — utilise ces extraits si pertinent pour répondre]\n");
+            for c in &chunks {
+                context_prefix.push_str("- ");
+                context_prefix.push_str(&c.replace('\n', " "));
+                context_prefix.push_str("\n");
+            }
+            context_prefix.push_str("\n");
+        }
+    }
+
     if let Some(ref st) = short_term {
         let new_msg_tokens = ShortTermStore::estimate_tokens(&message);
         compact_short_term_if_needed(
@@ -1243,12 +1178,7 @@ pub(crate) async fn run_message_via_llm(
     } else {
         format!("{}\nUtilisateur:\n{}", context_prefix.trim_end(), message)
     };
-    if message_suggests_external_service(&message) {
-        current_prompt.push_str(EXTERNAL_SERVICE_REMINDER);
-    }
-    if message_suggests_user_choice_or_confirmation(&message) {
-        current_prompt.push_str(USER_CHOICE_REMINDER);
-    }
+    // Reminders for ask_user / external service are always in tool_instruction; no keyword-based injection.
     let reply_text;
     const MAX_TOOL_ROUNDS: u32 = 3;
     let mut round = 0u32;
@@ -1274,6 +1204,7 @@ pub(crate) async fn run_message_via_llm(
             max_tokens: Some(max_tokens),
             temperature: Some(0.7),
             preferred_task_type: None,
+            image_data_urls: image_data_urls.clone(),
         };
         // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
         // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
@@ -1615,6 +1546,7 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
                 max_tokens: Some(extract_max_tokens),
                 temperature: Some(0.1),
                 preferred_task_type: Some("system".to_string()),
+                image_data_urls: None,
             };
             let mut to_promote: Vec<(String, String)> = Vec::new();
             let mut agent_updates: Vec<(String, String)> = Vec::new();
@@ -2062,10 +1994,46 @@ pub async fn handle_api(
 
     if method == "POST" && path == "/api/message" {
         let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
-        let message = body_json
+        let mut message = body_json
             .as_ref()
             .and_then(|v| v.get("message").and_then(|v| v.as_str().map(String::from)))
             .unwrap_or_default();
+        // Parse attachments: images -> data URLs for vision; documents -> append extracted text to message.
+        let image_data_urls: Option<Vec<String>> = {
+            let arr = body_json.as_ref().and_then(|v| v.get("attachments").and_then(|a| a.as_array()));
+            let mut urls = Vec::new();
+            let mut doc_texts = Vec::new();
+            if let Some(arr) = arr {
+                for att in arr {
+                    let typ = att.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    let content_base64 = att.get("content_base64").and_then(|c| c.as_str()).unwrap_or("");
+                    let mime = att.get("mime_type").and_then(|m| m.as_str()).unwrap_or("image/png");
+                    let name = att.get("name").and_then(|n| n.as_str()).unwrap_or("file");
+                    if content_base64.is_empty() {
+                        continue;
+                    }
+                    if typ == "image" || mime.starts_with("image/") {
+                        let data_url = format!("data:{};base64,{}", mime, content_base64);
+                        urls.push(data_url);
+                    } else if typ == "document" || mime.starts_with("text/") {
+                        if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, content_base64) {
+                            if let Ok(text) = String::from_utf8(decoded) {
+                                doc_texts.push(format!("[Document « {} »]\n{}", name, text));
+                            }
+                        }
+                    }
+                }
+            }
+            if !doc_texts.is_empty() {
+                message.push_str("\n\n");
+                message.push_str(&doc_texts.join("\n\n"));
+            }
+            if urls.is_empty() {
+                None
+            } else {
+                Some(urls)
+            }
+        };
         // Session: "new_session" => new UUID; else provided non-empty session_id; else day-YYYY-MM-DD (short-term = current day, survives UI restart).
         let session_id = {
             let new_session = body_json.as_ref().and_then(|v| v.get("new_session")).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2089,7 +2057,7 @@ pub async fn handle_api(
         }
         let correlation_id = uuid::Uuid::new_v4();
         // User talks only to orchestrator: ack immediately, delegate to conversation worker in background (non-blocking). session_id used for short-term memory.
-        match main_agent.handle_message(store_path, &message, correlation_id, true, &session_id) {
+        match main_agent.handle_message(store_path, &message, correlation_id, true, &session_id, image_data_urls) {
             Ok(task_id) => {
                 let body = serde_json::json!({
                     "ack": true,
@@ -2233,6 +2201,65 @@ pub async fn handle_api(
         return json_response("200 OK", &body);
     }
 
+    // User RAG: list documents
+    if method == "GET" && path == "/api/user-rag/documents" {
+        let store = crate::user_rag::UserRagStore::new(data_dir);
+        match store.list_documents() {
+            Ok(docs) => {
+                let body = serde_json::to_string(&serde_json::json!({ "documents": docs })).unwrap_or_else(|_| "[]".to_string());
+                return json_response("200 OK", &body);
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": "list_failed", "detail": e.to_string() });
+                return json_response("500 Internal Server Error", &body.to_string());
+            }
+        }
+    }
+
+    // User RAG: upload document (body: { name, content_base64, mime_type? })
+    if method == "POST" && path == "/api/user-rag/documents" {
+        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let name = body_json.as_ref().and_then(|j| j.get("name")).and_then(|v| v.as_str()).map(String::from);
+        let content_base64 = body_json.as_ref().and_then(|j| j.get("content_base64")).and_then(|v| v.as_str()).map(String::from);
+        let mime_type = body_json.as_ref().and_then(|j| j.get("mime_type")).and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| "application/octet-stream".to_string());
+        let name = match name.filter(|n| !n.is_empty()) {
+            Some(n) => n,
+            None => return json_response("400 Bad Request", r#"{"error":"name_required"}"#),
+        };
+        let content_base64 = match content_base64.filter(|c| !c.is_empty()) {
+            Some(c) => c,
+            None => return json_response("400 Bad Request", r#"{"error":"content_base64_required"}"#),
+        };
+        let store = crate::user_rag::UserRagStore::new(data_dir);
+        match store.add_document(&content_base64, &name, &mime_type) {
+            Ok(id) => {
+                let body = serde_json::json!({ "id": id, "name": name, "message": "Document ajouté." });
+                return json_response("200 OK", &body.to_string());
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": "add_failed", "detail": e.to_string() });
+                return json_response("500 Internal Server Error", &body.to_string());
+            }
+        }
+    }
+
+    // User RAG: delete document by id
+    if method == "DELETE" && path.starts_with("/api/user-rag/documents/") {
+        let id = path.trim_start_matches("/api/user-rag/documents/").split('?').next().unwrap_or("").trim();
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"id_required"}"#);
+        }
+        let store = crate::user_rag::UserRagStore::new(data_dir);
+        match store.delete_document(id) {
+            Ok(true) => return json_response("200 OK", r#"{"ok":true,"message":"Document supprimé."}"#),
+            Ok(false) => return json_response("404 Not Found", r#"{"error":"document_not_found"}"#),
+            Err(e) => {
+                let body = serde_json::json!({ "error": "delete_failed", "detail": e.to_string() });
+                return json_response("500 Internal Server Error", &body.to_string());
+            }
+        }
+    }
+
     // Phase 6: LLM completion via router
     if method == "POST" && path == "/api/complete" {
         let body = match body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
@@ -2250,6 +2277,7 @@ pub async fn handle_api(
             max_tokens: body.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32),
             temperature: body.get("temperature").and_then(|v| v.as_f64()).map(|f| f as f32),
             preferred_task_type: None,
+            image_data_urls: None,
         };
         match llm_router.complete(&req).await {
             Ok(resp) => {
@@ -2554,6 +2582,7 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
             max_tokens: Some(512),
             temperature: Some(0.3),
             preferred_task_type: None,
+            image_data_urls: None,
         };
         let advice_timeout = std::time::Duration::from_secs(120);
         match tokio::time::timeout(advice_timeout, llm_router.complete(&req)).await {

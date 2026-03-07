@@ -71,6 +71,12 @@ pub struct ProviderConfig {
     pub version: Option<String>,
     #[serde(default)]
     pub always_available: Option<bool>,
+    /// Optional site URL for OpenRouter (HTTP-Referer header).
+    #[serde(default)]
+    pub site_url: Option<String>,
+    /// Optional app/site name for OpenRouter (X-OpenRouter-Title header).
+    #[serde(default)]
+    pub app_title: Option<String>,
 }
 
 impl Default for TaskTypeConfig {

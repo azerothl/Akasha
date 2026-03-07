@@ -115,7 +115,7 @@ Tout le chemin « délégation → agent → sous-agents → résultat » est **
 - **Entrée** : `POST /api/message` (ou équivalent canal) crée toujours une **tâche racine** et envoie son `task_id` à l’orchestrateur (via une file, ex. `orchestrator_tx`).
 - **Réponse immédiate** : le handler API renvoie tout de suite `{ "ack": true, "task_id": "...", "message": "Je prends en compte votre demande." }` (sans attendre la fin du traitement).
 - **Traitement asynchrone** : un worker (orchestrateur) consomme la file des `task_id`, pour chaque tâche :
-  - Classifie la demande (LLM ou règles) → choisit l’agent.
+  - Décompose la demande via un appel LLM (agent_type|message) ; le type d’agent (conversation, code, search, schedule) est entièrement déterminé par le LLM, sans fallback par mots-clés.
   - Délègue à l’agent (nouvelle sous-tâche ou envoi sur une file dédiée à l’agent).
   - Les agents (et sous-agents) s’exécutent dans des tâches asynchrones (tokio::spawn ou équivalent).
 - **Remontée du résultat** : quand l’agent final a terminé, il met à jour la tâche racine (statut, résultat) et envoie un événement (ex. `TaskCompleted` avec le texte de réponse). Le **progress subscriber** (ou un composant dédié) pousse ce résultat au canal utilisateur (polling `GET /api/tasks/:id` ou WebSocket si ajouté).

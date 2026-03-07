@@ -117,7 +117,15 @@ async fn tick(
     // Only track runs whose send succeeded so we don't mark failed sends as Running.
     let mut successful_run_ids: Vec<uuid::Uuid> = Vec::new();
     for (run_id, task_id, message, session_id) in &pending {
-        match orch_tx.send((*task_id, message.clone(), session_id.clone())).await {
+        match orch_tx
+            .send(crate::agents::OrchestratorTask {
+                task_id: *task_id,
+                message: message.clone(),
+                session_id: session_id.clone(),
+                image_data_urls: None,
+            })
+            .await
+        {
             Ok(()) => {
                 successful_run_ids.push(*run_id);
             }
