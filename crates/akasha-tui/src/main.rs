@@ -228,8 +228,12 @@ struct App {
     force_new_session: bool,
     /// Memory tab: short-term turns (role, content) for current session.
     memory_short_term: Vec<(String, String)>,
-    /// Memory tab: long-term entries (content, created_at, source).
-    memory_long_term: Vec<(String, String, String)>,
+    /// Memory tab: long-term entries (id, content, created_at, source).
+    memory_long_term: Vec<(String, String, String, String)>,
+    /// Selected index in long-term list (for delete).
+    memory_lt_selected: usize,
+    /// Line index in Memory tab where each long-term entry starts (set during render).
+    memory_lt_line_starts: Vec<usize>,
     /// Whether long-term memory is available (daemon has embeddings).
     memory_long_term_available: bool,
     /// Current theme (cycle with F2).
@@ -291,6 +295,8 @@ impl App {
             force_new_session: false,
             memory_short_term: Vec::new(),
             memory_long_term: Vec::new(),
+            memory_lt_selected: 0,
+            memory_lt_line_starts: Vec::new(),
             memory_long_term_available: false,
             theme: ThemeName::default(),
             port,
@@ -774,12 +780,14 @@ impl App {
                     self.memory_long_term = entries
                         .iter()
                         .filter_map(|e| {
+                            let id = e.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                             let content = e.get("content")?.as_str()?.to_string();
                             let created_at = e.get("created_at")?.as_str()?.to_string();
                             let source = e.get("source")?.as_str()?.to_string();
-                            Some((content, created_at, source))
+                            Some((id, content, created_at, source))
                         })
                         .collect();
+                    self.memory_lt_selected = self.memory_lt_selected.min(self.memory_long_term.len().saturating_sub(1));
                 }
             } else {
                 self.memory_long_term.clear();
@@ -788,6 +796,22 @@ impl App {
         } else {
             self.memory_long_term.clear();
             self.memory_long_term_available = false;
+        }
+    }
+
+    /// Delete the long-term memory entry at the current selection (by id). Refreshes the list on success.
+    fn delete_memory_long_term_selected(&mut self) {
+        let id = match self.memory_long_term.get(self.memory_lt_selected) {
+            Some((id, _, _, _)) if !id.is_empty() => id.clone(),
+            _ => return,
+        };
+        let url = format!("{}/api/memory/long-term/{}", daemon_base_url(self.port), id);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_default();
+        if client.delete(&url).send().map(|r| r.status().is_success()).unwrap_or(false) {
+            self.fetch_memory();
         }
     }
 
@@ -2221,16 +2245,24 @@ fn ui(f: &mut Frame, app: &mut App) {
                 Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(""));
-            for (content, created_at, source) in &app.memory_long_term {
+            let mut lt_line_starts = Vec::new();
+            for (idx, (id, content, created_at, source)) in app.memory_long_term.iter().enumerate() {
+                lt_line_starts.push(lines.len());
+                let style = if idx == app.memory_lt_selected {
+                    Style::default().fg(theme.palette().accent)
+                } else {
+                    Style::default().fg(theme.palette().fg)
+                };
                 lines.push(Line::from(Span::styled(
-                    format!("  [{}] {} — {}", source, &created_at[..created_at.len().min(19)], content.chars().take(80).collect::<String>()),
-                    Style::default().fg(theme.palette().fg),
+                    format!("  [{}] {} — {} {}", source, &created_at[..created_at.len().min(19)], content.chars().take(80).collect::<String>(), if !id.is_empty() { format!("(id: {})", &id[..id.len().min(8)]) } else { String::new() }),
+                    style,
                 )));
                 if content.chars().count() > 80 {
                     lines.push(Line::from(Span::styled("    …", Style::default().fg(theme.palette().muted))));
                 }
                 lines.push(Line::from(""));
             }
+            app.memory_lt_line_starts = lt_line_starts;
             if app.memory_long_term.is_empty() && app.memory_long_term_available {
                 lines.push(Line::from(Span::styled("  (aucune entrée)", Style::default().fg(theme.palette().muted))));
             }
@@ -2244,7 +2276,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             }
             let mem_block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Mémoire agent (↑↓ ou molette, R = actualiser, Tab ou clic = onglet) ")
+                .title(" Mémoire agent (↑↓ sélection, D = supprimer, R = actualiser, Tab ou clic = onglet) ")
                 .border_style(theme.block_border());
             f.render_widget(
                 Paragraph::new(lines).block(mem_block).wrap(Wrap { trim: true }).scroll((app.scroll as u16, 0)),
@@ -2664,12 +2696,32 @@ fn run_app(
                     (Mode::Doc, KeyCode::PageDown, _) => app.scroll_page_down(),
                     (Mode::Doc, KeyCode::Home, _) => app.scroll = 0,
                     (Mode::Doc, KeyCode::End, _) => app.scroll_to_bottom(),
-                    (Mode::Memory, KeyCode::Up, _) => app.scroll_up(),
-                    (Mode::Memory, KeyCode::Down, _) => app.scroll_down(),
+                    (Mode::Memory, KeyCode::Up, _) => {
+                        if !app.memory_long_term.is_empty() && app.memory_lt_selected > 0 {
+                            app.memory_lt_selected -= 1;
+                            if let Some(&line) = app.memory_lt_line_starts.get(app.memory_lt_selected) {
+                                app.scroll = line.min(app.max_scroll());
+                            }
+                        } else {
+                            app.scroll_up();
+                        }
+                    }
+                    (Mode::Memory, KeyCode::Down, _) => {
+                        if !app.memory_long_term.is_empty() && app.memory_lt_selected + 1 < app.memory_long_term.len() {
+                            app.memory_lt_selected += 1;
+                            if let Some(&line) = app.memory_lt_line_starts.get(app.memory_lt_selected) {
+                                app.scroll = line.min(app.max_scroll());
+                            }
+                        } else {
+                            app.scroll_down();
+                        }
+                    }
                     (Mode::Memory, KeyCode::PageUp, _) => app.scroll_page_up(),
                     (Mode::Memory, KeyCode::PageDown, _) => app.scroll_page_down(),
                     (Mode::Memory, KeyCode::Home, _) => app.scroll = 0,
                     (Mode::Memory, KeyCode::End, _) => app.scroll_to_bottom(),
+                    (Mode::Memory, KeyCode::Char('d') | KeyCode::Char('D'), _) => app.delete_memory_long_term_selected(),
+                    (Mode::Memory, KeyCode::Delete, _) => app.delete_memory_long_term_selected(),
                     (Mode::Tasks, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_activity_tasks();
                     }

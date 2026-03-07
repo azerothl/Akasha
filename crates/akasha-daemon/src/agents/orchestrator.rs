@@ -443,7 +443,8 @@ Voici les réponses de différents agents spécialisés :
 
 {}
 
-Produis une seule réponse structurée et claire qui répond exactement à la question de l'utilisateur. Intègre les éléments utiles des réponses ci-dessus sans les lister ni citer les agents ; reformule de façon naturelle et directe pour l'utilisateur."#,
+Produis une seule réponse structurée et claire qui répond exactement à la question de l'utilisateur. Intègre les éléments utiles des réponses ci-dessus sans les lister ni citer les agents ; reformule de façon naturelle et directe pour l'utilisateur.
+N'ajoute aucune information qui ne figure pas dans les réponses des agents ci-dessus. Si les réponses ne permettent pas de répondre à la question, dis simplement que tu n'as pas trouvé d'information."#,
                         user_message.trim(),
                         raw_responses
                     );

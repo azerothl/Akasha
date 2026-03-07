@@ -139,7 +139,7 @@ function App() {
   const [scheduleDetailError, setScheduleDetailError] = useState<string | null>(null);
   const [calendarRunsCollapsed, setCalendarRunsCollapsed] = useState(false);
   const [memoryShortTerm, setMemoryShortTerm] = useState<Array<{ role: string; content: string }>>([]);
-  const [memoryLongTerm, setMemoryLongTerm] = useState<Array<{ content: string; created_at: string; source: string }>>([]);
+  const [memoryLongTerm, setMemoryLongTerm] = useState<Array<{ id?: string; content: string; created_at: string; source: string }>>([]);
   const [memoryLongTermAvailable, setMemoryLongTermAvailable] = useState(false);
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
@@ -358,7 +358,7 @@ function App() {
           sessionId: sessionId ?? undefined,
           port: DAEMON_PORT,
         }),
-        invoke<{ entries?: Array<{ content: string; created_at: string; source: string }>; long_term_available?: boolean }>("get_memory_long_term", {
+        invoke<{ entries?: Array<{ id?: string; content: string; created_at: string; source: string }>; long_term_available?: boolean }>("get_memory_long_term", {
           limit: 50,
           port: DAEMON_PORT,
         }),
@@ -1738,11 +1738,31 @@ function App() {
                 ) : (
                   <ul className="memory-long-term-list">
                     {memoryLongTerm.map((e, i) => (
-                      <li key={i} className="memory-long-term-item">
-                        <div className="memory-long-term-content">{e.content}</div>
-                        <div className="memory-long-term-meta">
-                          {e.created_at} {e.source ? ` · ${e.source}` : ""}
+                      <li key={e.id ?? `entry-${i}`} className="memory-long-term-item">
+                        <div className="memory-long-term-body">
+                          <div className="memory-long-term-content">{e.content}</div>
+                          <div className="memory-long-term-meta">
+                            {e.created_at} {e.source ? ` · ${e.source}` : ""}
+                          </div>
                         </div>
+                        {e.id != null && (
+                          <button
+                            type="button"
+                            className="memory-long-term-delete"
+                            onClick={async () => {
+                              try {
+                                await invoke("delete_memory_long_term", { id: e.id, port: DAEMON_PORT });
+                                fetchMemory();
+                              } catch (err) {
+                                setMemoryError(String(err));
+                              }
+                            }}
+                            aria-label="Supprimer cette entrée"
+                            title="Supprimer de la mémoire long terme"
+                          >
+                            Supprimer
+                          </button>
+                        )}
                       </li>
                     ))}
                   </ul>

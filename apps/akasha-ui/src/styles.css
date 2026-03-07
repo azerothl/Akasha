@@ -1373,6 +1373,35 @@ body {
   margin-top: 0.35rem;
 }
 
+.memory-long-term-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.memory-long-term-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.memory-long-term-delete {
+  flex-shrink: 0;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  color: #a1a1aa;
+  background: transparent;
+  border: 1px solid #3f3f46;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.memory-long-term-delete:hover {
+  color: #f87171;
+  border-color: #7f1d1d;
+  background: rgba(248, 113, 113, 0.1);
+}
+
 /* Calendar task detail modal (popup) */
 .calendar-detail-modal-overlay {
   position: fixed;

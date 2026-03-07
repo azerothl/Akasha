@@ -204,6 +204,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
     ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
     ("memory_store", "memory_store <content> <source> — stocker/promouvoir un contenu en mémoire long terme"),
+    ("memory_delete", "memory_delete <id> — supprimer une entrée de la mémoire long terme par son id (UUID)"),
     ("sessions_list", "sessions_list [limit] — lister les tâches/sessions récentes"),
     ("sessions_spawn", "sessions_spawn <message> [session_id] — créer une sous-tâche et la lancer"),
     ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
@@ -235,7 +236,8 @@ Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça m
 commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Mémoire/Doc/Activité), \
 commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, etc.). \
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
-Réponds en français sauf si l'utilisateur utilise une autre langue.\n\n";
+Réponds en français sauf si l'utilisateur utilise une autre langue. \
+Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »).\n\n";
 
 /// If AKASHA_TOOLS_JOURNAL_PATH is set, append a line for write tool invocations (Phase 4 modification journal).
 async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: &str) {
@@ -517,6 +519,27 @@ async fn execute_tool_call(
                     }
                 }
                 None => (false, "[memory_store] long-term memory not available".to_string()),
+            }
+        }
+        "memory_delete" => {
+            let id = args.get(0).map(|a| a.as_str()).unwrap_or("").trim();
+            if id.is_empty() {
+                return (false, "[memory_delete] usage: memory_delete <id> (UUID de l'entrée)".to_string());
+            }
+            match long_term_client {
+                Some(client) => {
+                    let client = client.clone();
+                    let id = id.to_string();
+                    let out = tokio::task::spawn_blocking(move || client.delete(id))
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok());
+                    match out {
+                        Some(()) => (true, "[memory_delete] deleted".to_string()),
+                        None => (false, "[memory_delete] failed or not found (vérifiez l'id)".to_string()),
+                    }
+                }
+                None => (false, "[memory_delete] long-term memory not available".to_string()),
             }
         }
         "sessions_list" => {
@@ -1464,7 +1487,8 @@ AGENT_PERSONALITY: personnalité ou ton demandé pour l'agent\n\
 AGENT_RULE: une règle que l'agent doit respecter\n\
 AGENT_CAN: ce que l'agent peut faire (autorisé)\n\
 AGENT_CANNOT: ce que l'agent ne doit pas faire (interdit)\n\
-N'écris que des lignes avec ces préfixes, ou NOTHING si rien. Pas d'autre texte.\n\nUtilisateur: {}\n\nAssistant: {}",
+N'écris que des lignes avec ces préfixes, ou NOTHING si rien. Pas d'autre texte.\n\
+N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assistant). N'invente rien.\n\nUtilisateur: {}\n\nAssistant: {}",
                 msg.trim(),
                 reply.trim()
             );
@@ -1684,8 +1708,8 @@ pub async fn handle_api(
         };
         let list: Vec<serde_json::Value> = entries
             .iter()
-            .map(|(content, created_at, source)| {
-                serde_json::json!({ "content": content, "created_at": created_at, "source": source })
+            .map(|(id, content, created_at, source)| {
+                serde_json::json!({ "id": id, "content": content, "created_at": created_at, "source": source })
             })
             .collect();
         let body_json = serde_json::json!({
@@ -1693,6 +1717,25 @@ pub async fn handle_api(
             "long_term_available": long_term_client.is_some()
         });
         return json_response("200 OK", &body_json.to_string());
+    }
+
+    // DELETE /api/memory/long-term/:id — delete one long-term memory entry by id
+    if method == "DELETE" && path.starts_with("/api/memory/long-term/") {
+        let id = path.trim_start_matches("/api/memory/long-term/").split('?').next().unwrap_or("").trim();
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing id"}"#);
+        }
+        let result = match long_term_client {
+            Some(ref client) => client.delete(id.to_string()),
+            None => Err("long-term memory not available".to_string()),
+        };
+        match result {
+            Ok(()) => return json_response("200 OK", r#"{"deleted":true}"#),
+            Err(e) if e == "not found" || e == "invalid uuid" => {
+                return json_response("404 Not Found", &format!(r#"{{"error":"{}"}}"#, e));
+            }
+            Err(e) => return json_response("500 Internal Server Error", &format!(r#"{{"error":"{}"}}"#, e)),
+        }
     }
 
     // GET /api/status — same as / but explicit for slash commands

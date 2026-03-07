@@ -730,6 +730,28 @@ async fn get_memory_long_term(limit: Option<u32>, port: Option<u16>) -> Result<s
     Ok(json)
 }
 
+/// Memory long-term: DELETE /api/memory/long-term/:id
+#[tauri::command]
+async fn delete_memory_long_term(id: String, port: Option<u16>) -> Result<(), String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("missing id".to_string());
+    }
+    let url = format!("{}/api/memory/long-term/{}", daemon_base_url(port), id);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} {}", status, body));
+    }
+    Ok(())
+}
+
 /// Schedule run reports: GET /api/schedule_run_reports — completed schedule runs with message (for chat).
 #[tauri::command]
 async fn get_schedule_run_reports(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -769,6 +791,7 @@ pub fn run() {
             get_task_runs,
             get_memory_short_term,
             get_memory_long_term,
+            delete_memory_long_term,
             get_schedule_run_reports,
             get_docs,
             get_config,
