@@ -81,9 +81,14 @@ async fn send_message_ack(
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| e.to_string())?;
+    // Si pièces jointes présentes et message vide, envoyer un libellé pour que la tâche reçoive un contenu (évite "message": "").
+    let message_for_body = match attachments.as_deref() {
+        Some(a) if !a.is_empty() && message.trim().is_empty() => "(Pièce(s) jointe(s))".to_string(),
+        _ => message,
+    };
     let mut body = match session_id.as_deref() {
-        Some(s) if !s.is_empty() => serde_json::json!({ "message": message, "session_id": s }),
-        _ => serde_json::json!({ "message": message }),
+        Some(s) if !s.is_empty() => serde_json::json!({ "message": message_for_body, "session_id": s }),
+        _ => serde_json::json!({ "message": message_for_body }),
     };
     if let Some(ref atts) = attachments {
         if !atts.is_empty() {

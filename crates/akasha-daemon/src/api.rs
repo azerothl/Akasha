@@ -142,6 +142,28 @@ pub fn new_human_input_store() -> HumanInputStore {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
 }
 
+/// Parse headers from the first chunk to get header length and Content-Length. Returns (header_body_sep_index, content_length).
+/// header_body_sep_index is the index of the start of "\r\n\r\n"; body starts at header_body_sep_index + 4.
+pub fn parse_content_length(buf: &[u8]) -> Option<(usize, usize)> {
+    let sep = b"\r\n\r\n";
+    let header_end = buf.windows(sep.len()).position(|w| w == sep)?;
+    let header_slice = &buf[..header_end];
+    let mut content_length = 0usize;
+    for line in header_slice.split(|&b| b == b'\n') {
+        let line_str = String::from_utf8_lossy(line).to_string();
+        let line_str = line_str.trim_end_matches('\r');
+        if let Some((name, value)) = line_str.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                if let Ok(n) = value.trim().parse::<usize>() {
+                    content_length = n;
+                }
+                break;
+            }
+        }
+    }
+    Some((header_end, content_length))
+}
+
 /// Parsed HTTP request: method, path, body, and lowercase header map.
 pub fn parse_request(buf: &[u8]) -> (String, String, Option<Vec<u8>>, std::collections::HashMap<String, String>) {
     let mut method = String::new();
@@ -2032,10 +2054,20 @@ pub async fn handle_api(
                     if typ == "image" || mime.starts_with("image/") {
                         let data_url = format!("data:{};base64,{}", mime, content_base64);
                         urls.push(data_url);
-                    } else if typ == "document" || mime.starts_with("text/") {
+                    } else if typ == "document" || mime.starts_with("text/") || mime == "application/pdf" {
                         if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, content_base64) {
-                            if let Ok(text) = String::from_utf8(decoded) {
-                                doc_texts.push(format!("[Document « {} »]\n{}", name, text));
+                            let text = if mime == "application/pdf" {
+                                pdf_extract::extract_text_from_mem(&decoded)
+                                    .unwrap_or_else(|_| String::from("[Extraction du texte PDF impossible ou PDF vide.]"))
+                            } else if let Ok(t) = String::from_utf8(decoded) {
+                                t
+                            } else {
+                                continue;
+                            };
+                            if !text.trim().is_empty() {
+                                doc_texts.push(format!("[Document « {} »]\n{}", name, text.trim()));
+                            } else if mime == "application/pdf" {
+                                doc_texts.push(format!("[Document « {} »]\n[PDF joint : extraction du texte vide (image ou PDF scanné).]", name));
                             }
                         }
                     }
@@ -2043,11 +2075,19 @@ pub async fn handle_api(
             }
             if !doc_texts.is_empty() {
                 let user_msg = message.trim_end();
+                let user_msg = if user_msg.is_empty() {
+                    "(Pièce(s) jointe(s))"
+                } else {
+                    user_msg
+                };
                 message = format!(
                     "[Pièce(s) jointe(s) à ce message : quand l'utilisateur dit « ce document », « ce fichier », « analyse-le », « analyse ce document », etc., il parle du contenu joint ci-dessous, pas des échanges précédents.]\n\nMessage : {}\n\n--- Document(s) joint(s) ---\n{}",
                     user_msg,
                     doc_texts.join("\n\n")
                 );
+            } else if message.trim().is_empty() && !urls.is_empty() {
+                // Pièces jointes images uniquement : éviter message vide pour la tâche.
+                message = "(Pièce(s) jointe(s))".to_string();
             }
             if urls.is_empty() {
                 None

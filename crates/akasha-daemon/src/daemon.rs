@@ -13,7 +13,7 @@ use futures_util::future::Either;
 use tracing::{error, info, warn};
 
 use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask};
-use crate::api::{handle_api, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, parse_request, run_message_via_llm, RestartTx};
+use crate::api::{handle_api, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, parse_content_length, parse_request, run_message_via_llm, RestartTx};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
@@ -552,9 +552,32 @@ impl Daemon {
                     result = listener.accept() => {
                         match result {
                             Ok((mut stream, _addr)) => {
-                                let mut buf = [0u8; 8192];
+                                const INITIAL_READ: usize = 65536;
+                                const MAX_BODY: usize = 10 * 1024 * 1024; // 10 MiB for POST body (e.g. documents in base64)
+                                let mut buf = vec![0u8; INITIAL_READ];
                                 let n = stream.read(&mut buf).await.unwrap_or(0);
-                                let (method, path, body, headers) = parse_request(&buf[..n]);
+                                buf.truncate(n);
+                                let full_buf: Vec<u8> = match parse_content_length(&buf) {
+                                    Some((header_end, content_length)) if content_length <= MAX_BODY => {
+                                        let total_needed = header_end + 4 + content_length;
+                                        if buf.len() >= total_needed {
+                                            buf
+                                        } else {
+                                            buf.reserve(total_needed.saturating_sub(buf.len()));
+                                            while buf.len() < total_needed {
+                                                let mut chunk = [0u8; 8192];
+                                                match stream.read(&mut chunk).await {
+                                                    Ok(0) => break,
+                                                    Ok(k) => buf.extend_from_slice(&chunk[..k]),
+                                                    Err(_) => break,
+                                                }
+                                            }
+                                            buf
+                                        }
+                                    }
+                                    _ => buf,
+                                };
+                                let (method, path, body, headers) = parse_request(&full_buf);
                                 // Spawn so we can accept the next connection while this request is processed (e.g. long /api/diagnostic/advice)
                                 let db_path = db_path.clone();
                                 let progress = progress.clone();
