@@ -250,25 +250,54 @@ fn message_suggests_external_service(message: &str) -> bool {
         "gitlab",
         "dépôt",
         "dépôts",
+
+    // Keywords that should match as standalone words (case-insensitive).
+    const WHOLE_WORD_KEYWORDS: &[&str] = &[
+        "repo",
+        "github",
+        "gitlab",
+        "dépôt",
+        "dépôts",
+        "api",
+        "pr",
+        "issues",
+        "token",
+        "credentials",
+    ];
+
+    // Substring patterns that are meaningful even inside longer phrases.
+    const SUBSTRING_KEYWORDS: &[&str] = &[
         " connecte",
         " connect ",
-        // Use specific multi-word phrases to avoid false positives on the bare word "api"
-        // (e.g. "rapide" contains "api" in French, and " pr " matches "prendre", "préparer").
-        "api key",
-        "api token",
-        "rest api",
         "pull request",
-        // Require explicit service context for "issues" to avoid matching everyday French
-        "github issues",
-        "gitlab issues",
-        "open issues",
-        "list issues",
-        "token",
         "clé api",
-        "credentials",
         "authentif",
     ];
-    KEYWORDS.iter().any(|k| m.contains(k))
+
+    // Tokenize the message into "words" to detect standalone keywords more reliably.
+    let mut words = Vec::new();
+    let mut current = String::new();
+    for ch in m.chars() {
+        if ch.is_alphanumeric() || ch == '\'' {
+            current.push(ch);
+        } else if !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+
+    // First, check for whole-word matches.
+    if words
+        .iter()
+        .any(|w| WHOLE_WORD_KEYWORDS.contains(&w.as_str()))
+    {
+        return true;
+    }
+
+    // Then, fall back to substring-based heuristics.
+    SUBSTRING_KEYWORDS.iter().any(|k| m.contains(k))
 }
 
 const EXTERNAL_SERVICE_REMINDER: &str = "\n\n[Rappel] L'utilisateur demande des données depuis un service externe. Tu DOIS répondre UNIQUEMENT par un appel à l'outil TOOL: ask_user (avec le JSON question/context), pas par un message en texte libre. Ainsi la réponse de l'utilisateur reviendra dans la même tâche et tu pourras continuer. Si ask_user n'est pas disponible, explique en message et demande à l'utilisateur de confirmer. Ne réponds pas que tu ne peux pas. Ne invente pas de commandes (ex. /status repo:... n'existe pas) ; les commandes réelles sont dans /help.";
