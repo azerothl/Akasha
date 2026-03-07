@@ -625,46 +625,6 @@ function App() {
         )
         .join("\n");
     }
-    if (cmd === "models") {
-      const sub = parts[1]?.toLowerCase() ?? "";
-      if (sub === "list") {
-        const routes = await invoke<Record<string, { primary?: { provider?: string; model?: string }; fallback?: Array<{ provider?: string; model?: string }> }>>("get_router_routes", { port });
-        if (!routes || Object.keys(routes).length === 0) return "Aucune route configurée.";
-        const lines: string[] = ["Modèles par catégorie (primary + fallback)\n"];
-        for (const cat of Object.keys(routes).sort()) {
-          const t = routes[cat];
-          const primary = t?.primary ? `${t.primary.provider ?? "?"} / ${t.primary.model ?? "?"}` : "(aucun)";
-          lines.push(`  ${cat}:`);
-          lines.push(`    primary: ${primary}`);
-          const fallback = t?.fallback ?? [];
-          if (fallback.length === 0) lines.push("    fallback: (aucun)");
-          else fallback.forEach((f, i) => lines.push(`    fallback[${i}]: ${f?.provider ?? "?"} / ${f?.model ?? "?"}`));
-        }
-        return lines.join("\n");
-      }
-      if (sub === "set") {
-        const category = parts[2];
-        const provider = parts[3];
-        const model = parts.slice(4).join(" ")?.trim() ?? "";
-        if (!category || !provider || !model) return "Usage: /models set CATÉGORIE PROVIDER MODÈLE (ex. /models set conversation ollama llama3.2)";
-        try {
-          const json = await invoke<{ message?: string; category?: string }>("set_router_route", { category, provider, model, port });
-          return `${json?.category ?? ""} — ${json?.message ?? "Route mise à jour."}`;
-        } catch (err) {
-          return `Erreur: ${String(err)}`;
-        }
-      }
-      const providers = await invoke<Record<string, string[]>>("get_router_models", { port });
-      if (!providers || Object.keys(providers).length === 0) return "Aucun modèle configuré.";
-      const lines: string[] = [];
-      for (const [provider, models] of Object.entries(providers)) {
-        if (models?.length) {
-          lines.push(`${provider}:`);
-          lines.push(...models.map((m) => `  ${m}`));
-        }
-      }
-      return lines.length ? lines.join("\n") : "Aucun modèle listé.";
-    }
     function formatRoutes(
       routes: Record<
         string,
@@ -692,6 +652,36 @@ function App() {
         }
       }
       return lines.join("\n");
+    }
+    if (cmd === "models") {
+      const sub = parts[1]?.toLowerCase() ?? "";
+      if (sub === "list") {
+        const routes = await invoke<Record<string, { primary?: { provider?: string; model?: string }; fallback?: Array<{ provider?: string; model?: string }> }>>("get_router_routes", { port });
+        if (!routes || Object.keys(routes).length === 0) return "Aucune route configurée.";
+        return formatRoutes(routes);
+      }
+      if (sub === "set") {
+        const category = parts[2];
+        const provider = parts[3];
+        const model = parts.slice(4).join(" ")?.trim() ?? "";
+        if (!category || !provider || !model) return "Usage: /models set CATÉGORIE PROVIDER MODÈLE (ex. /models set conversation ollama llama3.2)";
+        try {
+          const json = await invoke<{ message?: string; category?: string }>("set_router_route", { category, provider, model, port });
+          return `${json?.category ?? ""} — ${json?.message ?? "Route mise à jour."}`;
+        } catch (err) {
+          return `Erreur: ${String(err)}`;
+        }
+      }
+      const providers = await invoke<Record<string, string[]>>("get_router_models", { port });
+      if (!providers || Object.keys(providers).length === 0) return "Aucun modèle configuré.";
+      const lines: string[] = [];
+      for (const [provider, models] of Object.entries(providers)) {
+        if (models?.length) {
+          lines.push(`${provider}:`);
+          lines.push(...models.map((m) => `  ${m}`));
+        }
+      }
+      return lines.length ? lines.join("\n") : "Aucun modèle listé.";
     }
     if (cmd === "routes") {
       const routes = await invoke<

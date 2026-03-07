@@ -9,9 +9,8 @@ use crate::agent_profile::AgentProfile;
 use crate::agents::{EventBus, OrchestratorTask};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
@@ -491,7 +490,7 @@ async fn execute_tool_call(
                     if results.is_empty() {
                         (true, format!("[memory_search] no results for \"{}\"", query_str))
                     } else {
-                        let preview: Vec<String> = results.iter().take(5).map(|s| s.replace('\n', " ")).collect();
+                        let preview: Vec<String> = results.iter().take(5).map(|(id, content)| format!("id: {} — {}", id, content.replace('\n', " "))).collect();
                         (true, format!("[memory_search] {} result(s): {}", results.len(), preview.join(" | ")))
                     }
                 }
@@ -1084,7 +1083,7 @@ pub(crate) async fn run_message_via_llm(
             .unwrap_or_default();
         if !results.is_empty() {
             context_prefix.push_str("[Mémoire à long terme]\n");
-            for content in &results {
+            for (_, content) in &results {
                 context_prefix.push_str("- ");
                 context_prefix.push_str(&content.replace('\n', " "));
                 context_prefix.push_str("\n");
@@ -1115,7 +1114,7 @@ pub(crate) async fn run_message_via_llm(
                     .unwrap_or_default();
                 if !user_memories.is_empty() {
                     context_prefix.push_str("[Contexte utilisateur — utilise pour saluer si pertinent]\n");
-                    for content in &user_memories {
+                    for (_, content) in &user_memories {
                         context_prefix.push_str("- ");
                         context_prefix.push_str(&content.replace('\n', " "));
                         context_prefix.push_str("\n");
@@ -1726,7 +1725,13 @@ pub async fn handle_api(
             return json_response("400 Bad Request", r#"{"error":"missing id"}"#);
         }
         let result = match long_term_client {
-            Some(ref client) => client.delete(id.to_string()),
+            Some(ref client) => {
+                let client = client.clone();
+                let id = id.to_string();
+                tokio::task::spawn_blocking(move || client.delete(id))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("task join error: {}", e)))
+            }
             None => Err("long-term memory not available".to_string()),
         };
         match result {

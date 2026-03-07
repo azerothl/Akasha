@@ -2436,7 +2436,9 @@ fn run_app(
                                 let n_runs = app.calendar_task_runs.len();
                                 const SCHEDULE_START: usize = 3;
                                 let schedule_end = SCHEDULE_START + n_sched;
-                                let runs_start = 6 + n_sched;
+                                // When there are no schedules, a single "Aucune récurrence" placeholder
+                                // line is rendered, so runs_start must account for that extra line.
+                                let runs_start = SCHEDULE_START + if n_sched == 0 { 1 } else { n_sched } + 3;
                                 let runs_end = runs_start + n_runs;
                                 if actual_line >= SCHEDULE_START && actual_line < schedule_end && n_sched > 0 {
                                     let idx = actual_line - SCHEDULE_START;
@@ -2549,7 +2551,7 @@ fn run_app(
                         };
                         app.trigger_mode_entered();
                     }
-                    (_, KeyCode::Char(c), _) if ('1'..='6').contains(&c) => {
+                    (_, KeyCode::Char(c), _) if app.mode != Mode::Chat && ('1'..='6').contains(&c) => {
                         let idx = (c as u8 - b'1') as usize;
                         let new_mode = match idx {
                             0 => Mode::Chat,

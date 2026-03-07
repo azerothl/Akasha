@@ -12,7 +12,7 @@ pub enum MemoryRequest {
 }
 
 pub enum MemoryResponse {
-    Search(Vec<String>),
+    Search(Vec<(String, String)>), // (id, content)
     Promote(Result<(), String>),
     List(Vec<(String, String, String, String)>), // (id, content, created_at, source)
     Delete(Result<(), String>),
@@ -26,7 +26,9 @@ pub struct LongTermMemoryClient {
 }
 
 impl LongTermMemoryClient {
-    pub fn search(&self, query_text: String, _top_k: usize) -> Vec<String> {
+    /// Search long-term memory. Returns `(id, content)` pairs so callers can decide
+    /// whether to include the UUID (e.g. tool output) or just the content (e.g. context injection).
+    pub fn search(&self, query_text: String, _top_k: usize) -> Vec<(String, String)> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -34,7 +36,7 @@ impl LongTermMemoryClient {
                 return Vec::new();
             }
             match resp_rx.blocking_recv() {
-                Ok(MemoryResponse::Search(contents)) => contents,
+                Ok(MemoryResponse::Search(entries)) => entries,
                 _ => Vec::new(),
             }
         }
@@ -149,9 +151,9 @@ pub fn start_memory_actor(
                             }
                         };
                         let entries = store.search_by_embedding(&vec, top_k).unwrap_or_default();
-                        let contents: Vec<String> = entries
+                        let contents: Vec<(String, String)> = entries
                             .into_iter()
-                            .map(|e| format!("id: {} — {}", e.id, e.content))
+                            .map(|e| (e.id.to_string(), e.content))
                             .collect();
                         MemoryResponse::Search(contents)
                     }
