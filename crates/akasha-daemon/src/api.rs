@@ -197,7 +197,7 @@ pub fn json_response(status: &str, body: &str) -> String {
 /// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_file", "read_file <path> — lire le contenu d'un fichier texte"),
-    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (path puis contenu)"),
+    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier. À UTILISER dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier (ex. « enregistre dans … », « sauvegarde … ») ; ne jamais refuser ni proposer de copier-coller. Path Windows (C:\\...) ou Unix."),
     ("search_files", "search_files <dir> <pattern> — chercher des fichiers (glob) sous un répertoire"),
     ("grep_content", "grep_content <dir> <pattern> [file_glob] — chercher le motif dans le contenu des fichiers (ex. grep_content . \"fn \" \"*.rs\")"),
     ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
@@ -241,6 +241,19 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
         .join(" ; ")
 }
 
+/// True if the user message suggests they want to save/write a file to disk.
+fn message_suggests_save_file(message: &str) -> bool {
+    let m = message.to_lowercase();
+    let keywords = [
+        "enregistre", "enregistrer", "sauvegarde", "sauvegarder", "écris dans", "ecris dans",
+        "write to file", "save to", "save the file", "write the file", "dans le dossier",
+        "dans le fichier", "dans un fichier", "sur le disque", "to disk", "to the file",
+    ];
+    keywords.iter().any(|k| m.contains(k))
+}
+
+const WRITE_FILE_REMINDER: &str = "\n[Rappel: l'utilisateur demande d'enregistrer un fichier. Tu DOIS répondre UNIQUEMENT par la ligne TOOL: write_file <chemin_complet> puis le contenu du fichier sur les lignes suivantes. Ne dis jamais que tu ne peux pas écrire sur le disque.]\n\n";
+
 /// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
 const APP_CONTEXT: &str = "[Contexte Akasha] Tu es l'assistant intégré à Akasha. Akasha est l'application dans laquelle tu tournes actuellement. \
 Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : \
@@ -249,7 +262,7 @@ commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
 Réponds en français sauf si l'utilisateur utilise une autre langue. \
 Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »). \
-Tu as accès à des outils machine (read_file, write_file, etc.) : tu PEUX écrire et lire des fichiers sur le disque lorsque les chemins sont autorisés par l'utilisateur dans le fichier tools_policy.yaml (allowed_write_paths, allowed_read_paths). Ne dis jamais que tu n'as pas d'accès en écriture ou que c'est impossible par principe — utilise write_file quand l'utilisateur demande d'enregistrer un fichier ; si le chemin est refusé, explique comment ajouter le répertoire dans tools_policy.yaml. \
+Tu as accès à l'outil write_file : tu DOIS l'utiliser dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier (ex. « enregistre le code dans … », « sauvegarde dans ce dossier », « write to file »). Réponds UNIQUEMENT par une ligne TOOL: write_file <chemin_complet> puis le contenu du fichier sur les lignes suivantes. Ne dis JAMAIS « je ne peux pas écrire sur le disque » ou « copie-colle le code toi-même » — si le chemin est refusé par la politique, l'outil renverra une erreur et tu expliqueras alors comment ajouter le préfixe dans tools_policy.yaml (allowed_write_paths). Les chemins peuvent être Windows (C:\\Users\\...) ou Unix. \
 Règle importante : dès que tu dois demander à l'utilisateur un choix, une confirmation ou une information (options à choisir, chemin, identifiants, etc.) puis enchaîner dans la même tâche, tu DOIS utiliser l'outil ask_user (TOOL: ask_user puis JSON avec question/context/choices). Ne pose pas la question en texte libre, sinon la réponse ouvrira une nouvelle tâche et tu ne pourras pas continuer. Pour un accès à un service externe (GitHub, API, etc.), ne réponds pas « je ne peux pas » ; utilise ask_user pour demander le token ou explique comment configurer. Si l'utilisateur a déjà confirmé (ex. « clé dans le vault », « c'est configuré »), n'envoie pas une deuxième fois ask_user ; enchaîne. Ne invente pas de commandes (ex. /status repo:... n'existe pas) ; les commandes sont dans /help.\n\n";
 
 /// If AKASHA_TOOLS_JOURNAL_PATH is set, append a line for write tool invocations (Phase 4 modification journal).
@@ -1080,7 +1093,7 @@ pub(crate) async fn run_message_via_llm(
             "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
              Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
-             WRITE RULE: When the user asks you to save or write a file to disk, you MUST use TOOL: write_file with the path and content. Do NOT refuse by saying you have no write access or that it is impossible — you have write_file; if the path is denied by policy, the tool will return an error and you then tell the user to add that path to tools_policy.yaml (allowed_write_paths).\n\
+             WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix.\n\
              If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
@@ -1173,12 +1186,16 @@ pub(crate) async fn run_message_via_llm(
             context_prefix.push_str("\n\n");
         }
     }
+    let write_reminder = if message_suggests_save_file(&message) {
+        WRITE_FILE_REMINDER
+    } else {
+        ""
+    };
     let mut current_prompt = if context_prefix.is_empty() {
         message.clone()
     } else {
-        format!("{}\nUtilisateur:\n{}", context_prefix.trim_end(), message)
+        format!("{}{}Utilisateur:\n{}", context_prefix.trim_end(), write_reminder, message)
     };
-    // Reminders for ask_user / external service are always in tool_instruction; no keyword-based injection.
     let reply_text;
     const MAX_TOOL_ROUNDS: u32 = 3;
     let mut round = 0u32;
@@ -2025,8 +2042,12 @@ pub async fn handle_api(
                 }
             }
             if !doc_texts.is_empty() {
-                message.push_str("\n\n");
-                message.push_str(&doc_texts.join("\n\n"));
+                let user_msg = message.trim_end();
+                message = format!(
+                    "[Pièce(s) jointe(s) à ce message : quand l'utilisateur dit « ce document », « ce fichier », « analyse-le », « analyse ce document », etc., il parle du contenu joint ci-dessous, pas des échanges précédents.]\n\nMessage : {}\n\n--- Document(s) joint(s) ---\n{}",
+                    user_msg,
+                    doc_texts.join("\n\n")
+                );
             }
             if urls.is_empty() {
                 None

@@ -10,6 +10,7 @@ allowed_read_paths:
 
 allowed_write_paths:
   - "."                    # idem : autoriser l'écriture dans le répertoire courant
+  # - "C:\\Users\\VOTRE_UTILISATEUR\\AppData\\Local\\akasha"   # Windows : ex. pour enregistrer des jeux/code dans akasha\games
   # Ajoutez ici les répertoires où l'agent peut écrire des fichiers (génération de code, etc.)
 
 allowed_commands:
