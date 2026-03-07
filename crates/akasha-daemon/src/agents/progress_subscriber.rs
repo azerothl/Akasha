@@ -104,9 +104,13 @@ pub async fn run_events_subscriber(bus: EventBus, events: EventsCache) {
                     q.pop_front();
                 }
             }
-            Err(_) => {
-                // Lagged or closed: keep running to not miss future events
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                // Missed some events due to slow consumer; continue to process future events
                 continue;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                // Sender dropped, channel is done
+                break;
             }
         }
     }
