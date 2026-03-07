@@ -133,13 +133,13 @@ struct CalendarTaskRun {
 #[derive(Clone, Default)]
 struct CalendarRunDetail {
     run_status: String,
-    run_started_at: Option<String>,
-    run_ended_at: Option<String>,
+    _run_started_at: Option<String>,
+    _run_ended_at: Option<String>,
     task_status: String,
-    created_at: String,
-    updated_at: String,
+    _created_at: String,
+    _updated_at: String,
     progress: Vec<(u8, String)>,
-    schedule_id: Option<String>,
+    _schedule_id: Option<String>,
 }
 
 /// Detail for selected schedule (from GET /api/schedules/:id).
@@ -151,8 +151,8 @@ struct ScheduleDetail {
     channel_context: Option<String>,
     enabled: bool,
     interval_seconds: Option<u64>,
-    timezone: Option<String>,
-    rrule: Option<String>,
+    _timezone: Option<String>,
+    _rrule: Option<String>,
 }
 
 #[derive(Clone, Default, serde::Deserialize)]
@@ -631,13 +631,13 @@ impl App {
                         .unwrap_or_default();
                     self.calendar_run_detail = Some(CalendarRunDetail {
                         run_status: run.status.clone(),
-                        run_started_at: run.started_at.clone(),
-                        run_ended_at: run.ended_at.clone(),
+                        _run_started_at: run.started_at.clone(),
+                        _run_ended_at: run.ended_at.clone(),
                         task_status,
-                        created_at,
-                        updated_at,
+                        _created_at: created_at,
+                        _updated_at: updated_at,
                         progress,
-                        schedule_id: run.schedule_id.clone(),
+                        _schedule_id: run.schedule_id.clone(),
                     });
                     return;
                 }
@@ -670,8 +670,8 @@ impl App {
                         channel_context,
                         enabled,
                         interval_seconds,
-                        timezone,
-                        rrule,
+                        _timezone: timezone,
+                        _rrule: rrule,
                     });
                     return;
                 }
