@@ -2018,7 +2018,12 @@ fn ui(f: &mut Frame, app: &mut App) {
                     detail_lines.push(Line::from(""));
                 }
                 if let Some(last) = d.progress.last() {
-                    let reply_preview = if last.1.len() > 2000 { format!("{}…", &last.1[..2000]) } else { last.1.clone() };
+                    let reply_preview = if last.1.chars().count() > 2000 {
+                        let truncated: String = last.1.chars().take(2000).collect();
+                        format!("{}…", truncated)
+                    } else {
+                        last.1.clone()
+                    };
                     detail_lines.push(Line::from(Span::styled(" Réponse : ", Style::default().fg(theme.palette().success))));
                     let md_styles = theme.markdown_styles();
                     let detail_width = detail_area.width.saturating_sub(4) as u16;
