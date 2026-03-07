@@ -674,9 +674,9 @@ body {
   padding: 1rem;
   font-size: 0.875rem;
   line-height: 1.6;
-  background: #18181b;
+  background: var(--akasha-bg-elevated);
   border-radius: 8px;
-  border: 1px solid #27272a;
+  border: 1px solid var(--akasha-border);
 }
 
 .docs-panel .doc-content.doc-markdown {
@@ -684,7 +684,7 @@ body {
 }
 
 .docs-panel .doc-content code {
-  background: #27272a;
+  background: var(--akasha-bg-surface);
   padding: 0.15rem 0.35rem;
   border-radius: 4px;
   font-size: 0.8125rem;
@@ -696,9 +696,9 @@ body {
   margin: 1.25rem 0 0.75rem;
   font-size: 1.5rem;
   font-weight: 600;
-  color: #e4e4e7;
+  color: var(--akasha-text);
   padding-bottom: 0.35rem;
-  border-bottom: 1px solid #3f3f46;
+  border-bottom: 1px solid var(--akasha-bg-surface-hover);
 }
 
 .docs-panel .doc-markdown h1:first-child {
@@ -709,26 +709,26 @@ body {
   margin: 1.25rem 0 0.5rem;
   font-size: 1.2rem;
   font-weight: 600;
-  color: #a1a1aa;
+  color: var(--akasha-text-muted);
 }
 
 .docs-panel .doc-markdown h3 {
   margin: 1rem 0 0.4rem;
   font-size: 1.05rem;
   font-weight: 600;
-  color: #a1a1aa;
+  color: var(--akasha-text-muted);
 }
 
 .docs-panel .doc-markdown p {
   margin: 0.5rem 0;
-  color: #d4d4d8;
+  color: var(--akasha-text);
 }
 
 .docs-panel .doc-markdown ul,
 .docs-panel .doc-markdown ol {
   margin: 0.5rem 0;
   padding-left: 1.5rem;
-  color: #d4d4d8;
+  color: var(--akasha-text);
 }
 
 .docs-panel .doc-markdown li {
@@ -738,9 +738,9 @@ body {
 .docs-panel .doc-markdown pre {
   margin: 0.75rem 0;
   padding: 1rem;
-  background: #27272a;
+  background: var(--akasha-bg-surface);
   border-radius: 6px;
-  border: 1px solid #3f3f46;
+  border: 1px solid var(--akasha-bg-surface-hover);
   overflow-x: auto;
 }
 
@@ -762,28 +762,28 @@ body {
 .docs-panel .doc-markdown td {
   padding: 0.5rem 0.75rem;
   text-align: left;
-  border: 1px solid #3f3f46;
-  color: #d4d4d8;
+  border: 1px solid var(--akasha-bg-surface-hover);
+  color: var(--akasha-text);
 }
 
 .docs-panel .doc-markdown th {
-  background: #27272a;
+  background: var(--akasha-bg-surface);
   font-weight: 600;
-  color: #e4e4e7;
+  color: var(--akasha-text);
 }
 
 .docs-panel .doc-markdown tr:nth-child(even) td {
-  background: rgba(39, 39, 42, 0.5);
+  background: color-mix(in srgb, var(--akasha-bg-surface) 50%, transparent);
 }
 
 .docs-panel .doc-markdown hr {
   margin: 1.25rem 0;
   border: none;
-  border-top: 1px solid #3f3f46;
+  border-top: 1px solid var(--akasha-bg-surface-hover);
 }
 
 .docs-panel .doc-markdown a {
-  color: #6366f1;
+  color: var(--akasha-accent);
   text-decoration: none;
 }
 
@@ -793,7 +793,7 @@ body {
 
 .docs-panel .doc-markdown strong {
   font-weight: 600;
-  color: #e4e4e7;
+  color: var(--akasha-text);
 }
 
 /* Markdown in chat messages and task reply content */
