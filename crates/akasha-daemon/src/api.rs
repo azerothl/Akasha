@@ -219,7 +219,9 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
         Box::new(
             AVAILABLE_TOOLS
                 .iter()
-                .filter(move |(name, _)| allowed.iter().any(|a| a == *name)),
+                .filter(move |(name, _)| {
+                    *name == "ask_user" || allowed.iter().any(|a| a == *name)
+                }),
         )
     } else {
         Box::new(AVAILABLE_TOOLS.iter())
@@ -229,6 +231,32 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
         .join(" ; ")
 }
 
+/// True if the user message suggests they want data from an external service (repo, API, etc.).
+fn message_suggests_external_service(message: &str) -> bool {
+    let m = message.to_lowercase();
+    const KEYWORDS: &[&str] = &[
+        " repo ",
+        "github",
+        "gitlab",
+        "dépôt",
+        "dépôts",
+        " connecte",
+        " connect ",
+        " api ",
+        " pr ",
+        "pull request",
+        " issues",
+        "issues ",
+        "token",
+        "clé api",
+        "credentials",
+        "authentif",
+    ];
+    KEYWORDS.iter().any(|k| m.contains(k))
+}
+
+const EXTERNAL_SERVICE_REMINDER: &str = "\n\n[Rappel] L'utilisateur demande des données depuis un service externe. Tu DOIS utiliser ask_user pour demander le token ou la clé API, ou expliquer comment configurer l'accès (ex. GITHUB_TOKEN, vault) ; si ask_user n'est pas disponible, explique en message et demande à l'utilisateur de confirmer une fois l'accès configuré. Ne réponds pas que tu ne peux pas.";
+
 /// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
 const APP_CONTEXT: &str = "[Contexte Akasha] Tu es l'assistant intégré à Akasha. Akasha est l'application dans laquelle tu tournes actuellement. \
 Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : \
@@ -237,7 +265,7 @@ commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
 Réponds en français sauf si l'utilisateur utilise une autre langue. \
 Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »). \
-Si une tâche nécessite de te connecter à un service externe (compte, clé API, identifiants), demande à l'utilisateur les informations de connexion ou indique-lui comment les configurer (ex. variable d'environnement, vault Akasha), puis reprends la tâche une fois qu'il t'a répondu.\n\n";
+Règle importante — accès à un service externe (GitHub, API, etc.) : si l'utilisateur te demande de te connecter à un dépôt, une API ou un service (ex. « connecte-toi au repo X et donne-moi les PR »), ne réponds PAS que tu ne peux pas. Tu DOIS soit (1) utiliser l'outil ask_user pour lui demander le token ou la clé API, ou lui expliquer comment configurer l'accès (ex. GITHUB_TOKEN, vault Akasha), soit (2) si ask_user n'est pas disponible, lui expliquer en message comment fournir l'accès (variable d'environnement, vault) et lui demander de le faire puis de te confirmer. Une fois l'accès fourni ou configuré, reprends la tâche.\n\n";
 
 /// If AKASHA_TOOLS_JOURNAL_PATH is set, append a line for write tool invocations (Phase 4 modification journal).
 async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: &str) {
@@ -1053,7 +1081,7 @@ pub(crate) async fn run_message_via_llm(
         format!(
             "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
              When you need the user to provide information (choice, confirmation, or free text), use TOOL: ask_user then on the next line a single JSON: {{\"question\":\"...\", \"context\":\"...\", \"choices\":[\"a\",\"b\"]}} (context and choices optional).\n\
-             When a task requires connecting to an external service (account, API key, credentials), use ask_user to ask for the connection details or to explain how the user can provide or configure them (e.g. env var, Akasha vault); then continue the task once the user has replied.\n\
+             CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply that you cannot. You MUST use TOOL: ask_user to ask for the token/API key, or to explain how the user can provide it (e.g. GITHUB_TOKEN env var, akasha vault set). Example: user says \"connect to repo X and give me open PRs\" -> use ask_user with question like \"To access GitHub I need a token. Please provide a GitHub Personal Access Token (with repo scope), or set GITHUB_TOKEN in your environment / vault, then reply here when done.\" After the user replies, continue the task.\n\
              If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
@@ -1136,6 +1164,9 @@ pub(crate) async fn run_message_via_llm(
     } else {
         format!("{}\nUtilisateur:\n{}", context_prefix.trim_end(), message)
     };
+    if message_suggests_external_service(&message) {
+        current_prompt.push_str(EXTERNAL_SERVICE_REMINDER);
+    }
     let reply_text;
     const MAX_TOOL_ROUNDS: u32 = 3;
     let mut round = 0u32;

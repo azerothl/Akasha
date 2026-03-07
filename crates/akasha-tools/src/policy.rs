@@ -89,7 +89,11 @@ impl ToolsPolicy {
     }
 
     /// If default_profile is set, returns whether the tool is in the profile. Otherwise true.
+    /// ask_user is always allowed so the agent can request credentials for external services.
     pub fn can_use_tool(&self, tool_name: &str) -> bool {
+        if tool_name == "ask_user" {
+            return true;
+        }
         match &self.default_profile {
             Some(profile) => self
                 .tool_profiles
