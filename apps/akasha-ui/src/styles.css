@@ -1389,17 +1389,17 @@ body {
   flex-shrink: 0;
   padding: 0.25rem 0.5rem;
   font-size: 0.75rem;
-  color: #a1a1aa;
+  color: var(--akasha-text-muted);
   background: transparent;
-  border: 1px solid #3f3f46;
+  border: 1px solid var(--akasha-bg-surface-hover);
   border-radius: 6px;
   cursor: pointer;
 }
 
 .memory-long-term-delete:hover {
-  color: #f87171;
-  border-color: #7f1d1d;
-  background: rgba(248, 113, 113, 0.1);
+  color: var(--akasha-error);
+  border-color: var(--akasha-error);
+  background: color-mix(in srgb, var(--akasha-error) 10%, transparent);
 }
 
 /* Calendar task detail modal (popup) */
