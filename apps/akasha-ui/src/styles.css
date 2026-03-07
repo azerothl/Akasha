@@ -1303,6 +1303,56 @@ body {
   min-height: 0;
 }
 
+.memory-content-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.memory-subtabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+  flex-shrink: 0;
+}
+
+.memory-subtab {
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--akasha-text-muted, #71717a);
+  background: var(--akasha-bg-surface, #27272a);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.memory-subtab:hover {
+  color: var(--akasha-text, #fafafa);
+  background: #3f3f46;
+}
+
+.memory-subtab.active {
+  color: var(--akasha-text, #fafafa);
+  background: #3f3f46;
+  border-color: #52525b;
+}
+
+.memory-subpanel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.memory-list-scroll {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  margin-bottom: 1rem;
+}
+
 .memory-panel .memory-section-title {
   margin: 1.5rem 0 0.5rem;
   font-size: 1rem;

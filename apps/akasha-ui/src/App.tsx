@@ -143,6 +143,8 @@ function App() {
   const [memoryLongTermAvailable, setMemoryLongTermAvailable] = useState(false);
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
+  type MemorySubTab = "short" | "long";
+  const [memorySubTab, setMemorySubTab] = useState<MemorySubTab>("short");
   const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -968,8 +970,10 @@ function App() {
                   {scheduleReports.map((r, i) => (
                     <div key={`report-${i}`} className="message system report">
                       <span className="role" aria-hidden>Rappel exécuté</span>
-                      <div className="text" style={{ whiteSpace: "pre-wrap" }}>
-                        <strong>« {r.schedule_name} »</strong> — {r.message}
+                      <div className="text markdown-rendered">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {`**« ${r.schedule_name} »** — ${r.message}`}
+                        </ReactMarkdown>
                       </div>
                     </div>
                   ))}
@@ -1587,7 +1591,11 @@ function App() {
                                       {p.progress_pct != null && p.progress_pct > 0
                                         ? `${p.progress_pct}% — `
                                         : "État: "}
-                                      {p.message ?? ""}
+                                      <div className="markdown-rendered progress-message">
+                                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                          {p.message ?? ""}
+                                        </ReactMarkdown>
+                                      </div>
                                     </li>
                                   ))}
                                 </ul>
@@ -1703,31 +1711,72 @@ function App() {
               </p>
             )}
             {!memoryLoading && !memoryError && (
-              <>
-                <h3 className="memory-section-title">Court terme (session)</h3>
-                <p className="muted">
+              <div className="memory-content-wrap">
+                <div className="memory-subtabs" role="tablist" aria-label="Type de mémoire">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={memorySubTab === "short"}
+                    aria-controls="memory-content-short"
+                    id="memory-tab-short"
+                    className={"memory-subtab" + (memorySubTab === "short" ? " active" : "")}
+                    onClick={() => setMemorySubTab("short")}
+                  >
+                    Court terme
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={memorySubTab === "long"}
+                    aria-controls="memory-content-long"
+                    id="memory-tab-long"
+                    className={"memory-subtab" + (memorySubTab === "long" ? " active" : "")}
+                    onClick={() => setMemorySubTab("long")}
+                  >
+                    Long terme
+                  </button>
+                </div>
+                {memorySubTab === "short" && (
+                  <div
+                    id="memory-content-short"
+                    role="tabpanel"
+                    aria-labelledby="memory-tab-short"
+                    className="memory-subpanel"
+                  >
+                    <p className="muted">
                   Derniers échanges de la session courante (utilisée par l’orchestrateur pour le contexte).
                 </p>
                 {memoryShortTerm.length === 0 ? (
                   <p className="empty-state">Aucun tour en mémoire court terme.</p>
                 ) : (
-                  <ul className="memory-turns-list">
-                    {memoryShortTerm.map((t, i) => (
-                      <li key={i} className={`memory-turn memory-turn-${t.role}`}>
-                        <span className="memory-turn-role">{t.role}</span>
-                        <div className="memory-turn-content">{t.content}</div>
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="memory-list-scroll">
+                    <ul className="memory-turns-list">
+                      {memoryShortTerm.map((t, i) => (
+                        <li key={i} className={"memory-turn memory-turn-" + t.role}>
+                          <span className="memory-turn-role">{t.role}</span>
+                          <div className="memory-turn-content">{t.content}</div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 )}
-                <h3 className="memory-section-title">Long terme</h3>
-                {!memoryLongTermAvailable ? (
-                  <p className="muted">Mémoire long terme non disponible (embeddings non configurés ou désactivés).</p>
-                ) : memoryLongTerm.length === 0 ? (
-                  <p className="empty-state">Aucune entrée en mémoire long terme.</p>
-                ) : (
-                  <ul className="memory-long-term-list">
-                    {memoryLongTerm.map((e, i) => (
+                  </div>
+                )}
+                {memorySubTab === "long" && (
+                  <div
+                    id="memory-content-long"
+                    role="tabpanel"
+                    aria-labelledby="memory-tab-long"
+                    className="memory-subpanel"
+                  >
+                    {!memoryLongTermAvailable ? (
+                      <p className="muted">Mémoire long terme non disponible (embeddings non configurés ou désactivés).</p>
+                    ) : memoryLongTerm.length === 0 ? (
+                      <p className="empty-state">Aucune entrée en mémoire long terme.</p>
+                    ) : (
+                      <div className="memory-list-scroll">
+                        <ul className="memory-long-term-list">
+                          {memoryLongTerm.map((e, i) => (
                       <li key={e.id ?? `entry-${i}`} className="memory-long-term-item">
                         <div className="memory-long-term-body">
                           <div className="memory-long-term-content">{e.content}</div>
@@ -1753,11 +1802,14 @@ function App() {
                             Supprimer
                           </button>
                         )}
-                      </li>
-                    ))}
-                  </ul>
+                          </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
                 )}
-              </>
+              </div>
             )}
           </section>
         )}
