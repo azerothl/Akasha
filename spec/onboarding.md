@@ -34,6 +34,7 @@ Le wizard vous demande :
 Fichiers créés dans le data_dir (ex. `%LOCALAPPDATA%\akasha`) :
 - `llm_router.yaml` — configuration routeur LLM (par défaut : akasha_embedded/default pour tous les types de tâche). Si Ollama est joignable, les infos de chaque modèle (contexte max, num_ctx, family, etc.) sont récupérées et enregistrées dans la section `model_options`.
 - `connectors.env` — variables pour activer Telegram/Slack/Discord ; chargé automatiquement par `akasha start`.
+- `tools_policy.yaml` — créé par `akasha init` (ou par `akasha doctor --fix` si absent). Politique des outils machine (lecture/écriture de fichiers, commandes) ; éditez `allowed_read_paths` et `allowed_write_paths` pour autoriser les chemins utilisés par les agents.
 
 Mode sans questions (défauts : modèle embarqué akasha_embedded, aucun connecteur) :
 
@@ -119,6 +120,8 @@ akasha doctor --advice
 ```
 
 (Le daemon doit être démarré. Le modèle embarqué ou Ollama/cloud doit être disponible pour une réponse complète.)
+
+Si **tools_policy.yaml** est absent (outils machine désactivés), exécutez `akasha doctor --fix` pour le créer à partir de l’exemple ou d’une version minimale, puis éditez `allowed_read_paths` et `allowed_write_paths` selon vos besoins.
 
 ## 9. Canaux (si non configurés par init)
 

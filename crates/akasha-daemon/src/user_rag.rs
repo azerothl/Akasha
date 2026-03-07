@@ -196,3 +196,49 @@ impl UserRagStore {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::UserRagStore;
+    use std::path::Path;
+
+    #[test]
+    fn user_rag_add_list_delete_retrieve() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserRagStore::new(dir.path());
+
+        let content = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"Hello world from test document",
+        );
+        let id = store.add_document(&content, "test.txt", "text/plain").unwrap();
+        assert!(!id.is_empty());
+
+        let list = store.list_documents().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "test.txt");
+        assert_eq!(list[0].id, id);
+
+        let chunks = store.retrieve("world", 5).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].contains("Hello world"));
+
+        let deleted = store.delete_document(&id).unwrap();
+        assert!(deleted);
+        assert!(store.list_documents().unwrap().is_empty());
+        assert!(store.retrieve("world", 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn user_rag_retrieve_empty_query_returns_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserRagStore::new(dir.path());
+        let content = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"Some text content",
+        );
+        store.add_document(&content, "a.txt", "text/plain").unwrap();
+        let chunks = store.retrieve("", 5).unwrap();
+        assert_eq!(chunks.len(), 1);
+    }
+}

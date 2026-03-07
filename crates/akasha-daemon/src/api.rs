@@ -3040,3 +3040,29 @@ async fn get_schedule_run_reports(store_path: &Path, progress: &ProgressCache) -
     let body = serde_json::json!({ "reports": reports });
     json_response("200 OK", &body.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_content_length;
+
+    #[test]
+    fn parse_content_length_returns_header_end_and_content_length() {
+        let buf = b"POST /api/message HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+        let r = parse_content_length(buf);
+        assert!(r.is_some());
+        let (header_end, content_length) = r.unwrap();
+        assert_eq!(header_end, 43);
+        assert_eq!(content_length, 5);
+    }
+
+    #[test]
+    fn parse_content_length_no_separator_returns_none() {
+        let buf = b"POST /api/message HTTP/1.1";
+        assert!(parse_content_length(buf).is_none());
+    }
+
+    #[test]
+    fn parse_content_length_empty_returns_none() {
+        assert!(parse_content_length(&[]).is_none());
+    }
+}

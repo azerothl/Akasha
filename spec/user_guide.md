@@ -206,7 +206,15 @@ npm install
 npm run tauri dev
 ```
 
-L'UI se connecte au daemon sur le port 3876 (configurable via `AKASHA_PORT`). Onglets : Chat, Routeur (métriques), Documentation, Paramètres.
+L'UI se connecte au daemon sur le port 3876 (configurable via `AKASHA_PORT`). **Onglets** : Chat, Routeur (métriques), Documentation, Tâches, Calendrier, Mémoire, Paramètres.
+
+**Pièces jointes (interface web uniquement)** : dans le Chat, le bouton « Joindre » permet d’ajouter des images ou des documents (texte, PDF). Les images sont envoyées au modèle (vision) ; les documents texte et PDF sont extraits et inclus dans le message pour l’agent. Utile pour « analyse ce document » ou pour fournir un fichier sans le copier-coller.
+
+**RAG utilisateur (interface web uniquement)** : dans l’onglet Paramètres, la section « Mes documents (RAG utilisateur) » permet d’ajouter ou supprimer des documents (texte). Ces documents sont indexés et les extraits pertinents sont injectés dans le contexte des agents lors des réponses. En TUI ou sans interface web, le RAG utilisateur peut être géré via l’API : `GET/POST/DELETE /api/user-rag/documents`.
+
+**OpenRouter** : pour que l’application apparaisse dans le dashboard OpenRouter (usage, identification), définir `site_url` et `app_title` dans `providers.openrouter` du fichier `llm_router.yaml`, ou les variables d’environnement `OPENROUTER_SITE_URL` et `OPENROUTER_APP_TITLE`. Voir [35_configuration_reference.md](35_configuration_reference.md).
+
+**Différences TUI / Web** : la TUI propose les onglets Chat, Routeur, Doc, Tâches, Calendrier, Mémoire (pas d’onglet Paramètres). L’envoi de pièces jointes et la gestion du RAG utilisateur sont disponibles dans l’interface web uniquement ; en TUI, les messages sont envoyés sans pièces jointes et le RAG utilisateur se configure via l’API ou l’interface web.
 
 ### Flux des demandes (orchestrateur)
 

@@ -1209,6 +1209,28 @@ providers:
         println!("\n  Profil agent : template « Neutre / polyvalent » écrit dans {}", agent_profile_path.display());
     }
 
+    // --- 4c. tools_policy.yaml (outils machine) ---
+    let tools_policy_path = data_dir.join("tools_policy.yaml");
+    if !tools_policy_path.exists() {
+        let spec_dir = std::env::var("AKASHA_SPEC_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("spec"));
+        let example = spec_dir.join("tools_policy.example.yaml");
+        if example.exists() {
+            std::fs::copy(&example, &tools_policy_path)?;
+            println!("  Fichier écrit : {} (depuis spec/tools_policy.example.yaml)", tools_policy_path.display());
+        } else {
+            let minimal = r#"# tools_policy.yaml - éditez allowed_read_paths / allowed_write_paths selon vos besoins
+allowed_read_paths: []
+allowed_write_paths: []
+allowed_commands: []
+command_timeout_secs: 60
+"#;
+            std::fs::write(&tools_policy_path, minimal)?;
+            println!("  Fichier écrit : {} (minimal ; éditez pour autoriser chemins et commandes)", tools_policy_path.display());
+        }
+    }
+
     // --- 5. RAG / Memory ---
     println!("\n--- RAG & Memory ---");
     println!("  RAG : le dossier spec/ (et spec/runbooks/) du projet est utilisé par défaut.");
@@ -1218,6 +1240,9 @@ providers:
     println!("\n=== Initialisation terminée ===");
     println!("  • llm_router.yaml : {}", router_path.display());
     println!("  • connectors.env : {}", env_path.display());
+    if tools_policy_path.exists() {
+        println!("  • tools_policy.yaml : politique des outils machine (éditez allowed_read_paths / allowed_write_paths)");
+    }
     if agent_profile_path.exists() {
         println!("  • agent_profile.json : profil / personnalité de l'agent");
     }

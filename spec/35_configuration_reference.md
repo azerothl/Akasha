@@ -25,6 +25,8 @@ Ce document décrit **tous les fichiers de configuration** utilisés par Akasha 
 | `providers.<nom>.api_key_ref` | string | Non | Référence de la clé API : `vault://nom_cle` (résolution via vault en priorité), ou nom de clé sans préfixe (résolution via variable d'environnement, ex. `openrouter_api_key`). |
 | `providers.<nom>.organization` | string | Non | Ex. OpenAI organization. |
 | `providers.<nom>.version` | string | Non | Ex. version API. |
+| `providers.<nom>.site_url` | string | Non | (OpenRouter) URL du site pour l’en-tête HTTP-Referer ; sinon env `OPENROUTER_SITE_URL`. |
+| `providers.<nom>.app_title` | string | Non | (OpenRouter) Nom de l’app pour l’en-tête X-OpenRouter-Title ; défaut « Akasha ». Sinon env `OPENROUTER_APP_TITLE`. |
 | `model_options` | objet | Non | Métadonnées par modèle (remplies par `akasha config models fetch/add`). |
 | `model_options.<modele>.context_length_max` | entier (u64) | Non | Taille max de contexte. |
 | `model_options.<modele>.num_ctx` | entier (u64) | Non | Contexte effectif (Ollama). |
@@ -58,6 +60,7 @@ Voir [llm_router.example.yaml](llm_router.example.yaml).
 - **Utiliser OpenAI** : `providers.openai.api_key_ref: "vault://openai_api_key"` puis définir la route pour une catégorie.
 - **Modèle système (mémoire, décomposition)** : la catégorie `system` doit exister ; par défaut elle pointe vers `akasha_embedded` (voir [06_memory_model.md](06_memory_model.md)).
 - **OpenRouter / OpenAI en primary** : le daemon enregistre le provider OpenRouter (resp. OpenAI) dès qu’une clé API est disponible : variable d’environnement `OPENROUTER_API_KEY` (resp. `OPENAI_API_KEY`) ou vault `vault://openrouter_api_key` (resp. `vault://openai_api_key`). Il n’est pas obligatoire d’avoir une section `providers.openrouter` (resp. `providers.openai`) dans `llm_router.yaml` ; définir la route (ex. `task_types.conversation.primary: { provider: openrouter, model: "..." }`) via la TUI ou le fichier suffit une fois la clé définie.
+- **Identifier l’app auprès d’OpenRouter** : pour apparaître dans le dashboard OpenRouter, définir `providers.openrouter.site_url` (URL du site, en-tête HTTP-Referer) et `providers.openrouter.app_title` (nom de l’app, en-tête X-OpenRouter-Title), ou les variables d’environnement `OPENROUTER_SITE_URL` et `OPENROUTER_APP_TITLE`.
 
 ---
 
@@ -75,7 +78,11 @@ Voir [llm_router.example.yaml](llm_router.example.yaml).
 | `allowed_write_paths` | liste de strings | Non (défaut : []) | Préfixes de chemins autorisés pour l’écriture. |
 | `allowed_commands` | liste de strings | Non (défaut : []) | Noms d’exécutables autorisés pour `run_command` (ex. `cargo`, `npm`, `git`). |
 | `command_timeout_secs` | entier (u64) | Non (défaut : 0) | Timeout en secondes pour l’exécution d’une commande (ex. 60). |
-| `allowed_web_domains` | liste de strings | Non (défaut : []) | Domaines autorisés pour `web_fetch` (feature « web »). |
+| `allowed_web_domains` | liste de strings | Non (défaut : []) | Domaines autorisés pour `web_fetch` (feature « web »). Utiliser `["*"]` pour tout autoriser (sous réserve de `blocked_web_domains`). |
+| `blocked_web_domains` | liste de strings | Non (défaut : []) | Domaines interdits pour `web_fetch` ; prioritaire sur `allowed_web_domains`. |
+| `web_search_enabled` | booléen | Non (défaut : false) | Activer la recherche web (Brave API). Clé : vault `brave_api_key` ou env `BRAVE_API_KEY`. |
+| `tool_profiles` | objet | Non | Profils d’outils : clé = nom du profil, valeur = liste de noms d’outils (ex. `coding: [read_file, write_file, run_command]`). |
+| `default_profile` | string | Non | Nom du profil actif ; si défini, seuls les outils listés dans `tool_profiles[default_profile]` sont autorisés. |
 
 Les chemins peuvent être relatifs (ex. `.`) ou absolus ; sous Windows, utiliser des backslashes échappés ou des chemins normaux.
 

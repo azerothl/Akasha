@@ -20,6 +20,8 @@ providers:
   openrouter:
     api_key_ref: "vault://openrouter_api_key"   # ou OPENROUTER_API_KEY
     # base_url optionnel (défaut: https://openrouter.ai/api/v1)
+    # site_url: "https://myapp.example.com"    # en-tête HTTP-Referer (ou OPENROUTER_SITE_URL)
+    # app_title: "Akasha"                       # en-tête X-OpenRouter-Title (ou OPENROUTER_APP_TITLE)
 
 # Métadonnées par modèle (remplies par akasha init ou akasha config models fetch/add)
 # — context_length_max, num_ctx, family, etc. depuis Ollama /api/show
