@@ -2382,36 +2382,7 @@ fn run_app(
                                 };
                                 if app.mode != new_mode {
                                     app.mode = new_mode;
-                                    if app.mode == Mode::Router {
-                                        app.fetch_metrics();
-                                    }
-                                    if app.mode == Mode::Doc && app.doc_content.is_empty() {
-                                        app.fetch_doc();
-                                    }
-                                    if app.mode == Mode::Tasks {
-                                        app.fetch_activity_tasks();
-                                    }
-                                    if app.mode == Mode::Calendar {
-                                        app.fetch_calendar();
-                                        app.scroll = 0;
-                                        if !app.calendar_task_runs.is_empty() {
-                                            app.calendar_focus_schedules = false;
-                                            app.calendar_selected_run = Some(0);
-                                            let run = app.calendar_task_runs[0].clone();
-                                            app.fetch_calendar_run_detail(&run);
-                                        } else if !app.calendar_schedules.is_empty() {
-                                            app.calendar_focus_schedules = true;
-                                            app.calendar_schedule_index = 0;
-                                            let id = app.calendar_schedules[0].0.clone();
-                                            app.fetch_schedule_detail(&id);
-                                        }
-                                    }
-                                    if app.mode == Mode::Chat {
-                                        app.fetch_schedule_reports();
-                                    }
-                                    if app.mode == Mode::Memory {
-                                        app.fetch_memory();
-                                    }
+                                    app.trigger_mode_entered();
                                 }
                             }
                         }
