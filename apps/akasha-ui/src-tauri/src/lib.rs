@@ -301,6 +301,76 @@ async fn get_router_models(port: Option<u16>) -> Result<std::collections::HashMa
     Ok(providers)
 }
 
+/// GET /api/router/routes — primary + fallback per category (for /routes, /models list).
+#[tauri::command]
+async fn get_router_routes(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/routes", daemon_base_url(port));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// POST /api/router/route — set primary provider/model for a category (for /models set).
+#[tauri::command]
+async fn set_router_route(category: String, provider: String, model: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/route", daemon_base_url(port));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let body = serde_json::json!({ "category": category, "provider": provider, "model": model });
+    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let err = resp.text().await.unwrap_or_default();
+        return Err(err);
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// GET /api/router/embedded-status — embedded LLM status (for /embedded).
+#[tauri::command]
+async fn get_embedded_status(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/embedded-status", daemon_base_url(port));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// POST /api/router/embedded/reload — unload embedded model (for /embedded reload).
+#[tauri::command]
+async fn embedded_reload(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/router/embedded/reload", daemon_base_url(port));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// GET /api/doctor — health checks (for slash /doctor).
 #[tauri::command]
 async fn get_doctor(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -476,6 +546,41 @@ async fn cancel_task(task_id: String, port: Option<u16>) -> Result<serde_json::V
     Ok(json)
 }
 
+/// Human in the loop: GET /api/tasks/:id/human-input — pending question/context/choices for the task (404 if none).
+#[tauri::command]
+async fn get_task_human_input(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/tasks/{}/human-input", daemon_base_url(port), task_id);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Human in the loop: POST /api/tasks/:id/human-reply — submit user response to unblock the agent.
+#[tauri::command]
+async fn post_task_human_reply(task_id: String, response: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/tasks/{}/human-reply", daemon_base_url(port), task_id);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let body = serde_json::json!({ "response": response });
+    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// Schedules: GET /api/schedules (FR-028, Calendrier).
 #[tauri::command]
 async fn get_schedules(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -625,6 +730,28 @@ async fn get_memory_long_term(limit: Option<u32>, port: Option<u16>) -> Result<s
     Ok(json)
 }
 
+/// Memory long-term: DELETE /api/memory/long-term/:id
+#[tauri::command]
+async fn delete_memory_long_term(id: String, port: Option<u16>) -> Result<(), String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("missing id".to_string());
+    }
+    let url = format!("{}/api/memory/long-term/{}", daemon_base_url(port), id);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} {}", status, body));
+    }
+    Ok(())
+}
+
 /// Schedule run reports: GET /api/schedule_run_reports — completed schedule runs with message (for chat).
 #[tauri::command]
 async fn get_schedule_run_reports(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -655,6 +782,8 @@ pub fn run() {
             get_tasks,
             get_task_events,
             cancel_task,
+            get_task_human_input,
+            post_task_human_reply,
             get_schedules,
             get_schedule_by_id,
             create_schedule,
@@ -662,6 +791,7 @@ pub fn run() {
             get_task_runs,
             get_memory_short_term,
             get_memory_long_term,
+            delete_memory_long_term,
             get_schedule_run_reports,
             get_docs,
             get_config,
@@ -673,7 +803,11 @@ pub fn run() {
             get_doctor,
             get_advice,
             get_plugins,
-            reload_plugins
+            reload_plugins,
+            get_router_routes,
+            set_router_route,
+            get_embedded_status,
+            embedded_reload
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

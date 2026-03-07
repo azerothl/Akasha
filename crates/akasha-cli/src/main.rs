@@ -530,6 +530,66 @@ fn init_prompt(prompt: &str) -> String {
     s.trim().to_string()
 }
 
+/// Agent personality templates for `akasha init`. Each returns (name, personality, rules, can_do, cannot_do) as JSON-compatible values.
+fn agent_profile_templates() -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        (
+            "Neutre / polyvalent — ton professionnel, adapté à tous les usages",
+            serde_json::json!({
+                "name": "Akasha",
+                "personality": "Ton neutre et professionnel. Tu réponds de façon claire et adaptée au contexte, sans surcharge. Tu t'adaptes à la demande (technique, rédaction, conseil).",
+                "rules": [],
+                "can_do": [],
+                "cannot_do": []
+            }),
+        ),
+        (
+            "Bienveillant / coach — encourageant, pédagogique, à l'écoute",
+            serde_json::json!({
+                "name": "Akasha",
+                "personality": "Bienveillant et encourageant. Tu expliques avec pédagogie, tu reformules pour vérifier que l'utilisateur a compris. Tu valorises les progrès et proposes des étapes claires.",
+                "rules": ["Rester à l'écoute et ne pas juger.", "Proposer des pistes plutôt que d'imposer une seule solution."],
+                "can_do": [],
+                "cannot_do": []
+            }),
+        ),
+        (
+            "Concis / technique — réponses courtes et précises, orienté dev et sysadmin",
+            serde_json::json!({
+                "name": "Akasha",
+                "personality": "Concis et technique. Réponses courtes, précises, orientées développement et administration système. Tu vas à l'essentiel et cites les commandes ou extraits utiles.",
+                "rules": ["Privilégier le concret : commandes, extraits de code, chemins.", "Éviter les longues introductions."],
+                "can_do": [],
+                "cannot_do": []
+            }),
+        ),
+        (
+            "Créatif / rédacteur — ton libre, créatif, pour rédaction et idées",
+            serde_json::json!({
+                "name": "Akasha",
+                "personality": "Créatif et ouvert. Tu aides à structurer des idées, à rédiger, à brainstormer. Tu peux proposer plusieurs formulations ou angles, et tu acceptes les demandes un peu inhabituelles.",
+                "rules": [],
+                "can_do": ["Proposer des reformulations et variantes.", "Suggérer des angles ou idées complémentaires."],
+                "cannot_do": []
+            }),
+        ),
+        (
+            "Strict / sécurisé — règles strictes, pas d'exécution de code sans confirmation",
+            serde_json::json!({
+                "name": "Akasha",
+                "personality": "Précis et prudent. Tu expliques clairement les risques avant toute action. Tu ne proposes pas d'exécuter du code ou des commandes sans que l'utilisateur ait confirmé.",
+                "rules": [
+                    "Ne jamais exécuter de code ou commande sans confirmation explicite de l'utilisateur.",
+                    "Toujours expliquer le « quoi » et le « pourquoi » avant le « comment ».",
+                    "En cas de doute sur la sécurité, avertir et proposer une alternative plus sûre."
+                ],
+                "can_do": ["Expliquer et détailler les étapes.", "Proposer des commandes ou scripts à copier-coller après confirmation."],
+                "cannot_do": ["Exécuter du code ou des commandes sans confirmation.", "Modifier des fichiers sensibles sans demande claire."]
+            }),
+        ),
+    ]
+}
+
 fn cmd_tui() -> anyhow::Result<()> {
     let tui_path = find_tui_binary().ok_or_else(|| {
         anyhow::anyhow!("akasha-tui not found. Build with: cargo build -p akasha-tui")
@@ -1118,6 +1178,37 @@ providers:
     std::fs::write(&env_path, env_content)?;
     println!("  Fichier écrit : {}", env_path.display());
 
+    // --- 4b. Profil agent (personnalité) ---
+    let templates = agent_profile_templates();
+    let agent_profile_path = data_dir.join("agent_profile.json");
+    if !use_defaults {
+        println!("\n--- Profil agent (personnalité) ---");
+        println!("  Choisis un template de personnalité pour l'agent (réécritable plus tard dans agent_profile.json ou via le chat) :");
+        println!("  0) Aucun — profil vide, à configurer plus tard");
+        for (i, (label, _)) in templates.iter().enumerate() {
+            println!("  {}) {}", i + 1, *label);
+        }
+        let choice = init_prompt("Choix [1] :\n> ");
+        let idx = choice.parse::<usize>().ok().unwrap_or(1);
+        if idx >= 1 && idx <= templates.len() {
+            let profile = &templates[idx - 1].1;
+            let json = serde_json::to_string_pretty(profile).unwrap_or_else(|_| "{}".to_string());
+            std::fs::write(&agent_profile_path, json)?;
+            let label = templates[idx - 1].0;
+            let short: String = label.chars().take(50).collect::<String>();
+            let short = if label.chars().count() > 50 { format!("{}…", short) } else { short };
+            println!("  Fichier écrit : {} (template « {} »)", agent_profile_path.display(), short);
+        } else {
+            println!("  Aucun template appliqué. Tu pourras éditer {} plus tard.", agent_profile_path.display());
+        }
+    } else {
+        // --defaults : appliquer le premier template (neutre)
+        let profile = &templates[0].1;
+        let json = serde_json::to_string_pretty(profile).unwrap_or_else(|_| "{}".to_string());
+        std::fs::write(&agent_profile_path, json)?;
+        println!("\n  Profil agent : template « Neutre / polyvalent » écrit dans {}", agent_profile_path.display());
+    }
+
     // --- 5. RAG / Memory ---
     println!("\n--- RAG & Memory ---");
     println!("  RAG : le dossier spec/ (et spec/runbooks/) du projet est utilisé par défaut.");
@@ -1127,6 +1218,9 @@ providers:
     println!("\n=== Initialisation terminée ===");
     println!("  • llm_router.yaml : {}", router_path.display());
     println!("  • connectors.env : {}", env_path.display());
+    if agent_profile_path.exists() {
+        println!("  • agent_profile.json : profil / personnalité de l'agent");
+    }
     println!("  • Vault : secrets enregistrés (akasha vault list)");
     println!("\nPour démarrer le daemon :");
     println!("  akasha start   (ou akasha start --foreground)");

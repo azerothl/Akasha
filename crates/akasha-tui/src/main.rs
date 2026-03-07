@@ -18,6 +18,7 @@ use ratatui::{
 };
 use theme::{Theme, ThemeName};
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -25,6 +26,30 @@ use std::time::Duration;
 const DAEMON_PORT: u16 = 3876;
 const TASK_POLL_INTERVAL_MS: u64 = 1500;
 const TASK_POLL_TIMEOUT_SECS: u64 = 600;
+const TUI_THEME_FILENAME: &str = "tui_theme.txt";
+
+fn akasha_data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("AKASHA_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("akasha")
+}
+
+fn load_theme_from_disk() -> Option<ThemeName> {
+    let path = akasha_data_dir().join(TUI_THEME_FILENAME);
+    let s = std::fs::read_to_string(&path).ok()?;
+    let s = s.trim();
+    ThemeName::parse(s)
+}
+
+fn save_theme_to_disk(theme: ThemeName) {
+    let dir = akasha_data_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(TUI_THEME_FILENAME);
+    let _ = std::fs::write(path, theme.to_saved_str());
+}
 
 /// Label in French for task/event types (Task Center, spec 09_event_model).
 fn activity_event_label(typ: &str) -> String {
@@ -108,13 +133,13 @@ struct CalendarTaskRun {
 #[derive(Clone, Default)]
 struct CalendarRunDetail {
     run_status: String,
-    run_started_at: Option<String>,
-    run_ended_at: Option<String>,
+    _run_started_at: Option<String>,
+    _run_ended_at: Option<String>,
     task_status: String,
-    created_at: String,
-    updated_at: String,
+    _created_at: String,
+    _updated_at: String,
     progress: Vec<(u8, String)>,
-    schedule_id: Option<String>,
+    _schedule_id: Option<String>,
 }
 
 /// Detail for selected schedule (from GET /api/schedules/:id).
@@ -126,8 +151,8 @@ struct ScheduleDetail {
     channel_context: Option<String>,
     enabled: bool,
     interval_seconds: Option<u64>,
-    timezone: Option<String>,
-    rrule: Option<String>,
+    _timezone: Option<String>,
+    _rrule: Option<String>,
 }
 
 #[derive(Clone, Default, serde::Deserialize)]
@@ -193,14 +218,22 @@ struct App {
     activity_list_collapsed: bool,
     /// Tasks tab: list widget rect (for mouse click to select task).
     activity_list_rect: Option<ratatui::prelude::Rect>,
+    /// Tabs bar rect (for mouse click to switch tab).
+    tabs_rect: Option<ratatui::prelude::Rect>,
+    /// Calendar tab: content area rect (for mouse click to select schedule or run).
+    calendar_content_rect: Option<ratatui::prelude::Rect>,
     /// Session id for short-term memory (returned by daemon, send back on next message).
     session_id: Option<String>,
     /// If true, next message will request a new session (context reset).
     force_new_session: bool,
     /// Memory tab: short-term turns (role, content) for current session.
     memory_short_term: Vec<(String, String)>,
-    /// Memory tab: long-term entries (content, created_at, source).
-    memory_long_term: Vec<(String, String, String)>,
+    /// Memory tab: long-term entries (id, content, created_at, source).
+    memory_long_term: Vec<(String, String, String, String)>,
+    /// Selected index in long-term list (for delete).
+    memory_lt_selected: usize,
+    /// Line index in Memory tab where each long-term entry starts (set during render).
+    memory_lt_line_starts: Vec<usize>,
     /// Whether long-term memory is available (daemon has embeddings).
     memory_long_term_available: bool,
     /// Current theme (cycle with F2).
@@ -216,6 +249,10 @@ struct App {
     input_inner_height: usize,
     /// Set by ui(): wrapped line count of input text.
     input_wrapped_lines: usize,
+    /// If true, we have already loaded today's chat history from short-term memory (so we don't refetch every frame).
+    chat_history_loaded: bool,
+    /// Human in the loop: when the agent asked for user input, (task_id, question, context, choices).
+    pending_human_input: Option<(String, String, String, Option<Vec<String>>)>,
 }
 
 impl App {
@@ -252,10 +289,14 @@ impl App {
             activity_list_scroll: 0,
             activity_list_collapsed: false,
             activity_list_rect: None,
+            tabs_rect: None,
+            calendar_content_rect: None,
             session_id: None,
             force_new_session: false,
             memory_short_term: Vec::new(),
             memory_long_term: Vec::new(),
+            memory_lt_selected: 0,
+            memory_lt_line_starts: Vec::new(),
             memory_long_term_available: false,
             theme: ThemeName::default(),
             port,
@@ -264,7 +305,148 @@ impl App {
             input_scroll: 0,
             input_inner_height: 3,
             input_wrapped_lines: 0,
+            chat_history_loaded: false,
+            pending_human_input: None,
         }
+    }
+
+    /// Fetch pending human-input for a task (GET /api/tasks/:id/human-input). Sets pending_human_input if the agent is waiting.
+    fn fetch_pending_human_input(&mut self, task_id: &str) {
+        let url = format!("{}/api/tasks/{}/human-input", daemon_base_url(self.port), task_id);
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let resp = match client.get(&url).send() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        if !resp.status().is_success() {
+            self.pending_human_input = None;
+            return;
+        }
+        let json: serde_json::Value = match resp.json() {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let question = json.get("question").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if question.is_empty() {
+            self.pending_human_input = None;
+            return;
+        }
+        let context = json.get("context").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let choices = json.get("choices").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+        self.pending_human_input = Some((task_id.to_string(), question, context, choices));
+    }
+
+    /// Submit user reply for human-in-the-loop (POST /api/tasks/:id/human-reply).
+    fn submit_human_reply(&mut self, task_id: &str, response: &str) -> bool {
+        let url = format!("{}/api/tasks/{}/human-reply", daemon_base_url(self.port), task_id);
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        let body = serde_json::json!({ "response": response });
+        let resp = match client.post(&url).json(&body).send() {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        if resp.status().is_success() {
+            self.pending_human_input = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Side effects when switching to a mode (fetch data, reset scroll, etc.).
+    fn trigger_mode_entered(&mut self) {
+        if self.mode == Mode::Router {
+            self.fetch_metrics();
+        }
+        if self.mode == Mode::Doc && self.doc_content.is_empty() {
+            self.fetch_doc();
+        }
+        if self.mode == Mode::Tasks {
+            self.fetch_activity_tasks();
+        }
+        if self.mode == Mode::Calendar {
+            self.fetch_calendar();
+            self.scroll = 0;
+            if !self.calendar_task_runs.is_empty() {
+                self.calendar_focus_schedules = false;
+                self.calendar_selected_run = Some(0);
+                let run = self.calendar_task_runs[0].clone();
+                self.fetch_calendar_run_detail(&run);
+            } else if !self.calendar_schedules.is_empty() {
+                self.calendar_focus_schedules = true;
+                self.calendar_schedule_index = 0;
+                let id = self.calendar_schedules[0].0.clone();
+                self.fetch_schedule_detail(&id);
+            }
+        }
+        if self.mode == Mode::Chat {
+            self.fetch_schedule_reports();
+        }
+        if self.mode == Mode::Memory {
+            self.fetch_memory();
+        }
+    }
+
+    /// Load today's conversation from short-term memory (GET /api/memory/short-term without session_id = day-YYYY-MM-DD).
+    fn fetch_chat_history_from_memory(&mut self) {
+        self.chat_history_loaded = true;
+        let url = format!("{}/api/memory/short-term", daemon_base_url(self.port));
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let resp = match client.get(&url).send() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        if !resp.status().is_success() {
+            return;
+        }
+        let json: serde_json::Value = match resp.json() {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let session_id = json.get("session_id").and_then(|v| v.as_str()).map(String::from);
+        let turns = json.get("turns").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+        if let Some(ref sid) = session_id {
+            self.session_id = Some(sid.clone());
+        }
+        if turns.is_empty() {
+            return;
+        }
+        self.messages = turns
+            .iter()
+            .filter_map(|t| {
+                let role = t.get("role")?.as_str()?;
+                let content = t.get("content")?.as_str()?.to_string();
+                let role_label = match role {
+                    "user" => "Vous",
+                    "assistant" => "Akasha",
+                    _ => "Système",
+                };
+                Some(ChatMessage {
+                    role: role_label.to_string(),
+                    text: content,
+                    is_error: false,
+                })
+            })
+            .collect();
+        self.scroll = usize::MAX;
     }
 
     /// Number of wrapped lines for a string given line width (chars).
@@ -455,13 +637,13 @@ impl App {
                         .unwrap_or_default();
                     self.calendar_run_detail = Some(CalendarRunDetail {
                         run_status: run.status.clone(),
-                        run_started_at: run.started_at.clone(),
-                        run_ended_at: run.ended_at.clone(),
+                        _run_started_at: run.started_at.clone(),
+                        _run_ended_at: run.ended_at.clone(),
                         task_status,
-                        created_at,
-                        updated_at,
+                        _created_at: created_at,
+                        _updated_at: updated_at,
                         progress,
-                        schedule_id: run.schedule_id.clone(),
+                        _schedule_id: run.schedule_id.clone(),
                     });
                     return;
                 }
@@ -494,8 +676,8 @@ impl App {
                         channel_context,
                         enabled,
                         interval_seconds,
-                        timezone,
-                        rrule,
+                        _timezone: timezone,
+                        _rrule: rrule,
                     });
                     return;
                 }
@@ -598,12 +780,14 @@ impl App {
                     self.memory_long_term = entries
                         .iter()
                         .filter_map(|e| {
+                            let id = e.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                             let content = e.get("content")?.as_str()?.to_string();
                             let created_at = e.get("created_at")?.as_str()?.to_string();
                             let source = e.get("source")?.as_str()?.to_string();
-                            Some((content, created_at, source))
+                            Some((id, content, created_at, source))
                         })
                         .collect();
+                    self.memory_lt_selected = self.memory_lt_selected.min(self.memory_long_term.len().saturating_sub(1));
                 }
             } else {
                 self.memory_long_term.clear();
@@ -612,6 +796,22 @@ impl App {
         } else {
             self.memory_long_term.clear();
             self.memory_long_term_available = false;
+        }
+    }
+
+    /// Delete the long-term memory entry at the current selection (by id). Refreshes the list on success.
+    fn delete_memory_long_term_selected(&mut self) {
+        let id = match self.memory_long_term.get(self.memory_lt_selected) {
+            Some((id, _, _, _)) if !id.is_empty() => id.clone(),
+            _ => return,
+        };
+        let url = format!("{}/api/memory/long-term/{}", daemon_base_url(self.port), id);
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_default();
+        if client.delete(&url).send().map(|r| r.status().is_success()).unwrap_or(false) {
+            self.fetch_memory();
         }
     }
 
@@ -1487,24 +1687,40 @@ fn ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Min(0),
         ])
         .split(f.area());
 
-    let (content_area, input_area_opt) = if app.mode == Mode::Chat {
-        let vert = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(3)])
-            .split(chunks[1]);
-        (vert[0], Some(vert[1]))
+    let (content_area, input_area_opt, human_input_area_opt) = if app.mode == Mode::Chat {
+        if app.pending_human_input.is_some() {
+            let vert = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(0),
+                    Constraint::Length(4),
+                    Constraint::Length(3),
+                ])
+                .split(chunks[1]);
+            (vert[0], Some(vert[2]), Some(vert[1]))
+        } else {
+            let vert = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(3)])
+                .split(chunks[1]);
+            (vert[0], Some(vert[1]), None)
+        }
     } else {
-        (chunks[1], None)
+        (chunks[1], None, None)
     };
 
     let top_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
         .split(chunks[0]);
     let status = if app.daemon_ok {
         "Daemon connecté"
@@ -1540,11 +1756,17 @@ fn ui(f: &mut Frame, app: &mut App) {
         Mode::Memory => 5,
     };
     let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::BOTTOM).border_style(theme.block_border()))
+        .block(Block::default().borders(Borders::BOTTOM).title(" Clic ou Tab pour changer d'onglet ").border_style(theme.block_border()))
         .select(tab_index)
         .style(theme.tab_inactive())
         .highlight_style(theme.tab_active());
     f.render_widget(tabs, top_chunks[1]);
+    app.tabs_rect = Some(top_chunks[1]);
+
+    let help_line = " 1=Chat 2=Routeur 3=Doc 4=Tâches 5=Calendrier 6=Mémoire · Tab=onglet suivant · R=actualiser · F2=thème · Esc=quitter ";
+    let help_para = Paragraph::new(help_line)
+        .style(Style::default().fg(theme.palette().muted));
+    f.render_widget(help_para, top_chunks[2]);
 
     match app.mode {
         Mode::Chat => {
@@ -1554,7 +1776,10 @@ fn ui(f: &mut Frame, app: &mut App) {
                 lines.push(Line::from(""));
                 let style_muted = Style::default().fg(theme.palette().muted).add_modifier(Modifier::BOLD);
                 lines.push(Line::from(Span::styled("  ─── Rappel exécuté ───", style_muted)));
-                lines.push(Line::from(Span::styled(format!("  « {} » — {}", name, msg), Style::default().fg(theme.palette().muted))));
+                lines.push(Line::from(Span::styled(format!("  « {} »", name), Style::default().fg(theme.palette().muted))));
+                let md_styles = theme.markdown_styles();
+                let marked = markdown::from_str_with_width(msg, &md_styles, Some(content_width.saturating_sub(2) as u16));
+                lines.extend(marked.to_flat_lines());
             }
             for m in &app.messages {
                 let (role_style, _base_style) = if m.role == "Vous" {
@@ -1583,9 +1808,19 @@ fn ui(f: &mut Frame, app: &mut App) {
                     format!("  ─── {} ───", m.role),
                     role_style,
                 )));
-                let md_styles = theme.markdown_styles();
-                let marked = markdown::from_str_with_width(&m.text, &md_styles, Some(content_width as u16));
-                lines.extend(marked.to_flat_lines());
+                if m.role == "Système" {
+                    for line in m.text.lines() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {}", line),
+                            Style::default().fg(theme.palette().muted),
+                        )));
+                    }
+                } else {
+                    let md_styles = theme.markdown_styles();
+                    let marked = markdown::from_str_with_width(&m.text, &md_styles, Some(content_width as u16));
+                    lines.extend(marked.to_flat_lines());
+                }
+                lines.push(Line::from(""));
             }
             if let Some(ref tid) = app.pending_reply_task_id {
                 lines.push(Line::from(""));
@@ -1630,7 +1865,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Chat (↑↓ PgUp/PgDn défilement, F2 thème) ")
+                        .title(" Chat (↑↓ PgUp/PgDn ou molette, F2 thème) ")
                         .border_style(theme.block_border()),
                 )
                 .wrap(Wrap { trim: true })
@@ -1703,7 +1938,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Documentation (↑↓ PgUp/PgDn, R: actualiser, F2: thème) ")
+                        .title(" Documentation (↑↓ PgUp/PgDn ou molette, R: actualiser, F2: thème) ")
                         .border_style(theme.block_border()),
                 )
                 .wrap(Wrap { trim: true })
@@ -1807,11 +2042,17 @@ fn ui(f: &mut Frame, app: &mut App) {
                     detail_lines.push(Line::from(""));
                 }
                 if let Some(last) = d.progress.last() {
-                    let reply_preview = if last.1.len() > 200 { format!("{}…", &last.1[..200]) } else { last.1.clone() };
+                    let reply_preview = if last.1.chars().count() > 2000 {
+                        let truncated: String = last.1.chars().take(2000).collect();
+                        format!("{}…", truncated)
+                    } else {
+                        last.1.clone()
+                    };
                     detail_lines.push(Line::from(Span::styled(" Réponse : ", Style::default().fg(theme.palette().success))));
-                    for line in reply_preview.lines() {
-                        detail_lines.push(Line::from(format!("   {}", line)));
-                    }
+                    let md_styles = theme.markdown_styles();
+                    let detail_width = detail_area.width.saturating_sub(4) as u16;
+                    let marked = markdown::from_str_with_width(&reply_preview, &md_styles, Some(detail_width));
+                    detail_lines.extend(marked.to_flat_lines());
                     detail_lines.push(Line::from(""));
                 }
                 detail_lines.push(Line::from(format!("  Créé : {}  │  Mis à jour : {}  │  Statut : {}  │  Agent : {}", d.created_at, d.updated_at, d.status, d.assigned_agent)));
@@ -1845,16 +2086,27 @@ fn ui(f: &mut Frame, app: &mut App) {
             app.last_content_rendered_rows = 0;
         }
         Mode::Calendar => {
-            let mut lines: Vec<Line<'static>> = vec![
+            const CALENDAR_DETAIL_HEIGHT: u16 = 10;
+            let cal_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(4),
+                    Constraint::Length(CALENDAR_DETAIL_HEIGHT),
+                ])
+                .split(content_area);
+            let list_area = cal_chunks[0];
+            let detail_area = cal_chunks[1];
+
+            let mut list_lines: Vec<Line<'static>> = vec![
                 Line::from(""),
                 Line::from(Span::styled(
-                    " Récurrences (schedules) — ← → = récurrences / runs · ↑↓ = sélectionner · PgUp/PgDn = défiler · R = actualiser ",
+                    " Récurrences (schedules) — clic ou ↑↓ = sélectionner · ← → = récurrences / runs · molette = défiler · R = actualiser ",
                     Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
             ];
             if app.calendar_schedules.is_empty() {
-                lines.push(Line::from(Span::styled("  Aucune récurrence.", Style::default().fg(theme.palette().muted))));
+                list_lines.push(Line::from(Span::styled("  Aucune récurrence.", Style::default().fg(theme.palette().muted))));
             } else {
                 for (i, (id, name, enabled, interval_secs)) in app.calendar_schedules.iter().enumerate() {
                     let short_id = if id.len() > 8 { format!("…{}", &id[id.len()-8..]) } else { id.clone() };
@@ -1862,20 +2114,20 @@ fn ui(f: &mut Frame, app: &mut App) {
                     let interval = interval_secs.map(|s| format!(" — {}s", s)).unwrap_or_default();
                     let sel = app.calendar_focus_schedules && app.calendar_schedule_index == i;
                     let style = if sel { Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme.palette().fg) };
-                    lines.push(Line::from(Span::styled(
+                    list_lines.push(Line::from(Span::styled(
                         format!("  {} {}  {}  {}", if sel { "►" } else { " " }, short_id, name, format!("{} {}", status, interval)),
                         style,
                     )));
                 }
             }
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
+            list_lines.push(Line::from(""));
+            list_lines.push(Line::from(Span::styled(
                 " Runs récents (task_runs) ",
                 Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD),
             )));
-            lines.push(Line::from(""));
+            list_lines.push(Line::from(""));
             if app.calendar_task_runs.is_empty() {
-                lines.push(Line::from(Span::styled("  Aucun run. ↑↓ = sélectionner.", Style::default().fg(theme.palette().muted))));
+                list_lines.push(Line::from(Span::styled("  Aucun run. ↑↓ = sélectionner.", Style::default().fg(theme.palette().muted))));
             } else {
                 for (i, run) in app.calendar_task_runs.iter().enumerate() {
                     let short_id = if run.id.len() > 8 { &run.id[run.id.len()-8..] } else { run.id.as_str() };
@@ -1883,39 +2135,50 @@ fn ui(f: &mut Frame, app: &mut App) {
                     let planned = if run.planned_for.len() >= 19 { &run.planned_for[..19] } else { run.planned_for.as_str() };
                     let sel = !app.calendar_focus_schedules && app.calendar_selected_run == Some(i);
                     let style = if sel { Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme.palette().fg) };
-                    lines.push(Line::from(Span::styled(
+                    list_lines.push(Line::from(Span::styled(
                         format!("  {} {}  {}  {}  task {}  {}", if sel { "►" } else { " " }, short_id, run.status, planned, short_task, run.schedule_id.as_ref().map(|s| format!("sched…{}", if s.len() > 8 { &s[s.len()-8..] } else { s })).unwrap_or_default()),
                         style,
                     )));
                 }
             }
+
+            let list_height = list_area.height.saturating_sub(2);
+            app.last_content_lines = list_lines.len();
+            app.last_content_area_height = list_height;
+            app.last_content_rendered_rows = 0;
+            let max_scroll = app.max_scroll();
+            if app.scroll > max_scroll {
+                app.scroll = max_scroll;
+            }
+            let list_block = Block::default()
+                .borders(Borders::ALL)
+                .title(" Calendrier — liste (clic = sélectionner, molette = défiler) ")
+                .border_style(theme.block_border());
+            app.calendar_content_rect = Some(list_area);
+            f.render_widget(
+                Paragraph::new(list_lines).block(list_block).scroll((app.scroll as u16, 0)),
+                list_area,
+            );
+
+            let mut detail_lines: Vec<Line<'static>> = vec![];
             if let Some(sched) = &app.calendar_schedule_detail {
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled("  Détail récurrence sélectionnée", Style::default().fg(theme.palette().accent))));
-                lines.push(Line::from(format!("  ID (supprimer: /schedule delete <id>) : {}", sched.id)));
-                lines.push(Line::from(format!("  Nom : {}  │  État : {}", sched.name, if sched.enabled { "activée" } else { "en pause" })));
+                detail_lines.push(Line::from(Span::styled(" Récurrence sélectionnée ", Style::default().fg(theme.palette().accent))));
+                detail_lines.push(Line::from(format!("  ID : {}  │  Nom : {}  │  {}", sched.id, sched.name, if sched.enabled { "activée" } else { "en pause" })));
                 if let Some(secs) = sched.interval_seconds {
-                    lines.push(Line::from(format!("  Intervalle : {} s", secs)));
-                }
-                if let Some(ref tz) = sched.timezone {
-                    lines.push(Line::from(format!("  Fuseau : {}", tz)));
-                }
-                if let Some(ref rrule) = sched.rrule {
-                    if !rrule.is_empty() {
-                        lines.push(Line::from(format!("  Règle : {}", rrule)));
-                    }
+                    detail_lines.push(Line::from(format!("  Intervalle : {} s", secs)));
                 }
                 let demand = sched.channel_context.as_deref().unwrap_or(sched.description.as_str());
                 if !demand.is_empty() {
-                    lines.push(Line::from(Span::styled("  Demande envoyée aux agents :", Style::default().fg(theme.palette().warning))));
-                    for line in demand.lines().take(8) {
-                        lines.push(Line::from(format!("    {}", line)));
+                    for line in demand.lines().take(2) {
+                        detail_lines.push(Line::from(Span::styled(format!("  {}", line), Style::default().fg(theme.palette().muted))));
                     }
                 }
             }
             if let Some(d) = &app.calendar_run_detail {
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled("  Détail run/tâche sélectionné", Style::default().fg(theme.palette().accent))));
+                if !detail_lines.is_empty() {
+                    detail_lines.push(Line::from(""));
+                }
+                detail_lines.push(Line::from(Span::styled(" Run sélectionné ", Style::default().fg(theme.palette().accent))));
                 let run_label = match d.run_status.as_str() {
                     "completed" => "Terminé",
                     "failed" => "Échec",
@@ -1924,47 +2187,24 @@ fn ui(f: &mut Frame, app: &mut App) {
                     "queued" => "En attente",
                     _ => d.run_status.as_str(),
                 };
-                lines.push(Line::from(format!("  Exécution (run) : {}  │  Tâche (orchestrateur) : {}", run_label, d.task_status)));
-                if let Some(ref sid) = d.schedule_id {
-                    if let Some((_, name, _, _)) = app.calendar_schedules.iter().find(|(id, _, _, _)| id == sid) {
-                        lines.push(Line::from(format!("  Récurrence parente : {}", name)));
-                    }
-                }
-                if !d.created_at.is_empty() {
-                    lines.push(Line::from(format!("  Créé : {}", if d.created_at.len() >= 19 { &d.created_at[..19] } else { &d.created_at })));
-                }
-                if !d.updated_at.is_empty() {
-                    lines.push(Line::from(format!("  Dernière MAJ : {}", if d.updated_at.len() >= 19 { &d.updated_at[..19] } else { &d.updated_at })));
-                }
-                if let (Some(ref st), Some(ref end)) = (&d.run_started_at, &d.run_ended_at) {
-                    if let (Ok(s), Ok(e)) = (chrono::DateTime::parse_from_rfc3339(st), chrono::DateTime::parse_from_rfc3339(end)) {
-                        let secs = (e - s).num_seconds();
-                        let dur = if secs < 60 { format!("{} s", secs) } else { format!("{} min {} s", secs / 60, secs % 60) };
-                        lines.push(Line::from(format!("  Terminé à : {}  │  Durée : {}", &end[..end.len().min(19)], dur)));
-                    }
-                }
+                detail_lines.push(Line::from(format!("  Run : {}  │  Tâche : {}", run_label, d.task_status)));
                 if let Some((_, last_msg)) = d.progress.last().map(|(p, m)| (*p, m.as_str())) {
-                    lines.push(Line::from(Span::styled("  Réponse agent :", Style::default().fg(theme.palette().success))));
-                    for line in last_msg.lines().take(6) {
-                        lines.push(Line::from(format!("    {}", line)));
+                    let preview = last_msg.lines().next().unwrap_or("").chars().take(60).collect::<String>();
+                    if !preview.is_empty() {
+                        detail_lines.push(Line::from(Span::styled(format!("  {}", preview), Style::default().fg(theme.palette().muted))));
                     }
                 }
             }
-            let content_height = content_area.height.saturating_sub(2);
-            app.last_content_lines = lines.len();
-            app.last_content_area_height = content_height;
-            app.last_content_rendered_rows = 0;
-            let max_scroll = app.max_scroll();
-            if app.scroll > max_scroll {
-                app.scroll = max_scroll;
+            if detail_lines.is_empty() {
+                detail_lines.push(Line::from(Span::styled(" Sélectionnez une récurrence ou un run ci-dessus pour afficher le détail ici.", Style::default().fg(theme.palette().muted))));
             }
-            let cal_block = Block::default()
+            let detail_block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Calendrier (récurrences et runs) ")
+                .title(" Détail (visible au premier coup d’œil) ")
                 .border_style(theme.block_border());
             f.render_widget(
-                Paragraph::new(lines).block(cal_block).wrap(Wrap { trim: true }).scroll((app.scroll as u16, 0)),
-                content_area,
+                Paragraph::new(detail_lines).block(detail_block).wrap(Wrap { trim: true }),
+                detail_area,
             );
         }
         Mode::Memory => {
@@ -2005,16 +2245,24 @@ fn ui(f: &mut Frame, app: &mut App) {
                 Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(""));
-            for (content, created_at, source) in &app.memory_long_term {
+            let mut lt_line_starts = Vec::new();
+            for (idx, (id, content, created_at, source)) in app.memory_long_term.iter().enumerate() {
+                lt_line_starts.push(lines.len());
+                let style = if idx == app.memory_lt_selected {
+                    Style::default().fg(theme.palette().accent)
+                } else {
+                    Style::default().fg(theme.palette().fg)
+                };
                 lines.push(Line::from(Span::styled(
-                    format!("  [{}] {} — {}", source, &created_at[..created_at.len().min(19)], content.chars().take(80).collect::<String>()),
-                    Style::default().fg(theme.palette().fg),
+                    format!("  [{}] {} — {} {}", source, &created_at[..created_at.len().min(19)], content.chars().take(80).collect::<String>(), if !id.is_empty() { format!("(id: {})", &id[..id.len().min(8)]) } else { String::new() }),
+                    style,
                 )));
                 if content.chars().count() > 80 {
                     lines.push(Line::from(Span::styled("    …", Style::default().fg(theme.palette().muted))));
                 }
                 lines.push(Line::from(""));
             }
+            app.memory_lt_line_starts = lt_line_starts;
             if app.memory_long_term.is_empty() && app.memory_long_term_available {
                 lines.push(Line::from(Span::styled("  (aucune entrée)", Style::default().fg(theme.palette().muted))));
             }
@@ -2028,7 +2276,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             }
             let mem_block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Mémoire agent (R = actualiser, Tab = onglet) ")
+                .title(" Mémoire agent (↑↓ sélection, D = supprimer, R = actualiser, Tab ou clic = onglet) ")
                 .border_style(theme.block_border());
             f.render_widget(
                 Paragraph::new(lines).block(mem_block).wrap(Wrap { trim: true }).scroll((app.scroll as u16, 0)),
@@ -2037,8 +2285,33 @@ fn ui(f: &mut Frame, app: &mut App) {
         }
     }
 
+    if let (Some(rect), Some((_, ref question, ref context, ref choices))) = (human_input_area_opt, &app.pending_human_input) {
+        let theme = Theme::new(app.theme);
+        let style_warning = Style::default().fg(theme.palette().error).add_modifier(Modifier::BOLD);
+        let mut banner_lines = vec![
+            Line::from(Span::styled("⚠ Action requise — répondez ci-dessous (Entrée pour envoyer)", style_warning)),
+            Line::from(question.as_str()),
+        ];
+        if !context.is_empty() {
+            banner_lines.push(Line::from(""));
+            banner_lines.push(Line::from(Span::styled(context.as_str(), Style::default().fg(theme.palette().muted))));
+        }
+        if let Some(ref c) = choices {
+            let choice_preview = c.iter().enumerate().map(|(i, s)| format!("{}) {}", i + 1, s)).take(4).collect::<Vec<_>>().join("  ");
+            banner_lines.push(Line::from(Span::styled(choice_preview, Style::default().fg(theme.palette().muted))));
+        }
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Réponse pour l'agent ")
+            .border_style(theme.block_border());
+        f.render_widget(Paragraph::new(banner_lines).block(block).wrap(Wrap { trim: true }), rect);
+    }
     if let Some(input_rect) = input_area_opt {
-        let input_label = " Message (Entrée = envoyer, Maj+Entrée = nouvelle ligne, ↑↓ = chat, Ctrl+↑↓ = saisie, Tab = onglet) ";
+        let input_label = if app.pending_human_input.is_some() {
+            " Votre réponse (Entrée = envoyer à l'agent) "
+        } else {
+            " Message (Entrée = envoyer, Maj+Entrée = nouvelle ligne, ↑↓ = chat, Ctrl+↑↓ = saisie, Tab = onglet) "
+        };
         let input_area_width = input_rect.width.saturating_sub(2) as usize;
         app.input_inner_height = input_rect.height.saturating_sub(2) as usize;
         app.input_wrapped_lines = App::wrapped_line_count(&app.input, input_area_width.max(1));
@@ -2068,10 +2341,16 @@ fn run_app(
 ) -> anyhow::Result<()> {
     let mut last_health = std::time::Instant::now();
     loop {
+        if app.mode == Mode::Chat && !app.chat_history_loaded {
+            app.fetch_chat_history_from_memory();
+        }
         if last_health.elapsed() > Duration::from_secs(5) {
             app.check_health();
             if app.mode == Mode::Chat {
                 app.fetch_schedule_reports();
+                if let Some(task_id) = app.pending_reply_task_id.clone() {
+                    app.fetch_pending_human_input(&task_id);
+                }
             }
             last_health = std::time::Instant::now();
         }
@@ -2094,6 +2373,7 @@ fn run_app(
                     app.pending_reply_task_id = pending_task_id.clone();
                     if pending_task_id.is_none() {
                         app.pending_reply_pct = None;
+                        app.pending_human_input = None;
                     }
                     app.messages.push(ChatMessage {
                         role: role.into(),
@@ -2103,6 +2383,7 @@ fn run_app(
                 }
                 Err(e) => {
                     app.pending_reply_task_id = None;
+                    app.pending_human_input = None;
                     app.messages.push(ChatMessage {
                         role: "Erreur".into(),
                         text: e,
@@ -2118,6 +2399,94 @@ fn run_app(
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Mouse(mouse) => {
+                    // Click on tabs bar to switch tab
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        if let Some(rect) = app.tabs_rect {
+                            let x = mouse.column;
+                            let y = mouse.row;
+                            if x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height {
+                                const N_TABS: u16 = 6;
+                                let tab_w = (rect.width / N_TABS).max(1);
+                                let col = x.saturating_sub(rect.x);
+                                let tab_idx = (col / tab_w).min(N_TABS - 1) as usize;
+                                let new_mode = match tab_idx {
+                                    0 => Mode::Chat,
+                                    1 => Mode::Router,
+                                    2 => Mode::Doc,
+                                    3 => Mode::Tasks,
+                                    4 => Mode::Calendar,
+                                    _ => Mode::Memory,
+                                };
+                                if app.mode != new_mode {
+                                    app.mode = new_mode;
+                                    app.trigger_mode_entered();
+                                }
+                            }
+                        }
+                    }
+                    // Click in Calendar content to select schedule or run
+                    if app.mode == Mode::Calendar
+                        && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                    {
+                        if let Some(rect) = app.calendar_content_rect {
+                            let inner_y = mouse.row.saturating_sub(rect.y + 1);
+                            if inner_y < rect.height.saturating_sub(2) {
+                                let actual_line = app.scroll + inner_y as usize;
+                                let n_sched = app.calendar_schedules.len();
+                                let n_runs = app.calendar_task_runs.len();
+                                const SCHEDULE_START: usize = 3;
+                                let schedule_end = SCHEDULE_START + n_sched;
+                                // When there are no schedules, a single "Aucune récurrence" placeholder
+                                // line is rendered, so runs_start must account for that extra line.
+                                let runs_start = SCHEDULE_START + if n_sched == 0 { 1 } else { n_sched } + 3;
+                                let runs_end = runs_start + n_runs;
+                                if actual_line >= SCHEDULE_START && actual_line < schedule_end && n_sched > 0 {
+                                    let idx = actual_line - SCHEDULE_START;
+                                    app.calendar_focus_schedules = true;
+                                    app.calendar_schedule_index = idx;
+                                    if let Some((id, _, _, _)) = app.calendar_schedules.get(idx) {
+                                        let id = id.clone();
+                                        app.fetch_schedule_detail(&id);
+                                    }
+                                } else if actual_line >= runs_start && actual_line < runs_end && n_runs > 0 {
+                                    let idx = actual_line - runs_start;
+                                    app.calendar_focus_schedules = false;
+                                    app.calendar_selected_run = Some(idx);
+                                    if let Some(run) = app.calendar_task_runs.get(idx) {
+                                        let run = run.clone();
+                                        app.fetch_calendar_run_detail(&run);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Mouse wheel: scroll in Chat, Doc, Memory, Calendar
+                    if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                        match app.mode {
+                            Mode::Chat | Mode::Doc | Mode::Memory | Mode::Calendar => {
+                                if mouse.kind == MouseEventKind::ScrollUp {
+                                    app.scroll_up();
+                                } else {
+                                    app.scroll_down();
+                                }
+                            }
+                            Mode::Tasks => {
+                                if app.activity_list_collapsed {
+                                    if mouse.kind == MouseEventKind::ScrollUp {
+                                        app.scroll_up();
+                                    } else {
+                                        app.scroll_down();
+                                    }
+                                } else if mouse.kind == MouseEventKind::ScrollUp {
+                                    app.activity_detail_scroll = app.activity_detail_scroll.saturating_sub(1);
+                                } else {
+                                    app.activity_detail_scroll = app.activity_detail_scroll.saturating_add(1);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Click on task list row (Tasks tab)
                     if app.mode == Mode::Tasks
                         && mouse.kind == MouseEventKind::Down(MouseButton::Left)
                         && !app.activity_tasks.is_empty()
@@ -2180,35 +2549,22 @@ fn run_app(
                             Mode::Calendar => Mode::Memory,
                             Mode::Memory => Mode::Chat,
                         };
-                        if app.mode == Mode::Router {
-                            app.fetch_metrics();
-                        }
-                        if app.mode == Mode::Doc && app.doc_content.is_empty() {
-                            app.fetch_doc();
-                        }
-                        if app.mode == Mode::Tasks {
-                            app.fetch_activity_tasks();
-                        }
-                        if app.mode == Mode::Calendar {
-                            app.fetch_calendar();
-                            app.scroll = 0;
-                            if !app.calendar_task_runs.is_empty() {
-                                app.calendar_focus_schedules = false;
-                                app.calendar_selected_run = Some(0);
-                                let run = app.calendar_task_runs[0].clone();
-                                app.fetch_calendar_run_detail(&run);
-                            } else if !app.calendar_schedules.is_empty() {
-                                app.calendar_focus_schedules = true;
-                                app.calendar_schedule_index = 0;
-                                let id = app.calendar_schedules[0].0.clone();
-                                app.fetch_schedule_detail(&id);
-                            }
-                        }
-                        if app.mode == Mode::Chat {
-                            app.fetch_schedule_reports();
-                        }
-                        if app.mode == Mode::Memory {
-                            app.fetch_memory();
+                        app.trigger_mode_entered();
+                    }
+                    (_, KeyCode::Char(c), _) if app.mode != Mode::Chat && ('1'..='6').contains(&c) => {
+                        let idx = (c as u8 - b'1') as usize;
+                        let new_mode = match idx {
+                            0 => Mode::Chat,
+                            1 => Mode::Router,
+                            2 => Mode::Doc,
+                            3 => Mode::Tasks,
+                            4 => Mode::Calendar,
+                            5 => Mode::Memory,
+                            _ => continue,
+                        };
+                        if app.mode != new_mode {
+                            app.mode = new_mode;
+                            app.trigger_mode_entered();
                         }
                     }
                     (Mode::Chat, KeyCode::Enter, mods) => {
@@ -2217,6 +2573,36 @@ fn run_app(
                         } else {
                             let msg = app.input.trim_end().to_string();
                             if msg.is_empty() {
+                                continue;
+                            }
+                            // Human in the loop: if the agent is waiting for a reply, send it and don't send as normal message
+                            let pending = app.pending_human_input.clone();
+                            if let Some((task_id, _, _, choices)) = pending {
+                                let response = if let Some(ref c) = choices {
+                                    if msg == "1" && c.len() >= 1 {
+                                        c[0].clone()
+                                    } else if msg == "2" && c.len() >= 2 {
+                                        c[1].clone()
+                                    } else if msg == "3" && c.len() >= 3 {
+                                        c[2].clone()
+                                    } else if msg == "4" && c.len() >= 4 {
+                                        c[3].clone()
+                                    } else {
+                                        msg.clone()
+                                    }
+                                } else {
+                                    msg.clone()
+                                };
+                                if app.submit_human_reply(&task_id, &response) {
+                                    app.messages.push(ChatMessage {
+                                        role: "Vous".into(),
+                                        text: msg,
+                                        is_error: false,
+                                    });
+                                    app.input.clear();
+                                    app.input_scroll = 0;
+                                    app.scroll = usize::MAX;
+                                }
                                 continue;
                             }
                             app.messages.push(ChatMessage {
@@ -2312,12 +2698,32 @@ fn run_app(
                     (Mode::Doc, KeyCode::PageDown, _) => app.scroll_page_down(),
                     (Mode::Doc, KeyCode::Home, _) => app.scroll = 0,
                     (Mode::Doc, KeyCode::End, _) => app.scroll_to_bottom(),
-                    (Mode::Memory, KeyCode::Up, _) => app.scroll_up(),
-                    (Mode::Memory, KeyCode::Down, _) => app.scroll_down(),
+                    (Mode::Memory, KeyCode::Up, _) => {
+                        if !app.memory_long_term.is_empty() && app.memory_lt_selected > 0 {
+                            app.memory_lt_selected -= 1;
+                            if let Some(&line) = app.memory_lt_line_starts.get(app.memory_lt_selected) {
+                                app.scroll = line.min(app.max_scroll());
+                            }
+                        } else {
+                            app.scroll_up();
+                        }
+                    }
+                    (Mode::Memory, KeyCode::Down, _) => {
+                        if !app.memory_long_term.is_empty() && app.memory_lt_selected + 1 < app.memory_long_term.len() {
+                            app.memory_lt_selected += 1;
+                            if let Some(&line) = app.memory_lt_line_starts.get(app.memory_lt_selected) {
+                                app.scroll = line.min(app.max_scroll());
+                            }
+                        } else {
+                            app.scroll_down();
+                        }
+                    }
                     (Mode::Memory, KeyCode::PageUp, _) => app.scroll_page_up(),
                     (Mode::Memory, KeyCode::PageDown, _) => app.scroll_page_down(),
                     (Mode::Memory, KeyCode::Home, _) => app.scroll = 0,
                     (Mode::Memory, KeyCode::End, _) => app.scroll_to_bottom(),
+                    (Mode::Memory, KeyCode::Char('d') | KeyCode::Char('D'), _) => app.delete_memory_long_term_selected(),
+                    (Mode::Memory, KeyCode::Delete, _) => app.delete_memory_long_term_selected(),
                     (Mode::Tasks, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_activity_tasks();
                     }
@@ -2435,6 +2841,7 @@ fn run_app(
                     }
                     (_, KeyCode::F(2), _) => {
                         app.theme = app.theme.next();
+                        save_theme_to_disk(app.theme);
                     }
                     _ => {}
                 }
@@ -2454,6 +2861,9 @@ fn main() -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel::<Result<(String, String, Option<String>), String>>();
     let (progress_tx, progress_rx) = mpsc::channel::<(String, u8)>();
     let mut app = App::new(port, tx, Some(progress_tx));
+    if let Some(saved) = load_theme_from_disk() {
+        app.theme = saved;
+    }
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();

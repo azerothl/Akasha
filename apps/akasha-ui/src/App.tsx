@@ -4,6 +4,26 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 const DAEMON_PORT = 3876;
+const THEME_STORAGE_KEY = "akasha_theme";
+
+export type ThemeId = "dark" | "dark_nord" | "light" | "light_latte";
+
+const THEMES: { id: ThemeId; label: string }[] = [
+  { id: "dark", label: "Sombre (défaut)" },
+  { id: "dark_nord", label: "Sombre Nord" },
+  { id: "light", label: "Clair" },
+  { id: "light_latte", label: "Clair Latte" },
+];
+
+function loadSavedTheme(): ThemeId {
+  try {
+    const s = localStorage.getItem(THEME_STORAGE_KEY);
+    if (s && THEMES.some((t) => t.id === s)) return s as ThemeId;
+  } catch {
+    /* ignore */
+  }
+  return "dark";
+}
 
 type Tab = "chat" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
 
@@ -39,6 +59,42 @@ function formatDurationSec(sec: number): string {
   return s > 0 ? `${m} min ${s} s` : `${m} min`;
 }
 
+/** Parse "TOOL: ask_user" + JSON from assistant message text. Returns null if not present or invalid. */
+function parseAskUserMessage(
+  text: string
+): { question: string; context?: string; choices?: string[] } | null {
+  if (!text?.includes("ask_user")) return null;
+  const i = text.indexOf("{");
+  if (i === -1) return null;
+  let depth = 0;
+  let end = -1;
+  for (let j = i; j < text.length; j++) {
+    if (text[j] === "{") depth++;
+    else if (text[j] === "}") {
+      depth--;
+      if (depth === 0) {
+        end = j;
+        break;
+      }
+    }
+  }
+  if (end === -1) return null;
+  try {
+    const obj = JSON.parse(text.slice(i, end + 1)) as Record<string, unknown>;
+    const question = obj.question ?? "";
+    if (typeof question !== "string" || !question.trim()) return null;
+    return {
+      question: String(question).trim(),
+      context: obj.context != null ? String(obj.context).trim() : undefined,
+      choices: Array.isArray(obj.choices)
+        ? (obj.choices as unknown[]).map((c) => String(c))
+        : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 interface HealthState {
   ok: boolean;
   port?: number;
@@ -61,6 +117,7 @@ type RouterMetrics = Record<string, ModelMetricsEntry>;
 
 function App() {
   const [tab, setTab] = useState<Tab>("chat");
+  const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
   const [health, setHealth] = useState<HealthState | null>(null);
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState<
@@ -78,6 +135,16 @@ function App() {
   const [tasksEvents, setTasksEvents] = useState<Array<{ event_type: string; payload?: unknown; at: string }>>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
   const [runningTaskChips, setRunningTaskChips] = useState<Record<string, { pct?: number; message?: string }>>({});
+  /** Events (sub_agent_spawned, progress_update, etc.) per running task for collapsible sub-agent panel. Each event may have task_id (root or child). */
+  const [runningTaskEvents, setRunningTaskEvents] = useState<Record<string, Array<{ event_type: string; payload?: unknown; at: string; task_id?: string }>>>({});
+  /** Human in the loop: when the agent asks for user input, we store question/context/choices per task_id. */
+  const [pendingHumanInput, setPendingHumanInput] = useState<Record<string, { question: string; context: string; choices?: string[] }>>({});
+  /** Task id for which the human-input modal is open (null = closed). */
+  const [humanInputModalTaskId, setHumanInputModalTaskId] = useState<string | null>(null);
+  const [humanInputFreeText, setHumanInputFreeText] = useState("");
+  /** Reply text for the inline ask_user form in the chat (when modal is not used). */
+  const [inlineHumanReplyText, setInlineHumanReplyText] = useState("");
+  const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(true);
   const [schedules, setSchedules] = useState<Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>>([]);
   const [taskRuns, setTaskRuns] = useState<Array<{
     id: string;
@@ -110,14 +177,18 @@ function App() {
   const [scheduleDetailError, setScheduleDetailError] = useState<string | null>(null);
   const [calendarRunsCollapsed, setCalendarRunsCollapsed] = useState(false);
   const [memoryShortTerm, setMemoryShortTerm] = useState<Array<{ role: string; content: string }>>([]);
-  const [memoryLongTerm, setMemoryLongTerm] = useState<Array<{ content: string; created_at: string; source: string }>>([]);
+  const [memoryLongTerm, setMemoryLongTerm] = useState<Array<{ id?: string; content: string; created_at: string; source: string }>>([]);
   const [memoryLongTermAvailable, setMemoryLongTermAvailable] = useState(false);
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
+  type MemorySubTab = "short" | "long";
+  const [memorySubTab, setMemorySubTab] = useState<MemorySubTab>("short");
   const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
+  /** Tasks for which we already auto-opened the human-input modal (avoid re-opening every poll). */
+  const humanInputAutoOpenedRef = useRef<Set<string>>(new Set());
 
   const checkHealth = useCallback(async () => {
     try {
@@ -136,6 +207,50 @@ function App() {
     return () => clearInterval(id);
   }, [checkHealth]);
 
+  // Load today's conversation history on mount (short-term = current day, so it survives UI restart).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await invoke<{ session_id?: string; turns?: Array<{ role: string; content: string }> }>(
+          "get_memory_short_term",
+          { port: DAEMON_PORT }
+        );
+        if (cancelled) return;
+        if (data?.session_id && (data.turns?.length ?? 0) > 0) {
+          setMessages(
+            data.turns!.map((t) => ({
+              role: (t.role === "user" ? "user" : t.role === "assistant" ? "assistant" : "system") as "user" | "assistant" | "system",
+              text: t.content,
+            }))
+          );
+          setSessionId(data.session_id);
+        } else if (data?.session_id) {
+          setSessionId(data.session_id);
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Apply theme to document (for CSS variables)
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
+
+  const setThemeAndSave = useCallback((next: ThemeId) => {
+    setTheme(next);
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, next);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   // Scroll chat to last message and keep focus on input
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -143,6 +258,23 @@ function App() {
   useEffect(() => {
     if (tab === "chat") chatInputRef.current?.focus();
   }, [tab]);
+
+  // Global keyboard shortcuts: 1–7 = switch tab (when not in a modal or input)
+  const tabsByIndex: Tab[] = ["chat", "router", "docs", "tasks", "calendar", "memory", "settings"];
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (humanInputModalTaskId != null) return;
+      const target = e.target as HTMLElement;
+      if (target?.closest("input") || target?.closest("textarea") || target?.closest("[role='dialog']")) return;
+      const n = e.key === "1" ? 1 : e.key === "2" ? 2 : e.key === "3" ? 3 : e.key === "4" ? 4 : e.key === "5" ? 5 : e.key === "6" ? 6 : e.key === "7" ? 7 : 0;
+      if (n >= 1 && n <= 7) {
+        e.preventDefault();
+        setTab(tabsByIndex[n - 1]);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [humanInputModalTaskId]);
 
   const fetchRouterMetrics = useCallback(async () => {
     setRouterLoading(true);
@@ -268,7 +400,7 @@ function App() {
           sessionId: sessionId ?? undefined,
           port: DAEMON_PORT,
         }),
-        invoke<{ entries?: Array<{ content: string; created_at: string; source: string }>; long_term_available?: boolean }>("get_memory_long_term", {
+        invoke<{ entries?: Array<{ id?: string; content: string; created_at: string; source: string }>; long_term_available?: boolean }>("get_memory_long_term", {
           limit: 50,
           port: DAEMON_PORT,
         }),
@@ -389,23 +521,29 @@ function App() {
     if (cmd === "help" || cmd === "?") {
       return `Commandes disponibles:
 /help, /?         — cette aide
-/task create "msg" — créer une tâche (envoie le message au daemon)
+/task create "msg" — créer une tâche (envoie le message au daemon, comme un message chat)
 /schedule create NOM INTERVAL_SEC "description" — créer une récurrence
 /schedule delete SCHEDULE_ID — supprimer une récurrence
-/status           — état du daemon
 /stop TASK_ID     — annuler une tâche (en cours ou en attente)
 /cancel TASK_ID   — idem que /stop
+/newsession       — repartir de zéro (nouvelle session, contexte court terme effacé)
+/status           — état du daemon
 /doctor           — diagnostic (daemon, ollama, vault, spec)
 /advice           — conseil diagnostic (RAG + modèle)
+/embedded         — statut du modèle local embarqué
+/embedded reload  — décharger le modèle (rechargé au prochain appel)
 /metrics          — métriques du routeur LLM
 /models           — liste des modèles (tous les providers)
+/models list      — modèles par catégorie (primary + fallback)
+/models set CAT PROV MODÈLE — définir le modèle pour une catégorie (ex. conversation ollama llama3.2)
+/routes           — modèles par catégorie (primary + fallback)
 /config list      — variables (akasha.env)
 /config get KEY   — valeur d'une variable
-/config set K V   — définir variable
+/config set K V   — définir variable (K=V dans akasha.env)
 /vault list       — clés du vault (noms uniquement)
 /plugins          — liste des plugins
 /reload           — recharger les plugins
-/restart          — redémarrer le daemon
+/restart          — redémarrer le daemon (superviseur)
 /vault set        — utiliser le CLI : akasha vault set KEY [value]`;
     }
     if (cmd === "task") {
@@ -468,6 +606,9 @@ function App() {
         return `Erreur: ${String(err)}`;
       }
     }
+    if (cmd === "newsession" || cmd === "nouvelle" || (cmd === "session" && parts[1]?.toLowerCase() === "nouvelle")) {
+      return "Nouvelle session demandée. Votre prochain message repartira de zéro (contexte court terme effacé).";
+    }
     if (cmd === "status") {
       const r = await invoke<{ ok: boolean }>("check_health", { port });
       return r?.ok ? "Daemon : OK" : "Daemon : déconnecté ou erreur";
@@ -485,6 +626,27 @@ function App() {
       const model = adviceResp?.model_used ?? "?";
       if (!advice) return `(Aucun conseil retourné. Modèle utilisé : ${model}.)`;
       return `Conseil diagnostic (modèle: ${model})\n\n${advice}`;
+    }
+    if (cmd === "embedded") {
+      const sub = parts[1]?.toLowerCase() ?? "";
+      if (sub === "reload") {
+        try {
+          const json = await invoke<{ message?: string }>("embedded_reload", { port });
+          return json?.message ?? "Modèle déchargé.";
+        } catch {
+          return "Impossible de recharger (daemon ou routeur).";
+        }
+      }
+      try {
+        const json = await invoke<{ embedded_available?: boolean; embedded_loaded?: boolean; hint?: string }>("get_embedded_status", { port });
+        const available = json?.embedded_available ?? false;
+        const loaded = json?.embedded_loaded ?? false;
+        const hint = json?.hint ?? "";
+        const status = !available ? "non disponible" : loaded ? "disponible et chargé (prêt)" : "disponible (chargement au 1ᵉʳ appel, 5–15 min possibles)";
+        return `Modèle embarqué : ${status}\n${hint}`;
+      } catch {
+        return "Impossible de joindre le daemon ou routeur.";
+      }
     }
     if (cmd === "plugins") {
       const list = await invoke<Array<{ id?: string; name?: string; version?: string }>>("get_plugins", { port });
@@ -505,7 +667,53 @@ function App() {
         )
         .join("\n");
     }
+    function formatRoutes(
+      routes: Record<
+        string,
+        {
+          primary?: { provider?: string; model?: string };
+          fallback?: Array<{ provider?: string; model?: string }>;
+        }
+      >
+    ): string {
+      const lines: string[] = ["Modèles par catégorie (primary + fallback)\n"];
+      for (const cat of Object.keys(routes).sort()) {
+        const t = routes[cat];
+        const primary = t?.primary
+          ? `${t.primary.provider ?? "?"} / ${t.primary.model ?? "?"}`
+          : "(aucun)";
+        lines.push(`  ${cat}:`);
+        lines.push(`    primary: ${primary}`);
+        const fallback = t?.fallback ?? [];
+        if (fallback.length === 0) {
+          lines.push("    fallback: (aucun)");
+        } else {
+          fallback.forEach((f, i) =>
+            lines.push(`    fallback[${i}]: ${f?.provider ?? "?"} / ${f?.model ?? "?"}`)
+          );
+        }
+      }
+      return lines.join("\n");
+    }
     if (cmd === "models") {
+      const sub = parts[1]?.toLowerCase() ?? "";
+      if (sub === "list") {
+        const routes = await invoke<Record<string, { primary?: { provider?: string; model?: string }; fallback?: Array<{ provider?: string; model?: string }> }>>("get_router_routes", { port });
+        if (!routes || Object.keys(routes).length === 0) return "Aucune route configurée.";
+        return formatRoutes(routes);
+      }
+      if (sub === "set") {
+        const category = parts[2];
+        const provider = parts[3];
+        const model = parts.slice(4).join(" ")?.trim() ?? "";
+        if (!category || !provider || !model) return "Usage: /models set CATÉGORIE PROVIDER MODÈLE (ex. /models set conversation ollama llama3.2)";
+        try {
+          const json = await invoke<{ message?: string; category?: string }>("set_router_route", { category, provider, model, port });
+          return `${json?.category ?? ""} — ${json?.message ?? "Route mise à jour."}`;
+        } catch (err) {
+          return `Erreur: ${String(err)}`;
+        }
+      }
       const providers = await invoke<Record<string, string[]>>("get_router_models", { port });
       if (!providers || Object.keys(providers).length === 0) return "Aucun modèle configuré.";
       const lines: string[] = [];
@@ -516,6 +724,19 @@ function App() {
         }
       }
       return lines.length ? lines.join("\n") : "Aucun modèle listé.";
+    }
+    if (cmd === "routes") {
+      const routes = await invoke<
+        Record<
+          string,
+          {
+            primary?: { provider?: string; model?: string };
+            fallback?: Array<{ provider?: string; model?: string }>;
+          }
+        >
+      >("get_router_routes", { port });
+      if (!routes || Object.keys(routes).length === 0) return "Aucune route configurée.";
+      return formatRoutes(routes);
     }
     if (cmd === "config") {
       const sub = parts[1]?.toLowerCase() ?? "";
@@ -568,6 +789,10 @@ function App() {
     chatInputRef.current?.focus();
 
     if (userMessage.startsWith("/")) {
+      const cmdLower = userMessage.replace(/^\//, "").trim().toLowerCase().split(/\s+/)[0] ?? "";
+      if (cmdLower === "newsession" || cmdLower === "nouvelle" || (cmdLower === "session" && userMessage.toLowerCase().includes("nouvelle"))) {
+        setSessionId(null);
+      }
       setLoading(true);
       try {
         const result = await runSlashCommand(userMessage);
@@ -581,17 +806,21 @@ function App() {
     }
 
     // Non-blocking: ACK + task_id, then poll in background (FR-025)
+    setLoading(true);
     try {
       const ack = await invoke<{ task_id: string; session_id: string; message: string }>("send_message_ack", {
         message: userMessage,
         session_id: sessionId,
         port: DAEMON_PORT,
       });
+      setLoading(false);
       if (ack?.session_id) setSessionId(ack.session_id);
       const ackText = ack?.message ?? "Je prends en compte votre demande.";
       setMessages((prev) => [...prev, { role: "assistant", text: ackText + (ack?.task_id ? " Tu peux suivre l'avancement dans l'onglet Tâches." : "") }]);
       if (ack?.task_id) {
         setRunningTaskChips((prev) => ({ ...prev, [ack.task_id]: { pct: 0, message: "en cours…" } }));
+        setRunningTaskEvents((prev) => ({ ...prev, [ack.task_id]: [] }));
+        setSubAgentPanelCollapsed(false);
         fetchTasksList();
         const taskId = ack.task_id;
         const pollUntilDone = async () => {
@@ -599,27 +828,52 @@ function App() {
           for (let i = 0; i < maxWait; i++) {
             await new Promise((r) => setTimeout(r, 1500));
             try {
-              const raw = await invoke<string>("get_task_status", { taskId, port: DAEMON_PORT });
+              const [raw, eventsData, humanInputData] = await Promise.all([
+                invoke<string>("get_task_status", { taskId, port: DAEMON_PORT }),
+                invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> }>("get_task_events", { taskId, port: DAEMON_PORT }).catch(() => ({ events: [] })),
+                invoke<{ question?: string; context?: string; choices?: string[] }>("get_task_human_input", { taskId, port: DAEMON_PORT }).catch(() => null),
+              ]);
               const status = JSON.parse(raw) as { status?: string; progress?: Array<{ progress_pct?: number; message?: string }> };
               const pct = status?.progress?.slice(-1)[0]?.progress_pct ?? 0;
               const msg = status?.progress?.slice(-1)[0]?.message ?? "";
               setRunningTaskChips((prev) => (prev[taskId] !== undefined ? { ...prev, [taskId]: { pct, message: msg } } : prev));
-              if (status?.status === "completed") {
-                setRunningTaskChips((prev) => {
+              const events = (eventsData?.events ?? []).map((e) => ({
+                event_type: e.event_type ?? "?",
+                payload: e.payload,
+                at: e.at ?? "",
+                task_id: e.task_id,
+              }));
+              setRunningTaskEvents((prev) => (prev[taskId] !== undefined ? { ...prev, [taskId]: events } : prev));
+              if (humanInputData?.question) {
+                setPendingHumanInput((prev) => ({ ...prev, [taskId]: { question: humanInputData.question ?? "", context: humanInputData.context ?? "", choices: humanInputData.choices } }));
+                if (!humanInputAutoOpenedRef.current.has(taskId)) {
+                  humanInputAutoOpenedRef.current.add(taskId);
+                  setHumanInputModalTaskId(taskId);
+                }
+              } else {
+                setPendingHumanInput((prev) => {
                   const next = { ...prev };
                   delete next[taskId];
                   return next;
                 });
+                humanInputAutoOpenedRef.current.delete(taskId);
+              }
+              if (status?.status === "completed") {
+                setRunningTaskChips((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+                setRunningTaskEvents((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+                setPendingHumanInput((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+                humanInputAutoOpenedRef.current.delete(taskId);
+                setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 const finalMsg = status?.progress?.slice(-1)[0]?.message ?? "Terminé.";
                 setMessages((prev) => [...prev, { role: "assistant", text: finalMsg }]);
                 return;
               }
               if (status?.status === "failed") {
-                setRunningTaskChips((prev) => {
-                  const next = { ...prev };
-                  delete next[taskId];
-                  return next;
-                });
+                setRunningTaskChips((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+                setRunningTaskEvents((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+                setPendingHumanInput((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+                humanInputAutoOpenedRef.current.delete(taskId);
+                setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 setMessages((prev) => [...prev, { role: "assistant", text: "Tâche en échec.", error: true }]);
                 return;
               }
@@ -632,11 +886,17 @@ function App() {
             delete next[taskId];
             return next;
           });
+          setRunningTaskEvents((prev) => {
+            const next = { ...prev };
+            delete next[taskId];
+            return next;
+          });
           setMessages((prev) => [...prev, { role: "assistant", text: "Délai dépassé. Consultez l'onglet Tâches." }]);
         };
         pollUntilDone();
       }
     } catch (err) {
+      setLoading(false);
       setMessages((prev) => [...prev, { role: "assistant", text: `Erreur : ${String(err)}`, error: true }]);
     }
     chatInputRef.current?.focus();
@@ -644,9 +904,10 @@ function App() {
 
   return (
     <div className="app">
+      <a href="#main-content" className="skip-link">Aller au contenu principal</a>
       <header className="header">
         <h1 className="logo">Akasha</h1>
-        <p className="tagline">Local-first AI assistant</p>
+        <p className="tagline">Local-first AI assistant · 1–7 : onglets</p>
         <div className="daemon-status" role="status" aria-live="polite">
           <span
             className={`status-dot ${health?.ok ? "connected" : "disconnected"}`}
@@ -732,7 +993,7 @@ function App() {
         </nav>
       </header>
 
-      <main className="main">
+      <main className="main" id="main-content" tabIndex={-1}>
         {tab === "chat" && (
           <section
             id="panel-chat"
@@ -756,37 +1017,228 @@ function App() {
                   {scheduleReports.map((r, i) => (
                     <div key={`report-${i}`} className="message system report">
                       <span className="role" aria-hidden>Rappel exécuté</span>
-                      <div className="text" style={{ whiteSpace: "pre-wrap" }}>
-                        <strong>« {r.schedule_name} »</strong> — {r.message}
+                      <div className="text markdown-rendered">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {`**« ${r.schedule_name} »** — ${r.message}`}
+                        </ReactMarkdown>
                       </div>
                     </div>
                   ))}
-                  {messages.map((m, i) => (
-                    <div
-                      key={i}
-                      className={`message ${m.role} ${m.error ? "error" : ""}`}
-                    >
-                      <span className="role" aria-hidden>
-                        {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : "Akasha"}
-                      </span>
-                      <div className="text" style={{ whiteSpace: "pre-wrap" }}>
-                        {m.text}
+                  {messages.map((m, i) => {
+                    const askUserData = m.role === "assistant" ? parseAskUserMessage(m.text) : null;
+                    return (
+                      <div
+                        key={i}
+                        className={`message ${m.role} ${m.error ? "error" : ""} ${askUserData ? "message-ask-user" : ""}`}
+                      >
+                        <span className="role" aria-hidden>
+                          {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : "Akasha"}
+                        </span>
+                        {m.role === "system" ? (
+                          <div className="text system-text" style={{ whiteSpace: "pre-wrap" }}>
+                            {m.text}
+                          </div>
+                        ) : askUserData ? (
+                          <div className="message-ask-user-card">
+                            <div className="message-ask-user-question markdown-rendered">
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                {askUserData.question}
+                              </ReactMarkdown>
+                            </div>
+                            {askUserData.context && (
+                              <p className="message-ask-user-context">{askUserData.context}</p>
+                            )}
+                            {askUserData.choices?.length ? (
+                              <div className="message-ask-user-choices">
+                                {askUserData.choices.map((choice, j) => (
+                                  <span key={j} className="message-ask-user-choice-tag">
+                                    {choice}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null}
+                            <p className="message-ask-user-hint">Répondre dans le formulaire sous le chat ou via « Action requise » sur la tâche.</p>
+                          </div>
+                        ) : (
+                          <div className="text markdown-rendered">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {m.text}
+                            </ReactMarkdown>
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </>
               )}
+              {(loading || Object.keys(runningTaskChips).length > 0) && (
+                <div className="chat-loading-row" role="status" aria-live="polite">
+                  {loading && (
+                    <div className="chat-loader" aria-hidden>
+                      <span className="chat-loader-spinner" />
+                      <span>Envoi en cours…</span>
+                    </div>
+                  )}
+                  {Object.keys(runningTaskChips).length > 0 && (
+                    <div className="chat-chips">
+                      {Object.entries(runningTaskChips).map(([tid, { pct, message }]) => {
+                        const chipAskUser = parseAskUserMessage(message ?? "");
+                        const chipLabel = chipAskUser
+                          ? "Question en attente — répondez ci‑dessous"
+                          : (message ?? "en cours");
+                        return (
+                        <span key={tid} className="task-chip">
+                          <span className="task-chip-spinner" aria-hidden />
+                          Task #{tid.slice(-8)} {pct != null ? `(${pct}%)` : ""} {chipLabel}
+                          {pendingHumanInput[tid] && (
+                            <button
+                              type="button"
+                              className="task-chip-action-required"
+                              onClick={() => { setHumanInputModalTaskId(tid); setHumanInputFreeText(""); }}
+                              title="Une action de votre part est requise"
+                            >
+                              ⚠ Action requise
+                            </button>
+                          )}
+                        </span>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
               {Object.keys(runningTaskChips).length > 0 && (
-                <div className="chat-chips" role="status">
-                  {Object.entries(runningTaskChips).map(([tid, { pct, message }]) => (
-                    <span key={tid} className="task-chip">
-                      Task #{tid.slice(-8)} {pct != null ? `(${pct}%)` : ""} {message ?? "en cours"}
+                <div className="chat-subagents-panel">
+                  <button
+                    type="button"
+                    className="chat-subagents-toggle"
+                    onClick={() => setSubAgentPanelCollapsed((c) => !c)}
+                    aria-expanded={!subAgentPanelCollapsed}
+                    aria-controls="subagents-detail"
+                  >
+                    <span className="chat-subagents-toggle-icon" aria-hidden>{subAgentPanelCollapsed ? "▶" : "▼"}</span>
+                    <span>
+                      {subAgentPanelCollapsed
+                        ? (() => {
+                            const total = Object.values(runningTaskEvents).flat().length;
+                            return total > 0
+                              ? `Détail des sous-agents (${total} étape(s))`
+                              : "Détail des sous-agents (cliquez pour afficher)";
+                          })()
+                        : "Masquer le détail des sous-agents"}
                     </span>
-                  ))}
+                  </button>
+                  {!subAgentPanelCollapsed && (
+                    <div id="subagents-detail" className="chat-subagents-detail" role="region" aria-label="Actions des sous-agents">
+                      {Object.entries(runningTaskEvents).filter(([, ev]) => ev.length > 0).length === 0 ? (
+                        <p className="chat-subagents-empty">
+                          Aucune étape reçue pour le moment. Les événements (délégation, sous-agents, progression) s’afficheront ici au fur et à mesure.
+                        </p>
+                      ) : (
+                        Object.entries(runningTaskEvents).map(([rootTaskId, events]) => {
+                          if (events.length === 0) return null;
+                          // Group by task_id (root vs child) so we show "Tâche racine" and "Sous-tâche #xxx"
+                          const byTask: Record<string, typeof events> = {};
+                          for (const ev of events) {
+                            const tid = ev.task_id ?? rootTaskId;
+                            if (!byTask[tid]) byTask[tid] = [];
+                            byTask[tid].push(ev);
+                          }
+                          return Object.entries(byTask).map(([tid, evs]) => (
+                            <div key={`${rootTaskId}-${tid}`} className="chat-subagents-task">
+                              <div className="chat-subagents-task-id">
+                                {tid === rootTaskId ? `Tâche racine #${tid.slice(-8)}` : `Sous-tâche #${tid.slice(-8)}`}
+                              </div>
+                              <ul className="chat-subagents-events">
+                                {evs.map((ev, idx) => (
+                                  <li key={`${tid}-${idx}`} className="chat-subagents-event" data-type={ev.event_type}>
+                                    <span className="chat-subagents-event-type">{eventTypeLabel(ev.event_type)}</span>
+                                    {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload && (
+                                      <span className="chat-subagents-event-agent"> → {(ev.payload as { agent?: string }).agent}</span>
+                                    )}
+                                    {ev.at && <span className="chat-subagents-event-at"> {ev.at.slice(0, 19)}</span>}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          ));
+                        })
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
               <div ref={chatEndRef} aria-hidden />
             </div>
+            {Object.keys(pendingHumanInput).length > 0 && !humanInputModalTaskId && (
+              <div className="chat-human-input-banner" role="status">
+                Une question vous attend — répondez ci-dessous ou cliquez sur « Action requise » sur la tâche.
+              </div>
+            )}
+            {Object.keys(pendingHumanInput).length > 0 && !humanInputModalTaskId && (() => {
+              const pendingTaskId = Object.keys(pendingHumanInput)[0];
+              const pending = pendingTaskId ? pendingHumanInput[pendingTaskId] : null;
+              if (!pending || !pendingTaskId) return null;
+              return (
+                <div className="chat-inline-human-reply" role="form" aria-labelledby="inline-reply-label">
+                  <h3 id="inline-reply-label" className="chat-inline-human-reply-title">Répondre à l&apos;agent</h3>
+                  <p className="chat-inline-human-reply-question">{pending.question}</p>
+                  {pending.context && <p className="chat-inline-human-reply-context">{pending.context}</p>}
+                  {pending.choices?.length ? (
+                    <div className="chat-inline-human-reply-choices">
+                      {pending.choices.map((choice, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          className="chat-inline-human-reply-choice-btn"
+                          onClick={async () => {
+                            try {
+                              await invoke("post_task_human_reply", { taskId: pendingTaskId, response: choice, port: DAEMON_PORT });
+                              setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskId]; return next; });
+                              setHumanInputModalTaskId((c) => (c === pendingTaskId ? null : c));
+                            } catch (e) {
+                              console.error(e);
+                            }
+                          }}
+                        >
+                          {choice}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="chat-inline-human-reply-free">
+                      <label htmlFor="inline-human-reply-input" className="sr-only">Votre réponse</label>
+                      <input
+                        id="inline-human-reply-input"
+                        type="text"
+                        value={inlineHumanReplyText}
+                        onChange={(e) => setInlineHumanReplyText(e.target.value)}
+                        placeholder="Saisissez votre réponse…"
+                        onKeyDown={(e) => e.key === "Enter" && document.getElementById("inline-human-reply-submit")?.click()}
+                      />
+                      <button
+                        id="inline-human-reply-submit"
+                        type="button"
+                        onClick={async () => {
+                          const text = inlineHumanReplyText.trim();
+                          if (!text) return;
+                          try {
+                            await invoke("post_task_human_reply", { taskId: pendingTaskId, response: text, port: DAEMON_PORT });
+                            setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskId]; return next; });
+                            setHumanInputModalTaskId((c) => (c === pendingTaskId ? null : c));
+                            setInlineHumanReplyText("");
+                          } catch (e) {
+                            console.error(e);
+                          }
+                        }}
+                      >
+                        Envoyer la réponse
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             <div className="input-area">
               <label htmlFor="chat-input" className="sr-only">
                 Votre message
@@ -813,6 +1265,72 @@ function App() {
             <p id="send-hint" className="hint sr-only">
               Entrée pour envoyer
             </p>
+            {humanInputModalTaskId && pendingHumanInput[humanInputModalTaskId] && (
+              <div className="human-input-overlay" role="dialog" aria-labelledby="human-input-title" aria-modal="true">
+                <div className="human-input-modal">
+                  <h2 id="human-input-title">Action requise</h2>
+                  <p className="human-input-question">{pendingHumanInput[humanInputModalTaskId].question}</p>
+                  {pendingHumanInput[humanInputModalTaskId].context && (
+                    <p className="human-input-context">{pendingHumanInput[humanInputModalTaskId].context}</p>
+                  )}
+                  {pendingHumanInput[humanInputModalTaskId].choices?.length ? (
+                    <div className="human-input-choices">
+                      {pendingHumanInput[humanInputModalTaskId].choices!.map((choice, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          className="human-input-choice-btn"
+                          onClick={async () => {
+                            try {
+                              await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: choice, port: DAEMON_PORT });
+                              setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
+                              setHumanInputModalTaskId(null);
+                            } catch (e) {
+                              console.error(e);
+                            }
+                          }}
+                        >
+                          {choice}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="human-input-free">
+                      <label htmlFor="human-input-text">Votre réponse</label>
+                      <input
+                        id="human-input-text"
+                        type="text"
+                        value={humanInputFreeText}
+                        onChange={(e) => setHumanInputFreeText(e.target.value)}
+                        placeholder="Saisissez votre réponse…"
+                        onKeyDown={(e) => e.key === "Enter" && document.getElementById("human-input-submit")?.click()}
+                      />
+                      <button
+                        id="human-input-submit"
+                        type="button"
+                        onClick={async () => {
+                          const text = humanInputFreeText.trim();
+                          if (!text) return;
+                          try {
+                            await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: text, port: DAEMON_PORT });
+                            setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
+                            setHumanInputModalTaskId(null);
+                            setHumanInputFreeText("");
+                          } catch (e) {
+                            console.error(e);
+                          }
+                        }}
+                      >
+                        Envoyer
+                      </button>
+                    </div>
+                  )}
+                  <button type="button" className="human-input-close" onClick={() => setHumanInputModalTaskId(null)} aria-label="Fermer">
+                    Fermer
+                  </button>
+                </div>
+              </div>
+            )}
           </section>
         )}
 
@@ -825,7 +1343,8 @@ function App() {
           >
             <h2 className="panel-title">Métriques du routeur LLM</h2>
             {routerLoading && (
-              <p className="loading-inline" aria-busy="true">
+              <p className="panel-loading" aria-busy="true">
+                <span className="panel-loading-spinner" aria-hidden />
                 Chargement…
               </p>
             )}
@@ -899,7 +1418,8 @@ function App() {
           >
             <h2 className="panel-title">Documentation utilisateur</h2>
             {docLoading && (
-              <p className="loading-inline" aria-busy="true">
+              <p className="panel-loading" aria-busy="true">
+                <span className="panel-loading-spinner" aria-hidden />
                 Chargement…
               </p>
             )}
@@ -947,7 +1467,8 @@ function App() {
               Rafraîchir
             </button>
             {tasksLoading && (
-              <p className="loading-inline" aria-busy="true">
+              <p className="panel-loading" aria-busy="true">
+                <span className="panel-loading-spinner" aria-hidden />
                 Chargement…
               </p>
             )}
@@ -1198,7 +1719,9 @@ function App() {
                               return last ? (
                                 <div className="task-detail-reply">
                                   <strong>Réponse de l'agent:</strong>
-                                  <div className="task-detail-reply-content">{last}</div>
+                                  <div className="task-detail-reply-content markdown-rendered">
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{last}</ReactMarkdown>
+                                  </div>
                                 </div>
                               ) : null;
                             })()}
@@ -1214,7 +1737,11 @@ function App() {
                                       {p.progress_pct != null && p.progress_pct > 0
                                         ? `${p.progress_pct}% — `
                                         : "État: "}
-                                      {p.message ?? ""}
+                                      <div className="markdown-rendered progress-message">
+                                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                          {p.message ?? ""}
+                                        </ReactMarkdown>
+                                      </div>
                                     </li>
                                   ))}
                                 </ul>
@@ -1276,8 +1803,10 @@ function App() {
                             {(scheduleDetail.channel_context ?? scheduleDetail.description) ? (
                               <div className="task-detail-reply">
                                 <strong>Demande envoyée aux agents à chaque itération:</strong>
-                                <div className="task-detail-reply-content">
-                                  {scheduleDetail.channel_context ?? scheduleDetail.description}
+                                <div className="task-detail-reply-content markdown-rendered">
+                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                    {scheduleDetail.channel_context ?? scheduleDetail.description}
+                                  </ReactMarkdown>
                                 </div>
                               </div>
                             ) : (
@@ -1322,46 +1851,111 @@ function App() {
               </p>
             )}
             {memoryLoading && (
-              <p className="loading-inline" aria-busy="true">
+              <p className="panel-loading" aria-busy="true">
+                <span className="panel-loading-spinner" aria-hidden />
                 Chargement…
               </p>
             )}
             {!memoryLoading && !memoryError && (
-              <>
-                <h3 className="memory-section-title">Court terme (session)</h3>
-                <p className="muted">
+              <div className="memory-content-wrap">
+                <div className="memory-subtabs" role="tablist" aria-label="Type de mémoire">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={memorySubTab === "short"}
+                    aria-controls="memory-content-short"
+                    id="memory-tab-short"
+                    className={"memory-subtab" + (memorySubTab === "short" ? " active" : "")}
+                    onClick={() => setMemorySubTab("short")}
+                  >
+                    Court terme
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={memorySubTab === "long"}
+                    aria-controls="memory-content-long"
+                    id="memory-tab-long"
+                    className={"memory-subtab" + (memorySubTab === "long" ? " active" : "")}
+                    onClick={() => setMemorySubTab("long")}
+                  >
+                    Long terme
+                  </button>
+                </div>
+                {memorySubTab === "short" && (
+                  <div
+                    id="memory-content-short"
+                    role="tabpanel"
+                    aria-labelledby="memory-tab-short"
+                    className="memory-subpanel"
+                  >
+                    <p className="muted">
                   Derniers échanges de la session courante (utilisée par l’orchestrateur pour le contexte).
                 </p>
                 {memoryShortTerm.length === 0 ? (
                   <p className="empty-state">Aucun tour en mémoire court terme.</p>
                 ) : (
-                  <ul className="memory-turns-list">
-                    {memoryShortTerm.map((t, i) => (
-                      <li key={i} className={`memory-turn memory-turn-${t.role}`}>
-                        <span className="memory-turn-role">{t.role}</span>
-                        <div className="memory-turn-content">{t.content}</div>
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="memory-list-scroll">
+                    <ul className="memory-turns-list">
+                      {memoryShortTerm.map((t, i) => (
+                        <li key={i} className={"memory-turn memory-turn-" + t.role}>
+                          <span className="memory-turn-role">{t.role}</span>
+                          <div className="memory-turn-content">{t.content}</div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 )}
-                <h3 className="memory-section-title">Long terme</h3>
-                {!memoryLongTermAvailable ? (
-                  <p className="muted">Mémoire long terme non disponible (embeddings non configurés ou désactivés).</p>
-                ) : memoryLongTerm.length === 0 ? (
-                  <p className="empty-state">Aucune entrée en mémoire long terme.</p>
-                ) : (
-                  <ul className="memory-long-term-list">
-                    {memoryLongTerm.map((e, i) => (
-                      <li key={i} className="memory-long-term-item">
-                        <div className="memory-long-term-content">{e.content}</div>
-                        <div className="memory-long-term-meta">
-                          {e.created_at} {e.source ? ` · ${e.source}` : ""}
+                  </div>
+                )}
+                {memorySubTab === "long" && (
+                  <div
+                    id="memory-content-long"
+                    role="tabpanel"
+                    aria-labelledby="memory-tab-long"
+                    className="memory-subpanel"
+                  >
+                    {!memoryLongTermAvailable ? (
+                      <p className="muted">Mémoire long terme non disponible (embeddings non configurés ou désactivés).</p>
+                    ) : memoryLongTerm.length === 0 ? (
+                      <p className="empty-state">Aucune entrée en mémoire long terme.</p>
+                    ) : (
+                      <div className="memory-list-scroll">
+                        <ul className="memory-long-term-list">
+                          {memoryLongTerm.map((e, i) => (
+                      <li key={e.id ?? `entry-${i}`} className="memory-long-term-item">
+                        <div className="memory-long-term-body">
+                          <div className="memory-long-term-content">{e.content}</div>
+                          <div className="memory-long-term-meta">
+                            {e.created_at} {e.source ? ` · ${e.source}` : ""}
+                          </div>
                         </div>
-                      </li>
-                    ))}
-                  </ul>
+                        {e.id != null && (
+                          <button
+                            type="button"
+                            className="memory-long-term-delete"
+                            onClick={async () => {
+                              try {
+                                await invoke("delete_memory_long_term", { id: e.id, port: DAEMON_PORT });
+                                fetchMemory();
+                              } catch (err) {
+                                setMemoryError(String(err));
+                              }
+                            }}
+                            aria-label="Supprimer cette entrée"
+                            title="Supprimer de la mémoire long terme"
+                          >
+                            Supprimer
+                          </button>
+                        )}
+                          </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
                 )}
-              </>
+              </div>
             )}
           </section>
         )}
@@ -1375,6 +1969,22 @@ function App() {
           >
             <h2 className="panel-title">Paramètres</h2>
             <dl className="settings-list">
+              <dt>Thème</dt>
+              <dd>
+                <select
+                  aria-label="Choisir le thème d’affichage"
+                  className="settings-theme-select"
+                  value={theme}
+                  onChange={(e) => setThemeAndSave(e.target.value as ThemeId)}
+                >
+                  {THEMES.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+                <span className="settings-theme-hint">Thème par défaut enregistré.</span>
+              </dd>
               <dt>Port du daemon</dt>
               <dd>
                 <code>{DAEMON_PORT}</code> (défaut)

@@ -1,5 +1,6 @@
 //! Akasha Daemon - 24/7 runtime with supervision and healthcheck
 
+pub mod agent_profile;
 pub mod agents;
 pub mod api;
 pub mod channels;

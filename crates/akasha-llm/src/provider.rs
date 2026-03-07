@@ -343,6 +343,7 @@ impl LLMProvider for OpenRouterProvider {
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
+            .header("X-OpenRouter-Title", "Akasha")
             .json(&body)
             .timeout(timeout)
             .send()

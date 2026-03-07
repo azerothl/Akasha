@@ -5,11 +5,12 @@ use akasha_vault::Vault;
 use akasha_llm::CompletionRequest;
 use akasha_store::{Schedule, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
+use crate::agent_profile::AgentProfile;
 use crate::agents::{EventBus, OrchestratorTask};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
+use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
@@ -51,12 +52,36 @@ async fn get_task_list(store_path: &Path) -> String {
 }
 
 async fn get_task_events(events: &EventsCache, id: Uuid) -> String {
-    let list: Vec<TaskEventEntry> = {
+    let mut list: Vec<TaskEventEntry> = {
         let g = events.read().await;
         g.get(&id)
             .map(|q| q.iter().cloned().collect())
             .unwrap_or_default()
     };
+    // Derive child task IDs from SubAgentSpawned events already in the in-memory cache —
+    // avoids reopening SQLite (TaskStore) on every poll cycle (the endpoint is polled ~1.5s).
+    let child_ids: Vec<Uuid> = list
+        .iter()
+        .filter(|e| e.event_type == "sub_agent_spawned")
+        .filter_map(|e| {
+            e.payload
+                .as_ref()
+                .and_then(|p| p.get("task_id"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+        })
+        .collect();
+    if !child_ids.is_empty() {
+        let g = events.read().await;
+        for child_id in child_ids {
+            if let Some(q) = g.get(&child_id) {
+                for e in q.iter().cloned() {
+                    list.push(e);
+                }
+            }
+        }
+    }
+    list.sort_by(|a, b| a.at.cmp(&b.at));
     let body = serde_json::json!({ "task_id": id.to_string(), "events": list });
     json_response("200 OK", &body.to_string())
 }
@@ -76,6 +101,9 @@ pub struct TaskEventEntry {
     pub event_type: String,
     pub payload: Option<serde_json::Value>,
     pub at: String,
+    /// When present, indicates which task this event belongs to (for merged root+child responses).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 pub type EventsCache =
@@ -96,6 +124,21 @@ type BackgroundResultCell = Arc<RwLock<Option<anyhow::Result<(std::process::Outp
 pub type ProcessRegistry = Arc<RwLock<std::collections::HashMap<Uuid, (tokio::task::JoinHandle<()>, BackgroundResultCell)>>>;
 
 pub fn new_process_registry() -> ProcessRegistry {
+    Arc::new(RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Pending "human in the loop" request: agent is waiting for the user to answer.
+pub struct PendingHumanInput {
+    pub question: String,
+    pub context: String,
+    pub choices: Option<Vec<String>>,
+    pub response_tx: tokio::sync::oneshot::Sender<String>,
+}
+
+/// Store of pending human-input requests by task_id. Used by the conversation worker (to register and wait) and by the API (to return question/context/choices and to submit the reply).
+pub type HumanInputStore = Arc<RwLock<std::collections::HashMap<Uuid, PendingHumanInput>>>;
+
+pub fn new_human_input_store() -> HumanInputStore {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
 }
 
@@ -170,6 +213,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
     ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
     ("memory_store", "memory_store <content> <source> — stocker/promouvoir un contenu en mémoire long terme"),
+    ("memory_delete", "memory_delete <id> — supprimer une entrée de la mémoire long terme par son id (UUID)"),
     ("sessions_list", "sessions_list [limit] — lister les tâches/sessions récentes"),
     ("sessions_spawn", "sessions_spawn <message> [session_id] — créer une sous-tâche et la lancer"),
     ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
@@ -177,6 +221,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("browser", "browser navigate <url> | browser screenshot | browser snapshot — automation navigateur (non implémenté, prévu phase 3)"),
     ("image", "image <path|url> [prompt] — analyse d'image par modèle vision (non implémenté, prévu phase 3)"),
     ("pdf", "pdf <path|url> — extraire le texte d'un PDF (non implémenté, prévu phase 3)"),
+    ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
 ];
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -184,7 +229,9 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
         Box::new(
             AVAILABLE_TOOLS
                 .iter()
-                .filter(move |(name, _)| allowed.iter().any(|a| a == *name)),
+                .filter(move |(name, _)| {
+                    *name == "ask_user" || allowed.iter().any(|a| a == *name)
+                }),
         )
     } else {
         Box::new(AVAILABLE_TOOLS.iter())
@@ -194,13 +241,110 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
         .join(" ; ")
 }
 
+/// True if the user message suggests they want data from an external service (repo, API, etc.).
+fn message_suggests_external_service(message: &str) -> bool {
+    let m = message.to_lowercase();
+    const KEYWORDS: &[&str] = &[
+        " repo ",
+        "github",
+        "gitlab",
+        "dépôt",
+        "dépôts",
+
+    // Keywords that should match as standalone words (case-insensitive).
+    const WHOLE_WORD_KEYWORDS: &[&str] = &[
+        "repo",
+        "github",
+        "gitlab",
+        "dépôt",
+        "dépôts",
+        "api",
+        "pr",
+        "issues",
+        "token",
+        "credentials",
+    ];
+
+    // Substring patterns that are meaningful even inside longer phrases.
+    const SUBSTRING_KEYWORDS: &[&str] = &[
+        " connecte",
+        " connect ",
+        "pull request",
+        "clé api",
+        "authentif",
+    ];
+
+    // Tokenize the message into "words" to detect standalone keywords more reliably.
+    let mut words = Vec::new();
+    let mut current = String::new();
+    for ch in m.chars() {
+        if ch.is_alphanumeric() || ch == '\'' {
+            current.push(ch);
+        } else if !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+
+    // First, check for whole-word matches.
+    if words
+        .iter()
+        .any(|w| WHOLE_WORD_KEYWORDS.contains(&w.as_str()))
+    {
+        return true;
+    }
+
+    // Then, fall back to substring-based heuristics.
+    SUBSTRING_KEYWORDS.iter().any(|k| m.contains(k))
+}
+
+const EXTERNAL_SERVICE_REMINDER: &str = "\n\n[Rappel] L'utilisateur demande des données depuis un service externe. Tu DOIS répondre UNIQUEMENT par un appel à l'outil TOOL: ask_user (avec le JSON question/context), pas par un message en texte libre. Ainsi la réponse de l'utilisateur reviendra dans la même tâche et tu pourras continuer. Si ask_user n'est pas disponible, explique en message et demande à l'utilisateur de confirmer. Ne réponds pas que tu ne peux pas. Ne invente pas de commandes (ex. /status repo:... n'existe pas) ; les commandes réelles sont dans /help.";
+
+/// True if the user message suggests they want to choose between options or confirm something before the agent continues.
+fn message_suggests_user_choice_or_confirmation(message: &str) -> bool {
+    let m = message.to_lowercase();
+    const KEYWORDS: &[&str] = &[
+        "à choisir",
+        "2 options",
+        "2 différents",
+        "deux options",
+        "plusieurs options",
+        "une fois le choix",
+        "once the choice",
+        "once you",
+        "which one",
+        "lequel ",
+        "laquelle ",
+        "choisir entre",
+        "choose between",
+        "propose moi",
+        "propose-moi",
+        "propose 2",
+        "proposes ",
+        "confirm",
+        "confirme",
+        "confirmer",
+        "demande à l'utilisateur",
+        "ask the user",
+        "avant de continuer",
+        "before continuing",
+    ];
+    KEYWORDS.iter().any(|k| m.contains(k))
+}
+
+const USER_CHOICE_REMINDER: &str = "\n\n[Rappel] L'utilisateur demande des options au choix ou une étape qui nécessite sa réponse. Tu DOIS répondre UNIQUEMENT par un appel à l'outil TOOL: ask_user (JSON avec question et, si pertinent, choices), pas en texte libre.";
+
 /// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
 const APP_CONTEXT: &str = "[Contexte Akasha] Tu es l'assistant intégré à Akasha. Akasha est l'application dans laquelle tu tournes actuellement. \
 Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : \
 commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Mémoire/Doc/Activité), \
 commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, etc.). \
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
-Réponds en français sauf si l'utilisateur utilise une autre langue.\n\n";
+Réponds en français sauf si l'utilisateur utilise une autre langue. \
+Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »). \
+Règle importante : dès que tu dois demander à l'utilisateur un choix, une confirmation ou une information (options à choisir, chemin, identifiants, etc.) puis enchaîner dans la même tâche, tu DOIS utiliser l'outil ask_user (TOOL: ask_user puis JSON avec question/context/choices). Ne pose pas la question en texte libre, sinon la réponse ouvrira une nouvelle tâche et tu ne pourras pas continuer. Pour un accès à un service externe (GitHub, API, etc.), ne réponds pas « je ne peux pas » ; utilise ask_user pour demander le token ou explique comment configurer. Si l'utilisateur a déjà confirmé (ex. « clé dans le vault », « c'est configuré »), n'envoie pas une deuxième fois ask_user ; enchaîne. Ne invente pas de commandes (ex. /status repo:... n'existe pas) ; les commandes sont dans /help.\n\n";
 
 /// If AKASHA_TOOLS_JOURNAL_PATH is set, append a line for write tool invocations (Phase 4 modification journal).
 async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: &str) {
@@ -244,7 +388,7 @@ fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
                 let tool_name_lc = name.to_lowercase();
                 let supports_body = matches!(
                     tool_name_lc.as_str(),
-                    "apply_patch" | "edit_file" | "write_file"
+                    "apply_patch" | "edit_file" | "write_file" | "ask_user"
                 );
 
                 if supports_body {
@@ -454,7 +598,7 @@ async fn execute_tool_call(
                     if results.is_empty() {
                         (true, format!("[memory_search] no results for \"{}\"", query_str))
                     } else {
-                        let preview: Vec<String> = results.iter().take(5).map(|s| s.replace('\n', " ")).collect();
+                        let preview: Vec<String> = results.iter().take(5).map(|(id, content)| format!("id: {} — {}", id, content.replace('\n', " "))).collect();
                         (true, format!("[memory_search] {} result(s): {}", results.len(), preview.join(" | ")))
                     }
                 }
@@ -482,6 +626,27 @@ async fn execute_tool_call(
                     }
                 }
                 None => (false, "[memory_store] long-term memory not available".to_string()),
+            }
+        }
+        "memory_delete" => {
+            let id = args.get(0).map(|a| a.as_str()).unwrap_or("").trim();
+            if id.is_empty() {
+                return (false, "[memory_delete] usage: memory_delete <id> (UUID de l'entrée)".to_string());
+            }
+            match long_term_client {
+                Some(client) => {
+                    let client = client.clone();
+                    let id = id.to_string();
+                    let out = tokio::task::spawn_blocking(move || client.delete(id))
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok());
+                    match out {
+                        Some(()) => (true, "[memory_delete] deleted".to_string()),
+                        None => (false, "[memory_delete] failed or not found (vérifiez l'id)".to_string()),
+                    }
+                }
+                None => (false, "[memory_delete] long-term memory not available".to_string()),
             }
         }
         "sessions_list" => {
@@ -873,6 +1038,53 @@ async fn compact_short_term_if_needed(
     }
 }
 
+/// At daemon startup: if yesterday's short-term file exists, summarize it via LLM and promote to long-term (source "daily_summary").
+pub async fn summarize_yesterday_and_promote(
+    short_term_dir: PathBuf,
+    llm_router: Arc<akasha_llm::LLMRouter>,
+    long_term_client: Option<LongTermMemoryClient>,
+) {
+    let Some(client) = long_term_client else { return };
+    let yesterday = chrono::Utc::now() - chrono::Duration::days(1);
+    let session_id = format!("day-{}", yesterday.format("%Y-%m-%d"));
+    let turns = match ShortTermStore::read_day_from_disk(&session_id, &short_term_dir) {
+        Some(t) if !t.is_empty() => t,
+        _ => return,
+    };
+    let blob = ShortTermStore::turns_to_context(&turns);
+    let summary_prompt = format!(
+        "Résume en un court paragraphe synthétique (5 à 10 lignes) la journée du {} : sujets abordés, décisions, projets ou informations importantes. \
+Réponse en français, factuelle.\n\n{}",
+        session_id.trim_start_matches("day-"),
+        blob
+    );
+    let summary_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(1024);
+    let req = CompletionRequest {
+        prompt: summary_prompt,
+        max_tokens: Some(summary_max_tokens),
+        temperature: Some(0.2),
+        preferred_task_type: Some("system".to_string()),
+    };
+    match llm_router.complete(&req).await {
+        Ok(resp) => {
+            let summary = resp.text.trim();
+            if !summary.is_empty() {
+                let content = format!("Résumé du {} : {}", session_id.trim_start_matches("day-"), summary);
+                let client = client.clone();
+                match tokio::task::spawn_blocking(move || client.promote(content, "daily_summary".to_string())).await {
+                    Ok(Ok(())) => tracing::info!(session_id = %session_id, "Yesterday summarized and stored in long-term memory"),
+                    Ok(Err(e)) => tracing::warn!(error = %e, "Daily summary promote to long-term failed"),
+                    Err(e) => tracing::warn!(error = %e, "Daily summary task join failed"),
+                }
+            }
+        }
+        Err(e) => tracing::debug!(error = %e, "Daily summary LLM call failed"),
+    }
+}
+
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
 pub(crate) async fn run_message_via_llm(
     bus: EventBus,
@@ -887,6 +1099,7 @@ pub(crate) async fn run_message_via_llm(
     skill_registry: Option<std::sync::Arc<crate::skills::SkillRegistry>>,
     process_registry: Option<ProcessRegistry>,
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
+    human_input_store: Option<HumanInputStore>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -945,7 +1158,10 @@ pub(crate) async fn run_message_via_llm(
             None => String::new(),
         };
         format!(
-            "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\nIf you need no tool, reply normally with your answer.\n\
+            "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
+             Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
+             CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
+             If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
             base, skills_part
@@ -958,6 +1174,14 @@ pub(crate) async fn run_message_via_llm(
     let mut context_prefix = String::new();
     context_prefix.push_str(APP_CONTEXT);
 
+    // Agent profile: name, personality, rules, can/cannot (persisted in data_dir/agent_profile.json)
+    let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+    let agent_profile = AgentProfile::load(data_dir);
+    let profile_block = agent_profile.format_for_prompt();
+    if !profile_block.is_empty() {
+        context_prefix.push_str(&profile_block);
+    }
+
     // Long-term: retrieve top-k relevant memories by embedding similarity (current message + optional user-identity for first message)
     if let Some(ref client) = long_term_client {
         let msg = message.clone();
@@ -968,7 +1192,7 @@ pub(crate) async fn run_message_via_llm(
             .unwrap_or_default();
         if !results.is_empty() {
             context_prefix.push_str("[Mémoire à long terme]\n");
-            for content in &results {
+            for (_, content) in &results {
                 context_prefix.push_str("- ");
                 context_prefix.push_str(&content.replace('\n', " "));
                 context_prefix.push_str("\n");
@@ -999,7 +1223,7 @@ pub(crate) async fn run_message_via_llm(
                     .unwrap_or_default();
                 if !user_memories.is_empty() {
                     context_prefix.push_str("[Contexte utilisateur — utilise pour saluer si pertinent]\n");
-                    for content in &user_memories {
+                    for (_, content) in &user_memories {
                         context_prefix.push_str("- ");
                         context_prefix.push_str(&content.replace('\n', " "));
                         context_prefix.push_str("\n");
@@ -1019,6 +1243,12 @@ pub(crate) async fn run_message_via_llm(
     } else {
         format!("{}\nUtilisateur:\n{}", context_prefix.trim_end(), message)
     };
+    if message_suggests_external_service(&message) {
+        current_prompt.push_str(EXTERNAL_SERVICE_REMINDER);
+    }
+    if message_suggests_user_choice_or_confirmation(&message) {
+        current_prompt.push_str(USER_CHOICE_REMINDER);
+    }
     let reply_text;
     const MAX_TOOL_ROUNDS: u32 = 3;
     let mut round = 0u32;
@@ -1172,20 +1402,71 @@ pub(crate) async fn run_message_via_llm(
                         break 'tool_rounds;
                     }
                 }
-                let res = execute_tool_call(
-                    exec,
-                    &actual_tool,
-                    args,
-                    process_registry.as_ref(),
-                    long_term_client.as_ref(),
-                    task_id,
-                    Some(store_path.as_path()),
-                    conv_tx.clone(),
-                    message_webhook_url.as_deref(),
-                )
-                .await;
+                let (success, res) = if actual_tool == "ask_user" {
+                    // Human in the loop: register pending request, emit event, wait for user reply.
+                    match &human_input_store {
+                        Some(store) => {
+                            let body = args.first().map(String::as_str).unwrap_or("{}");
+                            let v = serde_json::from_str::<serde_json::Value>(body).ok();
+                            let (question, context, choices) = match &v {
+                                Some(v) => (
+                                    v.get("question").and_then(|q| q.as_str()).unwrap_or("").to_string(),
+                                    v.get("context").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                                    v.get("choices").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>()),
+                                ),
+                                None => (body.to_string(), String::new(), None),
+                            };
+                            if question.is_empty() {
+                                (false, format!("[ask_user] invalid JSON: question required. Got: {}", body.chars().take(100).collect::<String>()))
+                            } else {
+                                let (tx, rx) = tokio::sync::oneshot::channel();
+                                let pending = PendingHumanInput {
+                                    question: question.clone(),
+                                    context: context.clone(),
+                                    choices: choices.clone(),
+                                    response_tx: tx,
+                                };
+                                {
+                                    let mut g = store.write().await;
+                                    g.insert(task_id, pending);
+                                }
+                                let payload = serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "question": question,
+                                    "context": context,
+                                    "choices": choices
+                                });
+                                let _ = bus.send(
+                                    EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload)).with_correlation(task_id),
+                                );
+                                const HUMAN_INPUT_TIMEOUT_SECS: u64 = 3600;
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(HUMAN_INPUT_TIMEOUT_SECS),
+                                    rx,
+                                ).await {
+                                    Ok(Ok(reply)) => (true, format!("[ask_user] User replied: {}", reply)),
+                                    Ok(Err(_)) => (false, "[ask_user] Channel closed.".to_string()),
+                                    Err(_) => (false, format!("[ask_user] Timeout after {}s; no user reply.", HUMAN_INPUT_TIMEOUT_SECS)),
+                                }
+                            }
+                        }
+                        None => (false, "[ask_user] Human-in-the-loop not available.".to_string()),
+                    }
+                } else {
+                    execute_tool_call(
+                        exec,
+                        &actual_tool,
+                        args,
+                        process_registry.as_ref(),
+                        long_term_client.as_ref(),
+                        task_id,
+                        Some(store_path.as_path()),
+                        conv_tx.clone(),
+                        message_webhook_url.as_deref(),
+                    )
+                    .await
+                };
                 // Phase F: emit ToolInvoked for Actions tab (spec 33)
-                let (success, res) = res;
                 // Redact or truncate args in the event to avoid leaking large blobs or secrets.
                 let redacted_args: Vec<String> = if matches!(actual_tool.as_str(), "apply_patch" | "edit_file" | "write_file") {
                     vec!["[redacted for write-like tool]".to_string()]
@@ -1293,31 +1574,38 @@ pub(crate) async fn run_message_via_llm(
             }
         }
 
-        // Then spawn LLM extraction for additional facts (async, bounded concurrency, no wait).
+        // Then spawn LLM extraction for projects, interests, important info, personal facts, and agent profile (async).
         let msg = message.clone();
         let reply = reply_text.clone();
         let client = long_term.clone();
         let router = llm_router.clone();
-        let n_heuristic = heuristic_facts.len();
+        let heuristic_set: std::collections::HashSet<String> = heuristic_facts.iter().cloned().collect();
         let sem = extract_semaphore();
+        let data_dir_for_extract = data_dir.to_path_buf();
         tokio::spawn(async move {
-            // Acquire a permit; if all slots are busy, drop this extraction cycle rather than queuing unbounded work.
             let _permit = match sem.try_acquire() {
                 Ok(p) => p,
                 Err(_) => {
-                    tracing::debug!("Background fact extraction skipped: semaphore full (too many concurrent extractions)");
+                    tracing::debug!("Background fact extraction skipped: semaphore full");
                     return;
                 }
             };
-            let mut facts = heuristic_facts;
             let extract_prompt = format!(
-                "Tu dois extraire UNIQUEMENT les faits personnels à retenir sur l'utilisateur (nom, prénom, préférences, décisions). \
-Une ligne par fait, chaque ligne commence par FACT: (ex: FACT: L'utilisateur s'appelle Jean. FACT: L'utilisateur préfère le café.). \
-N'écris que des lignes FACT: ou NOTHING si aucun fait. Pas d'autre texte.\n\nUtilisateur: {}\n\nAssistant: {}",
+                "Extrais les éléments à retenir. Une ligne par élément, chaque ligne commence par exactement un des préfixes suivants :\n\
+FACT: faits personnels (nom, prénom, préférences, décisions)\n\
+PROJECT: projets créés ou mentionnés\n\
+INTEREST: centres d'intérêt\n\
+IMPORTANT: informations importantes à retenir\n\
+AGENT_NAME: le nom que l'utilisateur donne à l'agent (ex: Tu t'appelles X)\n\
+AGENT_PERSONALITY: personnalité ou ton demandé pour l'agent\n\
+AGENT_RULE: une règle que l'agent doit respecter\n\
+AGENT_CAN: ce que l'agent peut faire (autorisé)\n\
+AGENT_CANNOT: ce que l'agent ne doit pas faire (interdit)\n\
+N'écris que des lignes avec ces préfixes, ou NOTHING si rien. Pas d'autre texte.\n\
+N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assistant). N'invente rien.\n\nUtilisateur: {}\n\nAssistant: {}",
                 msg.trim(),
                 reply.trim()
             );
-            // Allow enough tokens for models that output "thinking" before the FACT: lines (done_reason: length otherwise).
             let extract_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok())
@@ -1328,31 +1616,63 @@ N'écris que des lignes FACT: ou NOTHING si aucun fait. Pas d'autre texte.\n\nUt
                 temperature: Some(0.1),
                 preferred_task_type: Some("system".to_string()),
             };
+            let mut to_promote: Vec<(String, String)> = Vec::new();
+            let mut agent_updates: Vec<(String, String)> = Vec::new();
             if let Ok(Ok(resp)) = tokio::time::timeout(
                 std::time::Duration::from_secs(30),
                 router.complete(&req),
             ).await {
                 for line in resp.text.lines() {
                     let line = line.trim();
-                    if let Some(fact) = line.strip_prefix("FACT:") {
-                        let fact = fact.trim().to_string();
-                        if !fact.is_empty() && !facts.contains(&fact) {
-                            facts.push(fact);
+                    if let Some(rest) = line.strip_prefix("AGENT_NAME:") {
+                        agent_updates.push(("AGENT_NAME".to_string(), rest.trim().to_string()));
+                    } else if let Some(rest) = line.strip_prefix("AGENT_PERSONALITY:") {
+                        agent_updates.push(("AGENT_PERSONALITY".to_string(), rest.trim().to_string()));
+                    } else if let Some(rest) = line.strip_prefix("AGENT_RULE:") {
+                        agent_updates.push(("AGENT_RULE".to_string(), rest.trim().to_string()));
+                    } else if let Some(rest) = line.strip_prefix("AGENT_CAN:") {
+                        agent_updates.push(("AGENT_CAN".to_string(), rest.trim().to_string()));
+                    } else if let Some(rest) = line.strip_prefix("AGENT_CANNOT:") {
+                        agent_updates.push(("AGENT_CANNOT".to_string(), rest.trim().to_string()));
+                    } else {
+                        let (content, source) = if let Some(rest) = line.strip_prefix("FACT:") {
+                            (rest.trim().to_string(), "user_fact".to_string())
+                        } else if let Some(rest) = line.strip_prefix("PROJECT:") {
+                            (rest.trim().to_string(), "project".to_string())
+                        } else if let Some(rest) = line.strip_prefix("INTEREST:") {
+                            (rest.trim().to_string(), "interest".to_string())
+                        } else if let Some(rest) = line.strip_prefix("IMPORTANT:") {
+                            (rest.trim().to_string(), "important".to_string())
+                        } else {
+                            continue;
+                        };
+                        if !content.is_empty() && !heuristic_set.contains(&content) {
+                            to_promote.push((content, source));
                         }
                     }
                 }
             }
-            if facts.is_empty() {
-                tracing::debug!(user_msg = %msg.trim().chars().take(100).collect::<String>(), "No personal facts extracted for long-term memory");
-            } else {
-                tracing::debug!(count = facts.len(), "Promoting extra facts to long-term memory");
+            if !agent_updates.is_empty() {
+                let mut profile = AgentProfile::load(&data_dir_for_extract);
+                for (kind, value) in agent_updates {
+                    profile.apply_extracted(&kind, value);
+                }
+                if let Err(e) = profile.save(&data_dir_for_extract) {
+                    tracing::warn!(error = %e, "Failed to save agent profile");
+                } else {
+                    tracing::info!("Agent profile updated from conversation");
+                }
             }
-            // Promote only facts that weren't already promoted (heuristic ones were done above).
-            for fact in facts.into_iter().skip(n_heuristic) {
+            if !to_promote.is_empty() {
+                tracing::debug!(count = to_promote.len(), "Promoting extracted items to long-term memory");
+            }
+            for (content, source) in to_promote {
                 let client = client.clone();
-                match tokio::task::spawn_blocking(move || client.promote(fact, "user_fact".to_string())).await {
+                let c = content.clone();
+                let s = source.clone();
+                match tokio::task::spawn_blocking(move || client.promote(c, s)).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote user_fact failed"),
+                    Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote failed"),
                     Err(e) => tracing::debug!(error = %e, "Promote task join error"),
                 }
             }
@@ -1406,11 +1726,53 @@ pub async fn handle_api(
     skill_registry: &std::sync::Arc<crate::skills::SkillRegistry>,
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
+    human_input_store: Option<HumanInputStore>,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
     if method == "GET" && (path == "/" || path.is_empty()) {
         return json_response("200 OK", r#"{"status":"ok"}"#);
+    }
+
+    // GET /api/agent-profile — read agent profile (name, personality, rules, can_do, cannot_do)
+    if method == "GET" && path == "/api/agent-profile" {
+        let profile = AgentProfile::load(data_dir);
+        let body_json = serde_json::json!({
+            "name": profile.name,
+            "personality": profile.personality,
+            "rules": profile.rules,
+            "can_do": profile.can_do,
+            "cannot_do": profile.cannot_do
+        });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
+    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, rules?, can_do?, cannot_do? }
+    if method == "POST" && path == "/api/agent-profile" {
+        let mut profile = AgentProfile::load(data_dir);
+        if let Some(body) = body.as_deref() {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+                if let Some(s) = v.get("name").and_then(|x| x.as_str()) {
+                    profile.name = Some(s.to_string());
+                }
+                if let Some(s) = v.get("personality").and_then(|x| x.as_str()) {
+                    profile.personality = Some(s.to_string());
+                }
+                if let Some(arr) = v.get("rules").and_then(|x| x.as_array()) {
+                    profile.rules = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+                }
+                if let Some(arr) = v.get("can_do").and_then(|x| x.as_array()) {
+                    profile.can_do = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+                }
+                if let Some(arr) = v.get("cannot_do").and_then(|x| x.as_array()) {
+                    profile.cannot_do = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+                }
+            }
+        }
+        match profile.save(data_dir) {
+            Ok(()) => return json_response("200 OK", r#"{"ok":true,"message":"Profil agent mis à jour"}"#),
+            Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
+        }
     }
 
     // GET /api/memory/short-term?session_id=... — turns for session (default: day-YYYY-MM-DD)
@@ -1460,8 +1822,8 @@ pub async fn handle_api(
         };
         let list: Vec<serde_json::Value> = entries
             .iter()
-            .map(|(content, created_at, source)| {
-                serde_json::json!({ "content": content, "created_at": created_at, "source": source })
+            .map(|(id, content, created_at, source)| {
+                serde_json::json!({ "id": id, "content": content, "created_at": created_at, "source": source })
             })
             .collect();
         let body_json = serde_json::json!({
@@ -1469,6 +1831,31 @@ pub async fn handle_api(
             "long_term_available": long_term_client.is_some()
         });
         return json_response("200 OK", &body_json.to_string());
+    }
+
+    // DELETE /api/memory/long-term/:id — delete one long-term memory entry by id
+    if method == "DELETE" && path.starts_with("/api/memory/long-term/") {
+        let id = path.trim_start_matches("/api/memory/long-term/").split('?').next().unwrap_or("").trim();
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing id"}"#);
+        }
+        let result = match long_term_client {
+            Some(ref client) => {
+                let client = client.clone();
+                let id = id.to_string();
+                tokio::task::spawn_blocking(move || client.delete(id))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("task join error: {}", e)))
+            }
+            None => Err("long-term memory not available".to_string()),
+        };
+        match result {
+            Ok(()) => return json_response("200 OK", r#"{"deleted":true}"#),
+            Err(e) if e == "not found" || e == "invalid uuid" => {
+                return json_response("404 Not Found", &format!(r#"{{"error":"{}"}}"#, e));
+            }
+            Err(e) => return json_response("500 Internal Server Error", &format!(r#"{{"error":"{}"}}"#, e)),
+        }
     }
 
     // GET /api/status — same as / but explicit for slash commands
@@ -1679,7 +2066,7 @@ pub async fn handle_api(
             .as_ref()
             .and_then(|v| v.get("message").and_then(|v| v.as_str().map(String::from)))
             .unwrap_or_default();
-        // Session: "new_session" => new UUID; else provided non-empty session_id; else new UUID (isolated context).
+        // Session: "new_session" => new UUID; else provided non-empty session_id; else day-YYYY-MM-DD (short-term = current day, survives UI restart).
         let session_id = {
             let new_session = body_json.as_ref().and_then(|v| v.get("new_session")).and_then(|v| v.as_bool()).unwrap_or(false);
             let provided = body_json.as_ref().and_then(|v| v.get("session_id").and_then(|v| v.as_str().map(String::from)));
@@ -1688,12 +2075,12 @@ pub async fn handle_api(
             } else if let Some(s) = provided {
                 let trimmed = s.trim();
                 if trimmed.is_empty() {
-                    uuid::Uuid::new_v4().to_string()
+                    format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"))
                 } else {
                     trimmed.to_string()
                 }
             } else {
-                uuid::Uuid::new_v4().to_string()
+                format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"))
             }
         };
         if let Err(e) = akasha_core::check_prompt_injection(&message) {
@@ -1729,6 +2116,40 @@ pub async fn handle_api(
                 }
                 if method == "GET" && parts.get(1) == Some(&"events") {
                     return get_task_events(events, id).await;
+                }
+                // Human in the loop: GET pending question/context/choices for the task
+                if method == "GET" && parts.get(1) == Some(&"human-input") {
+                    if let Some(ref store) = human_input_store {
+                        let g = store.read().await;
+                        if let Some(pending) = g.get(&id) {
+                            let body = serde_json::json!({
+                                "task_id": id.to_string(),
+                                "question": pending.question,
+                                "context": pending.context,
+                                "choices": pending.choices
+                            });
+                            return json_response("200 OK", &body.to_string());
+                        }
+                    }
+                    return json_response("404 Not Found", &serde_json::json!({ "error": "no_pending_human_input", "task_id": id.to_string() }).to_string());
+                }
+                // Human in the loop: POST user reply to unblock the agent
+                if method == "POST" && parts.get(1) == Some(&"human-reply") {
+                    let response_text = body.as_deref()
+                        .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+                        .and_then(|v| v.get("response").and_then(|r| r.as_str().map(String::from)))
+                        .unwrap_or_else(|| String::new());
+                    if let Some(ref store) = human_input_store {
+                        let pending = {
+                            let mut g = store.write().await;
+                            g.remove(&id)
+                        };
+                        if let Some(pending) = pending {
+                            let _ = pending.response_tx.send(response_text);
+                            return json_response("200 OK", &serde_json::json!({ "ok": true, "message": "Réponse transmise à l'agent." }).to_string());
+                        }
+                    }
+                    return json_response("404 Not Found", &serde_json::json!({ "error": "no_pending_human_input", "task_id": id.to_string() }).to_string());
                 }
                 if method == "GET" {
                     return get_task_status(store_path, progress, id).await;
@@ -2220,6 +2641,36 @@ async fn get_task_status(store_path: &Path, progress: &ProgressCache, id: Uuid) 
                 .unwrap_or_default()
         };
         progress_list = mem_entries;
+    }
+    // For a root task with children, aggregate child progress so the UI shows intermediate percentages.
+    if let Ok(children) = store.get_children(id) {
+        if !children.is_empty() {
+            let mut sum: u32 = 0;
+            let g = progress.read().await;
+            for child in &children {
+                let child_pct = store
+                    .get_progress(child.id)
+                    .ok()
+                    .and_then(|v| v.last().map(|(pct, _)| *pct as u32))
+                    .or_else(|| {
+                        g.get(&child.id)
+                            .and_then(|q| q.back().map(|e| e.progress_pct as u32))
+                    })
+                    .unwrap_or(0);
+                sum += child_pct;
+            }
+            let aggregated_pct = (sum / children.len() as u32).min(100) as u8;
+            let root_last_pct = progress_list.last().map(|e| e.progress_pct).unwrap_or(0);
+            let display_pct = aggregated_pct.max(root_last_pct);
+            if progress_list.is_empty() {
+                progress_list.push(ProgressEntry {
+                    progress_pct: display_pct,
+                    message: "Sous-tâches en cours.".to_string(),
+                });
+            } else if let Some(last) = progress_list.last_mut() {
+                last.progress_pct = display_pct;
+            }
+        }
     }
     let body = serde_json::json!({
         "task_id": task.id.to_string(),

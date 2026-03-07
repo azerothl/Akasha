@@ -8,12 +8,14 @@ pub enum MemoryRequest {
     Search { query_text: String, top_k: usize },
     Promote { content: String, source: String },
     List { limit: usize },
+    Delete { id: String },
 }
 
 pub enum MemoryResponse {
-    Search(Vec<String>),
+    Search(Vec<(String, String)>), // (id, content)
     Promote(Result<(), String>),
-    List(Vec<(String, String, String)>), // (content, created_at, source)
+    List(Vec<(String, String, String, String)>), // (id, content, created_at, source)
+    Delete(Result<(), String>),
 }
 
 /// Client handle: Send + Sync, can be used from async code.
@@ -24,7 +26,9 @@ pub struct LongTermMemoryClient {
 }
 
 impl LongTermMemoryClient {
-    pub fn search(&self, query_text: String, _top_k: usize) -> Vec<String> {
+    /// Search long-term memory. Returns `(id, content)` pairs so callers can decide
+    /// whether to include the UUID (e.g. tool output) or just the content (e.g. context injection).
+    pub fn search(&self, query_text: String, _top_k: usize) -> Vec<(String, String)> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -32,7 +36,7 @@ impl LongTermMemoryClient {
                 return Vec::new();
             }
             match resp_rx.blocking_recv() {
-                Ok(MemoryResponse::Search(contents)) => contents,
+                Ok(MemoryResponse::Search(entries)) => entries,
                 _ => Vec::new(),
             }
         }
@@ -62,8 +66,8 @@ impl LongTermMemoryClient {
         }
     }
 
-    /// List recent long-term entries (content, created_at, source). Empty if long-term disabled.
-    pub fn list(&self, limit: usize) -> Vec<(String, String, String)> {
+    /// List recent long-term entries (id, content, created_at, source). Empty if long-term disabled.
+    pub fn list(&self, limit: usize) -> Vec<(String, String, String, String)> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -81,6 +85,26 @@ impl LongTermMemoryClient {
             Vec::new()
         }
     }
+
+    /// Delete a long-term memory entry by id (UUID). Returns Ok(()) on success or Err(message).
+    pub fn delete(&self, id: String) -> Result<(), String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::Delete { id }, resp_tx)).is_err() {
+                return Err("memory actor disconnected".into());
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::Delete(r)) => r,
+                _ => Err("no response".into()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = id;
+            Err("long-term memory disabled".into())
+        }
+    }
 }
 
 /// Start the long-term memory actor on a dedicated thread. Returns a client and the join handle.
@@ -93,6 +117,7 @@ pub fn start_memory_actor(
     {
         use std::sync::mpsc;
         use tokio::sync::oneshot;
+        use uuid::Uuid;
         use akasha_embeddings::{embedding_to_bytes, Embedder};
         use akasha_store::LongTermStore;
 
@@ -126,7 +151,10 @@ pub fn start_memory_actor(
                             }
                         };
                         let entries = store.search_by_embedding(&vec, top_k).unwrap_or_default();
-                        let contents: Vec<String> = entries.into_iter().map(|e| e.content).collect();
+                        let contents: Vec<(String, String)> = entries
+                            .into_iter()
+                            .map(|e| (e.id.to_string(), e.content))
+                            .collect();
                         MemoryResponse::Search(contents)
                     }
                     MemoryRequest::Promote { content, source } => {
@@ -146,6 +174,13 @@ pub fn start_memory_actor(
                                 });
                             MemoryResponse::Promote(result)
                         }
+                    }
+                    MemoryRequest::Delete { id } => {
+                        let result = Uuid::parse_str(&id)
+                            .map_err(|_| "invalid uuid".to_string())
+                            .and_then(|uuid| store.delete_by_id(uuid).map_err(|e| e.to_string()))
+                            .and_then(|deleted| if deleted { Ok(()) } else { Err("not found".to_string()) });
+                        MemoryResponse::Delete(result)
                     }
                 };
                 let _ = resp_tx.send(response);
