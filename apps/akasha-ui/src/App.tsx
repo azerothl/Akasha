@@ -4,6 +4,26 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 const DAEMON_PORT = 3876;
+const THEME_STORAGE_KEY = "akasha_theme";
+
+export type ThemeId = "dark" | "dark_nord" | "light" | "light_latte";
+
+const THEMES: { id: ThemeId; label: string }[] = [
+  { id: "dark", label: "Sombre (défaut)" },
+  { id: "dark_nord", label: "Sombre Nord" },
+  { id: "light", label: "Clair" },
+  { id: "light_latte", label: "Clair Latte" },
+];
+
+function loadSavedTheme(): ThemeId {
+  try {
+    const s = localStorage.getItem(THEME_STORAGE_KEY);
+    if (s && THEMES.some((t) => t.id === s)) return s as ThemeId;
+  } catch {
+    /* ignore */
+  }
+  return "dark";
+}
 
 type Tab = "chat" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
 
@@ -61,6 +81,7 @@ type RouterMetrics = Record<string, ModelMetricsEntry>;
 
 function App() {
   const [tab, setTab] = useState<Tab>("chat");
+  const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
   const [health, setHealth] = useState<HealthState | null>(null);
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState<
@@ -174,6 +195,20 @@ function App() {
     };
   }, []);
 
+  // Apply theme to document (for CSS variables)
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
+
+  const setThemeAndSave = useCallback((next: ThemeId) => {
+    setTheme(next);
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, next);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   // Scroll chat to last message and keep focus on input
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -181,6 +216,23 @@ function App() {
   useEffect(() => {
     if (tab === "chat") chatInputRef.current?.focus();
   }, [tab]);
+
+  // Global keyboard shortcuts: 1–7 = switch tab (when not in a modal or input)
+  const tabsByIndex: Tab[] = ["chat", "router", "docs", "tasks", "calendar", "memory", "settings"];
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (humanInputModalTaskId != null) return;
+      const target = e.target as HTMLElement;
+      if (target?.closest("input") || target?.closest("textarea") || target?.closest("[role='dialog']")) return;
+      const n = e.key === "1" ? 1 : e.key === "2" ? 2 : e.key === "3" ? 3 : e.key === "4" ? 4 : e.key === "5" ? 5 : e.key === "6" ? 6 : e.key === "7" ? 7 : 0;
+      if (n >= 1 && n <= 7) {
+        e.preventDefault();
+        setTab(tabsByIndex[n - 1]);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [humanInputModalTaskId]);
 
   const fetchRouterMetrics = useCallback(async () => {
     setRouterLoading(true);
@@ -787,9 +839,10 @@ function App() {
 
   return (
     <div className="app">
+      <a href="#main-content" className="skip-link">Aller au contenu principal</a>
       <header className="header">
         <h1 className="logo">Akasha</h1>
-        <p className="tagline">Local-first AI assistant</p>
+        <p className="tagline">Local-first AI assistant · 1–7 : onglets</p>
         <div className="daemon-status" role="status" aria-live="polite">
           <span
             className={`status-dot ${health?.ok ? "connected" : "disconnected"}`}
@@ -875,7 +928,7 @@ function App() {
         </nav>
       </header>
 
-      <main className="main">
+      <main className="main" id="main-content" tabIndex={-1}>
         {tab === "chat" && (
           <section
             id="panel-chat"
@@ -1124,7 +1177,8 @@ function App() {
           >
             <h2 className="panel-title">Métriques du routeur LLM</h2>
             {routerLoading && (
-              <p className="loading-inline" aria-busy="true">
+              <p className="panel-loading" aria-busy="true">
+                <span className="panel-loading-spinner" aria-hidden />
                 Chargement…
               </p>
             )}
@@ -1198,7 +1252,8 @@ function App() {
           >
             <h2 className="panel-title">Documentation utilisateur</h2>
             {docLoading && (
-              <p className="loading-inline" aria-busy="true">
+              <p className="panel-loading" aria-busy="true">
+                <span className="panel-loading-spinner" aria-hidden />
                 Chargement…
               </p>
             )}
@@ -1246,7 +1301,8 @@ function App() {
               Rafraîchir
             </button>
             {tasksLoading && (
-              <p className="loading-inline" aria-busy="true">
+              <p className="panel-loading" aria-busy="true">
+                <span className="panel-loading-spinner" aria-hidden />
                 Chargement…
               </p>
             )}
@@ -1625,7 +1681,8 @@ function App() {
               </p>
             )}
             {memoryLoading && (
-              <p className="loading-inline" aria-busy="true">
+              <p className="panel-loading" aria-busy="true">
+                <span className="panel-loading-spinner" aria-hidden />
                 Chargement…
               </p>
             )}
@@ -1678,6 +1735,22 @@ function App() {
           >
             <h2 className="panel-title">Paramètres</h2>
             <dl className="settings-list">
+              <dt>Thème</dt>
+              <dd>
+                <select
+                  aria-label="Choisir le thème d’affichage"
+                  className="settings-theme-select"
+                  value={theme}
+                  onChange={(e) => setThemeAndSave(e.target.value as ThemeId)}
+                >
+                  {THEMES.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+                <span className="settings-theme-hint">Thème par défaut enregistré.</span>
+              </dd>
               <dt>Port du daemon</dt>
               <dd>
                 <code>{DAEMON_PORT}</code> (défaut)

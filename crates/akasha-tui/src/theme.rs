@@ -16,7 +16,7 @@ pub struct ThemePalette {
     pub fg: Color,
 }
 
-/// Available theme names; cycle with next/prev.
+/// Available theme names; cycle with next/prev. Includes dark and light themes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeName {
     #[default]
@@ -26,6 +26,10 @@ pub enum ThemeName {
     TokyoNight,
     GruvboxDark,
     SolarizedDark,
+    /// Light themes
+    SolarizedLight,
+    GruvboxLight,
+    CatppuccinLatte,
 }
 
 #[allow(dead_code)]
@@ -37,18 +41,24 @@ impl ThemeName {
             Self::CatppuccinMocha => Self::TokyoNight,
             Self::TokyoNight => Self::GruvboxDark,
             Self::GruvboxDark => Self::SolarizedDark,
-            Self::SolarizedDark => Self::Dracula,
+            Self::SolarizedDark => Self::SolarizedLight,
+            Self::SolarizedLight => Self::GruvboxLight,
+            Self::GruvboxLight => Self::CatppuccinLatte,
+            Self::CatppuccinLatte => Self::Dracula,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::Dracula => Self::SolarizedDark,
+            Self::Dracula => Self::CatppuccinLatte,
             Self::Nord => Self::Dracula,
             Self::CatppuccinMocha => Self::Nord,
             Self::TokyoNight => Self::CatppuccinMocha,
             Self::GruvboxDark => Self::TokyoNight,
             Self::SolarizedDark => Self::GruvboxDark,
+            Self::SolarizedLight => Self::SolarizedDark,
+            Self::GruvboxLight => Self::SolarizedLight,
+            Self::CatppuccinLatte => Self::GruvboxLight,
         }
     }
 
@@ -60,6 +70,9 @@ impl ThemeName {
             ThemeName::TokyoNight,
             ThemeName::GruvboxDark,
             ThemeName::SolarizedDark,
+            ThemeName::SolarizedLight,
+            ThemeName::GruvboxLight,
+            ThemeName::CatppuccinLatte,
         ]
     }
 
@@ -71,6 +84,39 @@ impl ThemeName {
             Self::TokyoNight => "Tokyo Night",
             Self::GruvboxDark => "Gruvbox Dark",
             Self::SolarizedDark => "Solarized Dark",
+            Self::SolarizedLight => "Solarized Light",
+            Self::GruvboxLight => "Gruvbox Light",
+            Self::CatppuccinLatte => "Catppuccin Latte",
+        }
+    }
+
+    /// Parse from saved string (e.g. "dracula", "solarized_light").
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "dracula" => Some(Self::Dracula),
+            "nord" => Some(Self::Nord),
+            "catppuccin_mocha" | "mocha" => Some(Self::CatppuccinMocha),
+            "tokyo_night" | "tokyonight" => Some(Self::TokyoNight),
+            "gruvbox_dark" | "gruvbox" => Some(Self::GruvboxDark),
+            "solarized_dark" => Some(Self::SolarizedDark),
+            "solarized_light" => Some(Self::SolarizedLight),
+            "gruvbox_light" => Some(Self::GruvboxLight),
+            "catppuccin_latte" | "latte" => Some(Self::CatppuccinLatte),
+            _ => None,
+        }
+    }
+
+    pub fn to_saved_str(self) -> &'static str {
+        match self {
+            Self::Dracula => "dracula",
+            Self::Nord => "nord",
+            Self::CatppuccinMocha => "catppuccin_mocha",
+            Self::TokyoNight => "tokyo_night",
+            Self::GruvboxDark => "gruvbox_dark",
+            Self::SolarizedDark => "solarized_dark",
+            Self::SolarizedLight => "solarized_light",
+            Self::GruvboxLight => "gruvbox_light",
+            Self::CatppuccinLatte => "catppuccin_latte",
         }
     }
 }
@@ -137,6 +183,36 @@ fn palette_for(name: ThemeName) -> ThemePalette {
             info: Color::Rgb(0x2a, 0xa1, 0x98),
             bg: Color::Rgb(0x00, 0x2b, 0x36),
             fg: Color::Rgb(0x83, 0x94, 0x96),
+        },
+        SolarizedLight => ThemePalette {
+            accent: Color::Rgb(0x26, 0x8b, 0xd2),
+            muted: Color::Rgb(0x93, 0xa1, 0xa1),
+            error: Color::Rgb(0xdc, 0x32, 0x2f),
+            warning: Color::Rgb(0xb5, 0x89, 0x00),
+            success: Color::Rgb(0x85, 0x99, 0x00),
+            info: Color::Rgb(0x2a, 0xa1, 0x98),
+            bg: Color::Rgb(0xfd, 0xf6, 0xe3),
+            fg: Color::Rgb(0x65, 0x7b, 0x83),
+        },
+        GruvboxLight => ThemePalette {
+            accent: Color::Rgb(0x42, 0x7b, 0x58),
+            muted: Color::Rgb(0x7c, 0x6f, 0x64),
+            error: Color::Rgb(0x9d, 0x00, 0x06),
+            warning: Color::Rgb(0xb5, 0x76, 0x14),
+            success: Color::Rgb(0x79, 0x7c, 0x0e),
+            info: Color::Rgb(0x07, 0x66, 0x78),
+            bg: Color::Rgb(0xfb, 0xf1, 0xc7),
+            fg: Color::Rgb(0x3c, 0x38, 0x36),
+        },
+        CatppuccinLatte => ThemePalette {
+            accent: Color::Rgb(0x88, 0x39, 0xee),
+            muted: Color::Rgb(0x6c, 0x6f, 0x85),
+            error: Color::Rgb(0xd2, 0x0f, 0x39),
+            warning: Color::Rgb(0xdf, 0x8e, 0x1d),
+            success: Color::Rgb(0x40, 0xa0, 0x2b),
+            info: Color::Rgb(0x1e, 0x66, 0xf5),
+            bg: Color::Rgb(0xef, 0xf1, 0xf5),
+            fg: Color::Rgb(0x4c, 0x4f, 0x69),
         },
     }
 }
