@@ -236,7 +236,8 @@ commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec ongle
 commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, etc.). \
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
 Réponds en français sauf si l'utilisateur utilise une autre langue. \
-Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »).\n\n";
+Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »). \
+Si une tâche nécessite de te connecter à un service externe (compte, clé API, identifiants), demande à l'utilisateur les informations de connexion ou indique-lui comment les configurer (ex. variable d'environnement, vault Akasha), puis reprends la tâche une fois qu'il t'a répondu.\n\n";
 
 /// If AKASHA_TOOLS_JOURNAL_PATH is set, append a line for write tool invocations (Phase 4 modification journal).
 async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: &str) {
@@ -1052,6 +1053,7 @@ pub(crate) async fn run_message_via_llm(
         format!(
             "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
              When you need the user to provide information (choice, confirmation, or free text), use TOOL: ask_user then on the next line a single JSON: {{\"question\":\"...\", \"context\":\"...\", \"choices\":[\"a\",\"b\"]}} (context and choices optional).\n\
+             When a task requires connecting to an external service (account, API key, credentials), use ask_user to ask for the connection details or to explain how the user can provide or configure them (e.g. env var, Akasha vault); then continue the task once the user has replied.\n\
              If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
@@ -2526,6 +2528,36 @@ async fn get_task_status(store_path: &Path, progress: &ProgressCache, id: Uuid) 
                 .unwrap_or_default()
         };
         progress_list = mem_entries;
+    }
+    // For a root task with children, aggregate child progress so the UI shows intermediate percentages.
+    if let Ok(children) = store.get_children(id) {
+        if !children.is_empty() {
+            let mut sum: u32 = 0;
+            let g = progress.read().await;
+            for child in &children {
+                let child_pct = store
+                    .get_progress(child.id)
+                    .ok()
+                    .and_then(|v| v.last().map(|(pct, _)| *pct as u32))
+                    .or_else(|| {
+                        g.get(&child.id)
+                            .and_then(|q| q.back().map(|e| e.progress_pct as u32))
+                    })
+                    .unwrap_or(0);
+                sum += child_pct;
+            }
+            let aggregated_pct = (sum / children.len() as u32).min(100) as u8;
+            let root_last_pct = progress_list.last().map(|e| e.progress_pct).unwrap_or(0);
+            let display_pct = aggregated_pct.max(root_last_pct);
+            if progress_list.is_empty() {
+                progress_list.push(ProgressEntry {
+                    progress_pct: display_pct,
+                    message: "Sous-tâches en cours.".to_string(),
+                });
+            } else if let Some(last) = progress_list.last_mut() {
+                last.progress_pct = display_pct;
+            }
+        }
     }
     let body = serde_json::json!({
         "task_id": task.id.to_string(),

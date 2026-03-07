@@ -21,10 +21,11 @@ async fn decompose_request(
     message: &str,
 ) -> Vec<Subtask> {
     let prompt = format!(
-        r#"You are a task decomposer. Output one line per subtask: agent_type|message.
+        r#"You are a task decomposer. Output one line per subtask: agent_type|message. One line per distinct user action (e.g. one for generating a report, another for creating a file).
 Agent types: conversation (general chat), code (code gen), search (info search), schedule (create recurring task IN THE APP).
 - If the user asks to CREATE a recurring/scheduled task (e.g. "tâche récurrente", "rappel toutes les 2 heures", "crée un rappel"), output exactly ONE line: schedule|interval_seconds|name|message
   where interval_seconds is in seconds (3600=1h, 7200=2h, 86400=1 day), name is a short title, message is the reminder text shown when the task runs. Example: schedule|7200|Rappel Github|Rappel: regarder l'avancement du projet sur GitHub
+- If the user asks for several distinct deliverables or actions (e.g. "make a report and then create a file", "do X then do Y"), output one line per deliverable/action. Example: first line for the report, second line for creating the file.
 - Otherwise output agent_type|message. Example: conversation|What is 2+2?
 
 User request:
