@@ -497,6 +497,30 @@ async fn reload_skills(port: Option<u16>) -> Result<serde_json::Value, String> {
     Ok(json)
 }
 
+/// POST /api/skills/uninstall — uninstall a skill by name. Body: { "name": "<skill_name>" }.
+#[tauri::command]
+async fn uninstall_skill(name: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/skills/uninstall", daemon_base_url(port));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let body = serde_json::json!({ "name": name.trim() });
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", resp.status(), err_body));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// POST /api/restart — request daemon restart (for slash /restart).
 #[tauri::command]
 async fn restart_daemon(port: Option<u16>) -> Result<(), String> {
@@ -948,6 +972,7 @@ pub fn run() {
             get_plugins,
             reload_plugins,
             reload_skills,
+            uninstall_skill,
             get_router_routes,
             set_router_route,
             get_embedded_status,

@@ -370,6 +370,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
     ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (ex. search pour recherche web). agent_type: search | code | conversation. Un seul niveau de délégation autorisé."),
     ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
+    ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
 ];
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -378,7 +379,7 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
             AVAILABLE_TOOLS
                 .iter()
                 .filter(move |(name, _)| {
-                    *name == "ask_user" || *name == "install_skill" || allowed.iter().any(|a| a == *name)
+                    *name == "ask_user" || *name == "install_skill" || *name == "uninstall_skill" || allowed.iter().any(|a| a == *name)
                 }),
         )
     } else {
@@ -767,6 +768,92 @@ async fn do_install_skill(
     }
 }
 
+/// Uninstall a skill by name: remove data_dir/skills/<name>, remove command from tools_policy, reload registry (and optionally hot-reload executor).
+async fn do_uninstall_skill(
+    name: &str,
+    data_dir: &Path,
+    spec_dir: &Path,
+    skill_registry: &crate::skills::SkillRegistry,
+    tools_reload: Option<(
+        &std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>,
+        &Path,
+    )>,
+) -> (bool, String) {
+    let name = name.trim();
+    if name.is_empty() {
+        return (false, "[uninstall_skill] usage: uninstall_skill <name> (ex. uninstall_skill bankr)".to_string());
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return (
+            false,
+            "[uninstall_skill] nom invalide (utiliser uniquement lettres, chiffres, _ et -)".to_string(),
+        );
+    }
+    let skill_dir = data_dir.join("skills").join(name);
+    if !skill_dir.exists() {
+        return (
+            false,
+            format!(
+                "[uninstall_skill] skill « {} » introuvable dans data_dir/skills/ (dossier absent).",
+                name
+            ),
+        );
+    }
+    if !skill_dir.is_dir() {
+        return (
+            false,
+            format!("[uninstall_skill] « {} » n'est pas un répertoire.", skill_dir.display()),
+        );
+    }
+    if let Err(e) = std::fs::remove_dir_all(&skill_dir) {
+        return (
+            false,
+            format!("[uninstall_skill] impossible de supprimer {}: {}", skill_dir.display(), e),
+        );
+    }
+    let policy_path = data_dir.join("tools_policy.yaml");
+    let mut policy_updated = false;
+    if policy_path.exists() {
+        if let Ok(mut policy) = akasha_tools::ToolsPolicy::load_from_path(&policy_path) {
+            if policy.remove_allowed_command(name) {
+                if policy.save_to_path(&policy_path).is_ok() {
+                    policy_updated = true;
+                }
+            }
+        }
+    }
+    if policy_updated {
+        if let Some((r, path)) = tools_reload {
+            if let Ok(mut reloaded) = akasha_tools::ToolsPolicy::load_from_path(path) {
+                if let Ok(v) = akasha_vault::open_vault(data_dir) {
+                    reloaded.brave_api_key = v.get("brave_api_key").ok();
+                }
+                *r.write().await = std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
+            }
+        }
+    }
+    match skill_registry.reload(data_dir, spec_dir).await {
+        Ok(count) => {
+            let policy_msg = if policy_updated {
+                format!(" Commande « {} » retirée de tools_policy.yaml (allowed_commands).", name)
+            } else {
+                String::new()
+            };
+            (
+                true,
+                format!(
+                    "[uninstall_skill] Skill « {} » désinstallé ({} skill(s) chargé(s) restants).{}",
+                    name, count, policy_msg
+                ),
+            )
+        }
+        Err(e) => (
+            false,
+            format!("[uninstall_skill] dossier supprimé mais rechargement du registry échoué: {}", e),
+        ),
+    }
+}
+
 const WRITE_FILE_REMINDER: &str = "\n[Rappel: l'utilisateur demande d'enregistrer un fichier. Tu DOIS répondre UNIQUEMENT par la ligne TOOL: write_file <chemin_complet> puis le contenu du fichier sur les lignes suivantes. Ne dis jamais que tu ne peux pas écrire sur le disque.]\n\n";
 
 const WEB_SEARCH_REMINDER: &str = "\n[Rappel: l'utilisateur demande des informations externes (météo, actualités, etc.). Tu DOIS utiliser TOOL: web_search <requête> pour chercher toi-même puis répondre avec les résultats. Ne propose pas d'aller sur un site sans avoir d'abord utilisé web_search.]\n\n";
@@ -776,7 +863,7 @@ const APP_CONTEXT: &str = "[Contexte Akasha] Tu es l'assistant intégré à Akas
 Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : \
 commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Mémoire/Doc/Activité), \
 commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, /skills reload, etc.). \
-Skills (capacités supplémentaires) : l'utilisateur peut en ajouter sans modifier le code. Quand l'utilisateur demande d'installer un skill depuis une URL (ex. « installe le skill bankr depuis … »), tu DOIS répondre par TOOL: install_skill <url>. Quand l'utilisateur te demande d'effectuer une action avec un skill (ex. « vérifie mon wallet bankr », « lance bankr whoami »), tu DOIS répondre UNIQUEMENT par une ligne TOOL: <nom_du_skill> <arguments> (ex. TOOL: bankr whoami) pour que le système exécute la commande ; ne dis pas à l'utilisateur de lancer la commande lui-même. Sinon, l'utilisateur peut placer les fichiers dans le dossier skills et exécuter /skills reload. \
+Skills (capacités supplémentaires) : l'utilisateur peut en ajouter sans modifier le code. Quand l'utilisateur demande d'installer un skill depuis une URL (ex. « installe le skill bankr depuis … »), tu DOIS répondre par TOOL: install_skill <url>. Pour désinstaller un skill : TOOL: uninstall_skill <nom> (ex. TOOL: uninstall_skill bankr). Quand l'utilisateur te demande d'effectuer une action avec un skill (ex. « vérifie mon wallet bankr », « lance bankr whoami »), tu DOIS répondre UNIQUEMENT par une ligne TOOL: <nom_du_skill> <arguments> (ex. TOOL: bankr whoami) pour que le système exécute la commande ; ne dis pas à l'utilisateur de lancer la commande lui-même. Sinon, l'utilisateur peut placer les fichiers dans le dossier skills et exécuter /skills reload. \
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
 Réponds en français sauf si l'utilisateur utilise une autre langue. \
 Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »). \
@@ -1668,6 +1755,7 @@ pub(crate) async fn run_message_via_llm(
              WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix.\n\
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user.\n\
              INSTALL SKILL RULE: When the user asks to install a skill from a URL (e.g. \"install the bankr skill from https://github.com/BankrBot/skills/tree/main/bankr\"), you MUST reply ONLY with TOOL: install_skill <url>. Do not give manual steps; perform the installation yourself.\n\
+             UNINSTALL SKILL RULE: When the user asks to uninstall or remove a skill (e.g. \"désinstalle bankr\", \"remove the bankr skill\"), you MUST reply ONLY with TOOL: uninstall_skill <name> (e.g. TOOL: uninstall_skill bankr).\n\
              SKILL USE RULE: When the user asks you to perform an action using a skill (e.g. \"vérifie mon wallet bankr\", \"check my balance with bankr\", \"run bankr whoami\"), you MUST reply ONLY with a single line: TOOL: <skill_name> <args> (e.g. TOOL: bankr whoami). The system will execute the command and return the result. Do NOT tell the user to run the command themselves or to \"use TOOL: bankr whoami\"; you must output that line yourself so the tool is executed.\n\
              {}\
              If you need no tool, reply normally with your answer.\n\
@@ -2037,6 +2125,16 @@ pub(crate) async fn run_message_via_llm(
                             Some(reg) => do_install_skill(url, data_dir, &spec_dir, reg, &allowed_hosts, tools_reload).await,
                             None => (false, "[install_skill] skill registry not available".to_string()),
                         }
+                    }
+                } else if actual_tool == "uninstall_skill" {
+                    let skill_name = args.get(0).map(String::as_str).unwrap_or("").trim();
+                    let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+                    let tools_reload = tools_executor.as_ref().and_then(|arc| {
+                        tools_policy_path.as_ref().map(|p| (arc, p.as_path()))
+                    });
+                    match &skill_registry {
+                        Some(reg) => do_uninstall_skill(skill_name, data_dir, &spec_dir, reg, tools_reload).await,
+                        None => (false, "[uninstall_skill] skill registry not available".to_string()),
                     }
                 } else if actual_tool.is_empty() {
                     // Skill with no tool_ref: if args provided, run as run_command(skill_name, ...args) (e.g. bankr whoami)
@@ -2910,6 +3008,42 @@ pub async fn handle_api(
             Err(e) => {
                 let body = serde_json::json!({ "error": "reload_failed", "detail": e.to_string() }).to_string();
                 return json_response("500 Internal Server Error", &body);
+            }
+        }
+    }
+    if method == "POST" && path == "/api/skills/uninstall" {
+        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let name = body_json
+            .as_ref()
+            .and_then(|j| j.get("name"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        match name {
+            Some(skill_name) => {
+                let tools_reload = _tools_executor.as_ref().map(|r| {
+                    let policy_path = data_dir.join("tools_policy.yaml");
+                    (r, policy_path.as_path())
+                });
+                let (ok, msg) = do_uninstall_skill(
+                    &skill_name,
+                    data_dir,
+                    spec_dir,
+                    skill_registry,
+                    tools_reload,
+                )
+                .await;
+                if ok {
+                    let body = serde_json::json!({ "uninstalled": true, "name": skill_name, "message": msg }).to_string();
+                    return json_response("200 OK", &body);
+                }
+                let body = serde_json::json!({ "error": "uninstall_failed", "detail": msg }).to_string();
+                return json_response("400 Bad Request", &body);
+            }
+            None => {
+                let body = serde_json::json!({ "error": "missing_name", "detail": "Body must be JSON with \"name\": \"<skill_name>\"" }).to_string();
+                return json_response("400 Bad Request", &body);
             }
         }
     }

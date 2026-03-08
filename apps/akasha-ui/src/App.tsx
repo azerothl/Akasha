@@ -625,7 +625,8 @@ function App() {
 /vault list       — clés du vault (noms uniquement)
 /plugins          — liste des plugins
 /reload           — recharger les plugins
-/skills reload    — recharger les skills (data_dir/skills, spec/skills)
+/skills reload     — recharger les skills (data_dir/skills, spec/skills)
+/skills uninstall <nom> — désinstaller un skill (ex. /skills uninstall bankr)
 /restart          — redémarrer le daemon (superviseur)
 /vault set        — utiliser le CLI : akasha vault set KEY [value]`;
     }
@@ -751,7 +752,20 @@ function App() {
           return "Impossible de recharger les skills (daemon déconnecté ou erreur).";
         }
       }
-      return "Usage: /skills reload — recharger les skills depuis data_dir/skills et spec/skills.";
+      if (sub === "uninstall") {
+        const skillName = parts[2]?.trim();
+        if (!skillName) return "Usage: /skills uninstall <nom> (ex. /skills uninstall bankr)";
+        try {
+          const json = await invoke<{ uninstalled?: boolean; name?: string; message?: string }>("uninstall_skill", {
+            name: skillName,
+            port,
+          });
+          return json?.uninstalled ? (json?.message ?? `Skill « ${skillName} » désinstallé.`) : (json?.message ?? "Erreur désinstallation.");
+        } catch (err) {
+          return `Impossible de désinstaller le skill : ${String(err)}`;
+        }
+      }
+      return "Usage: /skills reload — recharger les skills ; /skills uninstall <nom> — désinstaller un skill.";
     }
     if (cmd === "metrics") {
       const data = await invoke<Record<string, ModelMetricsEntry>>("get_router_metrics", { port });

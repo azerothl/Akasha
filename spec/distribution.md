@@ -97,7 +97,13 @@ L’utilisateur doit dans tous les cas **lancer le daemon** (ou l’avoir déjà
 
 ---
 
-## 6. Résumé pour l’utilisateur lambda
+## 6. Déploiement du site après release (mainteneurs)
+
+Lorsqu’un tag de version est poussé (ex. `v0.1.0`), le workflow **Release** crée la release GitHub puis envoie un **repository_dispatch** au dépôt [azerothl/Akasha_app](https://github.com/azerothl/Akasha_app). Ajouter le secret **AKASHA_APP_DISPATCH_TOKEN** (PAT ou token avec accès Actions sur Akasha_app). Event : `akasha-release` ; payload : `version`, `tag`, `release_url`, `repository`.
+
+---
+
+## 7. Résumé pour l’utilisateur lambda
 
 | Étape | Action |
 |-------|--------|

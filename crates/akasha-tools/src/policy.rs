@@ -80,6 +80,17 @@ impl ToolsPolicy {
         added
     }
 
+    /// Remove a command from allowed_commands (e.g. when uninstalling a skill). Returns true if it was present.
+    pub fn remove_allowed_command(&mut self, command: &str) -> bool {
+        let c = command.trim().to_lowercase();
+        if c.is_empty() {
+            return false;
+        }
+        let prev_len = self.allowed_commands.len();
+        self.allowed_commands.retain(|a| a.trim().to_lowercase() != c);
+        self.allowed_commands.len() < prev_len
+    }
+
     /// Check if a path is allowed for read (path must be under one of allowed_read_paths).
     pub fn can_read(&self, path: &Path) -> bool {
         let path_n = path_normalize(path);
@@ -119,7 +130,7 @@ impl ToolsPolicy {
     /// ask_user and install_skill are always allowed.
     /// Tools in allowed_commands (e.g. skill names like "bankr") are allowed so TOOL: bankr <args> can be executed as run_command.
     pub fn can_use_tool(&self, tool_name: &str) -> bool {
-        if tool_name == "ask_user" || tool_name == "install_skill" {
+        if tool_name == "ask_user" || tool_name == "install_skill" || tool_name == "uninstall_skill" {
             return true;
         }
         if self.can_run_command(tool_name) {

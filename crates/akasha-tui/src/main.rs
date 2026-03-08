@@ -1177,7 +1177,8 @@ impl App {
   /vault list       — clés du vault (noms uniquement)
   /plugins          — liste des plugins
   /reload           — recharger les plugins
-  /skills reload    — recharger les skills (data_dir/skills, spec/skills)
+  /skills reload     — recharger les skills (data_dir/skills, spec/skills)
+  /skills uninstall <nom> — désinstaller un skill (ex. /skills uninstall bankr)
   /restart          — redémarrer le daemon (superviseur)
   /vault set        — utiliser le CLI : akasha vault set KEY [value]"#.to_string();
             }
@@ -1424,7 +1425,30 @@ impl App {
                         Err(e) => return format!("Erreur: {}", e),
                     }
                 }
-                return "Usage: /skills reload — recharger les skills depuis data_dir/skills et spec/skills.".to_string();
+                if sub == "uninstall" {
+                    let name = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                    if name.is_empty() {
+                        return "Usage: /skills uninstall <nom> (ex. /skills uninstall bankr)".to_string();
+                    }
+                    let url = format!("{}/api/skills/uninstall", base);
+                    let body = serde_json::json!({ "name": name });
+                    match client.post(&url).json(&body).send() {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(json) = r.json::<serde_json::Value>() {
+                                let msg = json.get("message").and_then(|v| v.as_str()).unwrap_or("Skill désinstallé.");
+                                return msg.to_string();
+                            }
+                            return "Skill désinstallé.".to_string();
+                        }
+                        Ok(r) => {
+                            let status = r.status();
+                            let err_body = r.text().unwrap_or_default();
+                            return format!("Erreur: {} — {}", status, err_body);
+                        }
+                        Err(e) => return format!("Erreur: {}", e),
+                    }
+                }
+                return "Usage: /skills reload — recharger les skills ; /skills uninstall <nom> — désinstaller un skill.".to_string();
             }
             "metrics" => {
                 let url = format!("{}/api/router/metrics", base);
