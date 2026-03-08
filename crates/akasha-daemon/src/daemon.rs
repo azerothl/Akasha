@@ -552,33 +552,8 @@ impl Daemon {
                     result = listener.accept() => {
                         match result {
                             Ok((mut stream, _addr)) => {
-                                const INITIAL_READ: usize = 65536;
-                                const MAX_BODY: usize = 10 * 1024 * 1024; // 10 MiB for POST body (e.g. documents in base64)
-                                let mut buf = vec![0u8; INITIAL_READ];
-                                let n = stream.read(&mut buf).await.unwrap_or(0);
-                                buf.truncate(n);
-                                let full_buf: Vec<u8> = match parse_content_length(&buf) {
-                                    Some((header_end, content_length)) if content_length <= MAX_BODY => {
-                                        let total_needed = header_end + 4 + content_length;
-                                        if buf.len() >= total_needed {
-                                            buf
-                                        } else {
-                                            buf.reserve(total_needed.saturating_sub(buf.len()));
-                                            while buf.len() < total_needed {
-                                                let mut chunk = [0u8; 8192];
-                                                match stream.read(&mut chunk).await {
-                                                    Ok(0) => break,
-                                                    Ok(k) => buf.extend_from_slice(&chunk[..k]),
-                                                    Err(_) => break,
-                                                }
-                                            }
-                                            buf
-                                        }
-                                    }
-                                    _ => buf,
-                                };
-                                let (method, path, body, headers) = parse_request(&full_buf);
-                                // Spawn so we can accept the next connection while this request is processed (e.g. long /api/diagnostic/advice)
+                                // Clone resources before spawning so the accept loop is not blocked
+                                // waiting on body I/O (especially large document uploads).
                                 let db_path = db_path.clone();
                                 let progress = progress.clone();
                                 let events_clone = events.clone();
@@ -595,7 +570,35 @@ impl Daemon {
                                 let short_term = short_term.clone();
                                 let long_term_client = long_term_client.clone();
                                 let human_input_store = human_input_store.clone();
+                                // Body reading is done inside the spawned task so slow/large uploads
+                                // don't block the accept loop from handling other connections or signals.
                                 tokio::spawn(async move {
+                                    const INITIAL_READ: usize = 65536;
+                                    const MAX_BODY: usize = 10 * 1024 * 1024; // 10 MiB for POST body (e.g. documents in base64)
+                                    let mut buf = vec![0u8; INITIAL_READ];
+                                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                                    buf.truncate(n);
+                                    let full_buf: Vec<u8> = match parse_content_length(&buf) {
+                                        Some((header_end, content_length)) if content_length <= MAX_BODY => {
+                                            let total_needed = header_end + 4 + content_length;
+                                            if buf.len() >= total_needed {
+                                                buf
+                                            } else {
+                                                buf.reserve(total_needed.saturating_sub(buf.len()));
+                                                while buf.len() < total_needed {
+                                                    let mut chunk = [0u8; 8192];
+                                                    match stream.read(&mut chunk).await {
+                                                        Ok(0) => break,
+                                                        Ok(k) => buf.extend_from_slice(&chunk[..k]),
+                                                        Err(_) => break,
+                                                    }
+                                                }
+                                                buf
+                                            }
+                                        }
+                                        _ => buf,
+                                    };
+                                    let (method, path, body, headers) = parse_request(&full_buf);
                                     let response = handle_api(
                                         &method,
                                         &path,
