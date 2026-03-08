@@ -16,8 +16,11 @@ pub struct ToolsPolicy {
     pub allowed_read_paths: Vec<String>,
     /// Path prefixes allowed for write.
     pub allowed_write_paths: Vec<String>,
-    /// Executable names or paths allowed for run_command.
+    /// Executable names or paths allowed for run_command. Use ["*"] to allow all commands (subject to blocked_commands).
     pub allowed_commands: Vec<String>,
+    /// Commands blocked for run_command; takes precedence over allowed_commands (e.g. block dangerous ones when using allowed_commands: ["*"]).
+    #[serde(default)]
+    pub blocked_commands: Vec<String>,
     /// Default timeout in seconds for run_command.
     pub command_timeout_secs: u64,
     /// Optional: domains allowed for web_fetch. Use ["*"] to allow all domains (subject to blocked_web_domains).
@@ -110,6 +113,7 @@ impl ToolsPolicy {
     }
 
     /// Check if a command (first segment) is allowed.
+    /// Order: (1) block if command in blocked_commands; (2) allow if allowed_commands contains "*"; (3) allow if command in allowed_commands.
     pub fn can_run_command(&self, command_name: &str) -> bool {
         let name = command_name.trim().to_lowercase();
         if name.is_empty() {
@@ -120,6 +124,15 @@ impl ToolsPolicy {
             .and_then(|n| n.to_str())
             .unwrap_or(&name)
             .to_string();
+        if self.blocked_commands.iter().any(|b| {
+            let b = b.trim().to_lowercase();
+            name_base == b || name.ends_with(&b)
+        }) {
+            return false;
+        }
+        if self.allowed_commands.iter().any(|a| a.trim().eq_ignore_ascii_case("*")) {
+            return true;
+        }
         self.allowed_commands.iter().any(|allowed| {
             let a = allowed.trim().to_lowercase();
             name_base == a || name.ends_with(&a)

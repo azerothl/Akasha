@@ -475,6 +475,7 @@ fn windows_spawn(
     command: &str,
     args: &[String],
     cwd: &Path,
+    env: &[(String, String)],
 ) -> Result<tokio::process::Child, std::io::Error> {
     let base = command.trim().split_whitespace().next().unwrap_or(command);
     let has_ext = base.contains('.') || std::path::Path::new(base).extension().is_some();
@@ -489,13 +490,14 @@ fn windows_spawn(
     };
     let mut last_err = None;
     for exe in &candidates {
-        match tokio::process::Command::new(exe.as_ref())
-            .args(args)
-            .current_dir(cwd)
+        let mut cmd = tokio::process::Command::new(exe.as_ref());
+        cmd.args(args).current_dir(cwd)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
+            .stderr(std::process::Stdio::piped());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        match cmd.spawn() {
             Ok(child) => return Ok(child),
             Err(e) => last_err = Some(e),
         }
@@ -506,10 +508,12 @@ fn windows_spawn(
 }
 
 /// Run a command with timeout. Command name must be allowed by policy.
+/// `extra_env`: optional env vars (e.g. from vault) to inject into the child process.
 pub async fn run_command(
     command: &str,
     args: &[String],
     cwd: Option<&Path>,
+    extra_env: Option<&[(String, String)]>,
     policy: &ToolsPolicy,
 ) -> Result<(std::process::Output, ToolResult)> {
     let cmd_name = command.trim().split_whitespace().next().unwrap_or(command);
@@ -530,16 +534,20 @@ pub async fn run_command(
     }
     let timeout_secs = policy.command_timeout_secs;
     let cwd = cwd.unwrap_or_else(|| Path::new("."));
+    let env_slice = extra_env.unwrap_or(&[]);
     #[cfg(windows)]
-    let child = windows_spawn(command, args, cwd).with_context(|| format!("run_command {}", command))?;
+    let child = windows_spawn(command, args, cwd, env_slice).with_context(|| format!("run_command {}", command))?;
     #[cfg(not(windows))]
-    let child = tokio::process::Command::new(command)
-        .args(args)
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .with_context(|| format!("run_command {}", command))?;
+    let child = {
+        let mut cmd = tokio::process::Command::new(command);
+        cmd.args(args).current_dir(cwd)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        for (k, v) in env_slice {
+            cmd.env(k, v);
+        }
+        cmd.spawn().with_context(|| format!("run_command {}", command))?
+    };
     let timeout = Duration::from_secs(if timeout_secs == 0 { 60 } else { timeout_secs });
     let output: std::process::Output = tokio::time::timeout(timeout, child.wait_with_output())
         .await

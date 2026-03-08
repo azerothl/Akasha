@@ -19,6 +19,11 @@ allowed_commands:
   - "node"
   - "git"
   # - "cmd"   # Windows : à utiliser avec précaution
+# Pour tout autoriser : allowed_commands: ["*"]  (sous réserve de blocked_commands)
+
+# Optionnel : commandes interdites pour run_command (prioritaire sur allowed_commands)
+# blocked_commands: []
+# Exemple (avec allowed_commands: ["*"]) : blocked_commands: ["format", "rm", "del"]
 
 command_timeout_secs: 60
 

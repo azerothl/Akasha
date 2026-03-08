@@ -863,6 +863,7 @@ const APP_CONTEXT: &str = "[Contexte Akasha] Tu es l'assistant intégré à Akas
 Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : \
 commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Mémoire/Doc/Activité), \
 commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, /skills reload, etc.). \
+Pour installer un CLI en global (ex. « installe le CLI bankr », « npm install -g @bankr/cli »), répondre par TOOL: run_command npm install -g <package> (ne pas générer de script à faire exécuter par l'utilisateur). Pour utiliser une clé du vault dans une commande : TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (le système injecte la valeur du vault). \
 Skills (capacités supplémentaires) : l'utilisateur peut en ajouter sans modifier le code. Quand l'utilisateur demande d'installer un skill depuis une URL (ex. « installe le skill bankr depuis … »), tu DOIS répondre par TOOL: install_skill <url>. Pour désinstaller un skill : TOOL: uninstall_skill <nom> (ex. TOOL: uninstall_skill bankr). Quand l'utilisateur te demande d'effectuer une action avec un skill (ex. « vérifie mon wallet bankr », « lance bankr whoami »), tu DOIS répondre UNIQUEMENT par une ligne TOOL: <nom_du_skill> <arguments> (ex. TOOL: bankr whoami) pour que le système exécute la commande ; ne dis pas à l'utilisateur de lancer la commande lui-même. Sinon, l'utilisateur peut placer les fichiers dans le dossier skills et exécuter /skills reload. \
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
 Réponds en français sauf si l'utilisateur utilise une autre langue. \
@@ -948,6 +949,28 @@ fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
     out
 }
 
+/// Parse run_command args: leading VAULT:vault_key=ENV_VAR entries are extracted;
+/// the first non-VAULT arg is the command, the rest are command arguments.
+/// Returns (vault_specs: (vault_key, env_var), command, cmd_args).
+fn parse_run_command_args(args: &[String]) -> (Vec<(String, String)>, String, Vec<String>) {
+    let mut vault_specs = Vec::new();
+    let mut rest = Vec::new();
+    for arg in args {
+        if let Some(s) = arg.strip_prefix("VAULT:") {
+            if let Some((vault_key, env_var)) = s.split_once('=') {
+                vault_specs.push((vault_key.trim().to_string(), env_var.trim().to_string()));
+            }
+            continue;
+        }
+        rest.push(arg.clone());
+    }
+    let (command, cmd_args) = rest
+        .split_first()
+        .map(|(c, a)| (c.clone(), a.to_vec()))
+        .unwrap_or_else(|| (String::new(), Vec::new()));
+    (vault_specs, command, cmd_args)
+}
+
 /// Execute one tool call via ToolExecutor. Returns `(success, display_string)` for structured events.
 async fn execute_tool_call(
     executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
@@ -984,9 +1007,37 @@ async fn execute_tool_call(
             }
         }
         "run_command" => {
-            let cmd = args.get(0).map(String::as_str).unwrap_or("");
-            let cmd_args: Vec<String> = args.iter().skip(1).cloned().collect();
-            match executor.run_command(cmd, &cmd_args, None).await {
+            let (vault_specs, cmd, cmd_args) = parse_run_command_args(args);
+            let extra_env = if vault_specs.is_empty() {
+                None
+            } else {
+                let data_dir = store_path.and_then(|p| p.parent());
+                match data_dir.and_then(|d| akasha_vault::open_vault(d).ok()) {
+                    Some(vault) => {
+                        let mut env = Vec::new();
+                        for (vault_key, env_var) in &vault_specs {
+                            match vault.get(vault_key) {
+                                Ok(value) => env.push((env_var.clone(), value)),
+                                Err(_) => {
+                                    return (
+                                        false,
+                                        format!("[run_command] vault key not found: {}", vault_key),
+                                    );
+                                }
+                            }
+                        }
+                        Some(env)
+                    }
+                    None => {
+                        return (
+                            false,
+                            "[run_command] vault not available (no store_path or open failed)".to_string(),
+                        );
+                    }
+                }
+            };
+            let env_ref = extra_env.as_deref();
+            match executor.run_command(&cmd, &cmd_args, None, env_ref).await {
                 Ok((out, res)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1001,9 +1052,8 @@ async fn execute_tool_call(
             }
         }
         "run_terminal" => {
-            let cmd = args.get(0).map(String::as_str).unwrap_or("");
-            let cmd_args: Vec<String> = args.iter().skip(1).cloned().collect();
-            match executor.run_command(cmd, &cmd_args, None).await {
+            let (_vault_specs, cmd, cmd_args) = parse_run_command_args(args);
+            match executor.run_command(&cmd, &cmd_args, None, None).await {
                 Ok((out, res)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1018,8 +1068,7 @@ async fn execute_tool_call(
             }
         }
         "run_command_background" => {
-            let cmd = args.get(0).cloned().unwrap_or_default();
-            let cmd_args: Vec<String> = args.iter().skip(1).cloned().collect();
+            let (_vault_specs, cmd, cmd_args) = parse_run_command_args(args);
             let cmd_display = format!("{} {}", cmd, cmd_args.join(" "));
             match process_registry {
                 Some(reg) => {
@@ -1029,7 +1078,7 @@ async fn execute_tool_call(
                     let cell_clone = cell.clone();
                     let reg_clone = reg.clone();
                     let task = tokio::spawn(async move {
-                        let result = exec.run_command(&cmd, &cmd_args, None).await;
+                        let result = exec.run_command(&cmd, &cmd_args, None, None).await;
                         *cell_clone.write().await = Some(result);
                         // Auto-cleanup after a TTL to prevent leaking sessions the client never polls.
                         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
@@ -1512,7 +1561,7 @@ async fn execute_tool_call(
         }
         _ => {
             if executor.policy.can_run_command(tool_name) {
-                match executor.run_command(tool_name, args, None).await {
+                match executor.run_command(tool_name, args, None, None).await {
                     Ok((out, res)) => {
                         let stdout = String::from_utf8_lossy(&out.stdout);
                         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1724,7 +1773,15 @@ pub(crate) async fn run_message_via_llm(
         .unwrap_or(4096);
 
     let tool_instruction = if tools_executor_snapshot.is_some() {
-        let allowed_tools = tools_executor_snapshot.as_ref().and_then(|e| e.policy.allowed_tool_list());
+        let mut allowed_tools = tools_executor_snapshot.as_ref().and_then(|e| e.policy.allowed_tool_list());
+        if let Some(ref list) = allowed_tools {
+            let has_wildcard = tools_executor_snapshot.as_ref().map(|e| e.policy.allowed_commands.iter().any(|c| c.trim().eq_ignore_ascii_case("*"))).unwrap_or(false);
+            if has_wildcard && !list.iter().any(|t| t == "run_command") {
+                let mut list = list.clone();
+                list.push("run_command".to_string());
+                allowed_tools = Some(list);
+            }
+        }
         let base = available_tools_instruction(allowed_tools.as_deref());
         let (skills_part, skills_rule) = match &skill_registry {
             Some(reg) => {
@@ -1754,6 +1811,8 @@ pub(crate) async fn run_message_via_llm(
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
              WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix.\n\
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user.\n\
+             INSTALL CLI RULE: When the user asks to install a CLI or package globally (e.g. \"install bankr CLI\", \"npm install -g @bankr/cli\", \"install the bankr cli in global\"), you MUST reply ONLY with TOOL: run_command <cmd> <args> (e.g. TOOL: run_command npm install -g @bankr/cli). Do NOT generate a script or ask the user to run commands themselves; run the installation command via the tool.\n\
+             VAULT ENV RULE: When the user asks to use an API key or secret from the vault (e.g. \"use the key in the vault bankr_api_key\", \"utilise la clé bankr_api_key du vault\"), you CAN pass it to a command by adding VAULT:<vault_key>=<ENV_VAR> as first argument(s) of run_command. Example: TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (the system injects the vault value into BANKR_API_KEY for the command). You can chain several: VAULT:key1=VAR1 VAULT:key2=VAR2 cmd args.\n\
              INSTALL SKILL RULE: When the user asks to install a skill from a URL (e.g. \"install the bankr skill from https://github.com/BankrBot/skills/tree/main/bankr\"), you MUST reply ONLY with TOOL: install_skill <url>. Do not give manual steps; perform the installation yourself.\n\
              UNINSTALL SKILL RULE: When the user asks to uninstall or remove a skill (e.g. \"désinstalle bankr\", \"remove the bankr skill\"), you MUST reply ONLY with TOOL: uninstall_skill <name> (e.g. TOOL: uninstall_skill bankr).\n\
              SKILL USE RULE: When the user asks you to perform an action using a skill (e.g. \"vérifie mon wallet bankr\", \"check my balance with bankr\", \"run bankr whoami\"), you MUST reply ONLY with a single line: TOOL: <skill_name> <args> (e.g. TOOL: bankr whoami). The system will execute the command and return the result. Do NOT tell the user to run the command themselves or to \"use TOOL: bankr whoami\"; you must output that line yourself so the tool is executed.\n\
@@ -3022,10 +3081,8 @@ pub async fn handle_api(
             .map(String::from);
         match name {
             Some(skill_name) => {
-                let tools_reload = _tools_executor.map(|r| {
-                    let policy_path = data_dir.join("tools_policy.yaml");
-                    (r, policy_path.as_path())
-                });
+                let policy_path = data_dir.join("tools_policy.yaml");
+                let tools_reload = _tools_executor.map(|r| (r, policy_path.as_path()));
                 let (ok, msg) = do_uninstall_skill(
                     &skill_name,
                     data_dir,
