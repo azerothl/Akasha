@@ -216,6 +216,13 @@ pub async fn run_delegation_handler(
         let store_path = store_path.clone();
         let progress = progress.clone();
         tokio::spawn(async move {
+            let store = match TaskStore::open(&store_path) {
+                Ok(s) => s,
+                Err(_) => {
+                    let _ = reply_tx.send(Err("store open failed".to_string()));
+                    return;
+                }
+            };
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
             loop {
@@ -224,10 +231,6 @@ pub async fn run_delegation_handler(
                     let _ = reply_tx.send(Err("delegation timeout (5 min)".to_string()));
                     break;
                 }
-                let store = match TaskStore::open(&store_path) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
                 let task = match store.get(child_id) {
                     Ok(Some(t)) => t,
                     _ => continue,
@@ -432,7 +435,7 @@ fn parse_skill_install_url(url: &str, allowed_hosts: &[String]) -> Option<Parsed
     let url = url.trim();
     let parsed = url.parse::<url::Url>().ok()?;
     let scheme = parsed.scheme();
-    if scheme != "https" && scheme != "http" {
+    if scheme != "https" {
         return None;
     }
     let host = parsed.host_str()?.to_lowercase();
@@ -483,6 +486,9 @@ fn parse_skill_install_url(url: &str, allowed_hosts: &[String]) -> Option<Parsed
             let path_segments = &segments[tree_idx + 2..];
             let path_part = path_segments.join("/");
             let skill_name = path_segments.last().copied().unwrap_or("skill").to_string();
+            if !crate::user_rag::is_safe_relative_filename(&skill_name) {
+                return None;
+            }
             let raw_skill_url = if path_part.is_empty() {
                 format!("https://raw.githubusercontent.com/{}/{}/{}/SKILL.md", owner, repo, branch)
             } else {
@@ -509,9 +515,13 @@ fn parse_skill_install_url(url: &str, allowed_hosts: &[String]) -> Option<Parsed
             .or_else(|| segments.last().copied())
             .unwrap_or("skill")
             .to_string();
+        let skill_name = skill_name.to_lowercase().replace(' ', "-");
+        if !crate::user_rag::is_safe_relative_filename(&skill_name) {
+            return None;
+        }
         Some(ParsedSkillUrl {
             raw_skill_url,
-            skill_name: skill_name.to_lowercase().replace(' ', "-"),
+            skill_name,
             api_path: None,
         })
     }
@@ -557,6 +567,9 @@ async fn fetch_github_skill_extra_files(
         for item in items {
             let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let typ = item.get("type").and_then(|t| t.as_str()).unwrap_or("file");
+            if !crate::user_rag::is_safe_relative_filename(name) {
+                continue;
+            }
             if typ == "file" && name != "SKILL.md" {
                 let download_url = item.get("download_url").and_then(|u| u.as_str());
                 if let Some(url) = download_url {
@@ -647,8 +660,10 @@ async fn do_install_skill(
     match skill_registry.reload(data_dir, spec_dir).await {
         Ok(count) => {
             let body_instructions = skill_md_body(&body);
-            let body_preview = if body_instructions.len() > 8000 {
-                format!("{}... [tronqué, {} caractères au total]", &body_instructions[..8000], body_instructions.len())
+            let body_preview = if body_instructions.chars().count() > 8000 {
+                let truncated: String = body_instructions.chars().take(8000).collect();
+                let total_chars = body_instructions.chars().count();
+                format!("{}... [tronqué, {} caractères au total]", truncated, total_chars)
             } else {
                 body_instructions.to_string()
             };
@@ -3609,13 +3624,18 @@ async fn get_task_runs_list(store_path: &Path, path: &str) -> String {
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
     let task_store = TaskStore::open(store_path);
+    let task_map: std::collections::HashMap<Uuid, akasha_store::Task> = task_store
+        .ok()
+        .and_then(|ts| ts.get_all().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| (t.id, t))
+        .collect();
     let arr: Vec<serde_json::Value> = list
         .into_iter()
         .map(|r| {
-            let label = task_store
-                .as_ref()
-                .ok()
-                .and_then(|ts| ts.get(r.task_id).ok().flatten())
+            let label = task_map
+                .get(&r.task_id)
                 .map(|t| task_label(t.initial_message.as_ref(), &r.task_id))
                 .unwrap_or_else(|| task_label(None, &r.task_id));
             serde_json::json!({
