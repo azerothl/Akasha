@@ -99,7 +99,7 @@ L’utilisateur doit dans tous les cas **lancer le daemon** (ou l’avoir déjà
 
 ## 6. Déploiement du site après release (mainteneurs)
 
-Lorsqu’un tag de version est poussé (ex. `v0.1.0`), le workflow **Release** crée la release GitHub puis envoie un **repository_dispatch** au dépôt [azerothl/Akasha_app](https://github.com/azerothl/Akasha_app). Ajouter le secret **AKASHA_APP_DISPATCH_TOKEN** (PAT ou token avec accès Actions sur Akasha_app). Event : `akasha-release` ; payload : `version`, `tag`, `release_url`, `repository`.
+Lorsqu’un tag de version est poussé (ex. `v0.1.0`), le workflow **Release** crée la release GitHub puis envoie un **repository_dispatch** au dépôt [azerothl/Akasha_app](https://github.com/azerothl/Akasha_app). Ajouter le secret **AKASHA_APP_DISPATCH_TOKEN** (PAT ou token avec Actions read/write sur Akasha_app). Event : `new_release`. Payload : `version`, `tag`, `release_url`, `repository`, `release_date`, `release_type`, `title`, `description`, `download_url`, `changelog`. Pour qu'Akasha_app récupère les artefacts (zip) depuis le dépôt privé Akasha, ajouter dans Akasha_app le secret **AKASHA_RELEASE_READ_TOKEN** (lecture sur azerothl/Akasha). Exemple de workflow : `.github/akasha_app_update_release_workflow.example.yml`.
 
 ---
 
