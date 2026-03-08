@@ -481,11 +481,17 @@ fn parse_skill_install_url(url: &str, allowed_hosts: &[String]) -> Option<Parsed
             }
             let (raw_skill_url, skill_name) = if path.ends_with("SKILL.md") {
                 let skill_name = segments.get(segments.len().saturating_sub(2)).copied().unwrap_or("skill").to_string();
+                if !crate::user_rag::is_safe_relative_filename(&skill_name) {
+                    return None;
+                }
                 (url.to_string(), skill_name)
             } else {
                 let raw_url = format!("https://raw.githubusercontent.com/{}", path.trim_end_matches('/'));
                 let raw_skill_url = if raw_url.ends_with(".md") { raw_url } else { format!("{}/SKILL.md", raw_url) };
                 let skill_name = segments.last().copied().unwrap_or("skill").to_string();
+                if !crate::user_rag::is_safe_relative_filename(&skill_name) {
+                    return None;
+                }
                 (raw_skill_url, skill_name)
             };
             let api_path = if segments.len() >= 4 {
