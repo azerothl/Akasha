@@ -218,8 +218,8 @@ pub async fn run_delegation_handler(
         tokio::spawn(async move {
             let store = match TaskStore::open(&store_path) {
                 Ok(s) => s,
-                Err(_) => {
-                    let _ = reply_tx.send(Err("store open failed".to_string()));
+                Err(e) => {
+                    let _ = reply_tx.send(Err(format!("TaskStore open failed: {}", e)));
                     return;
                 }
             };
@@ -660,9 +660,9 @@ async fn do_install_skill(
     match skill_registry.reload(data_dir, spec_dir).await {
         Ok(count) => {
             let body_instructions = skill_md_body(&body);
-            let body_preview = if body_instructions.chars().count() > 8000 {
+            let total_chars = body_instructions.chars().count();
+            let body_preview = if total_chars > 8000 {
                 let truncated: String = body_instructions.chars().take(8000).collect();
-                let total_chars = body_instructions.chars().count();
                 format!("{}... [tronqué, {} caractères au total]", truncated, total_chars)
             } else {
                 body_instructions.to_string()
