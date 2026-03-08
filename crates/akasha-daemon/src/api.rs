@@ -13,8 +13,17 @@ use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+/// Request for a sub-agent delegation (from a worker to the orchestrator). Reply is sent on reply_tx.
+pub struct DelegationRequest {
+    pub requesting_task_id: Uuid,
+    pub agent_type: String,
+    pub message: String,
+    pub reply_tx: oneshot::Sender<Result<String, String>>,
+}
 
 /// Limits concurrent background LLM fact-extraction tasks to prevent unbounded queue growth under load.
 static EXTRACT_SEMAPHORE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
@@ -125,6 +134,107 @@ pub type ProcessRegistry = Arc<RwLock<std::collections::HashMap<Uuid, (tokio::ta
 
 pub fn new_process_registry() -> ProcessRegistry {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Runs in a loop: receives DelegationRequest, checks depth (root or direct child only), creates child task, sends to conv_tx, waits for child completion, sends reply on oneshot.
+pub async fn run_delegation_handler(
+    mut delegation_rx: mpsc::Receiver<DelegationRequest>,
+    conv_tx: mpsc::Sender<OrchestratorTask>,
+    store_path: PathBuf,
+    progress: ProgressCache,
+) {
+    while let Some(req) = delegation_rx.recv().await {
+        let store = match TaskStore::open(&store_path) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = req.reply_tx.send(Err(format!("store open: {}", e)));
+                continue;
+            }
+        };
+        let requesting = match store.get(req.requesting_task_id) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                let _ = req.reply_tx.send(Err("requesting task not found".to_string()));
+                continue;
+            }
+            Err(e) => {
+                let _ = req.reply_tx.send(Err(format!("store: {}", e)));
+                continue;
+            }
+        };
+        if let Some(parent_id) = requesting.parent_task_id {
+            if let Ok(Some(parent)) = store.get(parent_id) {
+                if parent.parent_task_id.is_some() {
+                    let _ = req.reply_tx.send(Err("max delegation depth (sous-sous-agent non autorisé)".to_string()));
+                    continue;
+                }
+            }
+        }
+        let child_id = Uuid::new_v4();
+        let agent_type = if ["search", "code", "conversation"].contains(&req.agent_type.as_str()) {
+            req.agent_type.clone()
+        } else {
+            "conversation".to_string()
+        };
+        let child_task = Task {
+            id: child_id,
+            parent_task_id: Some(req.requesting_task_id),
+            status: TaskStatus::Pending,
+            assigned_agent: agent_type.clone(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        if store.insert(&child_task).is_err() {
+            let _ = req.reply_tx.send(Err("store insert failed".to_string()));
+            continue;
+        }
+        if conv_tx
+            .send(OrchestratorTask {
+                task_id: child_id,
+                message: req.message.clone(),
+                session_id: String::new(),
+                image_data_urls: None,
+            })
+            .await
+            .is_err()
+        {
+            let _ = req.reply_tx.send(Err("conv_tx closed".to_string()));
+            continue;
+        }
+        let reply_tx = req.reply_tx;
+        let store_path = store_path.clone();
+        let progress = progress.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+            loop {
+                interval.tick().await;
+                if tokio::time::Instant::now() > deadline {
+                    let _ = reply_tx.send(Err("delegation timeout (5 min)".to_string()));
+                    break;
+                }
+                let store = match TaskStore::open(&store_path) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let task = match store.get(child_id) {
+                    Ok(Some(t)) => t,
+                    _ => continue,
+                };
+                if matches!(task.status, TaskStatus::Completed | TaskStatus::Failed) {
+                    let msg = {
+                        let g = progress.read().await;
+                        g.get(&child_id)
+                            .and_then(|q| q.back())
+                            .map(|e| e.message.clone())
+                            .unwrap_or_else(|| if matches!(task.status, TaskStatus::Failed) { "Échec.".to_string() } else { "Terminé.".to_string() })
+                    };
+                    let _ = reply_tx.send(Ok(msg));
+                    break;
+                }
+            }
+        });
+    }
 }
 
 /// Pending "human in the loop" request: agent is waiting for the user to answer.
@@ -244,6 +354,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("image", "image <path|url> [prompt] — analyse d'image par modèle vision (non implémenté, prévu phase 3)"),
     ("pdf", "pdf <path|url> — extraire le texte d'un PDF (non implémenté, prévu phase 3)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
+    ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (ex. search pour recherche web). agent_type: search | code | conversation. Un seul niveau de délégation autorisé."),
 ];
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -1054,6 +1165,7 @@ pub(crate) async fn run_message_via_llm(
     process_registry: Option<ProcessRegistry>,
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     human_input_store: Option<HumanInputStore>,
+    delegation_tx: Option<mpsc::Sender<DelegationRequest>>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -1429,6 +1541,29 @@ pub(crate) async fn run_message_via_llm(
                             }
                         }
                         None => (false, "[ask_user] Human-in-the-loop not available.".to_string()),
+                    }
+                } else if actual_tool == "delegate_to_agent" {
+                    match &delegation_tx {
+                        Some(tx) => {
+                            let (reply_tx, reply_rx) = oneshot::channel();
+                            let agent_type = args.get(0).cloned().unwrap_or_else(|| "conversation".to_string());
+                            let message = args.get(1..).map(|a| a.join(" ")).unwrap_or_else(|| args.get(0).cloned().unwrap_or_default());
+                            if tx.send(DelegationRequest {
+                                requesting_task_id: task_id,
+                                agent_type,
+                                message,
+                                reply_tx,
+                            }).await.is_ok() {
+                                match tokio::time::timeout(std::time::Duration::from_secs(310), reply_rx).await {
+                                    Ok(Ok(Ok(msg))) => (true, format!("[delegate_to_agent] {}", msg)),
+                                    Ok(Ok(Err(e))) => (false, format!("[delegate_to_agent] {}", e)),
+                                    _ => (false, "[delegate_to_agent] timeout or channel closed".to_string()),
+                                }
+                            } else {
+                                (false, "[delegate_to_agent] channel closed".to_string())
+                            }
+                        }
+                        None => (false, "[delegate_to_agent] not available".to_string()),
                     }
                 } else {
                     execute_tool_call(
