@@ -200,17 +200,14 @@ impl UserRagStore {
 #[cfg(test)]
 mod tests {
     use super::UserRagStore;
-    use std::path::Path;
+    use base64::Engine;
 
     #[test]
     fn user_rag_add_list_delete_retrieve() {
         let dir = tempfile::tempdir().unwrap();
         let store = UserRagStore::new(dir.path());
 
-        let content = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            b"Hello world from test document",
-        );
+        let content = base64::engine::general_purpose::STANDARD.encode(b"Hello world from test document");
         let id = store.add_document(&content, "test.txt", "text/plain").unwrap();
         assert!(!id.is_empty());
 
@@ -233,10 +230,7 @@ mod tests {
     fn user_rag_retrieve_empty_query_returns_chunks() {
         let dir = tempfile::tempdir().unwrap();
         let store = UserRagStore::new(dir.path());
-        let content = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            b"Some text content",
-        );
+        let content = base64::engine::general_purpose::STANDARD.encode(b"Some text content");
         store.add_document(&content, "a.txt", "text/plain").unwrap();
         let chunks = store.retrieve("", 5).unwrap();
         assert_eq!(chunks.len(), 1);

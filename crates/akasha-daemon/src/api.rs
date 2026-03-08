@@ -3051,7 +3051,7 @@ mod tests {
         let r = parse_content_length(buf);
         assert!(r.is_some());
         let (header_end, content_length) = r.unwrap();
-        assert_eq!(header_end, 43);
+        assert_eq!(header_end, 45); // start of "\r\n\r\n" after "Content-Length: 5\r\n"
         assert_eq!(content_length, 5);
     }
 
