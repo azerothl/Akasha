@@ -416,7 +416,8 @@ const WEB_SEARCH_REMINDER: &str = "\n[Rappel: l'utilisateur demande des informat
 const APP_CONTEXT: &str = "[Contexte Akasha] Tu es l'assistant intégré à Akasha. Akasha est l'application dans laquelle tu tournes actuellement. \
 Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : \
 commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Mémoire/Doc/Activité), \
-commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, etc.). \
+commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, /skills reload, etc.). \
+Skills (capacités supplémentaires) : l'utilisateur peut en ajouter sans modifier le code de l'application. Placer les définitions dans le dossier skills du répertoire de données Akasha (ou du répertoire spec), au format répertoire avec un fichier SKILL.md (spécification Agent Skills) ou fichier .yaml par skill. Après ajout ou modification, l'utilisateur exécute /skills reload dans le Chat pour recharger les skills ; aucun redémarrage du daemon ni recompilation. \
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
 Réponds en français sauf si l'utilisateur utilise une autre langue. \
 Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »). \
