@@ -396,7 +396,21 @@ fn message_suggests_save_file(message: &str) -> bool {
     keywords.iter().any(|k| m.contains(k))
 }
 
+/// True if the user message suggests they want external/live information (weather, news, etc.).
+fn message_suggests_external_info(message: &str) -> bool {
+    let m = message.to_lowercase();
+    let keywords = [
+        "météo", "meteo", "weather", "prévisions", "previsions", "actualités", "actualites",
+        "horaires", "trafic", "prix", "cours ", "bourse", "news", "nouvelle", "semaine à",
+        "aujourd'hui", "demain", "connaître la", "connaitre la", "quelle est la météo",
+        "quel temps", "prévision", "prevision",
+    ];
+    keywords.iter().any(|k| m.contains(k))
+}
+
 const WRITE_FILE_REMINDER: &str = "\n[Rappel: l'utilisateur demande d'enregistrer un fichier. Tu DOIS répondre UNIQUEMENT par la ligne TOOL: write_file <chemin_complet> puis le contenu du fichier sur les lignes suivantes. Ne dis jamais que tu ne peux pas écrire sur le disque.]\n\n";
+
+const WEB_SEARCH_REMINDER: &str = "\n[Rappel: l'utilisateur demande des informations externes (météo, actualités, etc.). Tu DOIS utiliser TOOL: web_search <requête> pour chercher toi-même puis répondre avec les résultats. Ne propose pas d'aller sur un site sans avoir d'abord utilisé web_search.]\n\n";
 
 /// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
 const APP_CONTEXT: &str = "[Contexte Akasha] Tu es l'assistant intégré à Akasha. Akasha est l'application dans laquelle tu tournes actuellement. \
@@ -406,6 +420,7 @@ commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
 Réponds en français sauf si l'utilisateur utilise une autre langue. \
 Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »). \
+Pour les questions sur des informations que tu n'as pas (météo, prévisions, actualités, horaires, etc.), tu dois utiliser l'outil web_search pour chercher toi-même puis répondre avec les résultats. Ne propose pas à l'utilisateur d'aller sur un site sans avoir d'abord utilisé web_search si tu as accès à cet outil. Si web_search renvoie une erreur (ex. non activé), tu peux alors suggérer des sites et indiquer comment activer la recherche web (tools_policy.yaml, web_search_enabled, BRAVE_API_KEY). \
 Tu as accès à l'outil write_file : tu DOIS l'utiliser dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier (ex. « enregistre le code dans … », « sauvegarde dans ce dossier », « write to file »). Réponds UNIQUEMENT par une ligne TOOL: write_file <chemin_complet> puis le contenu du fichier sur les lignes suivantes. Ne dis JAMAIS « je ne peux pas écrire sur le disque » ou « copie-colle le code toi-même » — si le chemin est refusé par la politique, l'outil renverra une erreur et tu expliqueras alors comment ajouter le préfixe dans tools_policy.yaml (allowed_write_paths). Les chemins peuvent être Windows (C:\\Users\\...) ou Unix. \
 Règle importante : dès que tu dois demander à l'utilisateur un choix, une confirmation ou une information (options à choisir, chemin, identifiants, etc.) puis enchaîner dans la même tâche, tu DOIS utiliser l'outil ask_user (TOOL: ask_user puis JSON avec question/context/choices). Ne pose pas la question en texte libre, sinon la réponse ouvrira une nouvelle tâche et tu ne pourras pas continuer. Pour un accès à un service externe (GitHub, API, etc.), ne réponds pas « je ne peux pas » ; utilise ask_user pour demander le token ou explique comment configurer. Si l'utilisateur a déjà confirmé (ex. « clé dans le vault », « c'est configuré »), n'envoie pas une deuxième fois ask_user ; enchaîne. Ne invente pas de commandes (ex. /status repo:... n'existe pas) ; les commandes sont dans /help.\n\n";
 
@@ -1254,6 +1269,7 @@ pub(crate) async fn run_message_via_llm(
              Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
              WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix.\n\
+             WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user.\n\
              If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
@@ -1355,10 +1371,26 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
+    let web_search_reminder = if message_suggests_external_info(&message)
+        && tools_executor
+            .as_ref()
+            .map(|e| e.policy.can_use_tool("web_search"))
+            .unwrap_or(false)
+    {
+        WEB_SEARCH_REMINDER
+    } else {
+        ""
+    };
     let mut current_prompt = if context_prefix.is_empty() {
         message.clone()
     } else {
-        format!("{}{}Utilisateur:\n{}", context_prefix.trim_end(), write_reminder, message)
+        format!(
+            "{}{}{}Utilisateur:\n{}",
+            context_prefix.trim_end(),
+            write_reminder,
+            web_search_reminder,
+            message
+        )
     };
     let reply_text;
     const MAX_TOOL_ROUNDS: u32 = 3;

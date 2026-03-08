@@ -30,7 +30,8 @@ command_timeout_secs: 60
 # blocked_web_domains: []
 # Exemple : blocked_web_domains: ["evil.com", "tracker.example.org"]
 
-# Optionnel : activer la recherche web (Brave API). Clé : vault "brave_api_key" ou variable d'environnement BRAVE_API_KEY
+# Optionnel : activer la recherche web (Brave API). Si true + BRAVE_API_KEY (ou vault brave_api_key),
+# l'agent utilisera web_search pour chercher lui-même météo, actualités, etc. au lieu de suggérer des sites.
 # web_search_enabled: false
 
 # Optionnel : profils d'outils (default_profile = nom du profil ; tool_profiles[profil] = liste d'outils)

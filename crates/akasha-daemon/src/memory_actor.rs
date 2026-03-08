@@ -107,6 +107,26 @@ impl LongTermMemoryClient {
             Err("long-term memory disabled".into())
         }
     }
+
+    /// Returns true if a daily summary entry exists for the given date (YYYY-MM-DD).
+    pub fn has_daily_summary_for_date(&self, date: String) -> bool {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::HasDailySummary { date }, resp_tx)).is_err() {
+                return false;
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::HasDailySummary(exists)) => exists,
+                _ => false,
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = date;
+            false
+        }
+    }
 }
 
 /// Start the long-term memory actor on a dedicated thread. Returns a client and the join handle.
