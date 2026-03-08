@@ -413,10 +413,12 @@ impl Daemon {
                 }
             });
             // Conversation worker: receives (task_id, message, session_id) from orchestrator, runs LLM with memory + optional tools, pushes progress/completion.
+            let spec_dir = self.spec_dir.clone();
             tokio::spawn({
                 let bus = bus.clone();
                 let llm_router = llm_router.clone();
                 let store_path = db_path.clone();
+                let spec_dir = spec_dir.clone();
                 let tools_executor = tools_executor.clone();
                 let skill_registry = skill_registry.clone();
                 let process_registry = process_registry.clone();
@@ -430,6 +432,7 @@ impl Daemon {
                             bus.clone(),
                             llm_router.clone(),
                             store_path.clone(),
+                            spec_dir.clone(),
                             task.task_id,
                             task.message,
                             task.session_id,

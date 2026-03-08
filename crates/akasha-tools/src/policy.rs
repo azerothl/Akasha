@@ -90,8 +90,9 @@ impl ToolsPolicy {
 
     /// If default_profile is set, returns whether the tool is in the profile. Otherwise true.
     /// ask_user is always allowed so the agent can request credentials for external services.
+    /// install_skill is always allowed so the agent can install skills from GitHub when the user asks.
     pub fn can_use_tool(&self, tool_name: &str) -> bool {
-        if tool_name == "ask_user" {
+        if tool_name == "ask_user" || tool_name == "install_skill" {
             return true;
         }
         match &self.default_profile {

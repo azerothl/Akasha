@@ -366,6 +366,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("pdf", "pdf <path|url> — extraire le texte d'un PDF (non implémenté, prévu phase 3)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
     ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (ex. search pour recherche web). agent_type: search | code | conversation. Un seul niveau de délégation autorisé."),
+    ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
 ];
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -374,7 +375,7 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
             AVAILABLE_TOOLS
                 .iter()
                 .filter(move |(name, _)| {
-                    *name == "ask_user" || allowed.iter().any(|a| a == *name)
+                    *name == "ask_user" || *name == "install_skill" || allowed.iter().any(|a| a == *name)
                 }),
         )
     } else {
@@ -408,6 +409,127 @@ fn message_suggests_external_info(message: &str) -> bool {
     keywords.iter().any(|k| m.contains(k))
 }
 
+/// Allowed hosts for install_skill (security: only GitHub).
+const INSTALL_SKILL_ALLOWED_HOSTS: &[&str] = &["github.com", "raw.githubusercontent.com", "www.github.com"];
+
+/// Parse a GitHub URL into raw SKILL.md URL and skill name. Returns None if URL not allowed or invalid.
+fn parse_github_skill_url(url: &str) -> Option<(String, String)> {
+    let url = url.trim();
+    let parsed = url.parse::<url::Url>().ok()?;
+    let host = parsed.host_str()?.to_lowercase();
+    let allowed = INSTALL_SKILL_ALLOWED_HOSTS
+        .iter()
+        .any(|h| host == *h || host.ends_with(&format!(".{}", *h)));
+    if !allowed {
+        return None;
+    }
+    let path = parsed.path().trim_matches('/');
+    if path.is_empty() {
+        return None;
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+    if host.contains("raw.githubusercontent.com") {
+        // Path: owner/repo/branch/path/to/skill or .../skill/SKILL.md
+        if segments.len() < 4 {
+            return None;
+        }
+        let (raw_url, skill_name) = if path.ends_with("SKILL.md") {
+            let skill_name = segments.get(segments.len().saturating_sub(2)).copied().unwrap_or("skill").to_string();
+            (url.to_string(), skill_name)
+        } else {
+            let raw_url = format!("https://raw.githubusercontent.com/{}", path.trim_end_matches('/'));
+            let raw_url = if raw_url.ends_with(".md") { raw_url } else { format!("{}/SKILL.md", raw_url) };
+            let skill_name = segments.last().copied().unwrap_or("skill").to_string();
+            (raw_url, skill_name)
+        };
+        Some((raw_url, skill_name))
+    } else {
+        // github.com/owner/repo/tree/branch/path
+        let tree_idx = segments.iter().position(|s| *s == "tree")?;
+        if tree_idx + 2 > segments.len() {
+            return None;
+        }
+        let owner = *segments.get(0)?;
+        let repo = *segments.get(1)?;
+        let branch = *segments.get(tree_idx + 1)?;
+        let path_segments = &segments[tree_idx + 2..];
+        let path_part = path_segments.join("/");
+        let skill_name = path_segments.last().copied().unwrap_or("skill").to_string();
+        let raw_url = if path_part.is_empty() {
+            format!("https://raw.githubusercontent.com/{}/{}/{}/SKILL.md", owner, repo, branch)
+        } else {
+            format!(
+                "https://raw.githubusercontent.com/{}/{}/{}/{}/SKILL.md",
+                owner, repo, branch, path_part
+            )
+        };
+        Some((raw_url, skill_name))
+    }
+}
+
+/// Install a skill from a GitHub URL: fetch SKILL.md, write to data_dir/skills/<name>/, reload registry.
+async fn do_install_skill(
+    url: &str,
+    data_dir: &Path,
+    spec_dir: &Path,
+    skill_registry: &crate::skills::SkillRegistry,
+) -> (bool, String) {
+    let (raw_url, skill_name) = match parse_github_skill_url(url) {
+        Some(x) => x,
+        None => {
+            return (
+                false,
+                format!(
+                    "[install_skill] URL non autorisée ou invalide. Utilisez une URL GitHub (ex. https://github.com/owner/repo/tree/main/skillname). Hôtes autorisés: {}.",
+                    INSTALL_SKILL_ALLOWED_HOSTS.join(", ")
+                ),
+            );
+        }
+    };
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return (false, format!("[install_skill] client HTTP: {}", e)),
+    };
+    let body = match client.get(&raw_url).send().await {
+        Ok(r) if r.status().is_success() => match r.text().await {
+            Ok(t) => t,
+            Err(e) => return (false, format!("[install_skill] lecture réponse: {}", e)),
+        },
+        Ok(r) => return (false, format!("[install_skill] HTTP {} — {}", r.status(), raw_url)),
+        Err(e) => return (false, format!("[install_skill] requête: {}", e)),
+    };
+    if body.trim().is_empty() {
+        return (false, format!("[install_skill] SKILL.md vide ou introuvable: {}", raw_url));
+    }
+    let skill_dir = data_dir.join("skills").join(&skill_name);
+    if let Err(e) = std::fs::create_dir_all(&skill_dir) {
+        return (
+            false,
+            format!("[install_skill] impossible de créer le dossier {}: {}", skill_dir.display(), e),
+        );
+    }
+    let skill_md_path = skill_dir.join("SKILL.md");
+    if let Err(e) = std::fs::write(&skill_md_path, &body) {
+        return (
+            false,
+            format!("[install_skill] écriture {}: {}", skill_md_path.display(), e),
+        );
+    }
+    match skill_registry.reload(data_dir, spec_dir).await {
+        Ok(count) => (
+            true,
+            format!("[install_skill] Skill « {} » installé et rechargé ({} skill(s) chargé(s)).", skill_name, count),
+        ),
+        Err(e) => (
+            false,
+            format!("[install_skill] skill écrit mais rechargement échoué: {}", e),
+        ),
+    }
+}
+
 const WRITE_FILE_REMINDER: &str = "\n[Rappel: l'utilisateur demande d'enregistrer un fichier. Tu DOIS répondre UNIQUEMENT par la ligne TOOL: write_file <chemin_complet> puis le contenu du fichier sur les lignes suivantes. Ne dis jamais que tu ne peux pas écrire sur le disque.]\n\n";
 
 const WEB_SEARCH_REMINDER: &str = "\n[Rappel: l'utilisateur demande des informations externes (météo, actualités, etc.). Tu DOIS utiliser TOOL: web_search <requête> pour chercher toi-même puis répondre avec les résultats. Ne propose pas d'aller sur un site sans avoir d'abord utilisé web_search.]\n\n";
@@ -417,7 +539,7 @@ const APP_CONTEXT: &str = "[Contexte Akasha] Tu es l'assistant intégré à Akas
 Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : \
 commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Mémoire/Doc/Activité), \
 commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, /skills reload, etc.). \
-Skills (capacités supplémentaires) : l'utilisateur peut en ajouter sans modifier le code de l'application. Placer les définitions dans le dossier skills du répertoire de données Akasha (ou du répertoire spec), au format répertoire avec un fichier SKILL.md (spécification Agent Skills) ou fichier .yaml par skill. Après ajout ou modification, l'utilisateur exécute /skills reload dans le Chat pour recharger les skills ; aucun redémarrage du daemon ni recompilation. \
+Skills (capacités supplémentaires) : l'utilisateur peut en ajouter sans modifier le code. Quand l'utilisateur demande d'installer un skill depuis une URL (ex. « installe le skill bankr depuis https://github.com/BankrBot/skills/tree/main/bankr »), tu DOIS utiliser l'outil install_skill : répondre par une ligne TOOL: install_skill <url>. Sinon, l'utilisateur peut placer les fichiers dans le dossier skills et exécuter /skills reload. \
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
 Réponds en français sauf si l'utilisateur utilise une autre langue. \
 Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »). \
@@ -1203,6 +1325,7 @@ pub(crate) async fn run_message_via_llm(
     bus: EventBus,
     llm_router: Arc<akasha_llm::LLMRouter>,
     store_path: std::path::PathBuf,
+    spec_dir: std::path::PathBuf,
     task_id: Uuid,
     message: String,
     session_id: String,
@@ -1278,6 +1401,7 @@ pub(crate) async fn run_message_via_llm(
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
              WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix.\n\
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user.\n\
+             INSTALL SKILL RULE: When the user asks to install a skill from a URL (e.g. \"install the bankr skill from https://github.com/BankrBot/skills/tree/main/bankr\"), you MUST reply ONLY with TOOL: install_skill <url>. Do not give manual steps; perform the installation yourself.\n\
              If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
@@ -1630,6 +1754,17 @@ pub(crate) async fn run_message_via_llm(
                             }
                         }
                         None => (false, "[delegate_to_agent] not available".to_string()),
+                    }
+                } else if actual_tool == "install_skill" {
+                    let url = args.get(0).map(String::as_str).unwrap_or("").trim();
+                    if url.is_empty() {
+                        (false, "[install_skill] usage: install_skill <url> (ex. https://github.com/BankrBot/skills/tree/main/bankr)".to_string())
+                    } else {
+                        let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+                        match &skill_registry {
+                            Some(reg) => do_install_skill(url, data_dir, &spec_dir, reg).await,
+                            None => (false, "[install_skill] skill registry not available".to_string()),
+                        }
                     }
                 } else if actual_tool.is_empty() {
                     // Skill with no tool_ref (Agent Skills doc-only): inject SKILL.md body as context for next round
