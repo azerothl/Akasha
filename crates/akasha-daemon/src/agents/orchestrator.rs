@@ -355,7 +355,7 @@ async fn process_root_task(
             updated_at: Utc::now(),
             initial_message: {
                 const MAX: usize = 500;
-                if sub_message.len() > MAX {
+                if sub_message.chars().count() > MAX {
                     Some(sub_message.chars().take(MAX).chain(std::iter::once('…')).collect::<String>())
                 } else if sub_message.is_empty() {
                     None

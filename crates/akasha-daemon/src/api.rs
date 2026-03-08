@@ -179,7 +179,7 @@ pub async fn run_delegation_handler(
             "conversation".to_string()
         };
         const MAX_INITIAL_MSG: usize = 500;
-        let initial_message = if req.message.len() > MAX_INITIAL_MSG {
+        let initial_message = if req.message.chars().count() > MAX_INITIAL_MSG {
             Some(req.message.chars().take(MAX_INITIAL_MSG).chain(std::iter::once('…')).collect::<String>())
         } else if req.message.is_empty() {
             None
@@ -3175,13 +3175,15 @@ async fn get_calendar_events(store_path: &Path, path: &str) -> String {
         .split('&')
         .find(|p| p.starts_with("from="))
         .and_then(|p| p.strip_prefix("from="))
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .and_then(|s| urlencoding::decode(s).ok())
+        .and_then(|decoded| chrono::DateTime::parse_from_rfc3339(&decoded).ok())
         .map(|dt| dt.with_timezone(&chrono::Utc));
     let to_ts = query
         .split('&')
         .find(|p| p.starts_with("to="))
         .and_then(|p| p.strip_prefix("to="))
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .and_then(|s| urlencoding::decode(s).ok())
+        .and_then(|decoded| chrono::DateTime::parse_from_rfc3339(&decoded).ok())
         .map(|dt| dt.with_timezone(&chrono::Utc));
     let (from_ts, to_ts) = match (from_ts, to_ts) {
         (Some(f), Some(t)) if f <= t => (f, t),
