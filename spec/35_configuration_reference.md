@@ -207,7 +207,7 @@ Voir [cluster.example.yaml](cluster.example.yaml).
 **Emplacement** : `data_dir/skills/` et/ou `spec/skills/`.  
 **Utilisé par** : daemon (SkillRegistry, GET `/api/skills`, POST `/api/skills/reload`).
 
-Deux formats supportés (alignés sur la [spécification Agent Skills](https://agentskills.io/specification)) : (1) **répertoire** avec `SKILL.md` (front matter YAML + corps Markdown) ; (2) **fichier** `.yaml` / `.yml` par skill (rétrocompatibilité). Rechargement à chaud : **POST /api/skills/reload** ou commande `/skills reload` (TUI/Web), à l’installation d’un skill, les commandes requises sont ajoutées automatiquement à `allowed_commands` ; redémarrer le daemon pour prendre en compte la nouvelle politique..
+Deux formats supportés (alignés sur la [spécification Agent Skills](https://agentskills.io/specification)) : (1) **répertoire** avec `SKILL.md` (front matter YAML + corps Markdown) ; (2) **fichier** `.yaml` / `.yml` par skill (rétrocompatibilité). Rechargement à chaud : **POST /api/skills/reload** ou commande `/skills reload` (TUI/Web), à l’installation d’un skill, les commandes requises sont ajoutées automatiquement à `allowed_commands` ; redémarrer le daemon pour prendre en compte la nouvelle politique.
 
 ### Structure et types (exemple)
 
