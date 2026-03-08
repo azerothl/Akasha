@@ -2939,6 +2939,26 @@ pub async fn handle_api(
     if method == "GET" && path == "/api/tasks" {
         return get_task_list(store_path).await;
     }
+    // GET /api/pending-human-input — list all tasks waiting for user input (so UI can show notifications after reload or when user was away)
+    if method == "GET" && path == "/api/pending-human-input" {
+        if let Some(ref store) = human_input_store {
+            let g = store.read().await;
+            let pending: Vec<_> = g
+                .iter()
+                .map(|(id, p)| {
+                    serde_json::json!({
+                        "task_id": id.to_string(),
+                        "question": p.question,
+                        "context": p.context,
+                        "choices": p.choices
+                    })
+                })
+                .collect();
+            let body = serde_json::json!({ "pending": pending });
+            return json_response("200 OK", &body.to_string());
+        }
+        return json_response("200 OK", r#"{"pending":[]}"#);
+    }
     if path.starts_with("/api/tasks/") {
         let rest = path.trim_start_matches("/api/tasks/");
         let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();

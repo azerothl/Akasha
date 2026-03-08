@@ -629,6 +629,23 @@ async fn cancel_task(task_id: String, port: Option<u16>) -> Result<serde_json::V
     Ok(json)
 }
 
+/// Human in the loop: GET /api/pending-human-input — list all tasks waiting for user input (for notifications on load or when user was away).
+#[tauri::command]
+async fn get_pending_human_input(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/pending-human-input", daemon_base_url(port));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// Human in the loop: GET /api/tasks/:id/human-input — pending question/context/choices for the task (404 if none).
 #[tauri::command]
 async fn get_task_human_input(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -946,6 +963,7 @@ pub fn run() {
             get_tasks,
             get_task_events,
             cancel_task,
+            get_pending_human_input,
             get_task_human_input,
             post_task_human_reply,
             get_schedules,

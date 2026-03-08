@@ -176,6 +176,108 @@ body {
   font-size: 0.8125rem;
 }
 
+/* Pending human-input (agent questions): notification in header */
+.header-pending-actions {
+  position: relative;
+  margin-top: 0.5rem;
+  margin-right: 0.5rem;
+}
+
+.header-pending-actions-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.75rem;
+  background: var(--akasha-warning);
+  color: var(--akasha-bg);
+  border: none;
+  border-radius: 6px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.header-pending-actions-trigger:hover {
+  background: var(--akasha-warning-hover);
+  color: var(--akasha-bg);
+}
+
+.header-pending-actions-icon {
+  font-size: 1rem;
+}
+
+.header-pending-actions-badge {
+  min-width: 1.25rem;
+  padding: 0.1rem 0.35rem;
+  background: var(--akasha-bg);
+  color: var(--akasha-warning);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.header-pending-actions-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 0.35rem;
+  min-width: 280px;
+  max-width: 400px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--akasha-bg-elevated);
+  border: 1px solid var(--akasha-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  z-index: 100;
+  padding: 0.5rem 0;
+}
+
+.header-pending-actions-dropdown-title {
+  margin: 0 0 0.5rem;
+  padding: 0 0.75rem 0.35rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--akasha-text-muted);
+  border-bottom: 1px solid var(--akasha-border);
+}
+
+.header-pending-actions-item {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--akasha-border);
+}
+
+.header-pending-actions-item:last-child {
+  border-bottom: none;
+}
+
+.header-pending-actions-item-question {
+  margin: 0 0 0.25rem;
+  font-size: 0.875rem;
+  color: var(--akasha-text);
+  line-height: 1.35;
+}
+
+.header-pending-actions-item-task {
+  margin: 0 0 0.35rem;
+  font-size: 0.75rem;
+  color: var(--akasha-text-dim);
+}
+
+.header-pending-actions-item-btn {
+  padding: 0.25rem 0.6rem;
+  background: var(--akasha-accent);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.header-pending-actions-item-btn:hover {
+  background: var(--akasha-accent-hover);
+}
+
 /* Tabs */
 .tabs {
   display: flex;

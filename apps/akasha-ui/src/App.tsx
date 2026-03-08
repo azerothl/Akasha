@@ -205,6 +205,9 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Tasks for which we already auto-opened the human-input modal (avoid re-opening every poll). */
   const humanInputAutoOpenedRef = useRef<Set<string>>(new Set());
+  /** Whether the "pending actions" notification dropdown is open. */
+  const [pendingNotifOpen, setPendingNotifOpen] = useState(false);
+  const pendingNotifRef = useRef<HTMLDivElement>(null);
 
   const checkHealth = useCallback(async () => {
     try {
@@ -222,6 +225,38 @@ function App() {
     const id = setInterval(checkHealth, 10000);
     return () => clearInterval(id);
   }, [checkHealth]);
+
+  // Fetch all pending human-input (agent questions) on load and periodically, so user sees them after relaunch or when popup was missed.
+  const fetchPendingHumanInput = useCallback(async () => {
+    if (!health?.ok) return;
+    try {
+      const data = await invoke<{ pending?: Array<{ task_id: string; question: string; context?: string; choices?: string[] }> }>(
+        "get_pending_human_input",
+        { port: DAEMON_PORT }
+      );
+      if (data?.pending?.length) {
+        setPendingHumanInput((prev) => {
+          const next = { ...prev };
+          for (const p of data.pending!) {
+            next[p.task_id] = {
+              question: p.question ?? "",
+              context: p.context ?? "",
+              choices: p.choices,
+            };
+          }
+          return next;
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [health?.ok]);
+
+  useEffect(() => {
+    fetchPendingHumanInput();
+    const id = setInterval(fetchPendingHumanInput, 25000);
+    return () => clearInterval(id);
+  }, [fetchPendingHumanInput]);
 
   // Load today's conversation history on mount (short-term = current day, so it survives UI restart).
   useEffect(() => {
@@ -274,6 +309,18 @@ function App() {
   useEffect(() => {
     if (tab === "chat") chatInputRef.current?.focus();
   }, [tab]);
+
+  // Close pending-actions dropdown when clicking outside
+  useEffect(() => {
+    if (!pendingNotifOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (pendingNotifRef.current && !pendingNotifRef.current.contains(e.target as Node)) {
+        setPendingNotifOpen(false);
+      }
+    };
+    document.addEventListener("click", onDocClick);
+    return () => document.removeEventListener("click", onDocClick);
+  }, [pendingNotifOpen]);
 
   // Global keyboard shortcuts: 1–7 = switch tab (when not in a modal or input)
   const tabsByIndex: Tab[] = ["chat", "router", "docs", "tasks", "calendar", "memory", "settings"];
@@ -1072,6 +1119,46 @@ function App() {
             <span>Daemon déconnecté — lancez <code>akasha start</code></span>
           )}
         </div>
+        {Object.keys(pendingHumanInput).length > 0 && (
+          <div ref={pendingNotifRef} className="header-pending-actions" role="region" aria-label="Demandes d'action en attente">
+            <button
+              type="button"
+              className="header-pending-actions-trigger"
+              onClick={() => setPendingNotifOpen((o) => !o)}
+              aria-expanded={pendingNotifOpen}
+              aria-haspopup="true"
+              title="Demandes en attente de votre réponse"
+            >
+              <span className="header-pending-actions-icon" aria-hidden>⚠</span>
+              <span className="header-pending-actions-badge">{Object.keys(pendingHumanInput).length}</span>
+              <span className="header-pending-actions-label">Action requise</span>
+            </button>
+            {pendingNotifOpen && (
+              <div className="header-pending-actions-dropdown" role="menu">
+                <p className="header-pending-actions-dropdown-title">Demandes des agents</p>
+                {Object.entries(pendingHumanInput).map(([taskId, p]) => (
+                  <div key={taskId} className="header-pending-actions-item">
+                    <p className="header-pending-actions-item-question" title={p.question}>
+                      {p.question.slice(0, 80)}{p.question.length > 80 ? "…" : ""}
+                    </p>
+                    <p className="header-pending-actions-item-task">Tâche #{taskId.slice(-8)}</p>
+                    <button
+                      type="button"
+                      className="header-pending-actions-item-btn"
+                      onClick={() => {
+                        setHumanInputModalTaskId(taskId);
+                        setHumanInputFreeText("");
+                        setPendingNotifOpen(false);
+                      }}
+                    >
+                      Répondre
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         <nav className="tabs" role="tablist" aria-label="Sections">
           <button
             role="tab"

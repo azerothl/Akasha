@@ -257,6 +257,8 @@ struct App {
     chat_history_loaded: bool,
     /// Human in the loop: when the agent asked for user input, (task_id, question, context, choices).
     pending_human_input: Option<(String, String, String, Option<Vec<String>>)>,
+    /// All tasks currently waiting for user input (from GET /api/pending-human-input), so we can show them after relaunch or when user was away.
+    pending_human_input_list: Vec<(String, String, String, Option<Vec<String>>)>,
 }
 
 impl App {
@@ -313,6 +315,60 @@ impl App {
             input_wrapped_lines: 0,
             chat_history_loaded: false,
             pending_human_input: None,
+            pending_human_input_list: Vec::new(),
+        }
+    }
+
+    /// Fetch all pending human-input (GET /api/pending-human-input). Updates pending_human_input_list and, if needed, pending_human_input so the user sees questions after relaunch or when they were away.
+    fn fetch_pending_human_input_list(&mut self) {
+        let url = format!("{}/api/pending-human-input", daemon_base_url(self.port));
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let resp = match client.get(&url).send() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        if !resp.status().is_success() {
+            self.pending_human_input_list.clear();
+            return;
+        }
+        let json: serde_json::Value = match resp.json() {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let pending = match json.get("pending").and_then(|p| p.as_array()) {
+            Some(a) => a,
+            None => {
+                self.pending_human_input_list.clear();
+                return;
+            }
+        };
+        let mut list = Vec::new();
+        for p in pending {
+            let task_id = p.get("task_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let question = p.get("question").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if task_id.is_empty() || question.is_empty() {
+                continue;
+            }
+            let context = p.get("context").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let choices = p.get("choices")
+                .and_then(|c| c.as_array())
+                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+            list.push((task_id, question, context, choices));
+        }
+        self.pending_human_input_list = list;
+        if let Some(first) = self.pending_human_input_list.first() {
+            let current_id = self.pending_human_input.as_ref().map(|t| t.0.as_str());
+            if current_id.is_none() || !self.pending_human_input_list.iter().any(|t| Some(t.0.as_str()) == current_id) {
+                self.pending_human_input = Some(first.clone());
+            }
+        } else {
+            self.pending_human_input = None;
         }
     }
 
@@ -364,7 +420,8 @@ impl App {
             Err(_) => return false,
         };
         if resp.status().is_success() {
-            self.pending_human_input = None;
+            self.pending_human_input_list.retain(|(id, _, _, _)| id != task_id);
+            self.pending_human_input = self.pending_human_input_list.first().cloned();
             true
         } else {
             false
@@ -381,6 +438,9 @@ impl App {
         }
         if self.mode == Mode::Tasks {
             self.fetch_activity_tasks();
+        }
+        if self.mode == Mode::Chat {
+            self.fetch_pending_human_input_list();
         }
         if self.mode == Mode::Calendar {
             self.fetch_calendar();
@@ -1825,7 +1885,14 @@ fn ui(f: &mut Frame, app: &mut App) {
     f.render_widget(tabs, top_chunks[1]);
     app.tabs_rect = Some(top_chunks[1]);
 
-    let help_line = " 1=Chat 2=Routeur 3=Doc 4=Tâches 5=Calendrier 6=Mémoire · Tab=onglet suivant · R=actualiser · F2=thème · Esc=quitter ";
+    let help_line = if !app.pending_human_input_list.is_empty() {
+        format!(
+            " ⚠ Demandes en attente: {} — répondez ci-dessous (Entrée pour envoyer) · 1=Chat 2=Routeur … · Esc=quitter ",
+            app.pending_human_input_list.len()
+        )
+    } else {
+        " 1=Chat 2=Routeur 3=Doc 4=Tâches 5=Calendrier 6=Mémoire · Tab=onglet suivant · R=actualiser · F2=thème · Esc=quitter ".to_string()
+    };
     let help_para = Paragraph::new(help_line)
         .style(Style::default().fg(theme.palette().muted));
     f.render_widget(help_para, top_chunks[2]);
@@ -2420,6 +2487,7 @@ fn run_app(
             app.check_health();
             if app.mode == Mode::Chat {
                 app.fetch_schedule_reports();
+                app.fetch_pending_human_input_list();
                 if let Some(task_id) = app.pending_reply_task_id.clone() {
                     app.fetch_pending_human_input(&task_id);
                 }
