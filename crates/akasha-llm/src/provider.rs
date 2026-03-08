@@ -330,6 +330,10 @@ impl OpenRouterProvider {
             .filter(|s| !s.is_empty())
             .or_else(|| std::env::var("OPENROUTER_APP_TITLE").ok().filter(|s| !s.is_empty()))
             .or_else(|| Some("Akasha".into()));
+        // #region agent log
+        let resolved_title = app_title.as_deref().unwrap_or("Akasha");
+        tracing::info!(openrouter_x_title = %resolved_title, "OpenRouter X-Title header (from providers.openrouter.app_title, OPENROUTER_APP_TITLE, or default)");
+        // #endregion
         Self {
             api_key: api_key.unwrap_or_default(),
             base_url: base_url

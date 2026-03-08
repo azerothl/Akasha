@@ -57,12 +57,18 @@ jobs:
         run: |
           cargo build --release --target ${{ matrix.target }} -p akasha-cli -p akasha-tui
 
-      - name: Build daemon (Linux / macOS)
-        if: matrix.os != 'windows-latest'
+      - name: Build daemon (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           cargo build --release --target ${{ matrix.target }} -p akasha-daemon
 
-      - name: Build daemon (Windows, without embeddings and baguettotron to avoid linker errors)
+      # macOS: ort-sys has no prebuilt binaries for x86_64-apple-darwin (and can be fragile on aarch64). Use tract backend like Windows.
+      - name: Build daemon (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features embedded,embeddings-tract,embedded-baguettotron
+
+      - name: Build daemon (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features embedded,embeddings-tract,embedded-baguettotron
