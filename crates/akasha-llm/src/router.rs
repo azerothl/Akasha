@@ -3,7 +3,7 @@
 use crate::classifier::classify_task_type;
 use crate::config::{RoutingConfig, TaskTypeConfig};
 use crate::fallback::{FallbackEngine, ProviderResolver};
-use crate::metrics::MetricsCollector;
+use crate::metrics::{MetricsCollector, MetricsPersistence};
 use crate::provider::{CompletionRequest, CompletionResponse, LLMProvider};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -19,6 +19,10 @@ pub struct LLMRouter {
 
 impl LLMRouter {
     pub fn new(config: RoutingConfig) -> Self {
+        Self::new_with_persistence(config, None)
+    }
+
+    pub fn new_with_persistence(config: RoutingConfig, persistence: Option<Arc<dyn MetricsPersistence>>) -> Self {
         let timeout_secs = config
             .global
             .default_timeout_secs
@@ -31,10 +35,14 @@ impl LLMRouter {
             max_retries,
             timeout_per_call: std::time::Duration::from_secs(timeout_secs),
         };
+        let metrics = match persistence {
+            Some(p) => Arc::new(MetricsCollector::with_persistence(p)),
+            None => Arc::new(MetricsCollector::new()),
+        };
         Self {
             config: Arc::new(RwLock::new(config)),
             fallback,
-            metrics: Arc::new(MetricsCollector::new()),
+            metrics,
             providers: HashMap::new(),
             degraded_mode: false,
         }

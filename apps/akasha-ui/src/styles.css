@@ -865,8 +865,30 @@ body {
   font-style: italic;
 }
 
-.router-panel .refresh-btn {
+.router-metrics-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
   margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.router-metrics-period-label {
+  font-size: 0.875rem;
+  color: var(--akasha-text-muted);
+}
+
+.router-metrics-period-select {
+  padding: 0.35rem 0.6rem;
+  font-size: 0.875rem;
+  background: var(--akasha-bg-surface);
+  border: 1px solid var(--akasha-border);
+  border-radius: 6px;
+  color: var(--akasha-text);
+}
+
+.router-panel .refresh-btn {
+  margin-bottom: 0;
   padding: 0.5rem 1rem;
   background: #3f3f46;
   color: #e4e4e7;

@@ -86,16 +86,26 @@ impl FallbackEngine {
                             prompt_tokens: 0,
                             completion_tokens: 0,
                         }));
-                        metrics.record_success(entry.provider.as_str(), &entry.model, latency_ms, tokens, cost);
                         if i > 0 {
-                            metrics.record_fallback_success(entry.provider.as_str(), &entry.model);
+                            metrics.record_success_with_fallback(
+                                entry.provider.as_str(),
+                                &entry.model,
+                                latency_ms,
+                                tokens,
+                                cost,
+                                true,
+                                true,
+                            );
+                        } else {
+                            metrics.record_success(entry.provider.as_str(), &entry.model, latency_ms, tokens, cost);
                         }
                         return Ok(resp);
                     }
                     Err(e) => {
-                        metrics.record_failure(entry.provider.as_str(), &entry.model);
                         if i > 0 {
-                            metrics.record_fallback_triggered(entry.provider.as_str(), &entry.model);
+                            metrics.record_failure_with_fallback(entry.provider.as_str(), &entry.model, true);
+                        } else {
+                            metrics.record_failure(entry.provider.as_str(), &entry.model);
                         }
                         last_error = Some(format!("{}: {}", entry.provider, e));
                         let retry = matches!(e, ProviderError::Timeout | ProviderError::RateLimit);

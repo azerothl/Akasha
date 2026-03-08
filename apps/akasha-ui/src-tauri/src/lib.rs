@@ -27,10 +27,14 @@ async fn check_health(port: Option<u16>) -> Result<serde_json::Value, String> {
 }
 
 /// Router metrics: GET /api/router/metrics returns { "provider::model": { total_requests, ... } }.
+/// If period is Some("day"|"week"|"month"|"year"), appends ?period= for filtered aggregates from persisted store.
 #[tauri::command]
-async fn get_router_metrics(port: Option<u16>) -> Result<serde_json::Value, String> {
+async fn get_router_metrics(port: Option<u16>, period: Option<String>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
-    let url = format!("{}/api/router/metrics", daemon_base_url(port));
+    let url = match period.as_deref().filter(|p| !p.is_empty()) {
+        Some(p) => format!("{}/api/router/metrics?period={}", daemon_base_url(port), p),
+        None => format!("{}/api/router/metrics", daemon_base_url(port)),
+    };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()

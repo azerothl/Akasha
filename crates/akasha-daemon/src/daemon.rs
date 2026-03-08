@@ -1,7 +1,7 @@
 //! Akasha Daemon - Core runtime loop with healthcheck and spec loading
 
 use akasha_core::{load_specs, Specs};
-use akasha_store::{ImmutableLog, TaskStore};
+use akasha_store::{ImmutableLog, MetricsEvent, MetricsStore, TaskStore};
 use akasha_vault::Vault;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -138,7 +138,17 @@ impl Daemon {
         let resolved_ollama_url = ollama_url.clone();
         let openai_cfg = router_config.providers.get("openai").cloned();
         let openrouter_cfg = router_config.providers.get("openrouter").cloned();
-        let mut llm_router = akasha_llm::LLMRouter::new(router_config);
+        let metrics_persistence: Option<Arc<dyn akasha_llm::MetricsPersistence>> = match MetricsStore::open(&db_path) {
+            Ok(store) => {
+                info!("LLM metrics persistence enabled (akasha.db)");
+                Some(Arc::new(MetricsPersister(std::sync::Mutex::new(store))))
+            }
+            Err(e) => {
+                warn!(error = %e, "Metrics store open failed, metrics will not persist");
+                None
+            }
+        };
+        let mut llm_router = akasha_llm::LLMRouter::new_with_persistence(router_config, metrics_persistence);
         llm_router.register_provider(Arc::new(akasha_llm::OllamaProvider::new(ollama_url)));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaCoreProvider::new()));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaEmbeddedProvider::new()));
@@ -663,5 +673,38 @@ impl Daemon {
         }
 
         Ok(())
+    }
+}
+
+/// Persists LLM metrics to SQLite for GET /api/router/metrics with period filter and survival across restarts.
+struct MetricsPersister(std::sync::Mutex<MetricsStore>);
+
+impl akasha_llm::MetricsPersistence for MetricsPersister {
+    fn record_event(
+        &self,
+        at: chrono::DateTime<chrono::Utc>,
+        provider: &str,
+        model: &str,
+        success: bool,
+        latency_ms: u64,
+        tokens: u64,
+        cost_usd: f64,
+        fallback_triggered: bool,
+        fallback_success: bool,
+    ) {
+        let e = MetricsEvent {
+            at,
+            provider: provider.to_string(),
+            model: model.to_string(),
+            success,
+            latency_ms,
+            tokens,
+            cost_usd,
+            fallback_triggered,
+            fallback_success,
+        };
+        if let Ok(store) = self.0.lock() {
+            let _ = store.insert(&e);
+        }
     }
 }

@@ -285,12 +285,16 @@ function App() {
     return () => document.removeEventListener("keydown", onKey);
   }, [humanInputModalTaskId]);
 
+  type MetricsPeriod = "all" | "day" | "week" | "month" | "year";
+  const [routerMetricsPeriod, setRouterMetricsPeriod] = useState<MetricsPeriod>("all");
+
   const fetchRouterMetrics = useCallback(async () => {
     setRouterLoading(true);
     setRouterError(null);
     try {
       const data = await invoke<RouterMetrics>("get_router_metrics", {
         port: DAEMON_PORT,
+        period: routerMetricsPeriod === "all" ? undefined : routerMetricsPeriod,
       });
       setRouterMetrics(data as RouterMetrics);
     } catch (e) {
@@ -299,7 +303,7 @@ function App() {
     } finally {
       setRouterLoading(false);
     }
-  }, []);
+  }, [routerMetricsPeriod]);
 
   useEffect(() => {
     if (tab === "router") fetchRouterMetrics();
@@ -1491,14 +1495,32 @@ function App() {
             )}
             {!routerLoading && !routerError && routerMetrics && (
               <>
-                <button
-                  type="button"
-                  className="refresh-btn"
-                  onClick={fetchRouterMetrics}
-                  aria-label="Rafraîchir les métriques"
-                >
-                  Rafraîchir
-                </button>
+                <div className="router-metrics-toolbar">
+                  <label htmlFor="router-metrics-period" className="router-metrics-period-label">
+                    Période :
+                  </label>
+                  <select
+                    id="router-metrics-period"
+                    value={routerMetricsPeriod}
+                    onChange={(e) => setRouterMetricsPeriod(e.target.value as MetricsPeriod)}
+                    className="router-metrics-period-select"
+                    aria-label="Filtrer les métriques par période"
+                  >
+                    <option value="all">Toutes</option>
+                    <option value="day">Jour</option>
+                    <option value="week">Semaine</option>
+                    <option value="month">Mois</option>
+                    <option value="year">Année</option>
+                  </select>
+                  <button
+                    type="button"
+                    className="refresh-btn"
+                    onClick={fetchRouterMetrics}
+                    aria-label="Rafraîchir les métriques"
+                  >
+                    Rafraîchir
+                  </button>
+                </div>
                 {Object.keys(routerMetrics).length === 0 ? (
                   <p className="empty-state">
                     Aucune requête enregistrée. Envoyez un message dans le Chat

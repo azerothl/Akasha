@@ -2364,8 +2364,59 @@ pub async fn handle_api(
         }
     }
 
-    if method == "GET" && path == "/api/router/metrics" {
-        let list = llm_router.metrics().list();
+    if method == "GET" && path.starts_with("/api/router/metrics") {
+        let period = path.split('?').nth(1)
+            .and_then(|q| q.split('&').find(|p| p.starts_with("period=")))
+            .and_then(|p| p.strip_prefix("period="));
+        let list: std::collections::HashMap<String, akasha_llm::ModelMetrics> = if let Some(period) = period {
+            let (from_ts, to_ts) = match period {
+                "day" => {
+                    let now = chrono::Utc::now();
+                    let start = now - chrono::Duration::days(1);
+                    (Some(start), Some(now))
+                }
+                "week" => {
+                    let now = chrono::Utc::now();
+                    let start = now - chrono::Duration::days(7);
+                    (Some(start), Some(now))
+                }
+                "month" => {
+                    let now = chrono::Utc::now();
+                    let start = now - chrono::Duration::days(30);
+                    (Some(start), Some(now))
+                }
+                "year" => {
+                    let now = chrono::Utc::now();
+                    let start = now - chrono::Duration::days(365);
+                    (Some(start), Some(now))
+                }
+                _ => (None, None),
+            };
+            match (from_ts, to_ts) {
+                (Some(from), Some(to)) => {
+                    match akasha_store::MetricsStore::open(store_path) {
+                        Ok(store) => store.aggregate(Some(from), Some(to)).ok()
+                            .map(|rows| rows.into_iter().map(|(k, v)| (k, akasha_llm::ModelMetrics {
+                                total_requests: v.total_requests,
+                                successful_requests: v.successful_requests,
+                                failed_requests: v.failed_requests,
+                                total_latency_ms: v.total_latency_ms,
+                                total_tokens: v.total_tokens,
+                                total_cost_usd: v.total_cost_usd,
+                                fallback_triggered: v.fallback_triggered,
+                                fallback_success: v.fallback_success,
+                                last_success: v.last_success,
+                                last_failure: v.last_failure,
+                            })).collect())
+                            .unwrap_or_default(),
+                        Err(_) => llm_router.metrics().list(),
+                    }
+                }
+                _ => llm_router.metrics().list(),
+            }
+        } else {
+            llm_router.metrics().list()
+        };
         let body = serde_json::to_string(&list).unwrap_or_else(|_| "{}".to_string());
         return json_response("200 OK", &body);
     }
