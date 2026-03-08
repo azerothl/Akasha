@@ -514,8 +514,9 @@ async fn uninstall_skill(name: String, port: Option<u16>) -> Result<serde_json::
         .await
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
+        let status = resp.status();
         let err_body = resp.text().await.unwrap_or_default();
-        return Err(format!("{} — {}", resp.status(), err_body));
+        return Err(format!("{} — {}", status, err_body));
     }
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok(json)
