@@ -1,7 +1,7 @@
 //! Akasha Daemon - Core runtime loop with healthcheck and spec loading
 
 use akasha_core::{load_specs, Specs};
-use akasha_store::{ImmutableLog, TaskStore};
+use akasha_store::{ImmutableLog, MetricsEvent, MetricsStore, TaskStore};
 use akasha_vault::Vault;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -13,13 +13,20 @@ use futures_util::future::Either;
 use tracing::{error, info, warn};
 
 use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask};
-use crate::api::{handle_api, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, parse_request, run_message_via_llm, RestartTx};
+use crate::api::{handle_api, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, RestartTx};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
 
 const HEALTHCHECK_INTERVAL_SECS: u64 = 5;
 const DEFAULT_PORT: u16 = 3876;
+
+/// Outcome of a daemon run. Used so that main can exit with the right code (e.g. 85 for restart).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    Normal,
+    RestartRequested,
+}
 
 /// Akasha Daemon
 pub struct Daemon {
@@ -42,7 +49,7 @@ impl Daemon {
     }
 
     /// Run the daemon (blocks until shutdown)
-    pub async fn run(&self) -> anyhow::Result<()> {
+    pub async fn run(&self) -> anyhow::Result<RunOutcome> {
         // Load specs at startup
         match load_specs(&self.spec_dir) {
             Ok(specs) => {
@@ -138,7 +145,17 @@ impl Daemon {
         let resolved_ollama_url = ollama_url.clone();
         let openai_cfg = router_config.providers.get("openai").cloned();
         let openrouter_cfg = router_config.providers.get("openrouter").cloned();
-        let mut llm_router = akasha_llm::LLMRouter::new(router_config);
+        let metrics_persistence: Option<Arc<dyn akasha_llm::MetricsPersistence>> = match MetricsStore::open(&db_path) {
+            Ok(store) => {
+                info!("LLM metrics persistence enabled (akasha.db)");
+                Some(Arc::new(MetricsPersister(std::sync::Mutex::new(store))))
+            }
+            Err(e) => {
+                warn!(error = %e, "Metrics store open failed, metrics will not persist");
+                None
+            }
+        };
+        let mut llm_router = akasha_llm::LLMRouter::new_with_persistence(router_config, metrics_persistence);
         llm_router.register_provider(Arc::new(akasha_llm::OllamaProvider::new(ollama_url)));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaCoreProvider::new()));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaEmbeddedProvider::new()));
@@ -187,9 +204,13 @@ impl Daemon {
             .or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
         if let Some(k) = openrouter_key {
             let base_url = openrouter_cfg.as_ref().and_then(|c| c.base_url.clone());
+            let site_url = openrouter_cfg.as_ref().and_then(|c| c.site_url.clone());
+            let app_title = openrouter_cfg.as_ref().and_then(|c| c.app_title.clone());
             llm_router.register_provider(Arc::new(akasha_llm::OpenRouterProvider::new(
                 Some(k),
                 base_url,
+                site_url,
+                app_title,
             )));
             info!("OpenRouter provider registered");
         }
@@ -294,13 +315,15 @@ impl Daemon {
                     }
                 }
             }
-            let tools_executor = {
+            let tools_executor: Option<Arc<tokio::sync::RwLock<Arc<akasha_tools::ToolExecutor>>>> = {
                 match akasha_tools::ToolsPolicy::load_from_path(&tools_policy_path) {
                     Ok(mut policy) => {
                         if let Ok(v) = &vault {
                             policy.brave_api_key = v.get("brave_api_key").ok();
                         }
-                        Some(Arc::new(akasha_tools::ToolExecutor::new(policy)))
+                        Some(Arc::new(tokio::sync::RwLock::new(Arc::new(
+                            akasha_tools::ToolExecutor::new(policy),
+                        ))))
                     }
                     Err(_) => None,
                 }
@@ -309,18 +332,11 @@ impl Daemon {
                 info!(path = %tools_policy_path.display(), "Tools policy loaded");
             }
 
-            // Phase D: Skills registry (loadable skills for agents)
+            // Phase D: Skills registry (Agent Skills spec: SKILL.md dirs + flat .yaml)
             let skill_registry = Arc::new(crate::skills::SkillRegistry::new());
-            let skills_dir = data_dir.join("skills");
-            if skills_dir.is_dir() {
-                if let Ok(n) = skill_registry.load_from_dir(&skills_dir).await {
-                    info!(count = n, path = %skills_dir.display(), "Skills loaded");
-                }
-            }
-            let spec_skills_dir = self.spec_dir.join("skills");
-            if spec_skills_dir.is_dir() {
-                if let Ok(n) = skill_registry.load_from_dir(&spec_skills_dir).await {
-                    info!(count = n, path = %spec_skills_dir.display(), "Skills loaded from spec");
+            if let Ok(n) = skill_registry.load_all(&data_dir, &self.spec_dir).await {
+                if n > 0 {
+                    info!(count = n, "Skills loaded");
                 }
             }
 
@@ -330,6 +346,7 @@ impl Daemon {
             let events = new_events_cache();
             let process_registry = new_process_registry();
             let human_input_store = new_human_input_store();
+            let user_rag_store = crate::user_rag::UserRagStore::new_shared(&data_dir);
             let (progress_persistence_tx, progress_persistence_rx) = std::sync::mpsc::channel::<(uuid::Uuid, u8, String)>();
             {
                 let store_path = db_path.clone();
@@ -374,6 +391,17 @@ impl Daemon {
             }
             let (orch_tx, orch_rx) = mpsc::channel::<OrchestratorTask>(64);
             let (conv_tx, mut conv_rx) = mpsc::channel::<OrchestratorTask>(64);
+            let (delegation_tx, delegation_rx) = mpsc::channel::<crate::api::DelegationRequest>(32);
+            let task_completion = new_task_completion_registry();
+            let db_path_for_delegation = db_path.clone();
+            tokio::spawn({
+                let conv_tx = conv_tx.clone();
+                let progress = progress.clone();
+                let task_completion = task_completion.clone();
+                async move {
+                    run_delegation_handler(delegation_rx, conv_tx, db_path_for_delegation, progress, task_completion).await;
+                }
+            });
             let orch_tx_for_scheduler = orch_tx.clone();
             let main_agent = MainAgent::new(bus.clone(), orch_tx);
             let orchestrator = Arc::new(Orchestrator::new(
@@ -382,6 +410,7 @@ impl Daemon {
                 conv_tx.clone(),
                 progress.clone(),
                 llm_router.clone(),
+                task_completion.clone(),
             ));
             tokio::spawn({
                 let orch = orchestrator.clone();
@@ -390,33 +419,43 @@ impl Daemon {
                 }
             });
             // Conversation worker: receives (task_id, message, session_id) from orchestrator, runs LLM with memory + optional tools, pushes progress/completion.
+            let spec_dir = self.spec_dir.clone();
+            let tools_policy_path = tools_policy_path.clone();
             tokio::spawn({
                 let bus = bus.clone();
                 let llm_router = llm_router.clone();
                 let store_path = db_path.clone();
+                let spec_dir = spec_dir.clone();
                 let tools_executor = tools_executor.clone();
+                let tools_policy_path = tools_policy_path.clone();
                 let skill_registry = skill_registry.clone();
                 let process_registry = process_registry.clone();
                 let conv_tx = conv_tx.clone();
                 let short_term = short_term.clone();
                 let long_term_client = long_term_client.clone();
                 let human_input_store = human_input_store.clone();
+                let task_completion = task_completion.clone();
                 async move {
-                    while let Some((task_id, message, session_id)) = conv_rx.recv().await {
+                    while let Some(task) = conv_rx.recv().await {
                         run_message_via_llm(
                             bus.clone(),
                             llm_router.clone(),
                             store_path.clone(),
-                            task_id,
-                            message,
-                            session_id,
+                            spec_dir.clone(),
+                            task.task_id,
+                            task.message,
+                            task.session_id,
+                            task.image_data_urls,
                             Some(short_term.clone()),
                             long_term_client.clone(),
                             tools_executor.clone(),
+                            Some(tools_policy_path.clone()),
                             Some(skill_registry.clone()),
                             Some(process_registry.clone()),
                             Some(conv_tx.clone()),
                             Some(human_input_store.clone()),
+                            Some(delegation_tx.clone()),
+                            Some(task_completion.clone()),
                         )
                         .await;
                     }
@@ -536,7 +575,13 @@ impl Daemon {
             let spec_dir = self.spec_dir.clone();
             let (restart_tx, mut restart_rx) = tokio::sync::mpsc::channel::<()>(1);
 
-            let lost_leadership = loop {
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            enum ShutdownReason {
+                Normal,
+                RestartRequested,
+                LostLeadership,
+            }
+            let reason = loop {
                 let recv_fut = match &mut leader_rx_opt {
                     Some(rx) => Either::Left(rx.recv()),
                     None => Either::Right(std::future::pending::<Option<bool>>()),
@@ -547,10 +592,8 @@ impl Daemon {
                     result = listener.accept() => {
                         match result {
                             Ok((mut stream, _addr)) => {
-                                let mut buf = [0u8; 8192];
-                                let n = stream.read(&mut buf).await.unwrap_or(0);
-                                let (method, path, body, headers) = parse_request(&buf[..n]);
-                                // Spawn so we can accept the next connection while this request is processed (e.g. long /api/diagnostic/advice)
+                                // Clone resources before spawning so the accept loop is not blocked
+                                // waiting on body I/O (especially large document uploads).
                                 let db_path = db_path.clone();
                                 let progress = progress.clone();
                                 let events_clone = events.clone();
@@ -567,7 +610,36 @@ impl Daemon {
                                 let short_term = short_term.clone();
                                 let long_term_client = long_term_client.clone();
                                 let human_input_store = human_input_store.clone();
+                                let user_rag_store = user_rag_store.clone();
+                                // Body reading is done inside the spawned task so slow/large uploads
+                                // don't block the accept loop from handling other connections or signals.
                                 tokio::spawn(async move {
+                                    const INITIAL_READ: usize = 65536;
+                                    const MAX_BODY: usize = 10 * 1024 * 1024; // 10 MiB for POST body (e.g. documents in base64)
+                                    let mut buf = vec![0u8; INITIAL_READ];
+                                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                                    buf.truncate(n);
+                                    let full_buf: Vec<u8> = match parse_content_length(&buf) {
+                                        Some((header_end, content_length)) if content_length <= MAX_BODY => {
+                                            let total_needed = header_end + 4 + content_length;
+                                            if buf.len() >= total_needed {
+                                                buf
+                                            } else {
+                                                buf.reserve(total_needed.saturating_sub(buf.len()));
+                                                while buf.len() < total_needed {
+                                                    let mut chunk = [0u8; 8192];
+                                                    match stream.read(&mut chunk).await {
+                                                        Ok(0) => break,
+                                                        Ok(k) => buf.extend_from_slice(&chunk[..k]),
+                                                        Err(_) => break,
+                                                    }
+                                                }
+                                                buf
+                                            }
+                                        }
+                                        _ => buf,
+                                    };
+                                    let (method, path, body, headers) = parse_request(&full_buf);
                                     let response = handle_api(
                                         &method,
                                         &path,
@@ -589,6 +661,7 @@ impl Daemon {
                                         Some(short_term),
                                         long_term_client,
                                         Some(human_input_store),
+                                        &user_rag_store,
                                     )
                                     .await;
                                     let _ = stream.write_all(response.as_bytes()).await;
@@ -599,25 +672,25 @@ impl Daemon {
                                 if !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
                                     error!(error = %e, "Accept error");
                                 }
-                                break false;
+                                break ShutdownReason::Normal;
                             }
                         }
                     }
                     msg = &mut recv_fut => {
                         if msg == Some(false) {
                             info!("Lost leadership");
-                            break true;
+                            break ShutdownReason::LostLeadership;
                         }
                     }
                     _ = restart_rx.recv() => {
                         info!("Restart requested via API");
                         shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
-                        break false;
+                        break ShutdownReason::RestartRequested;
                     }
                     _ = tokio::signal::ctrl_c() => {
                         info!("Received Ctrl+C, shutting down");
                         shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
-                        break false;
+                        break ShutdownReason::Normal;
                     }
                 }
             };
@@ -625,12 +698,48 @@ impl Daemon {
             self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
             healthcheck_handle.abort();
 
-            if cluster_enabled && lost_leadership {
+            if cluster_enabled && reason == ShutdownReason::LostLeadership {
                 continue;
             }
-            break;
+            return Ok(match reason {
+                ShutdownReason::RestartRequested => RunOutcome::RestartRequested,
+                _ => RunOutcome::Normal,
+            });
         }
+        #[allow(unreachable_code)]
+        Ok(RunOutcome::Normal)
+    }
+}
 
-        Ok(())
+/// Persists LLM metrics to SQLite for GET /api/router/metrics with period filter and survival across restarts.
+struct MetricsPersister(std::sync::Mutex<MetricsStore>);
+
+impl akasha_llm::MetricsPersistence for MetricsPersister {
+    fn record_event(
+        &self,
+        at: chrono::DateTime<chrono::Utc>,
+        provider: &str,
+        model: &str,
+        success: bool,
+        latency_ms: u64,
+        tokens: u64,
+        cost_usd: f64,
+        fallback_triggered: bool,
+        fallback_success: bool,
+    ) {
+        let e = MetricsEvent {
+            at,
+            provider: provider.to_string(),
+            model: model.to_string(),
+            success,
+            latency_ms,
+            tokens,
+            cost_usd,
+            fallback_triggered,
+            fallback_success,
+        };
+        if let Ok(store) = self.0.lock() {
+            let _ = store.insert(&e);
+        }
     }
 }

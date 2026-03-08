@@ -1,0 +1,219 @@
+# Example workflow for azerothl/Akasha_app: Update Release Notes + fetch artifacts from private Akasha repo.
+# Copy this to Akasha_app as .github/workflows/update-release.yml (or merge with your existing one).
+#
+# Prerequisites in Akasha_app:
+# - Secret AKASHA_RELEASE_READ_TOKEN: PAT or fine-grained token with read access to azerothl/Akasha (to download release assets).
+#
+# Trigger: repository_dispatch event_type "new_release" from Akasha (payload: version, release_date, release_type, title, description, download_url, changelog, tag, release_url, repository).
+
+name: Update Release Notes
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 1.2.0)'
+        required: true
+      release_date:
+        description: 'Release date (YYYY-MM-DD)'
+        required: true
+        default: ''
+      release_type:
+        description: 'Release type (major, minor, patch)'
+        required: true
+        default: 'patch'
+      title:
+        description: 'Release title'
+        required: true
+      description:
+        description: 'Short release description'
+        required: true
+      download_url:
+        description: 'Download URL for this release'
+        required: false
+      changelog_json:
+        description: 'JSON array of change objects'
+        required: false
+        default: '[]'
+
+  repository_dispatch:
+    types: [new_release]
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-artifacts:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'repository_dispatch'
+    outputs:
+      artifacts_dir: ${{ steps.download.outputs.artifacts_dir }}
+    steps:
+      - name: Get tag from payload
+        id: payload
+        run: |
+          echo "tag=${{ github.event.client_payload.tag || github.event.client_payload.version }}" >> "$GITHUB_OUTPUT"
+          echo "repository=${{ github.event.client_payload.repository }}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release assets from Akasha repo
+        id: download
+        env:
+          GH_TOKEN: ${{ secrets.AKASHA_RELEASE_READ_TOKEN }}
+          AKASHA_REPO: ${{ steps.payload.outputs.repository }}
+          TAG: ${{ steps.payload.outputs.tag }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "AKASHA_RELEASE_READ_TOKEN not set, skipping artifact download."
+            mkdir -p release_artifacts
+            echo "artifacts_dir=release_artifacts" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p release_artifacts
+          gh release download "$TAG" --repo "$AKASHA_REPO" --dir release_artifacts --clobber
+          echo "artifacts_dir=release_artifacts" >> "$GITHUB_OUTPUT"
+          ls -la release_artifacts/
+
+      - name: Upload artifacts for update-release-notes job
+        uses: actions/upload-artifact@v4
+        with:
+          name: akasha-release-assets
+          path: ${{ steps.download.outputs.artifacts_dir }}
+
+  update-release-notes:
+    runs-on: ubuntu-latest
+    needs: fetch-artifacts
+    if: always() && (needs.fetch-artifacts.result == 'success' || needs.fetch-artifacts.result == 'skipped') && (github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch')
+    steps:
+      - name: Checkout website repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download release assets (from previous job)
+        if: github.event_name == 'repository_dispatch'
+        uses: actions/download-artifact@v4
+        with:
+          name: akasha-release-assets
+
+      - name: Resolve inputs (dispatch or workflow_dispatch)
+        id: inputs
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "version=${{ github.event.client_payload.version }}"             >> "$GITHUB_OUTPUT"
+            echo "release_date=${{ github.event.client_payload.release_date }}"  >> "$GITHUB_OUTPUT"
+            echo "release_type=${{ github.event.client_payload.release_type }}"  >> "$GITHUB_OUTPUT"
+            echo "title=${{ github.event.client_payload.title }}"                >> "$GITHUB_OUTPUT"
+            echo "description=${{ github.event.client_payload.description }}"   >> "$GITHUB_OUTPUT"
+            echo "download_url=${{ github.event.client_payload.download_url }}" >> "$GITHUB_OUTPUT"
+            CHANGELOG='${{ toJson(github.event.client_payload.changelog) }}'
+          else
+            echo "version=${{ github.event.inputs.version }}"         >> "$GITHUB_OUTPUT"
+            DATE="${{ github.event.inputs.release_date }}"
+            [ -z "$DATE" ] && DATE="$(date -u +%Y-%m-%d)"
+            echo "release_date=$DATE"                                 >> "$GITHUB_OUTPUT"
+            echo "release_type=${{ github.event.inputs.release_type }}" >> "$GITHUB_OUTPUT"
+            echo "title=${{ github.event.inputs.title }}"            >> "$GITHUB_OUTPUT"
+            echo "description=${{ github.event.inputs.description }}" >> "$GITHUB_OUTPUT"
+            echo "download_url=${{ github.event.inputs.download_url }}" >> "$GITHUB_OUTPUT"
+            CHANGELOG='${{ github.event.inputs.changelog_json }}'
+          fi
+          [ -z "$CHANGELOG" ] || [ "$CHANGELOG" = "null" ] && CHANGELOG='[]'
+          echo "$CHANGELOG" > /tmp/changelog.json
+
+      - name: Prepend new release to data/releases.json
+        run: |
+          python3 - <<'PYEOF'
+          import json, sys, os
+
+          version      = os.environ.get("VERSION", "")
+          release_date = os.environ.get("RELEASE_DATE", "")
+          release_type = os.environ.get("RELEASE_TYPE", "patch")
+          title        = os.environ.get("TITLE", "")
+          description  = os.environ.get("DESCRIPTION", "")
+          download_url = os.environ.get("DOWNLOAD_URL", "")
+
+          with open("/tmp/changelog.json") as f:
+              try:
+                  changes = json.load(f)
+              except json.JSONDecodeError:
+                  changes = []
+
+          new_entry = {
+              "version": version,
+              "date": release_date,
+              "type": release_type,
+              "title": title,
+              "description": description,
+              "changes": changes,
+              "download_url": download_url,
+              "assets": []
+          }
+
+          with open("data/releases.json") as f:
+              releases = json.load(f)
+
+          releases = [r for r in releases if r.get("version") != version]
+          releases.insert(0, new_entry)
+
+          with open("data/releases.json", "w") as f:
+              json.dump(releases, f, indent=2, ensure_ascii=False)
+              f.write("\n")
+
+          print(f"✓ Prepended v{version} to data/releases.json")
+          PYEOF
+        env:
+          VERSION:      ${{ steps.inputs.outputs.version }}
+          RELEASE_DATE: ${{ steps.inputs.outputs.release_date }}
+          RELEASE_TYPE: ${{ steps.inputs.outputs.release_type }}
+          TITLE:        ${{ steps.inputs.outputs.title }}
+          DESCRIPTION:  ${{ steps.inputs.outputs.description }}
+          DOWNLOAD_URL: ${{ steps.inputs.outputs.download_url }}
+
+      - name: Update api/latest.json
+        run: |
+          python3 - <<'PYEOF'
+          import json, os
+
+          version      = os.environ.get("VERSION", "")
+          release_date = os.environ.get("RELEASE_DATE", "")
+          description  = os.environ.get("DESCRIPTION", "")
+          download_url = os.environ.get("DOWNLOAD_URL", "") or \
+              f"https://github.com/azerothl/Akasha/releases/tag/v{version}"
+
+          latest = {
+              "version": version,
+              "release_date": release_date,
+              "release_notes_url": "https://azerothl.github.io/Akasha_app/releases.html",
+              "download_url": download_url,
+              "changelog": description,
+              "min_supported_version": "0.5.0"
+          }
+
+          with open("api/latest.json", "w") as f:
+              json.dump(latest, f, indent=2, ensure_ascii=False)
+              f.write("\n")
+
+          print(f"✓ Updated api/latest.json to v{version}")
+          PYEOF
+        env:
+          VERSION:      ${{ steps.inputs.outputs.version }}
+          RELEASE_DATE: ${{ steps.inputs.outputs.release_date }}
+          DESCRIPTION:  ${{ steps.inputs.outputs.description }}
+          DOWNLOAD_URL: ${{ steps.inputs.outputs.download_url }}
+
+      # Optional: publish downloaded zip assets as a GitHub Release on Akasha_app, or copy to a static folder.
+      # - name: Create release on Akasha_app with downloaded assets
+      #   if: github.event_name == 'repository_dispatch' && hashFiles('akasha-*.zip') != ''
+      #   env:
+      #     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #   run: |
+      #     VERSION="${{ steps.inputs.outputs.version }}"
+      #     gh release create "v$VERSION" akasha-*.zip --title "$VERSION" --notes "Mirror of Akasha release. See https://github.com/azerothl/Akasha/releases."
+
+      - name: Commit and push changes
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/releases.json api/latest.json
+          git diff --staged --quiet || git commit -m "chore: update release notes for v${{ steps.inputs.outputs.version }}"
+          git push

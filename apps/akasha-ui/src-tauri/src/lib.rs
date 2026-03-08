@@ -27,10 +27,14 @@ async fn check_health(port: Option<u16>) -> Result<serde_json::Value, String> {
 }
 
 /// Router metrics: GET /api/router/metrics returns { "provider::model": { total_requests, ... } }.
+/// If period is Some("day"|"week"|"month"|"year"), appends ?period= for filtered aggregates from persisted store.
 #[tauri::command]
-async fn get_router_metrics(port: Option<u16>) -> Result<serde_json::Value, String> {
+async fn get_router_metrics(port: Option<u16>, period: Option<String>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
-    let url = format!("{}/api/router/metrics", daemon_base_url(port));
+    let url = match period.as_deref().filter(|p| !p.is_empty()) {
+        Some(p) => format!("{}/api/router/metrics?period={}", daemon_base_url(port), p),
+        None => format!("{}/api/router/metrics", daemon_base_url(port)),
+    };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
@@ -58,8 +62,22 @@ struct SendMessageAckResult {
     message: String,
 }
 
+#[derive(serde::Deserialize)]
+struct AttachmentPayload {
+    #[serde(rename = "type")]
+    typ: Option<String>,
+    name: Option<String>,
+    content_base64: Option<String>,
+    mime_type: Option<String>,
+}
+
 #[tauri::command]
-async fn send_message_ack(message: String, session_id: Option<String>, port: Option<u16>) -> Result<SendMessageAckResult, String> {
+async fn send_message_ack(
+    message: String,
+    session_id: Option<String>,
+    attachments: Option<Vec<AttachmentPayload>>,
+    port: Option<u16>,
+) -> Result<SendMessageAckResult, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let base = daemon_base_url(port);
     let url = format!("{}/api/message", base);
@@ -67,10 +85,33 @@ async fn send_message_ack(message: String, session_id: Option<String>, port: Opt
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| e.to_string())?;
-    let body = match session_id.as_deref() {
-        Some(s) if !s.is_empty() => serde_json::json!({ "message": message, "session_id": s }),
-        _ => serde_json::json!({ "message": message }),
+    // Si pièces jointes présentes et message vide, envoyer un libellé pour que la tâche reçoive un contenu (évite "message": "").
+    let message_for_body = match attachments.as_deref() {
+        Some(a) if !a.is_empty() && message.trim().is_empty() => "(Pièce(s) jointe(s))".to_string(),
+        _ => message,
     };
+    let mut body = match session_id.as_deref() {
+        Some(s) if !s.is_empty() => serde_json::json!({ "message": message_for_body, "session_id": s }),
+        _ => serde_json::json!({ "message": message_for_body }),
+    };
+    if let Some(ref atts) = attachments {
+        if !atts.is_empty() {
+            let arr: Vec<serde_json::Value> = atts
+                .iter()
+                .map(|a| {
+                    let typ = a.typ.as_deref().unwrap_or("document");
+                    let name = a.name.as_deref().unwrap_or("file");
+                    serde_json::json!({
+                        "type": typ,
+                        "name": name,
+                        "content_base64": a.content_base64.as_deref().unwrap_or(""),
+                        "mime_type": a.mime_type.as_deref().unwrap_or("application/octet-stream")
+                    })
+                })
+                .collect();
+            body["attachments"] = serde_json::Value::Array(arr);
+        }
+    }
     let resp = client
         .post(&url)
         .json(&body)
@@ -439,6 +480,48 @@ async fn reload_plugins(port: Option<u16>) -> Result<(), String> {
     Ok(())
 }
 
+/// POST /api/skills/reload — reload skills from disk (Agent Skills + YAML). Returns { count }.
+#[tauri::command]
+async fn reload_skills(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/skills/reload", daemon_base_url(port));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// POST /api/skills/uninstall — uninstall a skill by name. Body: { "name": "<skill_name>" }.
+#[tauri::command]
+async fn uninstall_skill(name: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/skills/uninstall", daemon_base_url(port));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let body = serde_json::json!({ "name": name.trim() });
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// POST /api/restart — request daemon restart (for slash /restart).
 #[tauri::command]
 async fn restart_daemon(port: Option<u16>) -> Result<(), String> {
@@ -546,6 +629,23 @@ async fn cancel_task(task_id: String, port: Option<u16>) -> Result<serde_json::V
     Ok(json)
 }
 
+/// Human in the loop: GET /api/pending-human-input — list all tasks waiting for user input (for notifications on load or when user was away).
+#[tauri::command]
+async fn get_pending_human_input(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/pending-human-input", daemon_base_url(port));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// Human in the loop: GET /api/tasks/:id/human-input — pending question/context/choices for the task (404 if none).
 #[tauri::command]
 async fn get_task_human_input(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -605,6 +705,25 @@ async fn get_schedule_by_id(schedule_id: String, port: Option<u16>) -> Result<se
     let url = format!("{}/api/schedules/{}", daemon_base_url(port), schedule_id);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Calendar events in range: GET /api/calendar/events?from=...&to=... (for calendar grid view).
+#[tauri::command]
+async fn get_calendar_events(port: Option<u16>, from: String, to: String) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let from_enc = urlencoding::encode(&from);
+    let to_enc = urlencoding::encode(&to);
+    let url = format!("{}/api/calendar/events?from={}&to={}", daemon_base_url(port), from_enc, to_enc);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| e.to_string())?;
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -769,6 +888,68 @@ async fn get_schedule_run_reports(port: Option<u16>) -> Result<serde_json::Value
     Ok(json)
 }
 
+/// User RAG: GET /api/user-rag/documents
+#[tauri::command]
+async fn get_user_rag_documents(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/user-rag/documents", daemon_base_url(port));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// User RAG: POST /api/user-rag/documents
+#[tauri::command]
+async fn add_user_rag_document(
+    name: String,
+    content_base64: String,
+    mime_type: Option<String>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/user-rag/documents", daemon_base_url(port));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let body = serde_json::json!({
+        "name": name,
+        "content_base64": content_base64,
+        "mime_type": mime_type.unwrap_or_else(|| "application/octet-stream".to_string())
+    });
+    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{} {}", status, text));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// User RAG: DELETE /api/user-rag/documents/:id
+#[tauri::command]
+async fn delete_user_rag_document(id: String, port: Option<u16>) -> Result<(), String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/user-rag/documents/{}", daemon_base_url(port), id.trim());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -782,17 +963,22 @@ pub fn run() {
             get_tasks,
             get_task_events,
             cancel_task,
+            get_pending_human_input,
             get_task_human_input,
             post_task_human_reply,
             get_schedules,
             get_schedule_by_id,
             create_schedule,
             delete_schedule,
+            get_calendar_events,
             get_task_runs,
             get_memory_short_term,
             get_memory_long_term,
             delete_memory_long_term,
             get_schedule_run_reports,
+            get_user_rag_documents,
+            add_user_rag_document,
+            delete_user_rag_document,
             get_docs,
             get_config,
             set_config,
@@ -804,6 +990,8 @@ pub fn run() {
             get_advice,
             get_plugins,
             reload_plugins,
+            reload_skills,
+            uninstall_skill,
             get_router_routes,
             set_router_route,
             get_embedded_status,

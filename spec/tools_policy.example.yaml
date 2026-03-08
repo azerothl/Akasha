@@ -10,6 +10,7 @@ allowed_read_paths:
 
 allowed_write_paths:
   - "."                    # idem : autoriser l'écriture dans le répertoire courant
+  # - "C:\\Users\\VOTRE_UTILISATEUR\\AppData\\Local\\akasha"   # Windows : ex. pour enregistrer des jeux/code dans akasha\games
   # Ajoutez ici les répertoires où l'agent peut écrire des fichiers (génération de code, etc.)
 
 allowed_commands:
@@ -18,6 +19,11 @@ allowed_commands:
   - "node"
   - "git"
   # - "cmd"   # Windows : à utiliser avec précaution
+# Pour tout autoriser : allowed_commands: ["*"]  (sous réserve de blocked_commands)
+
+# Optionnel : commandes interdites pour run_command (prioritaire sur allowed_commands)
+# blocked_commands: []
+# Exemple (avec allowed_commands: ["*"]) : blocked_commands: ["format", "rm", "del"]
 
 command_timeout_secs: 60
 
@@ -29,7 +35,8 @@ command_timeout_secs: 60
 # blocked_web_domains: []
 # Exemple : blocked_web_domains: ["evil.com", "tracker.example.org"]
 
-# Optionnel : activer la recherche web (Brave API). Clé : vault "brave_api_key" ou variable d'environnement BRAVE_API_KEY
+# Optionnel : activer la recherche web (Brave API). Si true + BRAVE_API_KEY (ou vault brave_api_key),
+# l'agent utilisera web_search pour chercher lui-même météo, actualités, etc. au lieu de suggérer des sites.
 # web_search_enabled: false
 
 # Optionnel : profils d'outils (default_profile = nom du profil ; tool_profiles[profil] = liste d'outils)
@@ -37,3 +44,8 @@ command_timeout_secs: 60
 # tool_profiles: {}
 # Exemple : default_profile: "coding"
 #          tool_profiles: { coding: [read_file, write_file, search_files, grep_content, run_command, edit_file, apply_patch] }
+
+# Optionnel : hôtes autorisés pour install_skill (site web, GitLab, etc.). Par défaut : GitHub uniquement.
+# allowed_skill_install_hosts: []
+# Exemple (GitHub + GitLab + votre domaine) : allowed_skill_install_hosts: ["github.com", "raw.githubusercontent.com", "gitlab.com", "mon-entreprise.com"]
+# Pour autoriser toute URL HTTPS : allowed_skill_install_hosts: ["*"]

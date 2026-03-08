@@ -17,10 +17,13 @@ Ce document décrit comment **obtenir et utiliser Akasha sans installer Rust ni 
    - **macOS Apple Silicon (M1/M2/M3)** : `akasha-macos-aarch64.zip`
 4. Décompressez l’archive dans un dossier (ex. `C:\Akasha` ou `~/Akasha`).
 
-Vous obtenez trois exécutables (ou deux sur certaines variantes) :
+Vous obtenez :
 - **akasha** (ou `akasha.exe`) — CLI : init, start, stop, doctor, tui, config…
 - **akasha-daemon** — serveur 24/7 (lancé par `akasha start`)
 - **akasha-tui** — interface en terminal (lancée par `akasha tui`)
+- **docs/user_guide.md** — documentation utilisateur (guide pour les binaires uniquement)
+
+**Documentation dans l’interface** : lancez `akasha start` depuis le dossier où vous avez extrait l’archive. L’onglet **Doc** des interfaces (TUI et Web) affiche alors cette documentation. Si le fichier `docs/user_guide.md` est absent du zip, l’onglet Doc affichera « Documentation non disponible ».
 
 ---
 
@@ -94,7 +97,13 @@ L’utilisateur doit dans tous les cas **lancer le daemon** (ou l’avoir déjà
 
 ---
 
-## 6. Résumé pour l’utilisateur lambda
+## 6. Déploiement du site après release (mainteneurs)
+
+Lorsqu’un tag de version est poussé (ex. `v0.1.0`), le workflow **Release** crée la release GitHub puis envoie un **repository_dispatch** au dépôt [azerothl/Akasha_app](https://github.com/azerothl/Akasha_app). Ajouter le secret **AKASHA_APP_DISPATCH_TOKEN** (PAT ou token avec Actions read/write sur Akasha_app). Event : `new_release`. Payload : `version`, `tag`, `release_url`, `repository`, `release_date`, `release_type`, `title`, `description`, `download_url`, `changelog`. Pour qu'Akasha_app récupère les artefacts (zip) depuis le dépôt privé Akasha, ajouter dans Akasha_app le secret **AKASHA_RELEASE_READ_TOKEN** (lecture sur azerothl/Akasha). Exemple de workflow : `.github/akasha_app_update_release_workflow.example.yml`.
+
+---
+
+## 7. Résumé pour l’utilisateur lambda
 
 | Étape | Action |
 |-------|--------|

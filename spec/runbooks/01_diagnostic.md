@@ -17,7 +17,7 @@ Pour recréer les fichiers de config manquants ou minimaux sans exécuter le wiz
 
 - **`akasha doctor --fix`** : crée si absent le data_dir, puis :
   - **llm_router.yaml** : config par défaut (task_types avec akasha_embedded) + section `providers.ollama.base_url` (OLLAMA_HOST ou `http://localhost:11434`) ;
-  - **tools_policy.yaml** : copie de `spec/tools_policy.example.yaml` si présent, sinon fichier minimal (aucun chemin autorisé par défaut) ;
+  - **tools_policy.yaml** : copie de `spec/tools_policy.example.yaml` si présent (en cas de build depuis les sources), sinon fichier minimal inline (aucun chemin autorisé par défaut) — utilisable avec les binaires seuls ;
   - **connectors.env** : fichier vide commenté (activation Telegram/Slack/Discord à la main).
 
 Ne modifie pas les fichiers déjà présents. À utiliser quand les chemins indiqués par `akasha doctor` pointent vers des fichiers manquants.

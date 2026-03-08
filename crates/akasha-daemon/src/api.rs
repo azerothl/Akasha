@@ -13,8 +13,17 @@ use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+/// Request for a sub-agent delegation (from a worker to the orchestrator). Reply is sent on reply_tx.
+pub struct DelegationRequest {
+    pub requesting_task_id: Uuid,
+    pub agent_type: String,
+    pub message: String,
+    pub reply_tx: oneshot::Sender<Result<String, String>>,
+}
 
 /// Limits concurrent background LLM fact-extraction tasks to prevent unbounded queue growth under load.
 static EXTRACT_SEMAPHORE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
@@ -37,13 +46,15 @@ async fn get_task_list(store_path: &Path) -> String {
         .rev()
         .take(50)
         .map(|t| {
+            let label = task_label(t.initial_message.as_ref(), &t.id);
             serde_json::json!({
                 "id": t.id.to_string(),
                 "parent_task_id": t.parent_task_id.map(|u| u.to_string()),
                 "status": t.status.as_str(),
                 "assigned_agent": t.assigned_agent,
                 "created_at": t.created_at.to_rfc3339(),
-                "updated_at": t.updated_at.to_rfc3339()
+                "updated_at": t.updated_at.to_rfc3339(),
+                "label": label,
             })
         })
         .collect();
@@ -127,6 +138,142 @@ pub fn new_process_registry() -> ProcessRegistry {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
 }
 
+/// Registry of task-completion notifiers: task_id → Notify. Written by the conversation worker
+/// on task completion; awaited by run_delegation_handler and the orchestrator aggregator so they
+/// can react immediately instead of polling TaskStore every 500 ms.
+pub type TaskCompletionRegistry = Arc<RwLock<std::collections::HashMap<Uuid, Arc<tokio::sync::Notify>>>>;
+
+pub fn new_task_completion_registry() -> TaskCompletionRegistry {
+    Arc::new(RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Runs in a loop: receives DelegationRequest, checks depth (root or direct child only), creates child task, sends to conv_tx, waits for child completion, sends reply on oneshot.
+pub async fn run_delegation_handler(
+    mut delegation_rx: mpsc::Receiver<DelegationRequest>,
+    conv_tx: mpsc::Sender<OrchestratorTask>,
+    store_path: PathBuf,
+    progress: ProgressCache,
+    task_completion: TaskCompletionRegistry,
+) {
+    while let Some(req) = delegation_rx.recv().await {
+        let store = match TaskStore::open(&store_path) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = req.reply_tx.send(Err(format!("store open: {}", e)));
+                continue;
+            }
+        };
+        let requesting = match store.get(req.requesting_task_id) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                let _ = req.reply_tx.send(Err("requesting task not found".to_string()));
+                continue;
+            }
+            Err(e) => {
+                let _ = req.reply_tx.send(Err(format!("store: {}", e)));
+                continue;
+            }
+        };
+        if let Some(parent_id) = requesting.parent_task_id {
+            if let Ok(Some(parent)) = store.get(parent_id) {
+                if parent.parent_task_id.is_some() {
+                    let _ = req.reply_tx.send(Err("max delegation depth (sous-sous-agent non autorisé)".to_string()));
+                    continue;
+                }
+            }
+        }
+        let child_id = Uuid::new_v4();
+        let agent_type = if ["search", "code", "conversation"].contains(&req.agent_type.as_str()) {
+            req.agent_type.clone()
+        } else {
+            "conversation".to_string()
+        };
+        const MAX_INITIAL_MSG: usize = 500;
+        let initial_message = if req.message.chars().count() > MAX_INITIAL_MSG {
+            Some(req.message.chars().take(MAX_INITIAL_MSG).chain(std::iter::once('…')).collect::<String>())
+        } else if req.message.is_empty() {
+            None
+        } else {
+            Some(req.message.clone())
+        };
+        let child_task = Task {
+            id: child_id,
+            parent_task_id: Some(req.requesting_task_id),
+            status: TaskStatus::Pending,
+            assigned_agent: agent_type.clone(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            initial_message,
+        };
+        if store.insert(&child_task).is_err() {
+            let _ = req.reply_tx.send(Err("store insert failed".to_string()));
+            continue;
+        }
+        // Register a completion notifier *before* sending to conv_tx so the worker can notify
+        // even if it completes before the spawned waiter calls notified().
+        let notify = Arc::new(tokio::sync::Notify::new());
+        {
+            let mut reg = task_completion.write().await;
+            reg.insert(child_id, notify.clone());
+        }
+        if conv_tx
+            .send(OrchestratorTask {
+                task_id: child_id,
+                message: req.message.clone(),
+                session_id: String::new(),
+                image_data_urls: None,
+            })
+            .await
+            .is_err()
+        {
+            task_completion.write().await.remove(&child_id);
+            let _ = req.reply_tx.send(Err("conv_tx closed".to_string()));
+            continue;
+        }
+        let reply_tx = req.reply_tx;
+        let store_path = store_path.clone();
+        let progress = progress.clone();
+        let task_completion = task_completion.clone();
+        tokio::spawn(async move {
+            const DELEGATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+            let timed_out = tokio::time::timeout(DELEGATION_TIMEOUT, notify.notified()).await.is_err();
+            // Ensure the registry entry is removed regardless of outcome.
+            task_completion.write().await.remove(&child_id);
+            if timed_out {
+                let _ = reply_tx.send(Err("delegation timeout (5 min)".to_string()));
+                return;
+            }
+            // Single store read to retrieve the final task status and result message.
+            let store = match TaskStore::open(&store_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = reply_tx.send(Err(format!("TaskStore open failed: {}", e)));
+                    return;
+                }
+            };
+            let task = match store.get(child_id) {
+                Ok(Some(t)) => t,
+                _ => {
+                    let _ = reply_tx.send(Err("child task not found in store".to_string()));
+                    return;
+                }
+            };
+            let msg = {
+                let g = progress.read().await;
+                g.get(&child_id)
+                    .and_then(|q| q.back())
+                    .map(|e| e.message.clone())
+                    .unwrap_or_else(|| if matches!(task.status, TaskStatus::Failed) { "Échec.".to_string() } else { "Terminé.".to_string() })
+            };
+            let _ = reply_tx.send(match task.status {
+                TaskStatus::Completed => Ok(msg),
+                TaskStatus::Failed => Err(msg),
+                _ => Err("child task did not complete successfully".to_string()),
+            });
+        });
+    }
+}
+
 /// Pending "human in the loop" request: agent is waiting for the user to answer.
 pub struct PendingHumanInput {
     pub question: String,
@@ -140,6 +287,28 @@ pub type HumanInputStore = Arc<RwLock<std::collections::HashMap<Uuid, PendingHum
 
 pub fn new_human_input_store() -> HumanInputStore {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Parse headers from the first chunk to get header length and Content-Length. Returns (header_body_sep_index, content_length).
+/// header_body_sep_index is the index of the start of "\r\n\r\n"; body starts at header_body_sep_index + 4.
+pub fn parse_content_length(buf: &[u8]) -> Option<(usize, usize)> {
+    let sep = b"\r\n\r\n";
+    let header_end = buf.windows(sep.len()).position(|w| w == sep)?;
+    let header_slice = &buf[..header_end];
+    let mut content_length: Option<usize> = None;
+    for line in header_slice.split(|&b| b == b'\n') {
+        let line_str = String::from_utf8_lossy(line).to_string();
+        let line_str = line_str.trim_end_matches('\r');
+        if let Some((name, value)) = line_str.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                if let Ok(n) = value.trim().parse::<usize>() {
+                    content_length = Some(n);
+                }
+                break;
+            }
+        }
+    }
+    content_length.map(|cl| (header_end, cl))
 }
 
 /// Parsed HTTP request: method, path, body, and lowercase header map.
@@ -197,7 +366,7 @@ pub fn json_response(status: &str, body: &str) -> String {
 /// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_file", "read_file <path> — lire le contenu d'un fichier texte"),
-    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (path puis contenu)"),
+    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier. À UTILISER dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier (ex. « enregistre dans … », « sauvegarde … ») ; ne jamais refuser ni proposer de copier-coller. Path Windows (C:\\...) ou Unix."),
     ("search_files", "search_files <dir> <pattern> — chercher des fichiers (glob) sous un répertoire"),
     ("grep_content", "grep_content <dir> <pattern> [file_glob] — chercher le motif dans le contenu des fichiers (ex. grep_content . \"fn \" \"*.rs\")"),
     ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
@@ -222,6 +391,9 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("image", "image <path|url> [prompt] — analyse d'image par modèle vision (non implémenté, prévu phase 3)"),
     ("pdf", "pdf <path|url> — extraire le texte d'un PDF (non implémenté, prévu phase 3)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
+    ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (ex. search pour recherche web). agent_type: search | code | conversation. Un seul niveau de délégation autorisé."),
+    ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
+    ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
 ];
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -230,7 +402,7 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
             AVAILABLE_TOOLS
                 .iter()
                 .filter(move |(name, _)| {
-                    *name == "ask_user" || allowed.iter().any(|a| a == *name)
+                    *name == "ask_user" || *name == "install_skill" || *name == "uninstall_skill" || allowed.iter().any(|a| a == *name)
                 }),
         )
     } else {
@@ -241,109 +413,492 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
         .join(" ; ")
 }
 
-/// True if the user message suggests they want data from an external service (repo, API, etc.).
-fn message_suggests_external_service(message: &str) -> bool {
+/// True if the user message suggests they want to save/write a file to disk.
+fn message_suggests_save_file(message: &str) -> bool {
     let m = message.to_lowercase();
-    const KEYWORDS: &[&str] = &[
-        " repo ",
-        "github",
-        "gitlab",
-        "dépôt",
-        "dépôts",
-
-    // Keywords that should match as standalone words (case-insensitive).
-    const WHOLE_WORD_KEYWORDS: &[&str] = &[
-        "repo",
-        "github",
-        "gitlab",
-        "dépôt",
-        "dépôts",
-        "api",
-        "pr",
-        "issues",
-        "token",
-        "credentials",
+    let keywords = [
+        "enregistre", "enregistrer", "sauvegarde", "sauvegarder", "écris dans", "ecris dans",
+        "write to file", "save to", "save the file", "write the file", "dans le dossier",
+        "dans le fichier", "dans un fichier", "sur le disque", "to disk", "to the file",
     ];
+    keywords.iter().any(|k| m.contains(k))
+}
 
-    // Substring patterns that are meaningful even inside longer phrases.
-    const SUBSTRING_KEYWORDS: &[&str] = &[
-        " connecte",
-        " connect ",
-        "pull request",
-        "clé api",
-        "authentif",
+/// True if the user message suggests they want external/live information (weather, news, etc.).
+fn message_suggests_external_info(message: &str) -> bool {
+    let m = message.to_lowercase();
+    let keywords = [
+        "météo", "meteo", "weather", "prévisions", "previsions", "actualités", "actualites",
+        "horaires", "trafic", "prix", "cours ", "bourse", "news", "nouvelle", "semaine à",
+        "aujourd'hui", "demain", "connaître la", "connaitre la", "quelle est la météo",
+        "quel temps", "prévision", "prevision",
     ];
+    keywords.iter().any(|k| m.contains(k))
+}
 
-    // Tokenize the message into "words" to detect standalone keywords more reliably.
-    let mut words = Vec::new();
-    let mut current = String::new();
-    for ch in m.chars() {
-        if ch.is_alphanumeric() || ch == '\'' {
-            current.push(ch);
-        } else if !current.is_empty() {
-            words.push(std::mem::take(&mut current));
+/// Default hosts when policy does not set allowed_skill_install_hosts (GitHub only).
+const INSTALL_SKILL_DEFAULT_HOSTS: &[&str] = &["github.com", "raw.githubusercontent.com", "www.github.com"];
+
+fn is_github_host(host: &str) -> bool {
+    INSTALL_SKILL_DEFAULT_HOSTS
+        .iter()
+        .any(|h| host == *h || host.ends_with(&format!(".{}", *h)))
+}
+
+/// Result of parsing a skill install URL: raw SKILL.md URL, skill name, and optional GitHub API path for listing contents.
+struct ParsedSkillUrl {
+    raw_skill_url: String,
+    skill_name: String,
+    /// (owner, repo, branch, path) for GitHub API only; None for other hosts (single-file install).
+    api_path: Option<(String, String, String, String)>,
+}
+
+/// Parse a skill install URL (GitHub, GitLab, or any allowed HTTPS host) into raw SKILL.md URL, skill name, and optional API path.
+/// allowed_hosts: from policy; if it contains "*", any HTTPS host is allowed. Otherwise only listed hosts (and subdomains) are allowed.
+fn parse_skill_install_url(url: &str, allowed_hosts: &[String]) -> Option<ParsedSkillUrl> {
+    let url = url.trim();
+    let parsed = url.parse::<url::Url>().ok()?;
+    let scheme = parsed.scheme();
+    if scheme != "https" {
+        return None;
+    }
+    let host = parsed.host_str()?.to_lowercase();
+    let host_allowed = allowed_hosts.iter().any(|h| h == "*")
+        || allowed_hosts.iter().any(|h| host == *h || host.ends_with(&format!(".{}", h)));
+    if !host_allowed {
+        return None;
+    }
+    let path = parsed.path().trim_matches('/');
+    if path.is_empty() {
+        return None;
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+
+    if is_github_host(&host) {
+        if host.contains("raw.githubusercontent.com") {
+            if segments.len() < 4 {
+                return None;
+            }
+            let (raw_skill_url, skill_name) = if path.ends_with("SKILL.md") {
+                let skill_name = segments.get(segments.len().saturating_sub(2)).copied().unwrap_or("skill").to_string();
+                if !crate::user_rag::is_safe_relative_filename(&skill_name) {
+                    return None;
+                }
+                (url.to_string(), skill_name)
+            } else {
+                let raw_url = format!("https://raw.githubusercontent.com/{}", path.trim_end_matches('/'));
+                let raw_skill_url = if raw_url.ends_with(".md") { raw_url } else { format!("{}/SKILL.md", raw_url) };
+                let skill_name = segments.last().copied().unwrap_or("skill").to_string();
+                if !crate::user_rag::is_safe_relative_filename(&skill_name) {
+                    return None;
+                }
+                (raw_skill_url, skill_name)
+            };
+            let api_path = if segments.len() >= 4 {
+                let owner = segments[0].to_string();
+                let repo = segments[1].to_string();
+                let branch = segments[2].to_string();
+                let path_part = segments[3..].join("/");
+                let path_part = path_part.strip_suffix("SKILL.md").map(|s| s.trim_end_matches('/')).unwrap_or(&path_part).to_string();
+                Some((owner, repo, branch, path_part))
+            } else {
+                None
+            };
+            Some(ParsedSkillUrl { raw_skill_url, skill_name, api_path })
+        } else {
+            let tree_idx = segments.iter().position(|s| *s == "tree")?;
+            if tree_idx + 2 > segments.len() {
+                return None;
+            }
+            let owner = (*segments.get(0)?).to_string();
+            let repo = (*segments.get(1)?).to_string();
+            let branch = (*segments.get(tree_idx + 1)?).to_string();
+            let path_segments = &segments[tree_idx + 2..];
+            let path_part = path_segments.join("/");
+            let skill_name = path_segments.last().copied().unwrap_or("skill").to_string();
+            if !crate::user_rag::is_safe_relative_filename(&skill_name) {
+                return None;
+            }
+            let raw_skill_url = if path_part.is_empty() {
+                format!("https://raw.githubusercontent.com/{}/{}/{}/SKILL.md", owner, repo, branch)
+            } else {
+                format!(
+                    "https://raw.githubusercontent.com/{}/{}/{}/{}/SKILL.md",
+                    owner, repo, branch, path_part
+                )
+            };
+            let api_path = Some((owner, repo, branch, path_part));
+            Some(ParsedSkillUrl { raw_skill_url, skill_name, api_path })
+        }
+    } else {
+        // Generic host (site web, GitLab, etc.): single-file install. URL must point to a .md file or we use path as skill name.
+        let raw_skill_url = if path.ends_with(".md") {
+            url.to_string()
+        } else if path.ends_with('/') {
+            format!("{}SKILL.md", url.trim_end_matches('/'))
+        } else {
+            format!("{}/SKILL.md", url.trim_end_matches('/'))
+        };
+        let skill_name = segments
+            .last()
+            .and_then(|s| s.strip_suffix(".md"))
+            .or_else(|| segments.last().copied())
+            .unwrap_or("skill")
+            .to_string();
+        let skill_name = skill_name.to_lowercase().replace(' ', "-");
+        if !crate::user_rag::is_safe_relative_filename(&skill_name) {
+            return None;
+        }
+        Some(ParsedSkillUrl {
+            raw_skill_url,
+            skill_name,
+            api_path: None,
+        })
+    }
+}
+
+/// Extract required CLI commands (bins) from SKILL.md front matter.
+/// Looks for metadata.<key>.requires.bins or requires.bins (array of strings). Falls back to [skill_name] for CLI skills.
+fn skill_required_bins(skill_md_content: &str, skill_name: &str) -> Vec<String> {
+    let yaml_str = match skill_md_content.strip_prefix("---") {
+        Some(r) => r,
+        None => return vec![skill_name.to_string()],
+    };
+    let end = match yaml_str.find("\n---") {
+        Some(i) => i,
+        None => return vec![skill_name.to_string()],
+    };
+    let yaml_str = yaml_str[..end].trim();
+    let value: serde_yaml::Value = match serde_yaml::from_str(yaml_str) {
+        Ok(v) => v,
+        Err(_) => return vec![skill_name.to_string()],
+    };
+    fn bins_from_value(v: &serde_yaml::Value) -> Option<Vec<String>> {
+        let arr = v.get("bins")?.as_sequence()?;
+        let list: Vec<String> = arr
+            .iter()
+            .filter_map(|a| a.as_str().map(String::from))
+            .collect();
+        if list.is_empty() {
+            None
+        } else {
+            Some(list)
         }
     }
-    if !current.is_empty() {
-        words.push(current);
+    if let Some(requires) = value.get("requires") {
+        if let Some(bins) = bins_from_value(requires) {
+            return bins;
+        }
     }
+    if let Some(metadata) = value.get("metadata").and_then(|m| m.as_mapping()) {
+        for (_key, val) in metadata {
+            if let Some(requires) = val.get("requires") {
+                if let Some(bins) = bins_from_value(requires) {
+                    return bins;
+                }
+            }
+        }
+    }
+    vec![skill_name.to_string()]
+}
 
-    // First, check for whole-word matches.
-    if words
-        .iter()
-        .any(|w| WHOLE_WORD_KEYWORDS.contains(&w.as_str()))
+/// Extract the Markdown body (instructions) from SKILL.md content (after the second ---).
+fn skill_md_body(content: &str) -> &str {
+    let rest = match content.strip_prefix("---") {
+        Some(r) => r,
+        None => return content,
+    };
+    let body_start = match rest.find("\n---") {
+        Some(i) => 3 + 1 + i + 4, // "---" + "\n" + "---" + "\n" after second ---
+        None => return content,
+    };
+    content.get(body_start..).unwrap_or(content).trim()
+}
+
+/// Fetch additional files from a GitHub repo path (scripts, references, etc.) and write into skill_dir. Uses a queue to avoid recursive async.
+async fn fetch_github_skill_extra_files(
+    client: &reqwest::Client,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    root_path: &str,
+    skill_dir: &Path,
+) -> Vec<String> {
+    let mut downloaded = Vec::new();
+    let mut queue: Vec<(String, PathBuf)> = vec![(root_path.to_string(), skill_dir.to_path_buf())];
+    while let Some((path, dir)) = queue.pop() {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/contents/{}?ref={}",
+            owner, repo, path, branch
+        );
+        let resp = match client.get(&url).header("User-Agent", "Akasha").send().await {
+            Ok(r) if r.status().is_success() => r,
+            _ => continue,
+        };
+        let items: Vec<serde_json::Value> = match resp.json().await {
+            Ok(arr) => arr,
+            Err(_) => continue,
+        };
+        for item in items {
+            let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let typ = item.get("type").and_then(|t| t.as_str()).unwrap_or("file");
+            if !crate::user_rag::is_safe_relative_filename(name) {
+                continue;
+            }
+            if typ == "file" && name != "SKILL.md" {
+                let download_url = item.get("download_url").and_then(|u| u.as_str());
+                if let Some(url) = download_url {
+                    if let Ok(resp) = client.get(url).send().await {
+                        if let Ok(content) = resp.text().await {
+                            let dest = dir.join(name);
+                            if std::fs::write(&dest, &content).is_ok() {
+                                let rel = if path == root_path { name.to_string() } else { format!("{}/{}", path.strip_prefix(root_path).unwrap_or(path.as_str()).trim_start_matches('/'), name) };
+                                downloaded.push(rel);
+                            }
+                        }
+                    }
+                }
+            } else if typ == "dir" {
+                let subpath = if path.is_empty() { name.to_string() } else { format!("{}/{}", path, name) };
+                let subdir = dir.join(name);
+                let _ = std::fs::create_dir_all(&subdir);
+                queue.push((subpath, subdir));
+            }
+        }
+    }
+    downloaded
+}
+
+/// Install a skill from a URL (Agent Skills spec: https://agentskills.io/specification).
+/// Supports GitHub (with directory listing), or any HTTPS host allowed in tools_policy (allowed_skill_install_hosts).
+/// Fetches SKILL.md, optional scripts/references/assets (GitHub only), writes to data_dir/skills/<name>/,
+/// reloads the registry, adds required commands to tools_policy.yaml, and optionally hot-reloads the in-memory policy.
+async fn do_install_skill(
+    url: &str,
+    data_dir: &Path,
+    spec_dir: &Path,
+    skill_registry: &crate::skills::SkillRegistry,
+    allowed_hosts: &[String],
+    tools_reload: Option<(
+        &std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>,
+        &Path,
+    )>,
+) -> (bool, String) {
+    let parsed = match parse_skill_install_url(url, allowed_hosts) {
+        Some(x) => x,
+        None => {
+            let hint = if allowed_hosts.iter().any(|h| h == "*") {
+                "URL invalide ou schéma non supporté (utilisez https://).".to_string()
+            } else {
+                format!(
+                    "URL non autorisée ou invalide. Hôtes autorisés (tools_policy.yaml allowed_skill_install_hosts) : {}.",
+                    allowed_hosts.join(", ")
+                )
+            };
+            return (false, format!("[install_skill] {}", hint));
+        }
+    };
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("Akasha")
+        .build()
     {
-        return true;
+        Ok(c) => c,
+        Err(e) => return (false, format!("[install_skill] client HTTP: {}", e)),
+    };
+    let body = match client.get(&parsed.raw_skill_url).send().await {
+        Ok(r) if r.status().is_success() => match r.text().await {
+            Ok(t) => t,
+            Err(e) => return (false, format!("[install_skill] lecture réponse: {}", e)),
+        },
+        Ok(r) => return (false, format!("[install_skill] HTTP {} — {}", r.status(), parsed.raw_skill_url)),
+        Err(e) => return (false, format!("[install_skill] requête: {}", e)),
+    };
+    if body.trim().is_empty() {
+        return (false, format!("[install_skill] SKILL.md vide ou introuvable: {}", parsed.raw_skill_url));
     }
-
-    // Then, fall back to substring-based heuristics.
-    SUBSTRING_KEYWORDS.iter().any(|k| m.contains(k))
+    let skill_dir = data_dir.join("skills").join(&parsed.skill_name);
+    if let Err(e) = std::fs::create_dir_all(&skill_dir) {
+        return (
+            false,
+            format!("[install_skill] impossible de créer le dossier {}: {}", skill_dir.display(), e),
+        );
+    }
+    let skill_md_path = skill_dir.join("SKILL.md");
+    if let Err(e) = std::fs::write(&skill_md_path, &body) {
+        return (
+            false,
+            format!("[install_skill] écriture {}: {}", skill_md_path.display(), e),
+        );
+    }
+    let extra_files = if let Some((ref owner, ref repo, ref branch, ref path)) = parsed.api_path {
+        fetch_github_skill_extra_files(&client, owner, repo, branch, path, &skill_dir).await
+    } else {
+        vec![]
+    };
+    match skill_registry.reload(data_dir, spec_dir).await {
+        Ok(count) => {
+            let body_instructions = skill_md_body(&body);
+            let total_chars = body_instructions.chars().count();
+            let body_preview = if total_chars > 8000 {
+                let truncated: String = body_instructions.chars().take(8000).collect();
+                format!("{}... [tronqué, {} caractères au total]", truncated, total_chars)
+            } else {
+                body_instructions.to_string()
+            };
+            let extra_msg = if extra_files.is_empty() {
+                String::new()
+            } else {
+                format!(" Fichiers additionnels récupérés (scripts/, references/, assets/) : {}.", extra_files.join(", "))
+            };
+            let (mut commands_added_msg, need_hot_reload) = {
+                let bins = skill_required_bins(&body, &parsed.skill_name);
+                let policy_path = data_dir.join("tools_policy.yaml");
+                if let Ok(mut policy) = akasha_tools::ToolsPolicy::load_from_path(&policy_path) {
+                    let added = policy.add_allowed_commands(&bins);
+                    if !added.is_empty() {
+                        if let Err(e) = policy.save_to_path(&policy_path) {
+                            (format!(" Commandes {} non ajoutées à tools_policy.yaml (écriture: {}).", added.join(", "), e), false)
+                        } else {
+                            let added_joined = added.join(", ");
+                            (format!(" Commande(s) ajoutée(s) à tools_policy.yaml (allowed_commands) : {}.", added_joined), true)
+                        }
+                    } else {
+                        (String::new(), false)
+                    }
+                } else {
+                    (String::new(), false)
+                }
+            };
+            if need_hot_reload {
+                if let Some((r, path)) = tools_reload {
+                    if let Ok(mut reloaded) = akasha_tools::ToolsPolicy::load_from_path(path) {
+                        if let Ok(v) = akasha_vault::open_vault(data_dir) {
+                            reloaded.brave_api_key = v.get("brave_api_key").ok();
+                        }
+                        *r.write().await = std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
+                        commands_added_msg = commands_added_msg.replace(" (allowed_commands) :", " ; politique rechargée à chaud :");
+                    }
+                }
+            }
+            let skill_dir_display = skill_dir.display().to_string();
+            let msg = format!(
+                "[install_skill] Skill « {} » installé et rechargé ({} skill(s) chargé(s)).{}{}\n\
+                 Répertoire du skill (pour read_file sur references/, scripts/, assets/) : {}\n\n\
+                 Contenu du skill (à utiliser pour savoir comment l'utiliser) :\n\n---\n{}",
+                parsed.skill_name, count, extra_msg, commands_added_msg, skill_dir_display, body_preview
+            );
+            (true, msg)
+        }
+        Err(e) => (
+            false,
+            format!("[install_skill] skill écrit mais rechargement échoué: {}", e),
+        ),
+    }
 }
 
-const EXTERNAL_SERVICE_REMINDER: &str = "\n\n[Rappel] L'utilisateur demande des données depuis un service externe. Tu DOIS répondre UNIQUEMENT par un appel à l'outil TOOL: ask_user (avec le JSON question/context), pas par un message en texte libre. Ainsi la réponse de l'utilisateur reviendra dans la même tâche et tu pourras continuer. Si ask_user n'est pas disponible, explique en message et demande à l'utilisateur de confirmer. Ne réponds pas que tu ne peux pas. Ne invente pas de commandes (ex. /status repo:... n'existe pas) ; les commandes réelles sont dans /help.";
-
-/// True if the user message suggests they want to choose between options or confirm something before the agent continues.
-fn message_suggests_user_choice_or_confirmation(message: &str) -> bool {
-    let m = message.to_lowercase();
-    const KEYWORDS: &[&str] = &[
-        "à choisir",
-        "2 options",
-        "2 différents",
-        "deux options",
-        "plusieurs options",
-        "une fois le choix",
-        "once the choice",
-        "once you",
-        "which one",
-        "lequel ",
-        "laquelle ",
-        "choisir entre",
-        "choose between",
-        "propose moi",
-        "propose-moi",
-        "propose 2",
-        "proposes ",
-        "confirm",
-        "confirme",
-        "confirmer",
-        "demande à l'utilisateur",
-        "ask the user",
-        "avant de continuer",
-        "before continuing",
-    ];
-    KEYWORDS.iter().any(|k| m.contains(k))
+/// Uninstall a skill by name: remove data_dir/skills/<name>, remove command from tools_policy, reload registry (and optionally hot-reload executor).
+async fn do_uninstall_skill(
+    name: &str,
+    data_dir: &Path,
+    spec_dir: &Path,
+    skill_registry: &crate::skills::SkillRegistry,
+    tools_reload: Option<(
+        &std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>,
+        &Path,
+    )>,
+) -> (bool, String) {
+    let name = name.trim();
+    if name.is_empty() {
+        return (false, "[uninstall_skill] usage: uninstall_skill <name> (ex. uninstall_skill bankr)".to_string());
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return (
+            false,
+            "[uninstall_skill] nom invalide (utiliser uniquement lettres, chiffres, _ et -)".to_string(),
+        );
+    }
+    let skill_dir = data_dir.join("skills").join(name);
+    if !skill_dir.exists() {
+        return (
+            false,
+            format!(
+                "[uninstall_skill] skill « {} » introuvable dans data_dir/skills/ (dossier absent).",
+                name
+            ),
+        );
+    }
+    if !skill_dir.is_dir() {
+        return (
+            false,
+            format!("[uninstall_skill] « {} » n'est pas un répertoire.", skill_dir.display()),
+        );
+    }
+    if let Err(e) = std::fs::remove_dir_all(&skill_dir) {
+        return (
+            false,
+            format!("[uninstall_skill] impossible de supprimer {}: {}", skill_dir.display(), e),
+        );
+    }
+    let policy_path = data_dir.join("tools_policy.yaml");
+    let mut policy_updated = false;
+    if policy_path.exists() {
+        if let Ok(mut policy) = akasha_tools::ToolsPolicy::load_from_path(&policy_path) {
+            if policy.remove_allowed_command(name) {
+                if policy.save_to_path(&policy_path).is_ok() {
+                    policy_updated = true;
+                }
+            }
+        }
+    }
+    if policy_updated {
+        if let Some((r, path)) = tools_reload {
+            if let Ok(mut reloaded) = akasha_tools::ToolsPolicy::load_from_path(path) {
+                if let Ok(v) = akasha_vault::open_vault(data_dir) {
+                    reloaded.brave_api_key = v.get("brave_api_key").ok();
+                }
+                *r.write().await = std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
+            }
+        }
+    }
+    match skill_registry.reload(data_dir, spec_dir).await {
+        Ok(count) => {
+            let policy_msg = if policy_updated {
+                format!(" Commande « {} » retirée de tools_policy.yaml (allowed_commands).", name)
+            } else {
+                String::new()
+            };
+            (
+                true,
+                format!(
+                    "[uninstall_skill] Skill « {} » désinstallé ({} skill(s) chargé(s) restants).{}",
+                    name, count, policy_msg
+                ),
+            )
+        }
+        Err(e) => (
+            false,
+            format!("[uninstall_skill] dossier supprimé mais rechargement du registry échoué: {}", e),
+        ),
+    }
 }
 
-const USER_CHOICE_REMINDER: &str = "\n\n[Rappel] L'utilisateur demande des options au choix ou une étape qui nécessite sa réponse. Tu DOIS répondre UNIQUEMENT par un appel à l'outil TOOL: ask_user (JSON avec question et, si pertinent, choices), pas en texte libre.";
+const WRITE_FILE_REMINDER: &str = "\n[Rappel: l'utilisateur demande d'enregistrer un fichier. Tu DOIS répondre UNIQUEMENT par la ligne TOOL: write_file <chemin_complet> puis le contenu du fichier sur les lignes suivantes. Ne dis jamais que tu ne peux pas écrire sur le disque.]\n\n";
+
+const WEB_SEARCH_REMINDER: &str = "\n[Rappel: l'utilisateur demande des informations externes (météo, actualités, etc.). Tu DOIS utiliser TOOL: web_search <requête> pour chercher toi-même puis répondre avec les résultats. Ne propose pas d'aller sur un site sans avoir d'abord utilisé web_search.]\n\n";
 
 /// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
 const APP_CONTEXT: &str = "[Contexte Akasha] Tu es l'assistant intégré à Akasha. Akasha est l'application dans laquelle tu tournes actuellement. \
 Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : \
 commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Mémoire/Doc/Activité), \
-commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, etc.). \
+commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, /skills reload, etc.). \
+Pour installer un CLI en global (ex. « installe le CLI bankr », « npm install -g @bankr/cli »), répondre par TOOL: run_command npm install -g <package> (ne pas générer de script à faire exécuter par l'utilisateur). Pour utiliser une clé du vault dans une commande : TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (le système injecte la valeur du vault). \
+Skills (capacités supplémentaires) : l'utilisateur peut en ajouter sans modifier le code. Quand l'utilisateur demande d'installer un skill depuis une URL (ex. « installe le skill bankr depuis … »), tu DOIS répondre par TOOL: install_skill <url>. Pour désinstaller un skill : TOOL: uninstall_skill <nom> (ex. TOOL: uninstall_skill bankr). Quand l'utilisateur te demande d'effectuer une action avec un skill (ex. « vérifie mon wallet bankr », « lance bankr whoami »), tu DOIS répondre UNIQUEMENT par une ligne TOOL: <nom_du_skill> <arguments> (ex. TOOL: bankr whoami) pour que le système exécute la commande ; ne dis pas à l'utilisateur de lancer la commande lui-même. Sinon, l'utilisateur peut placer les fichiers dans le dossier skills et exécuter /skills reload. \
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
 Réponds en français sauf si l'utilisateur utilise une autre langue. \
 Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »). \
+Pour les questions sur des informations que tu n'as pas (météo, prévisions, actualités, horaires, etc.), tu dois utiliser l'outil web_search pour chercher toi-même puis répondre avec les résultats. Ne propose pas à l'utilisateur d'aller sur un site sans avoir d'abord utilisé web_search si tu as accès à cet outil. Si web_search renvoie une erreur (ex. non activé), tu peux alors suggérer des sites et indiquer comment activer la recherche web (tools_policy.yaml, web_search_enabled, BRAVE_API_KEY). \
+Tu as accès à l'outil write_file : tu DOIS l'utiliser dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier (ex. « enregistre le code dans … », « sauvegarde dans ce dossier », « write to file »). Réponds UNIQUEMENT par une ligne TOOL: write_file <chemin_complet> puis le contenu du fichier sur les lignes suivantes. Ne dis JAMAIS « je ne peux pas écrire sur le disque » ou « copie-colle le code toi-même » — si le chemin est refusé par la politique, l'outil renverra une erreur et tu expliqueras alors comment ajouter le préfixe dans tools_policy.yaml (allowed_write_paths). Les chemins peuvent être Windows (C:\\Users\\...) ou Unix. \
 Règle importante : dès que tu dois demander à l'utilisateur un choix, une confirmation ou une information (options à choisir, chemin, identifiants, etc.) puis enchaîner dans la même tâche, tu DOIS utiliser l'outil ask_user (TOOL: ask_user puis JSON avec question/context/choices). Ne pose pas la question en texte libre, sinon la réponse ouvrira une nouvelle tâche et tu ne pourras pas continuer. Pour un accès à un service externe (GitHub, API, etc.), ne réponds pas « je ne peux pas » ; utilise ask_user pour demander le token ou explique comment configurer. Si l'utilisateur a déjà confirmé (ex. « clé dans le vault », « c'est configuré »), n'envoie pas une deuxième fois ask_user ; enchaîne. Ne invente pas de commandes (ex. /status repo:... n'existe pas) ; les commandes sont dans /help.\n\n";
 
 /// If AKASHA_TOOLS_JOURNAL_PATH is set, append a line for write tool invocations (Phase 4 modification journal).
@@ -423,6 +978,28 @@ fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
     out
 }
 
+/// Parse run_command args: leading VAULT:vault_key=ENV_VAR entries are extracted;
+/// the first non-VAULT arg is the command, the rest are command arguments.
+/// Returns (vault_specs: (vault_key, env_var), command, cmd_args).
+fn parse_run_command_args(args: &[String]) -> (Vec<(String, String)>, String, Vec<String>) {
+    let mut vault_specs = Vec::new();
+    let mut rest = Vec::new();
+    for arg in args {
+        if let Some(s) = arg.strip_prefix("VAULT:") {
+            if let Some((vault_key, env_var)) = s.split_once('=') {
+                vault_specs.push((vault_key.trim().to_string(), env_var.trim().to_string()));
+            }
+            continue;
+        }
+        rest.push(arg.clone());
+    }
+    let (command, cmd_args) = rest
+        .split_first()
+        .map(|(c, a)| (c.clone(), a.to_vec()))
+        .unwrap_or_else(|| (String::new(), Vec::new()));
+    (vault_specs, command, cmd_args)
+}
+
 /// Execute one tool call via ToolExecutor. Returns `(success, display_string)` for structured events.
 async fn execute_tool_call(
     executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
@@ -459,9 +1036,37 @@ async fn execute_tool_call(
             }
         }
         "run_command" => {
-            let cmd = args.get(0).map(String::as_str).unwrap_or("");
-            let cmd_args: Vec<String> = args.iter().skip(1).cloned().collect();
-            match executor.run_command(cmd, &cmd_args, None).await {
+            let (vault_specs, cmd, cmd_args) = parse_run_command_args(args);
+            let extra_env = if vault_specs.is_empty() {
+                None
+            } else {
+                let data_dir = store_path.and_then(|p| p.parent());
+                match data_dir.and_then(|d| akasha_vault::open_vault(d).ok()) {
+                    Some(vault) => {
+                        let mut env = Vec::new();
+                        for (vault_key, env_var) in &vault_specs {
+                            match vault.get(vault_key) {
+                                Ok(value) => env.push((env_var.clone(), value)),
+                                Err(_) => {
+                                    return (
+                                        false,
+                                        format!("[run_command] vault key not found: {}", vault_key),
+                                    );
+                                }
+                            }
+                        }
+                        Some(env)
+                    }
+                    None => {
+                        return (
+                            false,
+                            "[run_command] vault not available (no store_path or open failed)".to_string(),
+                        );
+                    }
+                }
+            };
+            let env_ref = extra_env.as_deref();
+            match executor.run_command(&cmd, &cmd_args, None, env_ref).await {
                 Ok((out, res)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -476,9 +1081,8 @@ async fn execute_tool_call(
             }
         }
         "run_terminal" => {
-            let cmd = args.get(0).map(String::as_str).unwrap_or("");
-            let cmd_args: Vec<String> = args.iter().skip(1).cloned().collect();
-            match executor.run_command(cmd, &cmd_args, None).await {
+            let (_vault_specs, cmd, cmd_args) = parse_run_command_args(args);
+            match executor.run_command(&cmd, &cmd_args, None, None).await {
                 Ok((out, res)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -493,8 +1097,7 @@ async fn execute_tool_call(
             }
         }
         "run_command_background" => {
-            let cmd = args.get(0).cloned().unwrap_or_default();
-            let cmd_args: Vec<String> = args.iter().skip(1).cloned().collect();
+            let (_vault_specs, cmd, cmd_args) = parse_run_command_args(args);
             let cmd_display = format!("{} {}", cmd, cmd_args.join(" "));
             match process_registry {
                 Some(reg) => {
@@ -504,7 +1107,7 @@ async fn execute_tool_call(
                     let cell_clone = cell.clone();
                     let reg_clone = reg.clone();
                     let task = tokio::spawn(async move {
-                        let result = exec.run_command(&cmd, &cmd_args, None).await;
+                        let result = exec.run_command(&cmd, &cmd_args, None, None).await;
                         *cell_clone.write().await = Some(result);
                         // Auto-cleanup after a TTL to prevent leaking sessions the client never polls.
                         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
@@ -700,6 +1303,14 @@ async fn execute_tool_call(
                 (Some(path), Some(tx)) => {
                     let new_id = Uuid::new_v4();
                     let now = chrono::Utc::now();
+                    const MAX_MSG: usize = 500;
+                    let initial_message = if message.len() > MAX_MSG {
+                        Some(message.chars().take(MAX_MSG).chain(std::iter::once('…')).collect::<String>())
+                    } else if message.is_empty() {
+                        None
+                    } else {
+                        Some(message.clone())
+                    };
                     let task = Task {
                         id: new_id,
                         parent_task_id: Some(task_id),
@@ -707,6 +1318,7 @@ async fn execute_tool_call(
                         assigned_agent: "conversation".to_string(),
                         created_at: now,
                         updated_at: now,
+                        initial_message,
                     };
                     match TaskStore::open(path) {
                         Ok(store) => {
@@ -718,7 +1330,16 @@ async fn execute_tool_call(
                             } else {
                                 child_session_id
                             };
-                            if tx.send((new_id, message, sid)).await.is_err() {
+                            if tx
+                                .send(OrchestratorTask {
+                                    task_id: new_id,
+                                    message,
+                                    session_id: sid,
+                                    image_data_urls: None,
+                                })
+                                .await
+                                .is_err()
+                            {
                                 return (false, "[sessions_spawn] failed to send to conversation queue".to_string());
                             }
                             (true, format!("[sessions_spawn] task_id: {} (queued)", new_id))
@@ -968,8 +1589,24 @@ async fn execute_tool_call(
             }
         }
         _ => {
-            let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
-            (false, format!("[{}] unknown tool. Available: {}.", tool_name, names.join(", ")))
+            if executor.policy.can_run_command(tool_name) {
+                match executor.run_command(tool_name, args, None, None).await {
+                    Ok((out, res)) => {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        let msg = if res.success {
+                            format!("[run_command {}] stdout: {} stderr: {}", tool_name, stdout.trim(), stderr.trim())
+                        } else {
+                            format!("[run_command] {} stderr: {}", res.summary, stderr.trim())
+                        };
+                        (res.success, msg)
+                    }
+                    Err(e) => (false, format!("[run_command] error: {}", e)),
+                }
+            } else {
+                let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
+                (false, format!("[{}] unknown tool. Available: {}.", tool_name, names.join(", ")))
+            }
         }
     };
     result
@@ -1013,6 +1650,7 @@ async fn compact_short_term_if_needed(
         max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
         preferred_task_type: None,
+        image_data_urls: None,
     };
     match llm_router.complete(&req).await {
         Ok(resp) => {
@@ -1039,6 +1677,7 @@ async fn compact_short_term_if_needed(
 }
 
 /// At daemon startup: if yesterday's short-term file exists, summarize it via LLM and promote to long-term (source "daily_summary").
+/// Skips if a daily summary for that date already exists in long-term memory.
 pub async fn summarize_yesterday_and_promote(
     short_term_dir: PathBuf,
     llm_router: Arc<akasha_llm::LLMRouter>,
@@ -1046,11 +1685,23 @@ pub async fn summarize_yesterday_and_promote(
 ) {
     let Some(client) = long_term_client else { return };
     let yesterday = chrono::Utc::now() - chrono::Duration::days(1);
-    let session_id = format!("day-{}", yesterday.format("%Y-%m-%d"));
+    let yesterday_str = yesterday.format("%Y-%m-%d").to_string();
+    let session_id = format!("day-{}", yesterday_str);
     let turns = match ShortTermStore::read_day_from_disk(&session_id, &short_term_dir) {
         Some(t) if !t.is_empty() => t,
         _ => return,
     };
+    let has_summary = {
+        let client = client.clone();
+        let date = yesterday_str.clone();
+        tokio::task::spawn_blocking(move || client.has_daily_summary_for_date(date))
+            .await
+            .unwrap_or(false)
+    };
+    if has_summary {
+        tracing::debug!(session_id = %session_id, "Daily summary for yesterday already in long-term memory, skipping");
+        return;
+    }
     let blob = ShortTermStore::turns_to_context(&turns);
     let summary_prompt = format!(
         "Résume en un court paragraphe synthétique (5 à 10 lignes) la journée du {} : sujets abordés, décisions, projets ou informations importantes. \
@@ -1067,6 +1718,7 @@ Réponse en français, factuelle.\n\n{}",
         max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
         preferred_task_type: Some("system".to_string()),
+        image_data_urls: None,
     };
     match llm_router.complete(&req).await {
         Ok(resp) => {
@@ -1086,29 +1738,41 @@ Réponse en français, factuelle.\n\n{}",
 }
 
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
+/// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
 pub(crate) async fn run_message_via_llm(
     bus: EventBus,
     llm_router: Arc<akasha_llm::LLMRouter>,
     store_path: std::path::PathBuf,
+    spec_dir: std::path::PathBuf,
     task_id: Uuid,
     message: String,
     session_id: String,
+    image_data_urls: Option<Vec<String>>,
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
-    tools_executor: Option<std::sync::Arc<akasha_tools::ToolExecutor>>,
+    tools_executor: Option<std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>>,
+    tools_policy_path: Option<std::path::PathBuf>,
     skill_registry: Option<std::sync::Arc<crate::skills::SkillRegistry>>,
     process_registry: Option<ProcessRegistry>,
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     human_input_store: Option<HumanInputStore>,
+    delegation_tx: Option<mpsc::Sender<DelegationRequest>>,
+    task_completion_registry: Option<TaskCompletionRegistry>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "LLM task: store open failed");
+            notify_task_completion(&task_completion_registry, task_id).await;
             return;
         }
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
+
+    let tools_executor_snapshot = match &tools_executor {
+        Some(r) => Some((*r.read().await).clone()),
+        None => None,
+    };
 
     let message_webhook_url = std::env::var("AKASHA_MESSAGE_WEBHOOK_URL").ok();
 
@@ -1139,32 +1803,55 @@ pub(crate) async fn run_message_via_llm(
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(4096);
 
-    let tool_instruction = if tools_executor.is_some() {
-        let allowed_tools = tools_executor.as_ref().and_then(|e| e.policy.allowed_tool_list());
+    let tool_instruction = if tools_executor_snapshot.is_some() {
+        let mut allowed_tools = tools_executor_snapshot.as_ref().and_then(|e| e.policy.allowed_tool_list());
+        if let Some(ref list) = allowed_tools {
+            let has_wildcard = tools_executor_snapshot.as_ref().map(|e| e.policy.allowed_commands.iter().any(|c| c.trim().eq_ignore_ascii_case("*"))).unwrap_or(false);
+            if has_wildcard && !list.iter().any(|t| t == "run_command") {
+                let mut list = list.clone();
+                list.push("run_command".to_string());
+                allowed_tools = Some(list);
+            }
+        }
         let base = available_tools_instruction(allowed_tools.as_deref());
-        let skills_part = match &skill_registry {
+        let (skills_part, skills_rule) = match &skill_registry {
             Some(reg) => {
                 let list = reg.list().await;
                 if list.is_empty() {
-                    String::new()
+                    (String::new(), String::new())
                 } else {
                     let skills_desc: Vec<String> = list
                         .iter()
                         .map(|s| format!("{} ({})", s.name, s.description))
                         .collect();
-                    format!(" ; Skills (use skill name as tool): {}", skills_desc.join(", "))
+                    let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
+                    let part = format!(" ; Skills (use skill name as tool): {}", skills_desc.join(", "));
+                    let rule = format!(
+                        " INSTALLED SKILLS RULE: The following skills ARE installed and available: {}. Do NOT say they are not installed or suggest install_skill for them. For balance/solde/wallet/Base requests, if \"bankr\" is in the list, reply ONLY with TOOL: bankr <args> (e.g. TOOL: bankr check balance on Base). Use the skill name as the tool name.\n\
+             ",
+                        names.join(", ")
+                    );
+                    (part, rule)
                 }
             }
-            None => String::new(),
+            None => (String::new(), String::new()),
         };
         format!(
             "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
              Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
+             WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix.\n\
+             WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user.\n\
+             INSTALL CLI RULE: When the user asks to install a CLI or package globally (e.g. \"install bankr CLI\", \"npm install -g @bankr/cli\", \"install the bankr cli in global\"), you MUST reply ONLY with TOOL: run_command <cmd> <args> (e.g. TOOL: run_command npm install -g @bankr/cli). Do NOT generate a script or ask the user to run commands themselves; run the installation command via the tool.\n\
+             VAULT ENV RULE: When the user asks to use an API key or secret from the vault (e.g. \"use the key in the vault bankr_api_key\", \"utilise la clé bankr_api_key du vault\"), you CAN pass it to a command by adding VAULT:<vault_key>=<ENV_VAR> as first argument(s) of run_command. Example: TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (the system injects the vault value into BANKR_API_KEY for the command). You can chain several: VAULT:key1=VAR1 VAULT:key2=VAR2 cmd args.\n\
+             INSTALL SKILL RULE: When the user asks to install a skill from a URL (e.g. \"install the bankr skill from https://github.com/BankrBot/skills/tree/main/bankr\"), you MUST reply ONLY with TOOL: install_skill <url>. Do not give manual steps; perform the installation yourself.\n\
+             UNINSTALL SKILL RULE: When the user asks to uninstall or remove a skill (e.g. \"désinstalle bankr\", \"remove the bankr skill\"), you MUST reply ONLY with TOOL: uninstall_skill <name> (e.g. TOOL: uninstall_skill bankr).\n\
+             SKILL USE RULE: When the user asks you to perform an action using a skill (e.g. \"vérifie mon wallet bankr\", \"check my balance with bankr\", \"run bankr whoami\"), you MUST reply ONLY with a single line: TOOL: <skill_name> <args> (e.g. TOOL: bankr whoami). The system will execute the command and return the result. Do NOT tell the user to run the command themselves or to \"use TOOL: bankr whoami\"; you must output that line yourself so the tool is executed.\n\
+             {}\
              If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
-            base, skills_part
+            base, skills_part, skills_rule
         )
     } else {
         String::new()
@@ -1200,6 +1887,25 @@ pub(crate) async fn run_message_via_llm(
             context_prefix.push_str("\n");
         }
     }
+
+    // User RAG: retrieve relevant chunks from user-uploaded documents (keyword match)
+    let user_rag_store = crate::user_rag::UserRagStore::new(data_dir);
+    let rag_query = message.clone();
+    let chunks = tokio::task::spawn_blocking(move || user_rag_store.retrieve(&rag_query, 5))
+        .await
+        .ok()
+        .and_then(|res| res.ok())
+        .unwrap_or_default();
+    if !chunks.is_empty() {
+        context_prefix.push_str("[Documents utilisateur — utilise ces extraits si pertinent pour répondre]\n");
+        for c in &chunks {
+            context_prefix.push_str("- ");
+            context_prefix.push_str(&c.replace('\n', " "));
+            context_prefix.push_str("\n");
+        }
+        context_prefix.push_str("\n");
+    }
+
     if let Some(ref st) = short_term {
         let new_msg_tokens = ShortTermStore::estimate_tokens(&message);
         compact_short_term_if_needed(
@@ -1238,17 +1944,32 @@ pub(crate) async fn run_message_via_llm(
             context_prefix.push_str("\n\n");
         }
     }
+    let write_reminder = if message_suggests_save_file(&message) {
+        WRITE_FILE_REMINDER
+    } else {
+        ""
+    };
+    let web_search_reminder = if message_suggests_external_info(&message)
+        && tools_executor_snapshot
+            .as_ref()
+            .map(|e| e.policy.can_use_tool("web_search"))
+            .unwrap_or(false)
+    {
+        WEB_SEARCH_REMINDER
+    } else {
+        ""
+    };
     let mut current_prompt = if context_prefix.is_empty() {
         message.clone()
     } else {
-        format!("{}\nUtilisateur:\n{}", context_prefix.trim_end(), message)
+        format!(
+            "{}{}{}Utilisateur:\n{}",
+            context_prefix.trim_end(),
+            write_reminder,
+            web_search_reminder,
+            message
+        )
     };
-    if message_suggests_external_service(&message) {
-        current_prompt.push_str(EXTERNAL_SERVICE_REMINDER);
-    }
-    if message_suggests_user_choice_or_confirmation(&message) {
-        current_prompt.push_str(USER_CHOICE_REMINDER);
-    }
     let reply_text;
     const MAX_TOOL_ROUNDS: u32 = 3;
     let mut round = 0u32;
@@ -1274,6 +1995,11 @@ pub(crate) async fn run_message_via_llm(
             max_tokens: Some(max_tokens),
             temperature: Some(0.7),
             preferred_task_type: None,
+            image_data_urls: if tool_loop_history.is_empty() {
+                image_data_urls.clone()
+            } else {
+                None
+            },
         };
         // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
         // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
@@ -1378,12 +2104,12 @@ pub(crate) async fn run_message_via_llm(
             break;
         }
 
-        let tool_calls = tools_executor.as_ref().and_then(|_| {
+        let tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
             let calls = parse_tool_calls(&response);
             if calls.is_empty() { None } else { Some(calls) }
         });
 
-        if let (Some(exec), Some(calls)) = (tools_executor.as_ref(), tool_calls) {
+        if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), tool_calls) {
             round += 1;
             let mut tool_results = Vec::new();
             for (name, args) in &calls {
@@ -1452,6 +2178,83 @@ pub(crate) async fn run_message_via_llm(
                         }
                         None => (false, "[ask_user] Human-in-the-loop not available.".to_string()),
                     }
+                } else if actual_tool == "delegate_to_agent" {
+                    match &delegation_tx {
+                        Some(tx) => {
+                            let (reply_tx, reply_rx) = oneshot::channel();
+                            let agent_type = args.get(0).cloned().unwrap_or_else(|| "conversation".to_string());
+                            let message = args.get(1..).map(|a| a.join(" ")).unwrap_or_else(|| args.get(0).cloned().unwrap_or_default());
+                            if tx.send(DelegationRequest {
+                                requesting_task_id: task_id,
+                                agent_type,
+                                message,
+                                reply_tx,
+                            }).await.is_ok() {
+                                match tokio::time::timeout(std::time::Duration::from_secs(310), reply_rx).await {
+                                    Ok(Ok(Ok(msg))) => (true, format!("[delegate_to_agent] {}", msg)),
+                                    Ok(Ok(Err(e))) => (false, format!("[delegate_to_agent] {}", e)),
+                                    _ => (false, "[delegate_to_agent] timeout or channel closed".to_string()),
+                                }
+                            } else {
+                                (false, "[delegate_to_agent] channel closed".to_string())
+                            }
+                        }
+                        None => (false, "[delegate_to_agent] not available".to_string()),
+                    }
+                } else if actual_tool == "install_skill" {
+                    let url = args.get(0).map(String::as_str).unwrap_or("").trim();
+                    if url.is_empty() {
+                        (false, "[install_skill] usage: install_skill <url> (ex. https://github.com/BankrBot/skills/tree/main/bankr ou toute URL HTTPS autorisée dans tools_policy allowed_skill_install_hosts)".to_string())
+                    } else {
+                        let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+                        let allowed_hosts = exec.policy.skill_install_allowed_hosts();
+                        let tools_reload = tools_executor.as_ref().and_then(|arc| {
+                            tools_policy_path.as_ref().map(|p| (arc, p.as_path()))
+                        });
+                        match &skill_registry {
+                            Some(reg) => do_install_skill(url, data_dir, &spec_dir, reg, &allowed_hosts, tools_reload).await,
+                            None => (false, "[install_skill] skill registry not available".to_string()),
+                        }
+                    }
+                } else if actual_tool == "uninstall_skill" {
+                    let skill_name = args.get(0).map(String::as_str).unwrap_or("").trim();
+                    let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+                    let tools_reload = tools_executor.as_ref().and_then(|arc| {
+                        tools_policy_path.as_ref().map(|p| (arc, p.as_path()))
+                    });
+                    match &skill_registry {
+                        Some(reg) => do_uninstall_skill(skill_name, data_dir, &spec_dir, reg, tools_reload).await,
+                        None => (false, "[uninstall_skill] skill registry not available".to_string()),
+                    }
+                } else if actual_tool.is_empty() {
+                    // Skill with no tool_ref: if args provided, run as run_command(skill_name, ...args) (e.g. bankr whoami)
+                    if !args.is_empty() {
+                        let run_args: Vec<String> = std::iter::once(name.clone()).chain(args.iter().cloned()).collect();
+                        execute_tool_call(
+                            exec,
+                            "run_command",
+                            &run_args,
+                            process_registry.as_ref(),
+                            long_term_client.as_ref(),
+                            task_id,
+                            Some(store_path.as_path()),
+                            conv_tx.clone(),
+                            message_webhook_url.as_deref(),
+                        )
+                        .await
+                    } else {
+                        // No args: inject SKILL.md body as context for next round (doc-only)
+                        match &skill_registry {
+                            Some(reg) => {
+                                if let Some(body) = reg.get_body(name).await {
+                                    (true, format!("[Skill: {}] Instructions:\n{}", name, body))
+                                } else {
+                                    (false, format!("[Skill: {}] No instructions body.", name))
+                                }
+                            }
+                            None => (false, "Skill registry not available.".to_string()),
+                        }
+                    }
                 } else {
                     execute_tool_call(
                         exec,
@@ -1482,8 +2285,9 @@ pub(crate) async fn run_message_via_llm(
                         })
                         .collect()
                 };
+                let tool_display = if actual_tool.is_empty() { name.as_str() } else { actual_tool.as_str() };
                 let payload = serde_json::json!({
-                    "tool": actual_tool,
+                    "tool": tool_display,
                     "skill": if &actual_tool != name { Some(name.as_str()) } else { None::<&str> },
                     "args": redacted_args,
                     "result_preview": if res.len() > 300 { format!("{}...", &res[..300]) } else { res.clone() },
@@ -1615,6 +2419,7 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
                 max_tokens: Some(extract_max_tokens),
                 temperature: Some(0.1),
                 preferred_task_type: Some("system".to_string()),
+                image_data_urls: None,
             };
             let mut to_promote: Vec<(String, String)> = Vec::new();
             let mut agent_updates: Vec<(String, String)> = Vec::new();
@@ -1701,6 +2506,16 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
         .with_correlation(task_id),
     );
     let _ = store.update_status(task_id, TaskStatus::Completed);
+    notify_task_completion(&task_completion_registry, task_id).await;
+}
+
+/// Notify any waiter in the TaskCompletionRegistry that `task_id` has finished.
+async fn notify_task_completion(registry: &Option<TaskCompletionRegistry>, task_id: Uuid) {
+    if let Some(reg) = registry {
+        if let Some(notify) = reg.write().await.remove(&task_id) {
+            notify.notify_one();
+        }
+    }
 }
 
 /// Optional channel to trigger daemon shutdown (for POST /api/restart).
@@ -1722,11 +2537,12 @@ pub async fn handle_api(
     ollama_base_url: Option<&str>,
     spec_dir: &Path,
     restart_tx: RestartTx,
-    _tools_executor: Option<&std::sync::Arc<akasha_tools::ToolExecutor>>,
+    _tools_executor: Option<&std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>>,
     skill_registry: &std::sync::Arc<crate::skills::SkillRegistry>,
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
     human_input_store: Option<HumanInputStore>,
+    user_rag_store: &crate::user_rag::SharedUserRagStore,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
@@ -2032,8 +2848,9 @@ pub async fn handle_api(
                     .parent()
                     .and_then(|p| std::fs::read_to_string(p.join("docs").join("user_guide.md")).ok())
             })
+            .or_else(|| std::fs::read_to_string(data_dir.join("docs").join("user_guide.md")).ok())
             .unwrap_or_else(|| {
-                "# Documentation\n\nDocumentation non disponible. Voir README et spec/onboarding.md dans le dépôt.\n"
+                "# Documentation\n\nDocumentation non disponible. Placez docs/user_guide.md dans le dossier d'extraction ou dans le data_dir (voir akasha paths).\n"
                     .to_string()
             });
         let body_json = serde_json::json!({ "content": content }).to_string();
@@ -2062,10 +2879,68 @@ pub async fn handle_api(
 
     if method == "POST" && path == "/api/message" {
         let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
-        let message = body_json
+        let mut message = body_json
             .as_ref()
             .and_then(|v| v.get("message").and_then(|v| v.as_str().map(String::from)))
             .unwrap_or_default();
+        // Parse attachments: images -> data URLs for vision; documents -> append extracted text to message.
+        let image_data_urls: Option<Vec<String>> = {
+            let arr = body_json.as_ref().and_then(|v| v.get("attachments").and_then(|a| a.as_array()));
+            let mut urls = Vec::new();
+            let mut doc_texts = Vec::new();
+            if let Some(arr) = arr {
+                for att in arr {
+                    let typ = att.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    let content_base64 = att.get("content_base64").and_then(|c| c.as_str()).unwrap_or("");
+                    let mime = att.get("mime_type").and_then(|m| m.as_str()).unwrap_or("image/png");
+                    let name = att.get("name").and_then(|n| n.as_str()).unwrap_or("file");
+                    if content_base64.is_empty() {
+                        continue;
+                    }
+                    if typ == "image" || mime.starts_with("image/") {
+                        let data_url = format!("data:{};base64,{}", mime, content_base64);
+                        urls.push(data_url);
+                    } else if typ == "document" || mime.starts_with("text/") || mime == "application/pdf" {
+                        if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, content_base64) {
+                            let text = if mime == "application/pdf" {
+                                pdf_extract::extract_text_from_mem(&decoded)
+                                    .unwrap_or_else(|_| String::from("[Extraction du texte PDF impossible ou PDF vide.]"))
+                            } else if let Ok(t) = String::from_utf8(decoded) {
+                                t
+                            } else {
+                                continue;
+                            };
+                            if !text.trim().is_empty() {
+                                doc_texts.push(format!("[Document « {} »]\n{}", name, text.trim()));
+                            } else if mime == "application/pdf" {
+                                doc_texts.push(format!("[Document « {} »]\n[PDF joint : extraction du texte vide (image ou PDF scanné).]", name));
+                            }
+                        }
+                    }
+                }
+            }
+            if !doc_texts.is_empty() {
+                let user_msg = message.trim_end();
+                let user_msg = if user_msg.is_empty() {
+                    "(Pièce(s) jointe(s))"
+                } else {
+                    user_msg
+                };
+                message = format!(
+                    "[Pièce(s) jointe(s) à ce message : quand l'utilisateur dit « ce document », « ce fichier », « analyse-le », « analyse ce document », etc., il parle du contenu joint ci-dessous, pas des échanges précédents.]\n\nMessage : {}\n\n--- Document(s) joint(s) ---\n{}",
+                    user_msg,
+                    doc_texts.join("\n\n")
+                );
+            } else if message.trim().is_empty() && !urls.is_empty() {
+                // Pièces jointes images uniquement : éviter message vide pour la tâche.
+                message = "(Pièce(s) jointe(s))".to_string();
+            }
+            if urls.is_empty() {
+                None
+            } else {
+                Some(urls)
+            }
+        };
         // Session: "new_session" => new UUID; else provided non-empty session_id; else day-YYYY-MM-DD (short-term = current day, survives UI restart).
         let session_id = {
             let new_session = body_json.as_ref().and_then(|v| v.get("new_session")).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2089,7 +2964,7 @@ pub async fn handle_api(
         }
         let correlation_id = uuid::Uuid::new_v4();
         // User talks only to orchestrator: ack immediately, delegate to conversation worker in background (non-blocking). session_id used for short-term memory.
-        match main_agent.handle_message(store_path, &message, correlation_id, true, &session_id) {
+        match main_agent.handle_message(store_path, &message, correlation_id, true, &session_id, image_data_urls) {
             Ok(task_id) => {
                 let body = serde_json::json!({
                     "ack": true,
@@ -2105,6 +2980,26 @@ pub async fn handle_api(
 
     if method == "GET" && path == "/api/tasks" {
         return get_task_list(store_path).await;
+    }
+    // GET /api/pending-human-input — list all tasks waiting for user input (so UI can show notifications after reload or when user was away)
+    if method == "GET" && path == "/api/pending-human-input" {
+        if let Some(ref store) = human_input_store {
+            let g = store.read().await;
+            let pending: Vec<_> = g
+                .iter()
+                .map(|(id, p)| {
+                    serde_json::json!({
+                        "task_id": id.to_string(),
+                        "question": p.question,
+                        "context": p.context,
+                        "choices": p.choices
+                    })
+                })
+                .collect();
+            let body = serde_json::json!({ "pending": pending });
+            return json_response("200 OK", &body.to_string());
+        }
+        return json_response("200 OK", r#"{"pending":[]}"#);
     }
     if path.starts_with("/api/tasks/") {
         let rest = path.trim_start_matches("/api/tasks/");
@@ -2190,6 +3085,9 @@ pub async fn handle_api(
             }
         }
     }
+    if method == "GET" && path.starts_with("/api/calendar/events") {
+        return get_calendar_events(store_path, path).await;
+    }
     if method == "GET" && path == "/api/task_runs" {
         return get_task_runs_list(store_path, path).await;
     }
@@ -2216,11 +3114,57 @@ pub async fn handle_api(
         return json_response("200 OK", r#"{"reloaded":true}"#);
     }
 
-    // Phase D: Skills (loadable skills for agents)
+    // Phase D: Skills (loadable skills for agents; Agent Skills spec + flat YAML)
     if method == "GET" && path == "/api/skills" {
         let list = skill_registry.list().await;
         let body = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
         return json_response("200 OK", &body);
+    }
+    if method == "POST" && path == "/api/skills/reload" {
+        match skill_registry.reload(data_dir, spec_dir).await {
+            Ok(count) => {
+                let body = serde_json::json!({ "reloaded": true, "count": count }).to_string();
+                return json_response("200 OK", &body);
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": "reload_failed", "detail": e.to_string() }).to_string();
+                return json_response("500 Internal Server Error", &body);
+            }
+        }
+    }
+    if method == "POST" && path == "/api/skills/uninstall" {
+        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let name = body_json
+            .as_ref()
+            .and_then(|j| j.get("name"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        match name {
+            Some(skill_name) => {
+                let policy_path = data_dir.join("tools_policy.yaml");
+                let tools_reload = _tools_executor.map(|r| (r, policy_path.as_path()));
+                let (ok, msg) = do_uninstall_skill(
+                    &skill_name,
+                    data_dir,
+                    spec_dir,
+                    skill_registry,
+                    tools_reload,
+                )
+                .await;
+                if ok {
+                    let body = serde_json::json!({ "uninstalled": true, "name": skill_name, "message": msg }).to_string();
+                    return json_response("200 OK", &body);
+                }
+                let body = serde_json::json!({ "error": "uninstall_failed", "detail": msg }).to_string();
+                return json_response("400 Bad Request", &body);
+            }
+            None => {
+                let body = serde_json::json!({ "error": "missing_name", "detail": "Body must be JSON with \"name\": \"<skill_name>\"" }).to_string();
+                return json_response("400 Bad Request", &body);
+            }
+        }
     }
 
     // Liste des outils machine disponibles (Phase A)
@@ -2231,6 +3175,65 @@ pub async fn handle_api(
             .collect();
         let body = serde_json::to_string(&serde_json::json!({ "tools": list })).unwrap_or_else(|_| "{}".to_string());
         return json_response("200 OK", &body);
+    }
+
+    // User RAG: list documents
+    if method == "GET" && path == "/api/user-rag/documents" {
+        let store = user_rag_store.lock().await;
+        match store.list_documents() {
+            Ok(docs) => {
+                let body = serde_json::to_string(&serde_json::json!({ "documents": docs })).unwrap_or_else(|_| "[]".to_string());
+                return json_response("200 OK", &body);
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": "list_failed", "detail": e.to_string() });
+                return json_response("500 Internal Server Error", &body.to_string());
+            }
+        }
+    }
+
+    // User RAG: upload document (body: { name, content_base64, mime_type? })
+    if method == "POST" && path == "/api/user-rag/documents" {
+        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let name = body_json.as_ref().and_then(|j| j.get("name")).and_then(|v| v.as_str()).map(String::from);
+        let content_base64 = body_json.as_ref().and_then(|j| j.get("content_base64")).and_then(|v| v.as_str()).map(String::from);
+        let mime_type = body_json.as_ref().and_then(|j| j.get("mime_type")).and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| "application/octet-stream".to_string());
+        let name = match name.filter(|n| !n.is_empty()) {
+            Some(n) => n,
+            None => return json_response("400 Bad Request", r#"{"error":"name_required"}"#),
+        };
+        let content_base64 = match content_base64.filter(|c| !c.is_empty()) {
+            Some(c) => c,
+            None => return json_response("400 Bad Request", r#"{"error":"content_base64_required"}"#),
+        };
+        let store = user_rag_store.lock().await;
+        match store.add_document(&content_base64, &name, &mime_type) {
+            Ok(id) => {
+                let body = serde_json::json!({ "id": id, "name": name, "message": "Document ajouté." });
+                return json_response("200 OK", &body.to_string());
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": "add_failed", "detail": e.to_string() });
+                return json_response("500 Internal Server Error", &body.to_string());
+            }
+        }
+    }
+
+    // User RAG: delete document by id
+    if method == "DELETE" && path.starts_with("/api/user-rag/documents/") {
+        let id = path.trim_start_matches("/api/user-rag/documents/").split('?').next().unwrap_or("").trim();
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"id_required"}"#);
+        }
+        let store = user_rag_store.lock().await;
+        match store.delete_document(id) {
+            Ok(true) => return json_response("200 OK", r#"{"ok":true,"message":"Document supprimé."}"#),
+            Ok(false) => return json_response("404 Not Found", r#"{"error":"document_not_found"}"#),
+            Err(e) => {
+                let body = serde_json::json!({ "error": "delete_failed", "detail": e.to_string() });
+                return json_response("500 Internal Server Error", &body.to_string());
+            }
+        }
     }
 
     // Phase 6: LLM completion via router
@@ -2250,6 +3253,7 @@ pub async fn handle_api(
             max_tokens: body.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32),
             temperature: body.get("temperature").and_then(|v| v.as_f64()).map(|f| f as f32),
             preferred_task_type: None,
+            image_data_urls: None,
         };
         match llm_router.complete(&req).await {
             Ok(resp) => {
@@ -2267,8 +3271,59 @@ pub async fn handle_api(
         }
     }
 
-    if method == "GET" && path == "/api/router/metrics" {
-        let list = llm_router.metrics().list();
+    if method == "GET" && path.starts_with("/api/router/metrics") {
+        let period = path.split('?').nth(1)
+            .and_then(|q| q.split('&').find(|p| p.starts_with("period=")))
+            .and_then(|p| p.strip_prefix("period="));
+        let list: std::collections::HashMap<String, akasha_llm::ModelMetrics> = if let Some(period) = period {
+            let (from_ts, to_ts) = match period {
+                "day" => {
+                    let now = chrono::Utc::now();
+                    let start = now - chrono::Duration::days(1);
+                    (Some(start), Some(now))
+                }
+                "week" => {
+                    let now = chrono::Utc::now();
+                    let start = now - chrono::Duration::days(7);
+                    (Some(start), Some(now))
+                }
+                "month" => {
+                    let now = chrono::Utc::now();
+                    let start = now - chrono::Duration::days(30);
+                    (Some(start), Some(now))
+                }
+                "year" => {
+                    let now = chrono::Utc::now();
+                    let start = now - chrono::Duration::days(365);
+                    (Some(start), Some(now))
+                }
+                _ => (None, None),
+            };
+            match (from_ts, to_ts) {
+                (Some(from), Some(to)) => {
+                    match akasha_store::MetricsStore::open(store_path) {
+                        Ok(store) => store.aggregate(Some(from), Some(to)).ok()
+                            .map(|rows| rows.into_iter().map(|(k, v)| (k, akasha_llm::ModelMetrics {
+                                total_requests: v.total_requests,
+                                successful_requests: v.successful_requests,
+                                failed_requests: v.failed_requests,
+                                total_latency_ms: v.total_latency_ms,
+                                total_tokens: v.total_tokens,
+                                total_cost_usd: v.total_cost_usd,
+                                fallback_triggered: v.fallback_triggered,
+                                fallback_success: v.fallback_success,
+                                last_success: v.last_success,
+                                last_failure: v.last_failure,
+                            })).collect())
+                            .unwrap_or_default(),
+                        Err(_) => llm_router.metrics().list(),
+                    }
+                }
+                _ => llm_router.metrics().list(),
+            }
+        } else {
+            llm_router.metrics().list()
+        };
         let body = serde_json::to_string(&list).unwrap_or_else(|_| "{}".to_string());
         return json_response("200 OK", &body);
     }
@@ -2554,6 +3609,7 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
             max_tokens: Some(512),
             temperature: Some(0.3),
             preferred_task_type: None,
+            image_data_urls: None,
         };
         let advice_timeout = std::time::Duration::from_secs(120);
         match tokio::time::timeout(advice_timeout, llm_router.complete(&req)).await {
@@ -2843,6 +3899,98 @@ async fn delete_schedule(store_path: &Path, id: Uuid) -> String {
     json_response("200 OK", &serde_json::json!({ "deleted": id.to_string() }).to_string())
 }
 
+fn task_label(initial_message: Option<&String>, task_id: &Uuid) -> String {
+    const LABEL_MAX: usize = 100;
+    match initial_message {
+        Some(m) if !m.trim().is_empty() => {
+            let s = m.trim();
+            if s.chars().count() > LABEL_MAX {
+                format!("{}…", s.chars().take(LABEL_MAX).collect::<String>())
+            } else {
+                s.to_string()
+            }
+        }
+        _ => {
+            let s = task_id.to_string();
+            let suffix = if s.len() >= 8 { &s[s.len() - 8..] } else { s.as_str() };
+            format!("Tâche …{suffix}")
+        }
+    }
+}
+
+async fn get_calendar_events(store_path: &Path, path: &str) -> String {
+    let query = path.split('?').nth(1).unwrap_or("");
+    let from_ts = query
+        .split('&')
+        .find(|p| p.starts_with("from="))
+        .and_then(|p| p.strip_prefix("from="))
+        .and_then(|s| urlencoding::decode(s).ok())
+        .and_then(|decoded| chrono::DateTime::parse_from_rfc3339(&decoded).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    let to_ts = query
+        .split('&')
+        .find(|p| p.starts_with("to="))
+        .and_then(|p| p.strip_prefix("to="))
+        .and_then(|s| urlencoding::decode(s).ok())
+        .and_then(|decoded| chrono::DateTime::parse_from_rfc3339(&decoded).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    let (from_ts, to_ts) = match (from_ts, to_ts) {
+        (Some(f), Some(t)) if f <= t => (f, t),
+        _ => {
+            let now = chrono::Utc::now();
+            let start = now - chrono::Duration::days(7);
+            (start, now)
+        }
+    };
+    let task_store = TaskStore::open(store_path);
+    let mut events: Vec<serde_json::Value> = Vec::new();
+    if let Ok(schedule_store) = ScheduleStore::open(store_path) {
+        if let Ok(runs) = schedule_store.list_task_runs_between(from_ts, to_ts, 500) {
+            for r in runs {
+                let at = r.started_at.unwrap_or(r.planned_for);
+                let label = task_store
+                    .as_ref()
+                    .ok()
+                    .and_then(|ts| ts.get(r.task_id).ok().flatten())
+                    .map(|t| task_label(t.initial_message.as_ref(), &r.task_id))
+                    .unwrap_or_else(|| task_label(None, &r.task_id));
+                events.push(serde_json::json!({
+                    "at": at.to_rfc3339(),
+                    "task_id": r.task_id.to_string(),
+                    "type": "run",
+                    "status": r.status.as_str(),
+                    "run_id": r.id.to_string(),
+                    "planned_for": r.planned_for.to_rfc3339(),
+                    "label": label,
+                }));
+            }
+        }
+    }
+    if let Ok(ref task_store) = task_store {
+        if let Ok(tasks) = task_store.list_tasks_created_between(from_ts, to_ts, 500) {
+            for t in tasks {
+                if t.parent_task_id.is_none() {
+                    let label = task_label(t.initial_message.as_ref(), &t.id);
+                    events.push(serde_json::json!({
+                        "at": t.created_at.to_rfc3339(),
+                        "task_id": t.id.to_string(),
+                        "type": "ad_hoc",
+                        "status": t.status.as_str(),
+                        "label": label,
+                    }));
+                }
+            }
+        }
+    }
+    events.sort_by(|a, b| {
+        let a_at = a.get("at").and_then(|v| v.as_str()).unwrap_or("");
+        let b_at = b.get("at").and_then(|v| v.as_str()).unwrap_or("");
+        a_at.cmp(b_at)
+    });
+    let body = serde_json::json!({ "events": events });
+    json_response("200 OK", &body.to_string())
+}
+
 async fn get_task_runs_list(store_path: &Path, path: &str) -> String {
     let store = match ScheduleStore::open(store_path) {
         Ok(s) => s,
@@ -2858,9 +4006,21 @@ async fn get_task_runs_list(store_path: &Path, path: &str) -> String {
         Ok(l) => l,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
+    let task_store = TaskStore::open(store_path);
+    let task_map: std::collections::HashMap<Uuid, akasha_store::Task> = task_store
+        .ok()
+        .and_then(|ts| ts.get_all().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| (t.id, t))
+        .collect();
     let arr: Vec<serde_json::Value> = list
         .into_iter()
         .map(|r| {
+            let label = task_map
+                .get(&r.task_id)
+                .map(|t| task_label(t.initial_message.as_ref(), &r.task_id))
+                .unwrap_or_else(|| task_label(None, &r.task_id));
             serde_json::json!({
                 "id": r.id.to_string(),
                 "schedule_id": r.schedule_id.map(|u| u.to_string()),
@@ -2869,7 +4029,8 @@ async fn get_task_runs_list(store_path: &Path, path: &str) -> String {
                 "planned_for": r.planned_for.to_rfc3339(),
                 "started_at": r.started_at.map(|t| t.to_rfc3339()),
                 "ended_at": r.ended_at.map(|t| t.to_rfc3339()),
-                "dedup_key": r.dedup_key
+                "dedup_key": r.dedup_key,
+                "label": label,
             })
         })
         .collect();
@@ -2949,4 +4110,30 @@ async fn get_schedule_run_reports(store_path: &Path, progress: &ProgressCache) -
         .collect();
     let body = serde_json::json!({ "reports": reports });
     json_response("200 OK", &body.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_content_length;
+
+    #[test]
+    fn parse_content_length_returns_header_end_and_content_length() {
+        let buf = b"POST /api/message HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+        let r = parse_content_length(buf);
+        assert!(r.is_some());
+        let (header_end, content_length) = r.unwrap();
+        assert_eq!(header_end, 45); // start of "\r\n\r\n" after "Content-Length: 5\r\n"
+        assert_eq!(content_length, 5);
+    }
+
+    #[test]
+    fn parse_content_length_no_separator_returns_none() {
+        let buf = b"POST /api/message HTTP/1.1";
+        assert!(parse_content_length(buf).is_none());
+    }
+
+    #[test]
+    fn parse_content_length_empty_returns_none() {
+        assert!(parse_content_length(&[]).is_none());
+    }
 }

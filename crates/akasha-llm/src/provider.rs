@@ -13,6 +13,9 @@ pub struct CompletionRequest {
     /// When set, router uses this task type instead of classifying from the prompt (e.g. "system" for memory extraction, decomposition).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_task_type: Option<String>,
+    /// Optional image data URLs (data:image/png;base64,...) for vision-capable providers; appended to user message content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_data_urls: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,9 +207,22 @@ impl OpenAIProvider {
         }
         let client = reqwest::Client::new();
         let url = format!("{}/chat/completions", self.base_url);
+        let messages = match &request.image_data_urls {
+            Some(urls) if !urls.is_empty() => {
+                let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
+                for url in urls {
+                    content.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": url }
+                    }));
+                }
+                serde_json::json!([{ "role": "user", "content": content }])
+            }
+            _ => serde_json::json!([{ "role": "user", "content": request.prompt }]),
+        };
         let body = serde_json::json!({
             "model": model,
-            "messages": [{"role": "user", "content": request.prompt}],
+            "messages": messages,
             "max_tokens": request.max_tokens.unwrap_or(1024),
             "temperature": request.temperature.unwrap_or(0.7)
         });
@@ -293,16 +309,35 @@ impl LLMProvider for OpenAIProvider {
 pub struct OpenRouterProvider {
     api_key: String,
     base_url: String,
+    /// HTTP-Referer header (optional; from config or OPENROUTER_SITE_URL env; default https://Akasha.local).
+    site_url: Option<String>,
+    /// X-Title header (optional; from config or OPENROUTER_APP_TITLE env; default Akasha).
+    app_title: Option<String>,
 }
 
 impl OpenRouterProvider {
-    pub fn new(api_key: Option<String>, base_url: Option<String>) -> Self {
+    pub fn new(
+        api_key: Option<String>,
+        base_url: Option<String>,
+        site_url: Option<String>,
+        app_title: Option<String>,
+    ) -> Self {
+        let site_url = site_url
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("OPENROUTER_SITE_URL").ok().filter(|s| !s.is_empty()))
+            .or_else(|| Some("https://Akasha.local".into()));
+        let app_title = app_title
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("OPENROUTER_APP_TITLE").ok().filter(|s| !s.is_empty()))
+            .or_else(|| Some("Akasha".into()));
         Self {
             api_key: api_key.unwrap_or_default(),
             base_url: base_url
                 .unwrap_or_else(|| "https://openrouter.ai/api/v1".into())
                 .trim_end_matches('/')
                 .to_string(),
+            site_url,
+            app_title,
         }
     }
 }
@@ -333,17 +368,35 @@ impl LLMProvider for OpenRouterProvider {
         let model = model_override.unwrap_or("openai/gpt-4o-mini");
         let client = reqwest::Client::new();
         let url = format!("{}/chat/completions", self.base_url);
+        let messages = match &request.image_data_urls {
+            Some(urls) if !urls.is_empty() => {
+                let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
+                for url in urls {
+                    content.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": url }
+                    }));
+                }
+                serde_json::json!([{ "role": "user", "content": content }])
+            }
+            _ => serde_json::json!([{ "role": "user", "content": request.prompt }]),
+        };
         let body = serde_json::json!({
             "model": model,
-            "messages": [{"role": "user", "content": request.prompt}],
+            "messages": messages,
             "max_tokens": request.max_tokens.unwrap_or(1024),
             "temperature": request.temperature.unwrap_or(0.7)
         });
-        let resp = client
+        let mut req = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .header("X-OpenRouter-Title", "Akasha")
+            .header("Content-Type", "application/json");
+        let referer = self.site_url.as_deref().unwrap_or("https://Akasha.local");
+        let title = self.app_title.as_deref().unwrap_or("Akasha");
+        req = req
+            .header("HTTP-Referer", referer)
+            .header("X-Title", title);
+        let resp = req
             .json(&body)
             .timeout(timeout)
             .send()

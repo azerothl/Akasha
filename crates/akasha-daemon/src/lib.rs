@@ -11,6 +11,7 @@ pub mod memory_actor;
 pub mod plugins;
 pub mod scheduler;
 pub mod skills;
+pub mod user_rag;
 
-pub use daemon::Daemon;
+pub use daemon::{Daemon, RunOutcome};
 pub use health::{HealthState, HealthStatus};

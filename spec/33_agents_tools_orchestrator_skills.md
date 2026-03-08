@@ -85,7 +85,9 @@ Activation : placer un fichier **tools_policy.yaml** dans le data_dir (voir `spe
 ## 4. Skills chargeables
 
 - **Skill** : ensemble de **définitions de capacités** (nom, description, paramètres, type de résultat) et optionnellement de **implémentations** (ex. script, WASM, ou appel à un outil existant).
-- **Chargement** : au démarrage du daemon (ou à chaud), le système charge les skills depuis un répertoire (ex. `data_dir/skills/` ou `spec/skills/`) ou un registre. Format proposé : fichier par skill (YAML ou TOML) décrivant le skill et comment l’invoquer (outil interne, plugin, conteneur).
+- **Chargement** : au démarrage du daemon et à chaud (POST `/api/skills/reload` ou `/skills reload`), le système charge les skills depuis `data_dir/skills/` et `spec/skills/`. Formats : répertoire avec `SKILL.md` ([Agent Skills](https://agentskills.io/specification)), ou fichier `.yaml` par skill. Les skills peuvent être ajoutés pendant la session sans redémarrage.
+- **Structure (Agent Skills)** : un skill peut contenir, en plus de `SKILL.md`, les dossiers optionnels `scripts/`, `references/`, `assets/` (cf. [What are skills?](https://agentskills.io/what-are-skills)). Lors de l’installation via l’outil `install_skill <url>`, le daemon télécharge `SKILL.md` puis récupère récursivement tous les fichiers du même chemin GitHub (scripts, références, assets), écrit le tout dans `data_dir/skills/<nom>/`, recharge le registre, et renvoie le contenu du skill ainsi que le chemin du répertoire du skill pour que l’agent puisse résoudre les références de fichiers (ex. `read_file` sur `references/REFERENCE.md`).
+- **Sources d’installation** : un skill peut être hébergé ailleurs que sur GitHub (site web, GitLab, Bitbucket, etc.). Dans `tools_policy.yaml`, la clé **`allowed_skill_install_hosts`** liste les hôtes autorisés (ex. `gitlab.com`, `mon-site.com`). Utiliser `["*"]` pour autoriser toute URL HTTPS. Par défaut, seuls les hôtes GitHub sont autorisés. Pour les hôtes non-GitHub, seul le fichier `SKILL.md` est téléchargé (pas de listing de répertoire) ; l’URL doit pointer vers un fichier `.md` ou vers un chemin dont le contenu `SKILL.md` est accessible (ex. `https://example.com/skills/mon-skill/SKILL.md`).
 - **Attribution aux agents** : l’orchestrateur (ou la config par type d’agent) associe à chaque agent un sous-ensemble de skills. Lors de la délégation, l’agent peut voir et utiliser uniquement les skills qui lui sont attribués.
 - **Compatibilité plugins** : réutiliser si possible le mécanisme de plugins existant (Phase 5) pour des skills en WASM, ou définir un type « skill » dans le manifest et l’API plugin.
 
@@ -115,7 +117,7 @@ Tout le chemin « délégation → agent → sous-agents → résultat » est **
 - **Entrée** : `POST /api/message` (ou équivalent canal) crée toujours une **tâche racine** et envoie son `task_id` à l’orchestrateur (via une file, ex. `orchestrator_tx`).
 - **Réponse immédiate** : le handler API renvoie tout de suite `{ "ack": true, "task_id": "...", "message": "Je prends en compte votre demande." }` (sans attendre la fin du traitement).
 - **Traitement asynchrone** : un worker (orchestrateur) consomme la file des `task_id`, pour chaque tâche :
-  - Classifie la demande (LLM ou règles) → choisit l’agent.
+  - Décompose la demande via un appel LLM (agent_type|message) ; le type d’agent (conversation, code, search, schedule) est entièrement déterminé par le LLM, sans fallback par mots-clés.
   - Délègue à l’agent (nouvelle sous-tâche ou envoi sur une file dédiée à l’agent).
   - Les agents (et sous-agents) s’exécutent dans des tâches asynchrones (tokio::spawn ou équivalent).
 - **Remontée du résultat** : quand l’agent final a terminé, il met à jour la tâche racine (statut, résultat) et envoie un événement (ex. `TaskCompleted` avec le texte de réponse). Le **progress subscriber** (ou un composant dédié) pousse ce résultat au canal utilisateur (polling `GET /api/tasks/:id` ou WebSocket si ajouté).

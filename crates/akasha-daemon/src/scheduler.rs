@@ -68,6 +68,12 @@ async fn tick(
                 }
                 let task_id = Uuid::new_v4();
                 let run_id = Uuid::new_v4();
+                let initial_message = schedule
+                    .channel_context
+                    .as_deref()
+                    .map(String::from)
+                    .or_else(|| Some(schedule.name.clone()))
+                    .filter(|s| !s.is_empty());
                 let task = Task {
                     id: task_id,
                     parent_task_id: None,
@@ -75,6 +81,7 @@ async fn tick(
                     assigned_agent: "conversation".to_string(),
                     created_at: now,
                     updated_at: now,
+                    initial_message,
                 };
                 task_store.insert(&task)?;
                 let task_run = TaskRun {
@@ -117,7 +124,15 @@ async fn tick(
     // Only track runs whose send succeeded so we don't mark failed sends as Running.
     let mut successful_run_ids: Vec<uuid::Uuid> = Vec::new();
     for (run_id, task_id, message, session_id) in &pending {
-        match orch_tx.send((*task_id, message.clone(), session_id.clone())).await {
+        match orch_tx
+            .send(crate::agents::OrchestratorTask {
+                task_id: *task_id,
+                message: message.clone(),
+                session_id: session_id.clone(),
+                image_data_urls: None,
+            })
+            .await
+        {
             Ok(()) => {
                 successful_run_ids.push(*run_id);
             }
@@ -229,6 +244,7 @@ mod tests {
                 assigned_agent: "conversation".to_string(),
                 created_at: now,
                 updated_at: now,
+                initial_message: None,
             })
             .expect("insert task");
 

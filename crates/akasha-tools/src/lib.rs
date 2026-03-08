@@ -86,8 +86,9 @@ impl ToolExecutor {
         command: &str,
         args: &[String],
         cwd: Option<&Path>,
+        extra_env: Option<&[(String, String)]>,
     ) -> anyhow::Result<(std::process::Output, ToolResult)> {
-        run_command(command, args, cwd, &self.policy).await
+        run_command(command, args, cwd, extra_env, &self.policy).await
     }
 
     pub async fn file_diff(

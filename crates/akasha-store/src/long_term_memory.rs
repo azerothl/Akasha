@@ -98,6 +98,18 @@ impl LongTermStore {
         Ok(exists)
     }
 
+    /// Return true if a daily summary (source "daily_summary") already exists for the given date (YYYY-MM-DD).
+    /// Content format is "Résumé du {date} : ...".
+    pub fn has_daily_summary_for_date(&self, date: &str) -> anyhow::Result<bool> {
+        let pattern = format!("Résumé du {} :%", date);
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM memory_entries WHERE source = 'daily_summary' AND content LIKE ?1)",
+            rusqlite::params![pattern],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
+    }
+
     /// Retrieve all entries with their embeddings for similarity search in memory.
     fn get_all_with_embedding(
         &self,

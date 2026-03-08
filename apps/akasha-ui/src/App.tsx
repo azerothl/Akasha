@@ -145,6 +145,8 @@ function App() {
   /** Reply text for the inline ask_user form in the chat (when modal is not used). */
   const [inlineHumanReplyText, setInlineHumanReplyText] = useState("");
   const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(true);
+  /** Per-root task: whether the discussion block is collapsed in the sub-agent panel (true = collapsed). */
+  const [collapsedRootTasks, setCollapsedRootTasks] = useState<Record<string, boolean>>({});
   const [schedules, setSchedules] = useState<Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>>([]);
   const [taskRuns, setTaskRuns] = useState<Array<{
     id: string;
@@ -154,6 +156,7 @@ function App() {
     planned_for: string;
     started_at?: string;
     ended_at?: string;
+    label?: string;
   }>>([]);
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [calendarSelectedTaskId, setCalendarSelectedTaskId] = useState<string | null>(null);
@@ -176,6 +179,12 @@ function App() {
   } | null>(null);
   const [scheduleDetailError, setScheduleDetailError] = useState<string | null>(null);
   const [calendarRunsCollapsed, setCalendarRunsCollapsed] = useState(false);
+  type CalendarGridView = "day" | "week" | "month";
+  const [calendarGridView, setCalendarGridView] = useState<CalendarGridView>("week");
+  const [calendarGridEvents, setCalendarGridEvents] = useState<Array<{ at: string; task_id: string; type: string; status: string; label?: string }>>([]);
+  const [calendarGridDate, setCalendarGridDate] = useState(() => new Date());
+  type CalendarSubTab = "grid" | "recent" | "schedules";
+  const [calendarSubTab, setCalendarSubTab] = useState<CalendarSubTab>("grid");
   const [memoryShortTerm, setMemoryShortTerm] = useState<Array<{ role: string; content: string }>>([]);
   const [memoryLongTerm, setMemoryLongTerm] = useState<Array<{ id?: string; content: string; created_at: string; source: string }>>([]);
   const [memoryLongTermAvailable, setMemoryLongTermAvailable] = useState(false);
@@ -185,10 +194,20 @@ function App() {
   const [memorySubTab, setMemorySubTab] = useState<MemorySubTab>("short");
   const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string }>>([]);
+  const [userRagLoading, setUserRagLoading] = useState(false);
+  const [userRagError, setUserRagError] = useState<string | null>(null);
+  const userRagFileInputRef = useRef<HTMLInputElement>(null);
+  /** Attachments for the next message: images (vision) and documents (text appended to message). */
+  const [attachments, setAttachments] = useState<Array<{ id: string; name: string; typ: "image" | "document"; content_base64: string; mime_type: string }>>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   /** Tasks for which we already auto-opened the human-input modal (avoid re-opening every poll). */
   const humanInputAutoOpenedRef = useRef<Set<string>>(new Set());
+  /** Whether the "pending actions" notification dropdown is open. */
+  const [pendingNotifOpen, setPendingNotifOpen] = useState(false);
+  const pendingNotifRef = useRef<HTMLDivElement>(null);
 
   const checkHealth = useCallback(async () => {
     try {
@@ -206,6 +225,38 @@ function App() {
     const id = setInterval(checkHealth, 10000);
     return () => clearInterval(id);
   }, [checkHealth]);
+
+  // Fetch all pending human-input (agent questions) on load and periodically, so user sees them after relaunch or when popup was missed.
+  const fetchPendingHumanInput = useCallback(async () => {
+    if (!health?.ok) return;
+    try {
+      const data = await invoke<{ pending?: Array<{ task_id: string; question: string; context?: string; choices?: string[] }> }>(
+        "get_pending_human_input",
+        { port: DAEMON_PORT }
+      );
+      if (data?.pending?.length) {
+        setPendingHumanInput((prev) => {
+          const next = { ...prev };
+          for (const p of data.pending!) {
+            next[p.task_id] = {
+              question: p.question ?? "",
+              context: p.context ?? "",
+              choices: p.choices,
+            };
+          }
+          return next;
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [health?.ok]);
+
+  useEffect(() => {
+    fetchPendingHumanInput();
+    const id = setInterval(fetchPendingHumanInput, 25000);
+    return () => clearInterval(id);
+  }, [fetchPendingHumanInput]);
 
   // Load today's conversation history on mount (short-term = current day, so it survives UI restart).
   useEffect(() => {
@@ -259,6 +310,18 @@ function App() {
     if (tab === "chat") chatInputRef.current?.focus();
   }, [tab]);
 
+  // Close pending-actions dropdown when clicking outside
+  useEffect(() => {
+    if (!pendingNotifOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (pendingNotifRef.current && !pendingNotifRef.current.contains(e.target as Node)) {
+        setPendingNotifOpen(false);
+      }
+    };
+    document.addEventListener("click", onDocClick);
+    return () => document.removeEventListener("click", onDocClick);
+  }, [pendingNotifOpen]);
+
   // Global keyboard shortcuts: 1–7 = switch tab (when not in a modal or input)
   const tabsByIndex: Tab[] = ["chat", "router", "docs", "tasks", "calendar", "memory", "settings"];
   useEffect(() => {
@@ -276,12 +339,16 @@ function App() {
     return () => document.removeEventListener("keydown", onKey);
   }, [humanInputModalTaskId]);
 
+  type MetricsPeriod = "all" | "day" | "week" | "month" | "year";
+  const [routerMetricsPeriod, setRouterMetricsPeriod] = useState<MetricsPeriod>("all");
+
   const fetchRouterMetrics = useCallback(async () => {
     setRouterLoading(true);
     setRouterError(null);
     try {
       const data = await invoke<RouterMetrics>("get_router_metrics", {
         port: DAEMON_PORT,
+        period: routerMetricsPeriod === "all" ? undefined : routerMetricsPeriod,
       });
       setRouterMetrics(data as RouterMetrics);
     } catch (e) {
@@ -290,7 +357,7 @@ function App() {
     } finally {
       setRouterLoading(false);
     }
-  }, []);
+  }, [routerMetricsPeriod]);
 
   useEffect(() => {
     if (tab === "router") fetchRouterMetrics();
@@ -357,7 +424,7 @@ function App() {
     try {
       const [schedData, runsData] = await Promise.all([
         invoke<{ schedules?: Array<{ id?: string; name?: string; enabled?: boolean; interval_seconds?: number }> }>("get_schedules", { port: DAEMON_PORT }),
-        invoke<{ task_runs?: Array<{ id?: string; schedule_id?: string; task_id?: string; status?: string; planned_for?: string; started_at?: string; ended_at?: string }> }>("get_task_runs", { port: DAEMON_PORT }),
+        invoke<{ task_runs?: Array<{ id?: string; schedule_id?: string; task_id?: string; status?: string; planned_for?: string; started_at?: string; ended_at?: string; label?: string }> }>("get_task_runs", { port: DAEMON_PORT }),
       ]);
       setSchedules((schedData?.schedules ?? []).map((s) => ({ id: s.id ?? "", name: s.name ?? "", enabled: s.enabled ?? false, interval_seconds: s.interval_seconds })));
       setTaskRuns((runsData?.task_runs ?? []).map((r) => ({
@@ -368,6 +435,7 @@ function App() {
         planned_for: r.planned_for ?? "",
         started_at: r.started_at,
         ended_at: r.ended_at,
+        label: r.label,
       })));
     } catch {
       setSchedules([]);
@@ -376,6 +444,41 @@ function App() {
       setCalendarLoading(false);
     }
   }, []);
+
+  const fetchCalendarGridEvents = useCallback(async () => {
+    const d = calendarGridDate;
+    let from: Date;
+    let to: Date;
+    if (calendarGridView === "day") {
+      from = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0);
+      to = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59);
+    } else if (calendarGridView === "week") {
+      const day = d.getDay();
+      const monday = new Date(d);
+      monday.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
+      from = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate(), 0, 0, 0);
+      to = new Date(monday);
+      to.setDate(monday.getDate() + 6);
+      to.setHours(23, 59, 59, 999);
+    } else {
+      from = new Date(d.getFullYear(), d.getMonth(), 1, 0, 0, 0);
+      to = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59);
+    }
+    try {
+      const data = await invoke<{ events?: Array<{ at: string; task_id: string; type: string; status: string; label?: string }> }>("get_calendar_events", {
+        port: DAEMON_PORT,
+        from: from.toISOString(),
+        to: to.toISOString(),
+      });
+      setCalendarGridEvents(data?.events ?? []);
+    } catch {
+      setCalendarGridEvents([]);
+    }
+  }, [calendarGridView, calendarGridDate]);
+
+  useEffect(() => {
+    if (tab === "calendar") fetchCalendarGridEvents();
+  }, [tab, fetchCalendarGridEvents]);
 
   useEffect(() => {
     if (tab === "tasks") fetchTasksList();
@@ -434,6 +537,32 @@ function App() {
   useEffect(() => {
     if (tab === "chat") fetchScheduleReports();
   }, [tab, fetchScheduleReports]);
+
+  const fetchUserRagDocuments = useCallback(async () => {
+    setUserRagLoading(true);
+    setUserRagError(null);
+    try {
+      const data = await invoke<{ documents?: Array<{ id?: string; name?: string; mime_type?: string; added_at?: string }> }>(
+        "get_user_rag_documents",
+        { port: DAEMON_PORT }
+      );
+      setUserRagDocuments((data?.documents ?? []).map((d) => ({
+        id: d.id ?? "",
+        name: d.name ?? "",
+        mime_type: d.mime_type ?? "",
+        added_at: d.added_at ?? "",
+      })));
+    } catch (e) {
+      setUserRagError(String(e));
+      setUserRagDocuments([]);
+    } finally {
+      setUserRagLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab === "settings") fetchUserRagDocuments();
+  }, [tab, fetchUserRagDocuments]);
 
   useEffect(() => {
     if (!calendarSelectedTaskId) {
@@ -543,6 +672,8 @@ function App() {
 /vault list       — clés du vault (noms uniquement)
 /plugins          — liste des plugins
 /reload           — recharger les plugins
+/skills reload     — recharger les skills (data_dir/skills, spec/skills)
+/skills uninstall <nom> — désinstaller un skill (ex. /skills uninstall bankr)
 /restart          — redémarrer le daemon (superviseur)
 /vault set        — utiliser le CLI : akasha vault set KEY [value]`;
     }
@@ -656,6 +787,32 @@ function App() {
     if (cmd === "reload") {
       await invoke("reload_plugins", { port });
       return "Plugins rechargés.";
+    }
+    if (cmd === "skills") {
+      const sub = parts[1]?.toLowerCase() ?? "";
+      if (sub === "reload") {
+        try {
+          const json = await invoke<{ reloaded?: boolean; count?: number }>("reload_skills", { port });
+          const count = json?.count ?? 0;
+          return json?.reloaded ? `Skills rechargés (${count} skill(s)).` : `Erreur rechargement skills.`;
+        } catch {
+          return "Impossible de recharger les skills (daemon déconnecté ou erreur).";
+        }
+      }
+      if (sub === "uninstall") {
+        const skillName = parts[2]?.trim();
+        if (!skillName) return "Usage: /skills uninstall <nom> (ex. /skills uninstall bankr)";
+        try {
+          const json = await invoke<{ uninstalled?: boolean; name?: string; message?: string }>("uninstall_skill", {
+            name: skillName,
+            port,
+          });
+          return json?.uninstalled ? (json?.message ?? `Skill « ${skillName} » désinstallé.`) : (json?.message ?? "Erreur désinstallation.");
+        } catch (err) {
+          return `Impossible de désinstaller le skill : ${String(err)}`;
+        }
+      }
+      return "Usage: /skills reload — recharger les skills ; /skills uninstall <nom> — désinstaller un skill.";
     }
     if (cmd === "metrics") {
       const data = await invoke<Record<string, ModelMetricsEntry>>("get_router_metrics", { port });
@@ -780,10 +937,48 @@ function App() {
     return `Commande inconnue: /${cmd}. Tapez /help.`;
   };
 
-  const handleSend = async () => {
-    if (!message.trim() || loading) return;
+  const readFileAsBase64 = (file: File): Promise<{ content_base64: string; mime_type: string }> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+        if (match) {
+          resolve({ content_base64: match[2], mime_type: match[1] });
+        } else {
+          reject(new Error("Invalid data URL"));
+        }
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  };
 
-    const userMessage = message.trim();
+  const onAttachFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files?.length) return;
+    const imageMimes = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      try {
+        const { content_base64, mime_type } = await readFileAsBase64(file);
+        const typ = imageMimes.includes(mime_type) ? "image" : "document";
+        setAttachments((prev) => [
+          ...prev,
+          { id: `${Date.now()}-${i}-${file.name}`, name: file.name, typ, content_base64, mime_type },
+        ]);
+      } catch (err) {
+        console.error("Failed to read file", file.name, err);
+      }
+    }
+    e.target.value = "";
+  };
+
+  const handleSend = async () => {
+    const hasContent = message.trim() || attachments.length > 0;
+    if (!hasContent || loading) return;
+
+    const userMessage = message.trim() || "(Pièce(s) jointe(s))";
     setMessages((prev) => [...prev, { role: "user", text: userMessage }]);
     setMessage("");
     chatInputRef.current?.focus();
@@ -806,11 +1001,16 @@ function App() {
     }
 
     // Non-blocking: ACK + task_id, then poll in background (FR-025)
+    const attachmentsPayload = attachments.length > 0
+      ? attachments.map((a) => ({ type: a.typ, name: a.name, content_base64: a.content_base64, mime_type: a.mime_type }))
+      : undefined;
+    setAttachments([]);
     setLoading(true);
     try {
       const ack = await invoke<{ task_id: string; session_id: string; message: string }>("send_message_ack", {
         message: userMessage,
         session_id: sessionId,
+        attachments: attachmentsPayload,
         port: DAEMON_PORT,
       });
       setLoading(false);
@@ -919,6 +1119,46 @@ function App() {
             <span>Daemon déconnecté — lancez <code>akasha start</code></span>
           )}
         </div>
+        {Object.keys(pendingHumanInput).length > 0 && (
+          <div ref={pendingNotifRef} className="header-pending-actions" role="region" aria-label="Demandes d'action en attente">
+            <button
+              type="button"
+              className="header-pending-actions-trigger"
+              onClick={() => setPendingNotifOpen((o) => !o)}
+              aria-expanded={pendingNotifOpen}
+              aria-haspopup="true"
+              title="Demandes en attente de votre réponse"
+            >
+              <span className="header-pending-actions-icon" aria-hidden>⚠</span>
+              <span className="header-pending-actions-badge">{Object.keys(pendingHumanInput).length}</span>
+              <span className="header-pending-actions-label">Action requise</span>
+            </button>
+            {pendingNotifOpen && (
+              <div className="header-pending-actions-dropdown" role="menu">
+                <p className="header-pending-actions-dropdown-title">Demandes des agents</p>
+                {Object.entries(pendingHumanInput).map(([taskId, p]) => (
+                  <div key={taskId} className="header-pending-actions-item">
+                    <p className="header-pending-actions-item-question" title={p.question}>
+                      {p.question.slice(0, 80)}{p.question.length > 80 ? "…" : ""}
+                    </p>
+                    <p className="header-pending-actions-item-task">Tâche #{taskId.slice(-8)}</p>
+                    <button
+                      type="button"
+                      className="header-pending-actions-item-btn"
+                      onClick={() => {
+                        setHumanInputModalTaskId(taskId);
+                        setHumanInputFreeText("");
+                        setPendingNotifOpen(false);
+                      }}
+                    >
+                      Répondre
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         <nav className="tabs" role="tablist" aria-label="Sections">
           <button
             role="tab"
@@ -1137,31 +1377,56 @@ function App() {
                       ) : (
                         Object.entries(runningTaskEvents).map(([rootTaskId, events]) => {
                           if (events.length === 0) return null;
-                          // Group by task_id (root vs child) so we show "Tâche racine" and "Sous-tâche #xxx"
-                          const byTask: Record<string, typeof events> = {};
-                          for (const ev of events) {
-                            const tid = ev.task_id ?? rootTaskId;
-                            if (!byTask[tid]) byTask[tid] = [];
-                            byTask[tid].push(ev);
-                          }
-                          return Object.entries(byTask).map(([tid, evs]) => (
-                            <div key={`${rootTaskId}-${tid}`} className="chat-subagents-task">
-                              <div className="chat-subagents-task-id">
-                                {tid === rootTaskId ? `Tâche racine #${tid.slice(-8)}` : `Sous-tâche #${tid.slice(-8)}`}
-                              </div>
-                              <ul className="chat-subagents-events">
-                                {evs.map((ev, idx) => (
-                                  <li key={`${tid}-${idx}`} className="chat-subagents-event" data-type={ev.event_type}>
-                                    <span className="chat-subagents-event-type">{eventTypeLabel(ev.event_type)}</span>
-                                    {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload && (
-                                      <span className="chat-subagents-event-agent"> → {(ev.payload as { agent?: string }).agent}</span>
-                                    )}
-                                    {ev.at && <span className="chat-subagents-event-at"> {ev.at.slice(0, 19)}</span>}
-                                  </li>
-                                ))}
-                              </ul>
+                          const isCollapsed = collapsedRootTasks[rootTaskId] ?? false;
+                          const chip = runningTaskChips[rootTaskId];
+                          const pct = chip?.pct ?? 0;
+                          return (
+                            <div key={rootTaskId} className="chat-subagents-discussion">
+                              <button
+                                type="button"
+                                className="chat-subagents-discussion-toggle"
+                                onClick={() => setCollapsedRootTasks((prev) => ({ ...prev, [rootTaskId]: !prev[rootTaskId] }))}
+                                aria-expanded={!isCollapsed}
+                                aria-controls={`subagents-discussion-${rootTaskId}`}
+                              >
+                                <span className="chat-subagents-discussion-icon" aria-hidden>{isCollapsed ? "▶" : "▼"}</span>
+                                <span className="chat-subagents-discussion-label">
+                                  Discussion — Task #{rootTaskId.slice(-8)}
+                                  {pct != null && pct < 100 ? ` (${pct}%)` : ""}
+                                </span>
+                              </button>
+                              {!isCollapsed && (
+                                <div id={`subagents-discussion-${rootTaskId}`} className="chat-subagents-discussion-body">
+                                  {(() => {
+                                    const byTask: Record<string, typeof events> = {};
+                                    for (const ev of events) {
+                                      const tid = ev.task_id ?? rootTaskId;
+                                      if (!byTask[tid]) byTask[tid] = [];
+                                      byTask[tid].push(ev);
+                                    }
+                                    return Object.entries(byTask).map(([tid, evs]) => (
+                                      <div key={`${rootTaskId}-${tid}`} className="chat-subagents-task">
+                                        <div className="chat-subagents-task-id">
+                                          {tid === rootTaskId ? `Tâche racine #${tid.slice(-8)}` : `Sous-tâche #${tid.slice(-8)}`}
+                                        </div>
+                                        <ul className="chat-subagents-events">
+                                          {evs.map((ev, idx) => (
+                                            <li key={`${tid}-${idx}`} className="chat-subagents-event" data-type={ev.event_type}>
+                                              <span className="chat-subagents-event-type">{eventTypeLabel(ev.event_type)}</span>
+                                              {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload && (
+                                                <span className="chat-subagents-event-agent"> → {(ev.payload as { agent?: string }).agent}</span>
+                                              )}
+                                              {ev.at && <span className="chat-subagents-event-at"> {ev.at.slice(0, 19)}</span>}
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    ));
+                                  })()}
+                                </div>
+                              )}
                             </div>
-                          ));
+                          );
                         })
                       )}
                     </div>
@@ -1239,7 +1504,40 @@ function App() {
                 </div>
               );
             })()}
+            {attachments.length > 0 && (
+              <div className="chat-attachments">
+                {attachments.map((a) => (
+                  <span key={a.id} className="chat-attachment-chip">
+                    {a.name}
+                    <button
+                      type="button"
+                      aria-label={`Retirer ${a.name}`}
+                      onClick={() => setAttachments((prev) => prev.filter((x) => x.id !== a.id))}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <div className="input-area">
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="image/*,.txt,.md,.pdf,.csv"
+                onChange={onAttachFiles}
+                className="sr-only"
+                aria-hidden
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Joindre un fichier"
+                title="Joindre une image ou un document"
+              >
+                Joindre
+              </button>
               <label htmlFor="chat-input" className="sr-only">
                 Votre message
               </label>
@@ -1256,7 +1554,7 @@ function App() {
               />
               <button
                 onClick={handleSend}
-                disabled={loading || !message.trim()}
+                disabled={loading || (!message.trim() && attachments.length === 0)}
                 aria-label="Envoyer le message"
               >
                 Envoyer
@@ -1355,14 +1653,32 @@ function App() {
             )}
             {!routerLoading && !routerError && routerMetrics && (
               <>
-                <button
-                  type="button"
-                  className="refresh-btn"
-                  onClick={fetchRouterMetrics}
-                  aria-label="Rafraîchir les métriques"
-                >
-                  Rafraîchir
-                </button>
+                <div className="router-metrics-toolbar">
+                  <label htmlFor="router-metrics-period" className="router-metrics-period-label">
+                    Période :
+                  </label>
+                  <select
+                    id="router-metrics-period"
+                    value={routerMetricsPeriod}
+                    onChange={(e) => setRouterMetricsPeriod(e.target.value as MetricsPeriod)}
+                    className="router-metrics-period-select"
+                    aria-label="Filtrer les métriques par période"
+                  >
+                    <option value="all">Toutes</option>
+                    <option value="day">Jour</option>
+                    <option value="week">Semaine</option>
+                    <option value="month">Mois</option>
+                    <option value="year">Année</option>
+                  </select>
+                  <button
+                    type="button"
+                    className="refresh-btn"
+                    onClick={fetchRouterMetrics}
+                    aria-label="Rafraîchir les métriques"
+                  >
+                    Rafraîchir
+                  </button>
+                </div>
                 {Object.keys(routerMetrics).length === 0 ? (
                   <p className="empty-state">
                     Aucune requête enregistrée. Envoyez un message dans le Chat
@@ -1535,7 +1851,36 @@ function App() {
             aria-labelledby="tab-calendar"
             className="panel calendar-panel"
           >
-            <h2 className="panel-title">Calendrier (récurrences)</h2>
+            <h2 className="panel-title">Calendrier</h2>
+            <div className="calendar-subtabs" role="tablist" aria-label="Sous-onglets Calendrier">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={calendarSubTab === "grid"}
+                className={calendarSubTab === "grid" ? "active" : ""}
+                onClick={() => setCalendarSubTab("grid")}
+              >
+                Vue calendrier
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={calendarSubTab === "recent"}
+                className={calendarSubTab === "recent" ? "active" : ""}
+                onClick={() => setCalendarSubTab("recent")}
+              >
+                Tâches récentes
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={calendarSubTab === "schedules"}
+                className={calendarSubTab === "schedules" ? "active" : ""}
+                onClick={() => setCalendarSubTab("schedules")}
+              >
+                Tâches récurrentes
+              </button>
+            </div>
             <button
               type="button"
               className="refresh-btn"
@@ -1550,9 +1895,264 @@ function App() {
                 Chargement…
               </p>
             )}
-            {!calendarLoading && (
+            {!calendarLoading && calendarSubTab === "grid" && (
               <>
-                <h3>Récurrences</h3>
+                <h3 className="calendar-grid-header">Vue calendrier (tâches lancées)</h3>
+                <div className="calendar-grid-toolbar">
+                  <select
+                    value={calendarGridView}
+                    onChange={(e) => { setCalendarGridView(e.target.value as CalendarGridView); setCalendarGridDate(new Date()); }}
+                    className="calendar-grid-select"
+                    aria-label="Vue"
+                  >
+                    <option value="day">Jour (par heure)</option>
+                    <option value="week">Semaine (par jour)</option>
+                    <option value="month">Mois (par jour)</option>
+                  </select>
+                  <input
+                    type="date"
+                    value={calendarGridDate.toISOString().slice(0, 10)}
+                    onChange={(e) => setCalendarGridDate(new Date(e.target.value + "T12:00:00"))}
+                    className="calendar-grid-date"
+                    aria-label="Date"
+                  />
+                  <button type="button" className="refresh-btn calendar-grid-refresh" onClick={fetchCalendarGridEvents} aria-label="Rafraîchir">Rafraîchir</button>
+                </div>
+                <div className="calendar-grid-wrap">
+                  {(() => {
+                    const events = calendarGridEvents;
+                    const eventLabel = (ev: { label?: string; task_id: string }) =>
+                      (ev.label && ev.label.trim()) ? ev.label : `Tâche …${ev.task_id.slice(-8)}`;
+                    if (calendarGridView === "day") {
+                      const byHour: Record<number, typeof events> = {};
+                      for (let h = 0; h < 24; h++) byHour[h] = [];
+                      events.forEach((ev) => {
+                        const date = new Date(ev.at);
+                        const h = date.getHours();
+                        byHour[h].push(ev);
+                      });
+                      return (
+                        <table className="calendar-grid-table calendar-grid-day" role="grid" aria-label="Calendrier jour">
+                          <thead>
+                            <tr>
+                              <th scope="col" className="calendar-grid-col-time">Heure</th>
+                              <th scope="col" className="calendar-grid-col-events">Événements</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {Array.from({ length: 24 }, (_, h) => (
+                              <tr key={h} className="calendar-grid-row">
+                                <td className="calendar-grid-cell-time">{h}h00</td>
+                                <td className="calendar-grid-cell-events">
+                                  <ul className="calendar-grid-slot-events" role="list">
+                                    {byHour[h].map((e, i) => (
+                                      <li key={i} className="calendar-event-block" title={`${e.type} — ${e.status}`}>
+                                        <span className="calendar-event-label">{eventLabel(e)}</span>
+                                        <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      );
+                    }
+                    if (calendarGridView === "week") {
+                      const d = calendarGridDate;
+                      const day = d.getDay();
+                      const monday = new Date(d);
+                      monday.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
+                      const byDay: Record<string, typeof events> = {};
+                      const dayKeys: string[] = [];
+                      for (let i = 0; i < 7; i++) {
+                        const date = new Date(monday);
+                        date.setDate(monday.getDate() + i);
+                        const key = date.toISOString().slice(0, 10);
+                        byDay[key] = [];
+                        dayKeys.push(key);
+                      }
+                      events.forEach((ev) => {
+                        const key = new Date(ev.at).toISOString().slice(0, 10);
+                        if (byDay[key]) byDay[key].push(ev);
+                      });
+                      const weekDayNames = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"];
+                      return (
+                        <table className="calendar-grid-table calendar-grid-week" role="grid" aria-label="Calendrier semaine">
+                          <thead>
+                            <tr>
+                              <th scope="col" className="calendar-grid-col-hour">Heure</th>
+                              {dayKeys.map((key) => {
+                                const dayNum = new Date(key + "T12:00:00").getDay();
+                                const nameIndex = dayNum === 0 ? 6 : dayNum - 1;
+                                return (
+                                  <th key={key} scope="col" className="calendar-grid-col-day">
+                                    {weekDayNames[nameIndex]}
+                                    <br />
+                                    <span className="calendar-grid-day-num">{new Date(key + "T12:00:00").getDate()}</span>
+                                  </th>
+                                );
+                              })}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {Array.from({ length: 24 }, (_, hour) => (
+                              <tr key={hour} className="calendar-grid-row">
+                                <td className="calendar-grid-cell-hour">{hour}h</td>
+                                {dayKeys.map((key) => (
+                                  <td key={key} className="calendar-grid-cell-day">
+                                    <ul className="calendar-grid-slot-events" role="list">
+                                      {(byDay[key] ?? []).filter((e) => new Date(e.at).getHours() === hour).map((e, i) => (
+                                        <li key={i} className="calendar-event-block" title={`${e.type} — ${e.status}`}>
+                                          <span className="calendar-event-label">{eventLabel(e)}</span>
+                                          <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      );
+                    }
+                    const byDay: Record<string, typeof events> = {};
+                    events.forEach((ev) => {
+                      const key = new Date(ev.at).toISOString().slice(0, 10);
+                      if (!byDay[key]) byDay[key] = [];
+                      byDay[key].push(ev);
+                    });
+                    const d = calendarGridDate;
+                    const firstDay = new Date(d.getFullYear(), d.getMonth(), 1);
+                    const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+                    const startWeekday = firstDay.getDay() === 0 ? 6 : firstDay.getDay() - 1;
+                    const daysInMonth = lastDay.getDate();
+                    const weeks: string[][] = [];
+                    let week: string[] = [];
+                    for (let i = 0; i < startWeekday; i++) week.push("");
+                    for (let day = 1; day <= daysInMonth; day++) {
+                      const date = new Date(d.getFullYear(), d.getMonth(), day);
+                      week.push(date.toISOString().slice(0, 10));
+                      if (week.length === 7) {
+                        weeks.push(week);
+                        week = [];
+                      }
+                    }
+                    if (week.length) {
+                      while (week.length < 7) week.push("");
+                      weeks.push(week);
+                    }
+                    const weekDayNames = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"];
+                    return (
+                      <table className="calendar-grid-table calendar-grid-month" role="grid" aria-label="Calendrier mois">
+                        <thead>
+                          <tr>
+                            {weekDayNames.map((wd) => (
+                              <th key={wd} scope="col" className="calendar-grid-col-weekday">{wd}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {weeks.map((weekRow, wi) => (
+                            <tr key={wi} className="calendar-grid-row">
+                              {weekRow.map((key, di) => (
+                                <td key={`${wi}-${di}`} className="calendar-grid-cell-month">
+                                  {key ? (
+                                    <>
+                                      <span className="calendar-grid-day-num">{new Date(key + "T12:00:00").getDate()}</span>
+                                      <ul className="calendar-grid-slot-events" role="list">
+                                        {(byDay[key] ?? []).map((e, i) => (
+                                          <li key={i} className="calendar-event-block" title={`${e.type} — ${e.status}`}>
+                                            <span className="calendar-event-label">{eventLabel(e)}</span>
+                                            <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    </>
+                                  ) : null}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    );
+                  })()}
+                </div>
+              </>
+            )}
+            {!calendarLoading && calendarSubTab === "recent" && (
+              <div className="calendar-recent-panel">
+                <h3 className="calendar-runs-header">Lancements récents</h3>
+                {taskRuns.length === 0 ? (
+                  <p className="empty-state">Aucun run.</p>
+                ) : (
+                  <div className="calendar-runs-list-wrap">
+                    {(() => {
+                      const byParent = new Map<string, typeof taskRuns>();
+                      for (const r of taskRuns) {
+                        const key = r.schedule_id ?? "__none__";
+                        if (!byParent.has(key)) byParent.set(key, []);
+                        byParent.get(key)!.push(r);
+                      }
+                      const groups: Array<{ key: string; label: string; runs: typeof taskRuns }> = [];
+                      byParent.forEach((runs, key) => {
+                        const label = key === "__none__" ? "Sans récurrence" : (schedules.find((s) => s.id === key)?.name || key.slice(0, 8));
+                        groups.push({ key, label, runs });
+                      });
+                      const runLabel = (r: { label?: string; task_id: string }) => (r.label && r.label.trim()) ? r.label : `Tâche …${r.task_id.slice(-8)}`;
+                      return (
+                        <ul className="calendar-runs-list" role="list">
+                          {groups.map(({ key, label, runs }) => (
+                            <li key={key} className="calendar-runs-group">
+                              <div className="calendar-runs-group-label">{label}</div>
+                              {runs.map((r) => {
+                                const endedAt = r.ended_at ? new Date(r.ended_at) : null;
+                                const startedAt = r.started_at ? new Date(r.started_at) : null;
+                                const durationSec = endedAt && startedAt ? (endedAt.getTime() - startedAt.getTime()) / 1000 : null;
+                                return (
+                                  <div
+                                    key={r.id}
+                                    role="button"
+                                    tabIndex={0}
+                                    onClick={() => setCalendarSelectedTaskId(r.task_id)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" || e.key === " ") {
+                                        e.preventDefault();
+                                        setCalendarSelectedTaskId(r.task_id);
+                                      }
+                                    }}
+                                    className={`calendar-run-item ${calendarSelectedTaskId === r.task_id ? "selected" : ""}`}
+                                  >
+                                    <strong className="calendar-run-item-title">{runLabel(r)}</strong>
+                                    <span className="run-id">#{r.id.slice(-8)}</span> — {r.status}
+                                    {r.planned_for && (
+                                      <> — prévu: {new Date(r.planned_for).toLocaleString()}</>
+                                    )}
+                                    {endedAt && (
+                                      <div className="run-meta">
+                                        Terminé à {endedAt.toLocaleString()}
+                                        {durationSec != null && durationSec > 0 && ` · Durée: ${formatDurationSec(durationSec)}`}
+                                      </div>
+                                    )}
+                                    <div className="run-meta">task: {r.task_id.slice(-8)}</div>
+                                  </div>
+                                );
+                              })}
+                            </li>
+                          ))}
+                        </ul>
+                      );
+                    })()}
+                  </div>
+                )}
+              </div>
+            )}
+            {!calendarLoading && calendarSubTab === "schedules" && (
+              <div className="calendar-schedules-panel">
+                <h3>Tâches récurrentes</h3>
                 {schedules.length === 0 ? (
                   <p className="empty-state">Aucune récurrence. Créez-en via l'API ou un outil.</p>
                 ) : (
@@ -1577,82 +2177,9 @@ function App() {
                     ))}
                   </ul>
                 )}
-                <h3 className="calendar-runs-header">
-                  Lancements récents
-                  {taskRuns.length > 0 && (
-                    <button
-                      type="button"
-                      className="calendar-runs-toggle"
-                      onClick={() => setCalendarRunsCollapsed((c) => !c)}
-                      aria-expanded={!calendarRunsCollapsed}
-                    >
-                      {calendarRunsCollapsed ? "Déplier" : "Plier"}
-                    </button>
-                  )}
-                </h3>
-                {taskRuns.length === 0 ? (
-                  <p className="empty-state">Aucun run.</p>
-                ) : calendarRunsCollapsed ? (
-                  <p className="empty-state">Liste repliée ({taskRuns.length} run(s)). Cliquez sur « Déplier » pour afficher.</p>
-                ) : (
-                  <div className="calendar-runs-list-wrap">
-                    {(() => {
-                      const byParent = new Map<string, typeof taskRuns>();
-                      for (const r of taskRuns) {
-                        const key = r.schedule_id ?? "__none__";
-                        if (!byParent.has(key)) byParent.set(key, []);
-                        byParent.get(key)!.push(r);
-                      }
-                      const groups: Array<{ key: string; label: string; runs: typeof taskRuns }> = [];
-                      byParent.forEach((runs, key) => {
-                        const label = key === "__none__" ? "Sans récurrence" : (schedules.find((s) => s.id === key)?.name || key.slice(0, 8));
-                        groups.push({ key, label, runs });
-                      });
-                      return (
-                        <ul className="calendar-runs-list" role="list">
-                          {groups.map(({ key, label, runs }) => (
-                            <li key={key} className="calendar-runs-group">
-                              <div className="calendar-runs-group-label">{label}</div>
-                              {runs.map((r) => {
-                                const endedAt = r.ended_at ? new Date(r.ended_at) : null;
-                                const startedAt = r.started_at ? new Date(r.started_at) : null;
-                                const durationSec = endedAt && startedAt ? (endedAt.getTime() - startedAt.getTime()) / 1000 : null;
-                                return (
-                                  <div
-                                    key={r.id}
-                                    role="button"
-                                    tabIndex={0}
-                                    onClick={() => setCalendarSelectedTaskId(r.task_id)}
-                                    onKeyDown={(e) => {
-                                      if (e.key === "Enter" || e.key === " ") {
-                                        e.preventDefault();
-                                        setCalendarSelectedTaskId(r.task_id);
-                                      }
-                                    }}
-                                    className={`calendar-run-item ${calendarSelectedTaskId === r.task_id ? "selected" : ""}`}
-                                  >
-                                    <span className="run-id">{r.id.slice(-8)}</span> {r.status}
-                                    {r.planned_for && (
-                                      <> — prévu: {new Date(r.planned_for).toLocaleString()}</>
-                                    )}
-                                    {endedAt && (
-                                      <div className="run-meta">
-                                        Terminé à {endedAt.toLocaleString()}
-                                        {durationSec != null && durationSec > 0 && ` · Durée: ${formatDurationSec(durationSec)}`}
-                                      </div>
-                                    )}
-                                    <div className="run-meta">task: {r.task_id.slice(-8)}</div>
-                                  </div>
-                                );
-                              })}
-                            </li>
-                          ))}
-                        </ul>
-                      );
-                    })()}
-                  </div>
-                )}
-                {calendarSelectedTaskId && (
+              </div>
+            )}
+            {calendarSelectedTaskId && (
                   <div
                     className="calendar-detail-modal-overlay"
                     role="dialog"
@@ -1823,8 +2350,6 @@ function App() {
                     </div>
                   </div>
                 )}
-              </>
-            )}
           </section>
         )}
 
@@ -1995,6 +2520,74 @@ function App() {
                 <code>~/.local/share/akasha</code> (Linux/macOS)
               </dd>
             </dl>
+            <h3 className="settings-subtitle">Mes documents (RAG utilisateur)</h3>
+            <p className="settings-doc muted">
+              Les documents ajoutés ici sont indexés et utilisés par les agents pour répondre à vos questions. Formats supportés : texte (.txt, .md, .csv, .json).
+            </p>
+            {userRagError && (
+              <p className="error-inline" role="alert">{userRagError}</p>
+            )}
+            <input
+              ref={userRagFileInputRef}
+              type="file"
+              accept=".txt,.md,.csv,.json,text/*"
+              className="sr-only"
+              aria-hidden
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                try {
+                  const { content_base64, mime_type } = await readFileAsBase64(file);
+                  await invoke("add_user_rag_document", {
+                    name: file.name,
+                    content_base64,
+                    mime_type,
+                    port: DAEMON_PORT,
+                  });
+                  fetchUserRagDocuments();
+                } catch (err) {
+                  setUserRagError(String(err));
+                }
+                e.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              className="refresh-btn"
+              onClick={() => userRagFileInputRef.current?.click()}
+              disabled={userRagLoading}
+            >
+              Ajouter un document
+            </button>
+            {userRagLoading && <p className="panel-loading" aria-busy="true">Chargement…</p>}
+            {!userRagLoading && userRagDocuments.length === 0 && (
+              <p className="empty-state">Aucun document. Cliquez sur « Ajouter un document » pour en ajouter.</p>
+            )}
+            {!userRagLoading && userRagDocuments.length > 0 && (
+              <ul className="settings-doc-list" role="list">
+                {userRagDocuments.map((d) => (
+                  <li key={d.id} className="settings-doc-item">
+                    <span className="settings-doc-name">{d.name}</span>
+                    <span className="settings-doc-meta">{d.added_at.slice(0, 10)}</span>
+                    <button
+                      type="button"
+                      className="settings-doc-delete"
+                      aria-label={`Supprimer ${d.name}`}
+                      onClick={async () => {
+                        try {
+                          await invoke("delete_user_rag_document", { id: d.id, port: DAEMON_PORT });
+                          fetchUserRagDocuments();
+                        } catch (err) {
+                          setUserRagError(String(err));
+                        }
+                      }}
+                    >
+                      Supprimer
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
             <p className="settings-doc">
               Configuration : variables d’environnement <code>AKASHA_*</code>,{" "}
               <code>OLLAMA_HOST</code>. Voir l’onglet Documentation pour le guide complet.

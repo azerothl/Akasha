@@ -89,7 +89,7 @@ pub fn handle_slack_command(
     let main_agent = main_agent.clone();
     let store_path = store_path.to_path_buf();
     tokio::spawn(async move {
-        let task_id = match main_agent.handle_message(&store_path, &text, uuid::Uuid::new_v4(), true, "slack") {
+        let task_id = match main_agent.handle_message(&store_path, &text, uuid::Uuid::new_v4(), true, "slack", None) {
             Ok(id) => id,
             Err(_) => {
                 let _ = post_slack_response(&response_url, "Failed to create task.").await;

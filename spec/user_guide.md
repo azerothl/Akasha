@@ -2,6 +2,8 @@
 
 Documentation accessible depuis l'interface TUI et l'interface web. Elle décrit les commandes, l'onboarding, les options de configuration et le lancement des différentes interfaces.
 
+**Utilisateurs des binaires uniquement** : le guide dédié aux utilisateurs qui n'ont pas accès au code source est dans [docs/user_guide_final.md](../docs/user_guide_final.md). Il est servi dans l'onglet Doc des interfaces lorsque vous lancez le daemon depuis le dossier d'extraction contenant `docs/user_guide.md` (voir [spec/distribution.md](distribution.md)).
+
 ---
 
 ## 1. Prérequis
@@ -157,7 +159,7 @@ Pour les **formats, types de données et exemples** de chaque fichier, voir [35_
 - **llm_router.yaml** : recherché dans l'ordre : data_dir, puis racine du projet. Définit les providers (Ollama, OpenAI, OpenRouter) et les modèles par type de tâche. **Section `providers` vide** : ce n'est pas la cause de timeouts. Le daemon enregistre Ollama (URL = `OLLAMA_HOST` ou découverte auto), le modèle embarqué, et **OpenRouter/OpenAI dès qu’une clé API est disponible** (env `OPENROUTER_API_KEY` / `OPENAI_API_KEY` ou vault). Vous pouvez donc définir une route primary vers openrouter/openai (TUI ou fichier) sans ajouter `providers.openrouter` dans le YAML si la clé est en variable d’environnement. Pour les modèles avec « thinking » (ex. glm-4.7-flash) qui renvoient une réponse vide (done_reason: length), augmenter **AKASHA_SYSTEM_TASK_MAX_TOKENS** (défaut 4096). Voir `spec/llm_router.example.yaml`.
 - **connectors.env** : variables d'activation des connecteurs (chargé par `akasha start`).
 - **akasha.env** : variables persistantes (chargé après connectors.env).
-- **tools_policy.yaml** (dans le data_dir) : politique de sécurité des **outils machine** (lecture/écriture de fichiers, commandes). Utilisé par l’agent pour `read_file`, `write_file`, `search_files`, `run_command`, etc. Si le fichier est absent, le daemon peut le créer à partir de `spec/tools_policy.example.yaml` au premier démarrage. Pour autoriser l’écriture de fichiers (ex. génération de code sur disque), éditez ce fichier et ajoutez les répertoires sous **allowed_write_paths** (et **allowed_read_paths** pour la lecture). Par défaut, tout est refusé si le fichier est vide ou manquant.
+- **tools_policy.yaml** (dans le data_dir) : politique de sécurité des **outils machine** (lecture/écriture de fichiers, commandes). Utilisé par l’agent pour `read_file`, `write_file`, `search_files`, `run_command`, etc. Si le fichier est absent, le daemon peut le créer à partir de `spec/tools_policy.example.yaml` au premier démarrage. Pour autoriser l’écriture de fichiers (ex. génération de code sur disque), éditez ce fichier et ajoutez les répertoires sous **allowed_write_paths** (et **allowed_read_paths** pour la lecture). Par défaut, tout est refusé si le fichier est vide ou manquant. Pour que l'agent utilise spontanément la recherche web (météo, actualités, etc.) au lieu de suggérer des sites, activez **web_search_enabled: true** et configurez une clé Brave (`BRAVE_API_KEY` ou vault `brave_api_key`).
 
 ### Où sont stockés les modèles
 
@@ -206,7 +208,15 @@ npm install
 npm run tauri dev
 ```
 
-L'UI se connecte au daemon sur le port 3876 (configurable via `AKASHA_PORT`). Onglets : Chat, Routeur (métriques), Documentation, Paramètres.
+L'UI se connecte au daemon sur le port 3876 (configurable via `AKASHA_PORT`). **Onglets** : Chat, Routeur (métriques), Documentation, Tâches, Calendrier, Mémoire, Paramètres.
+
+**Pièces jointes (interface web uniquement)** : dans le Chat, le bouton « Joindre » permet d’ajouter des images ou des documents (texte, PDF). Les images sont envoyées au modèle (vision) ; les documents texte et PDF sont extraits et inclus dans le message pour l’agent. Utile pour « analyse ce document » ou pour fournir un fichier sans le copier-coller.
+
+**RAG utilisateur (interface web uniquement)** : dans l’onglet Paramètres, la section « Mes documents (RAG utilisateur) » permet d’ajouter ou supprimer des documents (texte). Ces documents sont indexés et les extraits pertinents sont injectés dans le contexte des agents lors des réponses. En TUI ou sans interface web, le RAG utilisateur peut être géré via l’API : `GET/POST/DELETE /api/user-rag/documents`.
+
+**OpenRouter** : pour que l’application apparaisse dans le dashboard OpenRouter (usage, identification), définir `site_url` et `app_title` dans `providers.openrouter` du fichier `llm_router.yaml`, ou les variables d’environnement `OPENROUTER_SITE_URL` et `OPENROUTER_APP_TITLE`. Voir [35_configuration_reference.md](35_configuration_reference.md).
+
+**Différences TUI / Web** : la TUI propose les onglets Chat, Routeur, Doc, Tâches, Calendrier, Mémoire (pas d’onglet Paramètres). L’envoi de pièces jointes et la gestion du RAG utilisateur sont disponibles dans l’interface web uniquement ; en TUI, les messages sont envoyés sans pièces jointes et le RAG utilisateur se configure via l’API ou l’interface web.
 
 ### Flux des demandes (orchestrateur)
 

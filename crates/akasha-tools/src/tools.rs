@@ -468,11 +468,52 @@ fn match_glob(glob: &str, path: &str) -> bool {
     }
 }
 
+/// On Windows, many commands (npm, npx, yarn, etc.) are .cmd/.bat scripts; Command::new("npm") fails.
+/// If the name has no extension, try .cmd and .bat so any script in PATH works.
+#[cfg(windows)]
+fn windows_spawn(
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+    env: &[(String, String)],
+) -> Result<tokio::process::Child, std::io::Error> {
+    let base = command.trim().split_whitespace().next().unwrap_or(command);
+    let has_ext = base.contains('.') || std::path::Path::new(base).extension().is_some();
+    let candidates: Vec<std::borrow::Cow<'_, str>> = if has_ext {
+        vec![std::borrow::Cow::Borrowed(command)]
+    } else {
+        vec![
+            std::borrow::Cow::Borrowed(command),
+            std::borrow::Cow::Owned(format!("{}.cmd", base)),
+            std::borrow::Cow::Owned(format!("{}.bat", base)),
+        ]
+    };
+    let mut last_err = None;
+    for exe in &candidates {
+        let mut cmd = tokio::process::Command::new(exe.as_ref());
+        cmd.args(args).current_dir(cwd)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "command not found")
+    }))
+}
+
 /// Run a command with timeout. Command name must be allowed by policy.
+/// `extra_env`: optional env vars (e.g. from vault) to inject into the child process.
 pub async fn run_command(
     command: &str,
     args: &[String],
     cwd: Option<&Path>,
+    extra_env: Option<&[(String, String)]>,
     policy: &ToolsPolicy,
 ) -> Result<(std::process::Output, ToolResult)> {
     let cmd_name = command.trim().split_whitespace().next().unwrap_or(command);
@@ -492,13 +533,21 @@ pub async fn run_command(
         ));
     }
     let timeout_secs = policy.command_timeout_secs;
-    let child = tokio::process::Command::new(command)
-        .args(args)
-        .current_dir(cwd.unwrap_or_else(|| Path::new(".")))
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .with_context(|| format!("run_command {}", command))?;
+    let cwd = cwd.unwrap_or_else(|| Path::new("."));
+    let env_slice = extra_env.unwrap_or(&[]);
+    #[cfg(windows)]
+    let child = windows_spawn(command, args, cwd, env_slice).with_context(|| format!("run_command {}", command))?;
+    #[cfg(not(windows))]
+    let child = {
+        let mut cmd = tokio::process::Command::new(command);
+        cmd.args(args).current_dir(cwd)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        for (k, v) in env_slice {
+            cmd.env(k, v);
+        }
+        cmd.spawn().with_context(|| format!("run_command {}", command))?
+    };
     let timeout = Duration::from_secs(if timeout_secs == 0 { 60 } else { timeout_secs });
     let output: std::process::Output = tokio::time::timeout(timeout, child.wait_with_output())
         .await

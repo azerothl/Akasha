@@ -9,8 +9,14 @@ use uuid::Uuid;
 
 use super::EventBus;
 
-/// Message sent to the orchestrator: root task id, user message, session id (for memory).
-pub type OrchestratorTask = (Uuid, String, String);
+/// Message sent to the orchestrator: root task id, user message, session id (for memory), optional image data URLs for vision.
+#[derive(Clone, Debug)]
+pub struct OrchestratorTask {
+    pub task_id: Uuid,
+    pub message: String,
+    pub session_id: String,
+    pub image_data_urls: Option<Vec<String>>,
+}
 
 #[derive(Clone)]
 pub struct MainAgent {
@@ -24,9 +30,10 @@ impl MainAgent {
     }
 
     /// Handle user message: ack immediately, create root task, emit events.
-    /// If `forward_to_orchestrator` is true, send (task_id, message, session_id) to orchestrator for non-blocking delegation.
+    /// If `forward_to_orchestrator` is true, send task to orchestrator for non-blocking delegation.
     /// If false, the caller is responsible for completing the task (e.g. via LLM and ProgressUpdate + TaskCompleted).
     /// session_id: used for short-term memory; if empty, a default "default" is used so all messages share one session.
+    /// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
     pub fn handle_message(
         &self,
         store_path: &Path,
@@ -34,6 +41,7 @@ impl MainAgent {
         _correlation_id: Uuid,
         forward_to_orchestrator: bool,
         session_id: &str,
+        image_data_urls: Option<Vec<String>>,
     ) -> anyhow::Result<Uuid> {
         let session_id = if session_id.is_empty() { "default" } else { session_id };
         let task_id = Uuid::new_v4();
@@ -48,6 +56,16 @@ impl MainAgent {
             .with_correlation(task_id),
         );
 
+        const MAX_INITIAL_MESSAGE: usize = 500;
+        let initial_message = if message.is_empty() {
+            None
+        } else {
+            Some(if message.chars().count() > MAX_INITIAL_MESSAGE {
+                message.chars().take(MAX_INITIAL_MESSAGE).chain(std::iter::once('…')).collect::<String>()
+            } else {
+                message.to_string()
+            })
+        };
         let store = TaskStore::open(store_path)?;
         let task = Task {
             id: task_id,
@@ -56,6 +74,7 @@ impl MainAgent {
             assigned_agent: if forward_to_orchestrator { "orchestrator" } else { "llm" }.to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            initial_message,
         };
         store.insert(&task)?;
         let _ = self.bus.send(
@@ -71,7 +90,12 @@ impl MainAgent {
         );
 
         if forward_to_orchestrator {
-            let _ = self.orchestrator_tx.try_send((task_id, message.to_string(), session_id.to_string()));
+            let _ = self.orchestrator_tx.try_send(OrchestratorTask {
+                task_id,
+                message: message.to_string(),
+                session_id: session_id.to_string(),
+                image_data_urls,
+            });
         }
         Ok(task_id)
     }

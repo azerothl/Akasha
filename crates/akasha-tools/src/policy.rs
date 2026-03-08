@@ -1,6 +1,6 @@
 //! Security policy for agent tools: allowed paths, commands, timeouts.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -9,15 +9,18 @@ fn path_normalize(p: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", default)]
 pub struct ToolsPolicy {
     /// Path prefixes allowed for read and search.
     pub allowed_read_paths: Vec<String>,
     /// Path prefixes allowed for write.
     pub allowed_write_paths: Vec<String>,
-    /// Executable names or paths allowed for run_command.
+    /// Executable names or paths allowed for run_command. Use ["*"] to allow all commands (subject to blocked_commands).
     pub allowed_commands: Vec<String>,
+    /// Commands blocked for run_command; takes precedence over allowed_commands (e.g. block dangerous ones when using allowed_commands: ["*"]).
+    #[serde(default)]
+    pub blocked_commands: Vec<String>,
     /// Default timeout in seconds for run_command.
     pub command_timeout_secs: u64,
     /// Optional: domains allowed for web_fetch. Use ["*"] to allow all domains (subject to blocked_web_domains).
@@ -37,6 +40,10 @@ pub struct ToolsPolicy {
     /// Optional: default profile name. When set, only tools listed in tool_profiles[default_profile] are allowed.
     #[serde(default)]
     pub default_profile: Option<String>,
+    /// Optional: hosts allowed for install_skill (e.g. "github.com", "gitlab.com", "raw.githubusercontent.com", "myserver.com").
+    /// If absent, only GitHub is allowed. Use ["*"] to allow any HTTPS host.
+    #[serde(default)]
+    pub allowed_skill_install_hosts: Option<Vec<String>>,
 }
 
 impl ToolsPolicy {
@@ -51,6 +58,40 @@ impl ToolsPolicy {
         }
         let policy: ToolsPolicy = serde_yaml::from_str(&content)?;
         Ok(policy)
+    }
+
+    /// Save policy to a YAML file. Used e.g. after adding allowed_commands for a newly installed skill.
+    pub fn save_to_path(&self, path: &Path) -> anyhow::Result<()> {
+        let yaml = serde_yaml::to_string(self)?;
+        std::fs::write(path, yaml)?;
+        Ok(())
+    }
+
+    /// Add commands to allowed_commands if not already present. Returns the list of newly added commands.
+    pub fn add_allowed_commands(&mut self, commands: &[String]) -> Vec<String> {
+        let mut added = Vec::new();
+        for cmd in commands {
+            let c = cmd.trim().to_lowercase();
+            if c.is_empty() {
+                continue;
+            }
+            if !self.allowed_commands.iter().any(|a| a.trim().to_lowercase() == c) {
+                self.allowed_commands.push(cmd.trim().to_string());
+                added.push(cmd.trim().to_string());
+            }
+        }
+        added
+    }
+
+    /// Remove a command from allowed_commands (e.g. when uninstalling a skill). Returns true if it was present.
+    pub fn remove_allowed_command(&mut self, command: &str) -> bool {
+        let c = command.trim().to_lowercase();
+        if c.is_empty() {
+            return false;
+        }
+        let prev_len = self.allowed_commands.len();
+        self.allowed_commands.retain(|a| a.trim().to_lowercase() != c);
+        self.allowed_commands.len() < prev_len
     }
 
     /// Check if a path is allowed for read (path must be under one of allowed_read_paths).
@@ -72,6 +113,7 @@ impl ToolsPolicy {
     }
 
     /// Check if a command (first segment) is allowed.
+    /// Order: (1) block if command in blocked_commands; (2) allow if allowed_commands contains "*"; (3) allow if command in allowed_commands.
     pub fn can_run_command(&self, command_name: &str) -> bool {
         let name = command_name.trim().to_lowercase();
         if name.is_empty() {
@@ -82,16 +124,29 @@ impl ToolsPolicy {
             .and_then(|n| n.to_str())
             .unwrap_or(&name)
             .to_string();
+        if self.blocked_commands.iter().any(|b| {
+            let b = b.trim().to_lowercase();
+            name_base == b || name.ends_with(&b)
+        }) {
+            return false;
+        }
+        if self.allowed_commands.iter().any(|a| a.trim().eq_ignore_ascii_case("*")) {
+            return true;
+        }
         self.allowed_commands.iter().any(|allowed| {
             let a = allowed.trim().to_lowercase();
             name_base == a || name.ends_with(&a)
         })
     }
 
-    /// If default_profile is set, returns whether the tool is in the profile. Otherwise true.
-    /// ask_user is always allowed so the agent can request credentials for external services.
+    /// If default_profile is set, returns whether the tool is in the profile or in allowed_commands (skills/CLIs). Otherwise true.
+    /// ask_user and install_skill are always allowed.
+    /// Tools in allowed_commands (e.g. skill names like "bankr") are allowed so TOOL: bankr <args> can be executed as run_command.
     pub fn can_use_tool(&self, tool_name: &str) -> bool {
-        if tool_name == "ask_user" {
+        if tool_name == "ask_user" || tool_name == "install_skill" || tool_name == "uninstall_skill" {
+            return true;
+        }
+        if self.can_run_command(tool_name) {
             return true;
         }
         match &self.default_profile {
@@ -109,6 +164,18 @@ impl ToolsPolicy {
         self.default_profile
             .as_ref()
             .and_then(|p| self.tool_profiles.get(p).cloned())
+    }
+
+    /// Hosts allowed for install_skill. If None or empty, returns default GitHub hosts. If list contains "*", any host is allowed (caller must check).
+    pub fn skill_install_allowed_hosts(&self) -> Vec<String> {
+        match &self.allowed_skill_install_hosts {
+            Some(v) if !v.is_empty() => v.iter().map(|s| s.trim().to_lowercase()).collect(),
+            _ => vec![
+                "github.com".into(),
+                "raw.githubusercontent.com".into(),
+                "www.github.com".into(),
+            ],
+        }
     }
 
     /// Check if a URL's host is allowed for web_fetch.

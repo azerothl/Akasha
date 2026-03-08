@@ -105,9 +105,10 @@ Voir aussi les documents listés en [§1](#1-vision-et-périmètre) (scope, FR, 
 
 | Document | Description |
 |----------|-------------|
-| [user_guide.md](user_guide.md) | **Guide utilisateur complet** : commandes CLI, config, interfaces (TUI, Web), commandes slash, canaux. Servi par le daemon via `GET /api/docs` et affiché dans l’onglet Doc des interfaces. |
+| [user_guide.md](user_guide.md) | **Guide utilisateur complet** : commandes CLI, config, interfaces (TUI, Web), commandes slash, canaux, build. Servi par le daemon via `GET /api/docs` et affiché dans l’onglet Doc des interfaces. |
 | [onboarding.md](onboarding.md) | Premier lancement pas à pas : build, init, vault, Ollama, daemon, doctor, canaux, evals. |
-| [distribution.md](distribution.md) | **Distribution** : télécharger les binaires précompilés (sans compiler), créer une release, option Tauri desktop. |
+| [distribution.md](distribution.md) | **Distribution** : binaires + docs/user_guide.md dans le zip, créer une release, option Tauri desktop. |
+| [../docs/user_guide_final.md](../docs/user_guide_final.md) | **Guide utilisateur final** (binaires uniquement, sans référence au code). Livré dans le zip sous docs/user_guide.md. |
 
 **Référence complète** (formats, types de données, cas d’usage) : [35_configuration_reference.md](35_configuration_reference.md).
 

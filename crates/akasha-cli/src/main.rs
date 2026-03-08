@@ -1209,6 +1209,28 @@ providers:
         println!("\n  Profil agent : template « Neutre / polyvalent » écrit dans {}", agent_profile_path.display());
     }
 
+    // --- 4c. tools_policy.yaml (outils machine) ---
+    let tools_policy_path = data_dir.join("tools_policy.yaml");
+    if !tools_policy_path.exists() {
+        let spec_dir = std::env::var("AKASHA_SPEC_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("spec"));
+        let example = spec_dir.join("tools_policy.example.yaml");
+        if example.exists() {
+            std::fs::copy(&example, &tools_policy_path)?;
+            println!("  Fichier écrit : {} (depuis spec/tools_policy.example.yaml)", tools_policy_path.display());
+        } else {
+            let minimal = r#"# tools_policy.yaml - éditez allowed_read_paths / allowed_write_paths selon vos besoins
+allowed_read_paths: []
+allowed_write_paths: []
+allowed_commands: []
+command_timeout_secs: 60
+"#;
+            std::fs::write(&tools_policy_path, minimal)?;
+            println!("  Fichier écrit : {} (minimal ; éditez pour autoriser chemins et commandes)", tools_policy_path.display());
+        }
+    }
+
     // --- 5. RAG / Memory ---
     println!("\n--- RAG & Memory ---");
     println!("  RAG : le dossier spec/ (et spec/runbooks/) du projet est utilisé par défaut.");
@@ -1218,6 +1240,9 @@ providers:
     println!("\n=== Initialisation terminée ===");
     println!("  • llm_router.yaml : {}", router_path.display());
     println!("  • connectors.env : {}", env_path.display());
+    if tools_policy_path.exists() {
+        println!("  • tools_policy.yaml : politique des outils machine (éditez allowed_read_paths / allowed_write_paths)");
+    }
     if agent_profile_path.exists() {
         println!("  • agent_profile.json : profil / personnalité de l'agent");
     }
@@ -1471,6 +1496,8 @@ fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
                 organization: None,
                 version: None,
                 always_available: None,
+                site_url: None,
+                app_title: None,
             },
         );
         config.save_to_path(&llm_router_path)?;
@@ -1510,6 +1537,57 @@ command_timeout_secs: 60
     Ok(fixes)
 }
 
+/// Run config file checks: existence and valid format (YAML load where applicable).
+/// Returns (check_id, ok, description). Invalid files are reported; --fix does not overwrite them.
+fn run_config_checks(data_dir: &Path) -> Vec<(String, bool, String)> {
+    let mut out = Vec::new();
+
+    // llm_router.yaml
+    let p = data_dir.join("llm_router.yaml");
+    let (ok, msg) = if !p.exists() {
+        (false, "llm_router.yaml: file missing".to_string())
+    } else {
+        match akasha_llm::RoutingConfig::load_from_path(&p) {
+            Ok(c) if c.providers.is_empty() => (false, "llm_router.yaml: providers empty".to_string()),
+            Ok(_) => (true, "llm_router.yaml: OK".to_string()),
+            Err(e) => (false, format!("llm_router.yaml: invalid — {}", e)),
+        }
+    };
+    out.push(("llm_router_yaml".to_string(), ok, msg));
+
+    // tools_policy.yaml
+    let p = data_dir.join("tools_policy.yaml");
+    let (ok, msg) = if !p.exists() {
+        (false, "tools_policy.yaml: file missing".to_string())
+    } else {
+        match akasha_tools::ToolsPolicy::load_from_path(&p) {
+            Ok(_) => (true, "tools_policy.yaml: OK".to_string()),
+            Err(e) => (false, format!("tools_policy.yaml: invalid — {}", e)),
+        }
+    };
+    out.push(("tools_policy_yaml".to_string(), ok, msg));
+
+    // connectors.env (existence only)
+    let p = data_dir.join("connectors.env");
+    let (ok, msg) = if p.exists() {
+        (true, "connectors.env: OK".to_string())
+    } else {
+        (false, "connectors.env: file missing".to_string())
+    };
+    out.push(("connectors_env".to_string(), ok, msg));
+
+    // akasha.env (optional, existence only)
+    let p = data_dir.join("akasha.env");
+    let (ok, msg) = if p.exists() {
+        (true, "akasha.env: OK".to_string())
+    } else {
+        (false, "akasha.env: file missing (optional)".to_string())
+    };
+    out.push(("akasha_env".to_string(), ok, msg));
+
+    out
+}
+
 fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
     let port: u16 = std::env::var("AKASHA_PORT")
         .ok()
@@ -1528,26 +1606,27 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
         }
     }
 
-    let mut checks = Vec::new();
+    type CheckItem = (String, bool, String);
+    let mut checks: Vec<CheckItem> = Vec::new();
 
     // Check Rust
     let rust_ok = Command::new("rustc").arg("--version").output().is_ok();
-    checks.push(("rust", rust_ok, "Rust compiler"));
+    checks.push(("rust".to_string(), rust_ok, "Rust compiler".to_string()));
 
     // Check Node
     let node_ok = Command::new("node").arg("--version").output().is_ok();
-    checks.push(("node", node_ok, "Node.js runtime"));
+    checks.push(("node".to_string(), node_ok, "Node.js runtime".to_string()));
 
     // Check daemon binary
     let daemon_ok = find_daemon_binary().is_some();
-    checks.push(("daemon_binary", daemon_ok, "akasha-daemon binary"));
+    checks.push(("daemon_binary".to_string(), daemon_ok, "akasha-daemon binary".to_string()));
 
     // Check spec directory
     let spec_dir = std::env::current_dir().unwrap_or_default().join("spec");
     let event_model = spec_dir.join("09_event_model.yaml");
     let data_model = spec_dir.join("10_data_model.yaml");
     let spec_files_ok = event_model.exists() && data_model.exists();
-    checks.push(("spec_files", spec_files_ok, "Spec YAML files (09, 10)"));
+    checks.push(("spec_files".to_string(), spec_files_ok, "Spec YAML files (09, 10)".to_string()));
 
     // Check daemon health (if running)
     let daemon_healthy = reqwest::blocking::Client::new()
@@ -1558,7 +1637,10 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
         .ok()
         .map(|body| body.contains("\"status\":\"ok\"") || body.contains("ok"))
         .unwrap_or(false);
-    checks.push(("daemon_health", daemon_healthy, "Daemon health endpoint"));
+    checks.push(("daemon_health".to_string(), daemon_healthy, "Daemon health endpoint".to_string()));
+
+    // Config file checks (existence + valid format)
+    checks.extend(run_config_checks(&data_dir));
 
     let all_ok = checks.iter().all(|(_, ok, _)| *ok);
 
@@ -1573,7 +1655,7 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
     let health_payload = serde_json::json!({
         "ok": all_ok,
         "checks": checks.iter().map(|(id, ok, desc)| {
-            serde_json::json!({ "id": id, "ok": *ok, "description": desc })
+            serde_json::json!({ "id": id, "ok": ok, "description": desc })
         }).collect::<Vec<_>>(),
         "config_paths": config_paths
     });

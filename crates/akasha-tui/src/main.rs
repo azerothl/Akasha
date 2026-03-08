@@ -216,6 +216,10 @@ struct App {
     activity_list_scroll: usize,
     /// Tasks tab: if true, task list body is collapsed (only header visible; Space/Enter to expand).
     activity_list_collapsed: bool,
+    /// Tasks tab: if true, list shows only root tasks (one row per discussion). Toggle with 'd' for "discussions".
+    activity_show_roots_only: bool,
+    /// Indices into activity_tasks for the visible list (roots only or all). Updated on fetch and when toggling activity_show_roots_only.
+    activity_visible_indices: Vec<usize>,
     /// Tasks tab: list widget rect (for mouse click to select task).
     activity_list_rect: Option<ratatui::prelude::Rect>,
     /// Tabs bar rect (for mouse click to switch tab).
@@ -253,6 +257,8 @@ struct App {
     chat_history_loaded: bool,
     /// Human in the loop: when the agent asked for user input, (task_id, question, context, choices).
     pending_human_input: Option<(String, String, String, Option<Vec<String>>)>,
+    /// All tasks currently waiting for user input (from GET /api/pending-human-input), so we can show them after relaunch or when user was away.
+    pending_human_input_list: Vec<(String, String, String, Option<Vec<String>>)>,
 }
 
 impl App {
@@ -288,6 +294,8 @@ impl App {
             calendar_schedule_detail: None,
             activity_list_scroll: 0,
             activity_list_collapsed: false,
+            activity_show_roots_only: true,
+            activity_visible_indices: Vec::new(),
             activity_list_rect: None,
             tabs_rect: None,
             calendar_content_rect: None,
@@ -307,6 +315,60 @@ impl App {
             input_wrapped_lines: 0,
             chat_history_loaded: false,
             pending_human_input: None,
+            pending_human_input_list: Vec::new(),
+        }
+    }
+
+    /// Fetch all pending human-input (GET /api/pending-human-input). Updates pending_human_input_list and, if needed, pending_human_input so the user sees questions after relaunch or when they were away.
+    fn fetch_pending_human_input_list(&mut self) {
+        let url = format!("{}/api/pending-human-input", daemon_base_url(self.port));
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let resp = match client.get(&url).send() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        if !resp.status().is_success() {
+            self.pending_human_input_list.clear();
+            return;
+        }
+        let json: serde_json::Value = match resp.json() {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let pending = match json.get("pending").and_then(|p| p.as_array()) {
+            Some(a) => a,
+            None => {
+                self.pending_human_input_list.clear();
+                return;
+            }
+        };
+        let mut list = Vec::new();
+        for p in pending {
+            let task_id = p.get("task_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let question = p.get("question").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if task_id.is_empty() || question.is_empty() {
+                continue;
+            }
+            let context = p.get("context").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let choices = p.get("choices")
+                .and_then(|c| c.as_array())
+                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+            list.push((task_id, question, context, choices));
+        }
+        self.pending_human_input_list = list;
+        if let Some(first) = self.pending_human_input_list.first() {
+            let current_id = self.pending_human_input.as_ref().map(|t| t.0.as_str());
+            if current_id.is_none() || !self.pending_human_input_list.iter().any(|t| Some(t.0.as_str()) == current_id) {
+                self.pending_human_input = Some(first.clone());
+            }
+        } else {
+            self.pending_human_input = None;
         }
     }
 
@@ -358,7 +420,8 @@ impl App {
             Err(_) => return false,
         };
         if resp.status().is_success() {
-            self.pending_human_input = None;
+            self.pending_human_input_list.retain(|(id, _, _, _)| id != task_id);
+            self.pending_human_input = self.pending_human_input_list.first().cloned();
             true
         } else {
             false
@@ -375,6 +438,9 @@ impl App {
         }
         if self.mode == Mode::Tasks {
             self.fetch_activity_tasks();
+        }
+        if self.mode == Mode::Chat {
+            self.fetch_pending_human_input_list();
         }
         if self.mode == Mode::Calendar {
             self.fetch_calendar();
@@ -495,8 +561,16 @@ impl App {
                             Some(ActivityTaskRow { id, status, created_at, assigned_agent, parent_task_id })
                         })
                         .collect();
-                    if self.activity_selected >= self.activity_tasks.len() && !self.activity_tasks.is_empty() {
-                        self.activity_selected = self.activity_tasks.len() - 1;
+                    self.activity_visible_indices = if self.activity_show_roots_only {
+                        self.activity_tasks.iter().enumerate()
+                            .filter(|(_, r)| r.parent_task_id.is_none())
+                            .map(|(i, _)| i)
+                            .collect()
+                    } else {
+                        (0..self.activity_tasks.len()).collect()
+                    };
+                    if self.activity_selected >= self.activity_visible_indices.len() && !self.activity_visible_indices.is_empty() {
+                        self.activity_selected = self.activity_visible_indices.len() - 1;
                     }
                     if !self.activity_tasks.is_empty() {
                         self.fetch_activity_events_for_selected();
@@ -511,8 +585,11 @@ impl App {
     }
 
     fn fetch_activity_events_for_selected(&mut self) {
-        let id = match self.activity_tasks.get(self.activity_selected) {
-            Some(row) => row.id.clone(),
+        let id = self.activity_visible_indices.get(self.activity_selected)
+            .and_then(|&idx| self.activity_tasks.get(idx))
+            .map(|row| row.id.clone());
+        let id = match id {
+            Some(id) => id,
             None => {
                 self.activity_events.clear();
                 self.activity_task_detail = None;
@@ -558,7 +635,9 @@ impl App {
     }
 
     fn fetch_activity_task_detail(&mut self) {
-        let id = match self.activity_tasks.get(self.activity_selected) {
+        let id = match self.activity_visible_indices.get(self.activity_selected)
+            .and_then(|&idx| self.activity_tasks.get(idx))
+        {
             Some(row) => row.id.clone(),
             None => return,
         };
@@ -1158,6 +1237,8 @@ impl App {
   /vault list       — clés du vault (noms uniquement)
   /plugins          — liste des plugins
   /reload           — recharger les plugins
+  /skills reload     — recharger les skills (data_dir/skills, spec/skills)
+  /skills uninstall <nom> — désinstaller un skill (ex. /skills uninstall bankr)
   /restart          — redémarrer le daemon (superviseur)
   /vault set        — utiliser le CLI : akasha vault set KEY [value]"#.to_string();
             }
@@ -1387,6 +1468,47 @@ impl App {
                     Ok(r) => return format!("Erreur: {}", r.status()),
                     Err(e) => return format!("Erreur: {}", e),
                 }
+            }
+            "skills" => {
+                let sub = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+                if sub == "reload" {
+                    let url = format!("{}/api/skills/reload", base);
+                    match client.post(&url).send() {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(json) = r.json::<serde_json::Value>() {
+                                let count = json.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                                return format!("Skills rechargés ({} skill(s)).", count);
+                            }
+                            return "Skills rechargés.".to_string();
+                        }
+                        Ok(r) => return format!("Erreur: {}", r.status()),
+                        Err(e) => return format!("Erreur: {}", e),
+                    }
+                }
+                if sub == "uninstall" {
+                    let name = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                    if name.is_empty() {
+                        return "Usage: /skills uninstall <nom> (ex. /skills uninstall bankr)".to_string();
+                    }
+                    let url = format!("{}/api/skills/uninstall", base);
+                    let body = serde_json::json!({ "name": name });
+                    match client.post(&url).json(&body).send() {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(json) = r.json::<serde_json::Value>() {
+                                let msg = json.get("message").and_then(|v| v.as_str()).unwrap_or("Skill désinstallé.");
+                                return msg.to_string();
+                            }
+                            return "Skill désinstallé.".to_string();
+                        }
+                        Ok(r) => {
+                            let status = r.status();
+                            let err_body = r.text().unwrap_or_default();
+                            return format!("Erreur: {} — {}", status, err_body);
+                        }
+                        Err(e) => return format!("Erreur: {}", e),
+                    }
+                }
+                return "Usage: /skills reload — recharger les skills ; /skills uninstall <nom> — désinstaller un skill.".to_string();
             }
             "metrics" => {
                 let url = format!("{}/api/router/metrics", base);
@@ -1763,7 +1885,14 @@ fn ui(f: &mut Frame, app: &mut App) {
     f.render_widget(tabs, top_chunks[1]);
     app.tabs_rect = Some(top_chunks[1]);
 
-    let help_line = " 1=Chat 2=Routeur 3=Doc 4=Tâches 5=Calendrier 6=Mémoire · Tab=onglet suivant · R=actualiser · F2=thème · Esc=quitter ";
+    let help_line = if !app.pending_human_input_list.is_empty() {
+        format!(
+            " ⚠ Demandes en attente: {} — répondez ci-dessous (Entrée pour envoyer) · 1=Chat 2=Routeur … · Esc=quitter ",
+            app.pending_human_input_list.len()
+        )
+    } else {
+        " 1=Chat 2=Routeur 3=Doc 4=Tâches 5=Calendrier 6=Mémoire · Tab=onglet suivant · R=actualiser · F2=thème · Esc=quitter ".to_string()
+    };
     let help_para = Paragraph::new(help_line)
         .style(Style::default().fg(theme.palette().muted));
     f.render_widget(help_para, top_chunks[2]);
@@ -1979,7 +2108,12 @@ fn ui(f: &mut Frame, app: &mut App) {
                     Style::default().fg(theme.palette().muted),
                 )));
             } else {
-                for (i, row) in app.activity_tasks.iter().enumerate() {
+                let visible_len = app.activity_visible_indices.len();
+                for (i, &idx) in app.activity_visible_indices.iter().enumerate() {
+                    let row = match app.activity_tasks.get(idx) {
+                        Some(r) => r,
+                        None => continue,
+                    };
                     let short_date = if row.created_at.len() >= 16 {
                         format!("{} {}", &row.created_at[5..10], &row.created_at[11..16])
                     } else {
@@ -2003,13 +2137,18 @@ fn ui(f: &mut Frame, app: &mut App) {
                         style,
                     )));
                 }
-                if app.activity_tasks.is_empty() {
-                    list_lines.push(Line::from("  Aucune tâche. Envoyez un message dans Chat ou /task create \"message\"."));
+                if visible_len == 0 {
+                    list_lines.push(Line::from(if app.activity_tasks.is_empty() {
+                        "  Aucune tâche. Envoyez un message dans Chat ou /task create \"message\"."
+                    } else {
+                        "  Aucune discussion (racine). Touche 'd' : afficher toutes les tâches."
+                    }));
                 }
             }
             let list_len = list_lines.len();
-            if !app.activity_tasks.is_empty() {
-                let selected_line = 3 + app.activity_selected.min(app.activity_tasks.len() - 1);
+            let visible_len = app.activity_visible_indices.len();
+            if visible_len > 0 {
+                let selected_line = 3 + app.activity_selected.min(visible_len - 1);
                 if selected_line >= app.activity_list_scroll + list_inner_h && list_inner_h > 0 {
                     app.activity_list_scroll = selected_line - list_inner_h + 1;
                 }
@@ -2021,7 +2160,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             app.activity_list_scroll = app.activity_list_scroll.min(max_scroll);
             let list_block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Liste des tâches ")
+                .title(if app.activity_show_roots_only { " Discussions (racines) [d=toutes] " } else { " Liste des tâches [d=racines] " })
                 .border_style(theme.block_border());
             app.activity_list_rect = Some(list_area);
             f.render_widget(
@@ -2062,8 +2201,8 @@ fn ui(f: &mut Frame, app: &mut App) {
             for ev in &app.activity_events {
                 detail_lines.push(Line::from(format!("  {}", ev)));
             }
-            if app.activity_task_detail.is_none() && !app.activity_tasks.is_empty() {
-                detail_lines.push(Line::from("  Sélectionnez une tâche ci-dessus pour voir la demande et la réponse."));
+            if app.activity_task_detail.is_none() && !app.activity_visible_indices.is_empty() {
+                detail_lines.push(Line::from("  Sélectionnez une tâche ci-dessus pour voir la demande et la réponse. (d = discussions / toutes)"));
             }
             let detail_len = detail_lines.len();
             let detail_inner_height = detail_area.height.saturating_sub(2) as usize; // block borders
@@ -2348,6 +2487,7 @@ fn run_app(
             app.check_health();
             if app.mode == Mode::Chat {
                 app.fetch_schedule_reports();
+                app.fetch_pending_human_input_list();
                 if let Some(task_id) = app.pending_reply_task_id.clone() {
                     app.fetch_pending_human_input(&task_id);
                 }
@@ -2500,7 +2640,7 @@ fn run_app(
                                 let content_line = app.activity_list_scroll + inner_y as usize;
                                 if content_line >= 3 {
                                     let task_idx = content_line - 3;
-                                    if task_idx < app.activity_tasks.len() {
+                                    if task_idx < app.activity_visible_indices.len() {
                                         app.activity_selected = task_idx;
                                         app.activity_detail_scroll = 0;
                                         app.fetch_activity_events_for_selected();
@@ -2736,12 +2876,28 @@ fn run_app(
                         }
                     }
                     (Mode::Tasks, KeyCode::Down, _) => {
-                        if app.activity_selected + 1 < app.activity_tasks.len() {
+                        if app.activity_selected + 1 < app.activity_visible_indices.len() {
                             app.activity_selected += 1;
                             app.activity_detail_scroll = 0;
                             app.fetch_activity_events_for_selected();
                             app.fetch_activity_task_detail();
                         }
+                    }
+                    (Mode::Tasks, KeyCode::Char('d') | KeyCode::Char('D'), _) => {
+                        app.activity_show_roots_only = !app.activity_show_roots_only;
+                        app.activity_visible_indices = if app.activity_show_roots_only {
+                            app.activity_tasks.iter().enumerate()
+                                .filter(|(_, r)| r.parent_task_id.is_none())
+                                .map(|(i, _)| i)
+                                .collect()
+                        } else {
+                            (0..app.activity_tasks.len()).collect()
+                        };
+                        if app.activity_selected >= app.activity_visible_indices.len() && !app.activity_visible_indices.is_empty() {
+                            app.activity_selected = app.activity_visible_indices.len() - 1;
+                        }
+                        app.fetch_activity_events_for_selected();
+                        app.fetch_activity_task_detail();
                     }
                     (Mode::Tasks, KeyCode::PageUp, _) => {
                         app.activity_detail_scroll = app.activity_detail_scroll.saturating_sub(1);
