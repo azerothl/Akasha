@@ -2542,6 +2542,7 @@ pub async fn handle_api(
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
     human_input_store: Option<HumanInputStore>,
+    user_rag_store: &crate::user_rag::SharedUserRagStore,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
@@ -3178,7 +3179,7 @@ pub async fn handle_api(
 
     // User RAG: list documents
     if method == "GET" && path == "/api/user-rag/documents" {
-        let store = crate::user_rag::UserRagStore::new(data_dir);
+        let store = user_rag_store.lock().await;
         match store.list_documents() {
             Ok(docs) => {
                 let body = serde_json::to_string(&serde_json::json!({ "documents": docs })).unwrap_or_else(|_| "[]".to_string());
@@ -3205,7 +3206,7 @@ pub async fn handle_api(
             Some(c) => c,
             None => return json_response("400 Bad Request", r#"{"error":"content_base64_required"}"#),
         };
-        let store = crate::user_rag::UserRagStore::new(data_dir);
+        let store = user_rag_store.lock().await;
         match store.add_document(&content_base64, &name, &mime_type) {
             Ok(id) => {
                 let body = serde_json::json!({ "id": id, "name": name, "message": "Document ajouté." });
@@ -3224,7 +3225,7 @@ pub async fn handle_api(
         if id.is_empty() {
             return json_response("400 Bad Request", r#"{"error":"id_required"}"#);
         }
-        let store = crate::user_rag::UserRagStore::new(data_dir);
+        let store = user_rag_store.lock().await;
         match store.delete_document(id) {
             Ok(true) => return json_response("200 OK", r#"{"ok":true,"message":"Document supprimé."}"#),
             Ok(false) => return json_response("404 Not Found", r#"{"error":"document_not_found"}"#),

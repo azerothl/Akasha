@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -48,6 +49,10 @@ struct Chunk {
     content: String,
 }
 
+/// A `UserRagStore` wrapped in an `Arc<Mutex<…>>` so it can be safely shared
+/// across concurrent request handlers without manifest-write races.
+pub type SharedUserRagStore = Arc<tokio::sync::Mutex<UserRagStore>>;
+
 pub struct UserRagStore {
     base_dir: PathBuf,
 }
@@ -57,6 +62,12 @@ impl UserRagStore {
         Self {
             base_dir: data_dir.join("user_rag"),
         }
+    }
+
+    /// Create a new store wrapped in a shared mutex suitable for use across
+    /// concurrent tokio tasks.
+    pub fn new_shared(data_dir: &Path) -> SharedUserRagStore {
+        Arc::new(tokio::sync::Mutex::new(Self::new(data_dir)))
     }
 
     fn documents_dir(&self) -> PathBuf {
