@@ -3022,7 +3022,7 @@ pub async fn handle_api(
             .map(String::from);
         match name {
             Some(skill_name) => {
-                let tools_reload = _tools_executor.as_ref().map(|r| {
+                let tools_reload = _tools_executor.map(|r| {
                     let policy_path = data_dir.join("tools_policy.yaml");
                     (r, policy_path.as_path())
                 });
