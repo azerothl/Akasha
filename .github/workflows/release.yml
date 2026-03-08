@@ -127,7 +127,6 @@ jobs:
   deploy_site:
     needs: release
     runs-on: ubuntu-latest
-    if: ${{ secrets.AKASHA_APP_DISPATCH_TOKEN != '' }}
     steps:
       - name: Trigger Akasha_app deployment via repository_dispatch
         env:
@@ -136,6 +135,10 @@ jobs:
           REPO_APP: Akasha_app
           TOKEN: ${{ secrets.AKASHA_APP_DISPATCH_TOKEN }}
         run: |
+          if [ -z "$TOKEN" ]; then
+            echo "AKASHA_APP_DISPATCH_TOKEN not set, skipping deployment."
+            exit 0
+          fi
           curl -sS -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $TOKEN" \

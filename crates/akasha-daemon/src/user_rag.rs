@@ -114,7 +114,19 @@ impl UserRagStore {
 
         let mut manifest = self.load_manifest()?;
         manifest.documents.push(meta);
-        self.save_manifest(&manifest)?;
+        if let Err(e) = self.save_manifest(&manifest) {
+            // Best-effort rollback of the written file if manifest save fails.
+            if full_path.exists() {
+                if let Err(del_err) = std::fs::remove_file(&full_path) {
+                    warn!(
+                        path = %full_path.display(),
+                        error = %del_err,
+                        "Failed to remove document file after manifest save failure"
+                    );
+                }
+            }
+            return Err(e);
+        }
         Ok(id)
     }
 
@@ -182,7 +194,7 @@ impl UserRagStore {
                 Err(_) => continue,
             };
             let content_trim = content.trim();
-            if content_trim.len() > 10 {
+            if content_trim.chars().count() > 10 {
                 chunks.push(Chunk {
                     content: content_trim.chars().take(4000).collect::<String>(),
                 });
