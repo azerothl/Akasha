@@ -1424,8 +1424,24 @@ async fn execute_tool_call(
             }
         }
         _ => {
-            let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
-            (false, format!("[{}] unknown tool. Available: {}.", tool_name, names.join(", ")))
+            if executor.policy.can_run_command(tool_name) {
+                match executor.run_command(tool_name, args, None).await {
+                    Ok((out, res)) => {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        let msg = if res.success {
+                            format!("[run_command {}] stdout: {} stderr: {}", tool_name, stdout.trim(), stderr.trim())
+                        } else {
+                            format!("[run_command] {} stderr: {}", res.summary, stderr.trim())
+                        };
+                        (res.success, msg)
+                    }
+                    Err(e) => (false, format!("[run_command] error: {}", e)),
+                }
+            } else {
+                let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
+                (false, format!("[{}] unknown tool. Available: {}.", tool_name, names.join(", ")))
+            }
         }
     };
     result
@@ -1623,20 +1639,27 @@ pub(crate) async fn run_message_via_llm(
     let tool_instruction = if tools_executor_snapshot.is_some() {
         let allowed_tools = tools_executor_snapshot.as_ref().and_then(|e| e.policy.allowed_tool_list());
         let base = available_tools_instruction(allowed_tools.as_deref());
-        let skills_part = match &skill_registry {
+        let (skills_part, skills_rule) = match &skill_registry {
             Some(reg) => {
                 let list = reg.list().await;
                 if list.is_empty() {
-                    String::new()
+                    (String::new(), String::new())
                 } else {
                     let skills_desc: Vec<String> = list
                         .iter()
                         .map(|s| format!("{} ({})", s.name, s.description))
                         .collect();
-                    format!(" ; Skills (use skill name as tool): {}", skills_desc.join(", "))
+                    let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
+                    let part = format!(" ; Skills (use skill name as tool): {}", skills_desc.join(", "));
+                    let rule = format!(
+                        " INSTALLED SKILLS RULE: The following skills ARE installed and available: {}. Do NOT say they are not installed or suggest install_skill for them. For balance/solde/wallet/Base requests, if \"bankr\" is in the list, reply ONLY with TOOL: bankr <args> (e.g. TOOL: bankr check balance on Base). Use the skill name as the tool name.\n\
+             ",
+                        names.join(", ")
+                    );
+                    (part, rule)
                 }
             }
-            None => String::new(),
+            None => (String::new(), String::new()),
         };
         format!(
             "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
@@ -1646,10 +1669,11 @@ pub(crate) async fn run_message_via_llm(
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user.\n\
              INSTALL SKILL RULE: When the user asks to install a skill from a URL (e.g. \"install the bankr skill from https://github.com/BankrBot/skills/tree/main/bankr\"), you MUST reply ONLY with TOOL: install_skill <url>. Do not give manual steps; perform the installation yourself.\n\
              SKILL USE RULE: When the user asks you to perform an action using a skill (e.g. \"vérifie mon wallet bankr\", \"check my balance with bankr\", \"run bankr whoami\"), you MUST reply ONLY with a single line: TOOL: <skill_name> <args> (e.g. TOOL: bankr whoami). The system will execute the command and return the result. Do NOT tell the user to run the command themselves or to \"use TOOL: bankr whoami\"; you must output that line yourself so the tool is executed.\n\
+             {}\
              If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
-            base, skills_part
+            base, skills_part, skills_rule
         )
     } else {
         String::new()

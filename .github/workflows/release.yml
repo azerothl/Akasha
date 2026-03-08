@@ -65,7 +65,7 @@ jobs:
       - name: Build daemon (Windows, without embeddings and baguettotron to avoid linker errors)
         if: matrix.os == 'windows-latest'
         run: |
-          cargo build --release --target ${{ matrix.target }} -p akasha-daemon --features embedded,embeddings-tract,embedded-baguettotron
+          cargo build --release --target ${{ matrix.target }} -p akasha-daemon --no-default-features --features embedded,embeddings-tract,embedded-baguettotron
 
       - name: Prepare artifact (Linux / macOS)
         if: matrix.os != 'windows-latest'

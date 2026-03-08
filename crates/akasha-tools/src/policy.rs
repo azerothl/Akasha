@@ -115,11 +115,14 @@ impl ToolsPolicy {
         })
     }
 
-    /// If default_profile is set, returns whether the tool is in the profile. Otherwise true.
-    /// ask_user is always allowed so the agent can request credentials for external services.
-    /// install_skill is always allowed so the agent can install skills from GitHub when the user asks.
+    /// If default_profile is set, returns whether the tool is in the profile or in allowed_commands (skills/CLIs). Otherwise true.
+    /// ask_user and install_skill are always allowed.
+    /// Tools in allowed_commands (e.g. skill names like "bankr") are allowed so TOOL: bankr <args> can be executed as run_command.
     pub fn can_use_tool(&self, tool_name: &str) -> bool {
         if tool_name == "ask_user" || tool_name == "install_skill" {
+            return true;
+        }
+        if self.can_run_command(tool_name) {
             return true;
         }
         match &self.default_profile {
