@@ -346,6 +346,7 @@ impl Daemon {
             let events = new_events_cache();
             let process_registry = new_process_registry();
             let human_input_store = new_human_input_store();
+            let user_rag_store = crate::user_rag::UserRagStore::new_shared(&data_dir);
             let (progress_persistence_tx, progress_persistence_rx) = std::sync::mpsc::channel::<(uuid::Uuid, u8, String)>();
             {
                 let store_path = db_path.clone();
@@ -430,6 +431,7 @@ impl Daemon {
                 let short_term = short_term.clone();
                 let long_term_client = long_term_client.clone();
                 let human_input_store = human_input_store.clone();
+                let user_rag_store = user_rag_store.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
                         run_message_via_llm(
@@ -450,6 +452,7 @@ impl Daemon {
                             Some(conv_tx.clone()),
                             Some(human_input_store.clone()),
                             Some(delegation_tx.clone()),
+                            Some(user_rag_store.clone()),
                         )
                         .await;
                     }
@@ -604,6 +607,7 @@ impl Daemon {
                                 let short_term = short_term.clone();
                                 let long_term_client = long_term_client.clone();
                                 let human_input_store = human_input_store.clone();
+                                let user_rag_store = user_rag_store.clone();
                                 // Body reading is done inside the spawned task so slow/large uploads
                                 // don't block the accept loop from handling other connections or signals.
                                 tokio::spawn(async move {
@@ -654,6 +658,7 @@ impl Daemon {
                                         Some(short_term),
                                         long_term_client,
                                         Some(human_input_store),
+                                        &user_rag_store,
                                     )
                                     .await;
                                     let _ = stream.write_all(response.as_bytes()).await;

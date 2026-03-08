@@ -1728,6 +1728,7 @@ pub(crate) async fn run_message_via_llm(
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     human_input_store: Option<HumanInputStore>,
     delegation_tx: Option<mpsc::Sender<DelegationRequest>>,
+    user_rag_store: Option<crate::user_rag::SharedUserRagStore>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -1858,13 +1859,19 @@ pub(crate) async fn run_message_via_llm(
     }
 
     // User RAG: retrieve relevant chunks from user-uploaded documents (keyword match)
-    let user_rag_store = crate::user_rag::UserRagStore::new(data_dir);
     let rag_query = message.clone();
-    let chunks = tokio::task::spawn_blocking(move || user_rag_store.retrieve(&rag_query, 5))
+    let chunks = if let Some(rag_store) = user_rag_store.as_ref().map(Arc::clone) {
+        tokio::task::spawn_blocking(move || {
+            let guard = rag_store.blocking_lock();
+            guard.retrieve(&rag_query, 5)
+        })
         .await
         .ok()
         .and_then(|res| res.ok())
-        .unwrap_or_default();
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if !chunks.is_empty() {
         context_prefix.push_str("[Documents utilisateur — utilise ces extraits si pertinent pour répondre]\n");
         for c in &chunks {
@@ -2501,6 +2508,7 @@ pub async fn handle_api(
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
     human_input_store: Option<HumanInputStore>,
+    user_rag_store: &crate::user_rag::SharedUserRagStore,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
@@ -3137,7 +3145,7 @@ pub async fn handle_api(
 
     // User RAG: list documents
     if method == "GET" && path == "/api/user-rag/documents" {
-        let store = crate::user_rag::UserRagStore::new(data_dir);
+        let store = user_rag_store.lock().await;
         match store.list_documents() {
             Ok(docs) => {
                 let body = serde_json::to_string(&serde_json::json!({ "documents": docs })).unwrap_or_else(|_| "[]".to_string());
@@ -3164,7 +3172,7 @@ pub async fn handle_api(
             Some(c) => c,
             None => return json_response("400 Bad Request", r#"{"error":"content_base64_required"}"#),
         };
-        let store = crate::user_rag::UserRagStore::new(data_dir);
+        let store = user_rag_store.lock().await;
         match store.add_document(&content_base64, &name, &mime_type) {
             Ok(id) => {
                 let body = serde_json::json!({ "id": id, "name": name, "message": "Document ajouté." });
@@ -3183,7 +3191,7 @@ pub async fn handle_api(
         if id.is_empty() {
             return json_response("400 Bad Request", r#"{"error":"id_required"}"#);
         }
-        let store = crate::user_rag::UserRagStore::new(data_dir);
+        let store = user_rag_store.lock().await;
         match store.delete_document(id) {
             Ok(true) => return json_response("200 OK", r#"{"ok":true,"message":"Document supprimé."}"#),
             Ok(false) => return json_response("404 Not Found", r#"{"error":"document_not_found"}"#),
