@@ -1150,7 +1150,14 @@ pub async fn summarize_yesterday_and_promote(
         Some(t) if !t.is_empty() => t,
         _ => return,
     };
-    if client.has_daily_summary_for_date(yesterday_str.clone()) {
+    let has_summary = {
+        let client = client.clone();
+        let date = yesterday_str.clone();
+        tokio::task::spawn_blocking(move || client.has_daily_summary_for_date(date))
+            .await
+            .unwrap_or(false)
+    };
+    if has_summary {
         tracing::debug!(session_id = %session_id, "Daily summary for yesterday already in long-term memory, skipping");
         return;
     }

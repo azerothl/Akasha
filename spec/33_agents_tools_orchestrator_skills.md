@@ -85,7 +85,8 @@ Activation : placer un fichier **tools_policy.yaml** dans le data_dir (voir `spe
 ## 4. Skills chargeables
 
 - **Skill** : ensemble de **définitions de capacités** (nom, description, paramètres, type de résultat) et optionnellement de **implémentations** (ex. script, WASM, ou appel à un outil existant).
-- **Chargement** : au démarrage du daemon et à chaud (POST `/api/skills/reload` ou `/skills reload`), le système charge les skills depuis `data_dir/skills/` et `spec/skills/`. Formats : répertoire avec `SKILL.md` ([Agent Skills](https://agentskills.io/specification)), ou fichier `.yaml` par skill. Les skills peuvent être ajoutés pendant la session sans redémarrage. l’**Attribution aux agents** : l’orchestrateur (ou la config par type d’agent) associe à chaque agent un sous-ensemble de skills. Lors de la délégation, l’agent peut voir et utiliser uniquement les skills qui lui sont attribués.
+- **Chargement** : au démarrage du daemon et à chaud (POST `/api/skills/reload` ou `/skills reload`), le système charge les skills depuis `data_dir/skills/` et `spec/skills/`. Formats : répertoire avec `SKILL.md` ([Agent Skills](https://agentskills.io/specification)), ou fichier `.yaml` par skill. Les skills peuvent être ajoutés pendant la session sans redémarrage. 
+- **Attribution aux agents** : l’orchestrateur (ou la config par type d’agent) associe à chaque agent un sous-ensemble de skills. Lors de la délégation, l’agent peut voir et utiliser uniquement les skills qui lui sont attribués.
 - **Compatibilité plugins** : réutiliser si possible le mécanisme de plugins existant (Phase 5) pour des skills en WASM, ou définir un type « skill » dans le manifest et l’API plugin.
 
 ---
