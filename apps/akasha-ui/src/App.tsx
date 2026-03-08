@@ -2235,8 +2235,6 @@ function App() {
                     </div>
                   </div>
                 )}
-              </>
-            )}
           </section>
         )}
 
