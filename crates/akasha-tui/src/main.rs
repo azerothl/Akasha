@@ -1177,6 +1177,7 @@ impl App {
   /vault list       — clés du vault (noms uniquement)
   /plugins          — liste des plugins
   /reload           — recharger les plugins
+  /skills reload    — recharger les skills (data_dir/skills, spec/skills)
   /restart          — redémarrer le daemon (superviseur)
   /vault set        — utiliser le CLI : akasha vault set KEY [value]"#.to_string();
             }
@@ -1406,6 +1407,24 @@ impl App {
                     Ok(r) => return format!("Erreur: {}", r.status()),
                     Err(e) => return format!("Erreur: {}", e),
                 }
+            }
+            "skills" => {
+                let sub = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+                if sub == "reload" {
+                    let url = format!("{}/api/skills/reload", base);
+                    match client.post(&url).send() {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(json) = r.json::<serde_json::Value>() {
+                                let count = json.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                                return format!("Skills rechargés ({} skill(s)).", count);
+                            }
+                            return "Skills rechargés.".to_string();
+                        }
+                        Ok(r) => return format!("Erreur: {}", r.status()),
+                        Err(e) => return format!("Erreur: {}", e),
+                    }
+                }
+                return "Usage: /skills reload — recharger les skills depuis data_dir/skills et spec/skills.".to_string();
             }
             "metrics" => {
                 let url = format!("{}/api/router/metrics", base);

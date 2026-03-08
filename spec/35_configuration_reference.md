@@ -190,11 +190,12 @@ Voir [cluster.example.yaml](cluster.example.yaml).
 
 ---
 
-## 6. Fichiers de skills (data_dir/skills/*.yaml et spec/skills/*.yaml)
+## 6. Fichiers de skills (data_dir/skills et spec/skills)
 
-**Emplacement** : `data_dir/skills/*.yaml` et/ou `spec/skills/*.yaml`.  
-**Format** : YAML, un fichier par skill.  
-**Utilisé par** : daemon (SkillRegistry, GET `/api/skills`).
+**Emplacement** : `data_dir/skills/` et/ou `spec/skills/`.  
+**Utilisé par** : daemon (SkillRegistry, GET `/api/skills`, POST `/api/skills/reload`).
+
+Deux formats supportés (alignés sur la [spécification Agent Skills](https://agentskills.io/specification)) : (1) **répertoire** avec `SKILL.md` (front matter YAML + corps Markdown) ; (2) **fichier** `.yaml` / `.yml` par skill (rétrocompatibilité). Rechargement à chaud : **POST /api/skills/reload** ou commande `/skills reload` (TUI/Web), sans redémarrage.
 
 ### Structure et types (exemple)
 

@@ -1623,6 +1623,18 @@ pub(crate) async fn run_message_via_llm(
                         }
                         None => (false, "[delegate_to_agent] not available".to_string()),
                     }
+                } else if actual_tool.is_empty() {
+                    // Skill with no tool_ref (Agent Skills doc-only): inject SKILL.md body as context for next round
+                    match &skill_registry {
+                        Some(reg) => {
+                            if let Some(body) = reg.get_body(name).await {
+                                (true, format!("[Skill: {}] Instructions:\n{}", name, body))
+                            } else {
+                                (false, format!("[Skill: {}] No instructions body.", name))
+                            }
+                        }
+                        None => (false, "Skill registry not available.".to_string()),
+                    }
                 } else {
                     execute_tool_call(
                         exec,
@@ -1653,8 +1665,9 @@ pub(crate) async fn run_message_via_llm(
                         })
                         .collect()
                 };
+                let tool_display = if actual_tool.is_empty() { name.as_str() } else { actual_tool.as_str() };
                 let payload = serde_json::json!({
-                    "tool": actual_tool,
+                    "tool": tool_display,
                     "skill": if &actual_tool != name { Some(name.as_str()) } else { None::<&str> },
                     "args": redacted_args,
                     "result_preview": if res.len() > 300 { format!("{}...", &res[..300]) } else { res.clone() },
@@ -2449,11 +2462,23 @@ pub async fn handle_api(
         return json_response("200 OK", r#"{"reloaded":true}"#);
     }
 
-    // Phase D: Skills (loadable skills for agents)
+    // Phase D: Skills (loadable skills for agents; Agent Skills spec + flat YAML)
     if method == "GET" && path == "/api/skills" {
         let list = skill_registry.list().await;
         let body = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
         return json_response("200 OK", &body);
+    }
+    if method == "POST" && path == "/api/skills/reload" {
+        match skill_registry.reload(data_dir, spec_dir).await {
+            Ok(count) => {
+                let body = serde_json::json!({ "reloaded": true, "count": count }).to_string();
+                return json_response("200 OK", &body);
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": "reload_failed", "detail": e.to_string() }).to_string();
+                return json_response("500 Internal Server Error", &body);
+            }
+        }
     }
 
     // Liste des outils machine disponibles (Phase A)

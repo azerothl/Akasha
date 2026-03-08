@@ -625,6 +625,7 @@ function App() {
 /vault list       — clés du vault (noms uniquement)
 /plugins          — liste des plugins
 /reload           — recharger les plugins
+/skills reload    — recharger les skills (data_dir/skills, spec/skills)
 /restart          — redémarrer le daemon (superviseur)
 /vault set        — utiliser le CLI : akasha vault set KEY [value]`;
     }
@@ -738,6 +739,19 @@ function App() {
     if (cmd === "reload") {
       await invoke("reload_plugins", { port });
       return "Plugins rechargés.";
+    }
+    if (cmd === "skills") {
+      const sub = parts[1]?.toLowerCase() ?? "";
+      if (sub === "reload") {
+        try {
+          const json = await invoke<{ reloaded?: boolean; count?: number }>("reload_skills", { port });
+          const count = json?.count ?? 0;
+          return json?.reloaded ? `Skills rechargés (${count} skill(s)).` : `Erreur rechargement skills.`;
+        } catch {
+          return "Impossible de recharger les skills (daemon déconnecté ou erreur).";
+        }
+      }
+      return "Usage: /skills reload — recharger les skills depuis data_dir/skills et spec/skills.";
     }
     if (cmd === "metrics") {
       const data = await invoke<Record<string, ModelMetricsEntry>>("get_router_metrics", { port });

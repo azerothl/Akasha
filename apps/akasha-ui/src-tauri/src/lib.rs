@@ -480,6 +480,23 @@ async fn reload_plugins(port: Option<u16>) -> Result<(), String> {
     Ok(())
 }
 
+/// POST /api/skills/reload — reload skills from disk (Agent Skills + YAML). Returns { count }.
+#[tauri::command]
+async fn reload_skills(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/skills/reload", daemon_base_url(port));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// POST /api/restart — request daemon restart (for slash /restart).
 #[tauri::command]
 async fn restart_daemon(port: Option<u16>) -> Result<(), String> {
@@ -930,6 +947,7 @@ pub fn run() {
             get_advice,
             get_plugins,
             reload_plugins,
+            reload_skills,
             get_router_routes,
             set_router_route,
             get_embedded_status,
