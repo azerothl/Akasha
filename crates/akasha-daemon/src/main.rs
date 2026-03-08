@@ -1,8 +1,11 @@
 //! Akasha Daemon - Entry point
 
-use akasha_daemon::Daemon;
+use akasha_daemon::{Daemon, RunOutcome};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+/// Exit code when restart is requested via POST /api/restart. Supervisor treats non-zero as "respawn".
+const RESTART_EXIT_CODE: i32 = 85;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -29,8 +32,11 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&data_path).ok();
 
     let daemon = Daemon::new(spec_dir, data_path);
-    daemon.run().await?;
+    let outcome = daemon.run().await?;
 
     info!("Akasha daemon stopped");
+    if outcome == RunOutcome::RestartRequested {
+        std::process::exit(RESTART_EXIT_CODE);
+    }
     Ok(())
 }

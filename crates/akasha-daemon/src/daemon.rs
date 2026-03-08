@@ -21,6 +21,13 @@ use crate::health::{HealthState, HealthStatus};
 const HEALTHCHECK_INTERVAL_SECS: u64 = 5;
 const DEFAULT_PORT: u16 = 3876;
 
+/// Outcome of a daemon run. Used so that main can exit with the right code (e.g. 85 for restart).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    Normal,
+    RestartRequested,
+}
+
 /// Akasha Daemon
 pub struct Daemon {
     spec_dir: PathBuf,
@@ -42,7 +49,7 @@ impl Daemon {
     }
 
     /// Run the daemon (blocks until shutdown)
-    pub async fn run(&self) -> anyhow::Result<()> {
+    pub async fn run(&self) -> anyhow::Result<RunOutcome> {
         // Load specs at startup
         match load_specs(&self.spec_dir) {
             Ok(specs) => {
@@ -323,18 +330,11 @@ impl Daemon {
                 info!(path = %tools_policy_path.display(), "Tools policy loaded");
             }
 
-            // Phase D: Skills registry (loadable skills for agents)
+            // Phase D: Skills registry (Agent Skills spec: SKILL.md dirs + flat .yaml)
             let skill_registry = Arc::new(crate::skills::SkillRegistry::new());
-            let skills_dir = data_dir.join("skills");
-            if skills_dir.is_dir() {
-                if let Ok(n) = skill_registry.load_from_dir(&skills_dir).await {
-                    info!(count = n, path = %skills_dir.display(), "Skills loaded");
-                }
-            }
-            let spec_skills_dir = self.spec_dir.join("skills");
-            if spec_skills_dir.is_dir() {
-                if let Ok(n) = skill_registry.load_from_dir(&spec_skills_dir).await {
-                    info!(count = n, path = %spec_skills_dir.display(), "Skills loaded from spec");
+            if let Ok(n) = skill_registry.load_all(&data_dir, &self.spec_dir).await {
+                if n > 0 {
+                    info!(count = n, "Skills loaded");
                 }
             }
 
@@ -561,7 +561,13 @@ impl Daemon {
             let spec_dir = self.spec_dir.clone();
             let (restart_tx, mut restart_rx) = tokio::sync::mpsc::channel::<()>(1);
 
-            let lost_leadership = loop {
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            enum ShutdownReason {
+                Normal,
+                RestartRequested,
+                LostLeadership,
+            }
+            let reason = loop {
                 let recv_fut = match &mut leader_rx_opt {
                     Some(rx) => Either::Left(rx.recv()),
                     None => Either::Right(std::future::pending::<Option<bool>>()),
@@ -650,25 +656,25 @@ impl Daemon {
                                 if !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
                                     error!(error = %e, "Accept error");
                                 }
-                                break false;
+                                break ShutdownReason::Normal;
                             }
                         }
                     }
                     msg = &mut recv_fut => {
                         if msg == Some(false) {
                             info!("Lost leadership");
-                            break true;
+                            break ShutdownReason::LostLeadership;
                         }
                     }
                     _ = restart_rx.recv() => {
                         info!("Restart requested via API");
                         shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
-                        break false;
+                        break ShutdownReason::RestartRequested;
                     }
                     _ = tokio::signal::ctrl_c() => {
                         info!("Received Ctrl+C, shutting down");
                         shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
-                        break false;
+                        break ShutdownReason::Normal;
                     }
                 }
             };
@@ -676,13 +682,16 @@ impl Daemon {
             self.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
             healthcheck_handle.abort();
 
-            if cluster_enabled && lost_leadership {
+            if cluster_enabled && reason == ShutdownReason::LostLeadership {
                 continue;
             }
-            break;
+            return Ok(match reason {
+                ShutdownReason::RestartRequested => RunOutcome::RestartRequested,
+                _ => RunOutcome::Normal,
+            });
         }
-
-        Ok(())
+        #[allow(unreachable_code)]
+        Ok(RunOutcome::Normal)
     }
 }
 
