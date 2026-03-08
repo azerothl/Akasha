@@ -1121,6 +1121,7 @@ async fn compact_short_term_if_needed(
 }
 
 /// At daemon startup: if yesterday's short-term file exists, summarize it via LLM and promote to long-term (source "daily_summary").
+/// Skips if a daily summary for that date already exists in long-term memory.
 pub async fn summarize_yesterday_and_promote(
     short_term_dir: PathBuf,
     llm_router: Arc<akasha_llm::LLMRouter>,
@@ -1128,11 +1129,16 @@ pub async fn summarize_yesterday_and_promote(
 ) {
     let Some(client) = long_term_client else { return };
     let yesterday = chrono::Utc::now() - chrono::Duration::days(1);
-    let session_id = format!("day-{}", yesterday.format("%Y-%m-%d"));
+    let yesterday_str = yesterday.format("%Y-%m-%d").to_string();
+    let session_id = format!("day-{}", yesterday_str);
     let turns = match ShortTermStore::read_day_from_disk(&session_id, &short_term_dir) {
         Some(t) if !t.is_empty() => t,
         _ => return,
     };
+    if client.has_daily_summary_for_date(yesterday_str.clone()) {
+        tracing::debug!(session_id = %session_id, "Daily summary for yesterday already in long-term memory, skipping");
+        return;
+    }
     let blob = ShortTermStore::turns_to_context(&turns);
     let summary_prompt = format!(
         "Résume en un court paragraphe synthétique (5 à 10 lignes) la journée du {} : sujets abordés, décisions, projets ou informations importantes. \

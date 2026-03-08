@@ -9,6 +9,7 @@ pub enum MemoryRequest {
     Promote { content: String, source: String },
     List { limit: usize },
     Delete { id: String },
+    HasDailySummary { date: String },
 }
 
 pub enum MemoryResponse {
@@ -16,6 +17,7 @@ pub enum MemoryResponse {
     Promote(Result<(), String>),
     List(Vec<(String, String, String, String)>), // (id, content, created_at, source)
     Delete(Result<(), String>),
+    HasDailySummary(bool),
 }
 
 /// Client handle: Send + Sync, can be used from async code.
@@ -181,6 +183,10 @@ pub fn start_memory_actor(
                             .and_then(|uuid| store.delete_by_id(uuid).map_err(|e| e.to_string()))
                             .and_then(|deleted| if deleted { Ok(()) } else { Err("not found".to_string()) });
                         MemoryResponse::Delete(result)
+                    }
+                    MemoryRequest::HasDailySummary { date } => {
+                        let exists = store.has_daily_summary_for_date(&date).unwrap_or(false);
+                        MemoryResponse::HasDailySummary(exists)
                     }
                 };
                 let _ = resp_tx.send(response);
