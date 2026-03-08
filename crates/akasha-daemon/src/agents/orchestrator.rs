@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::{EventBus, OrchestratorTask};
-use crate::api::ProgressCache;
+use crate::api::{ProgressCache, TaskCompletionRegistry};
 
 /// One subtask from decomposition: (agent_type, message for that agent).
 pub type Subtask = (String, String);
@@ -88,6 +88,7 @@ pub struct Orchestrator {
     conversation_tx: mpsc::Sender<OrchestratorTask>,
     progress: ProgressCache,
     llm_router: Arc<akasha_llm::LLMRouter>,
+    task_completion: TaskCompletionRegistry,
 }
 
 impl Orchestrator {
@@ -97,6 +98,7 @@ impl Orchestrator {
         conversation_tx: mpsc::Sender<OrchestratorTask>,
         progress: ProgressCache,
         llm_router: Arc<akasha_llm::LLMRouter>,
+        task_completion: TaskCompletionRegistry,
     ) -> Self {
         Self {
             bus,
@@ -104,6 +106,7 @@ impl Orchestrator {
             conversation_tx,
             progress,
             llm_router,
+            task_completion,
         }
     }
 
@@ -117,6 +120,7 @@ impl Orchestrator {
             let conv_tx = self.conversation_tx.clone();
             let progress = self.progress.clone();
             let llm_router = self.llm_router.clone();
+            let task_completion = self.task_completion.clone();
             let root_task_id = task.task_id;
             let message = task.message;
             let session_id = task.session_id;
@@ -132,6 +136,7 @@ impl Orchestrator {
                     conv_tx,
                     progress,
                     llm_router,
+                    task_completion,
                 )
                 .await
                 {
@@ -152,6 +157,7 @@ async fn process_root_task(
     conversation_tx: mpsc::Sender<OrchestratorTask>,
     progress: ProgressCache,
     llm_router: Arc<akasha_llm::LLMRouter>,
+    task_completion: TaskCompletionRegistry,
 ) -> anyhow::Result<()> {
     if !akasha_core::Role::OrchestratorAgent.can_spawn_agents() {
         anyhow::bail!("RBAC: orchestrator not allowed to spawn agents");
@@ -344,6 +350,7 @@ async fn process_root_task(
     }
 
     // Multiple subtasks: create child tasks and delegate each; aggregator below collects all replies into one response.
+    let mut child_notifies: Vec<(Uuid, Arc<tokio::sync::Notify>)> = Vec::new();
     for (agent_type, sub_message) in &steps {
         let child_id = Uuid::new_v4();
         let task = Task {
@@ -376,6 +383,9 @@ async fn process_root_task(
             )
             .with_correlation(root_task_id),
         );
+        // Register notifier *before* sending to conv_tx so the worker can fire it immediately.
+        let notify = Arc::new(tokio::sync::Notify::new());
+        task_completion.write().await.insert(child_id, notify.clone());
         // Delegate to conversation worker for all types (code/search handled as conversation for now). Pass same session_id for memory. No image attachments for sub-steps.
         let _ = conversation_tx
             .send(OrchestratorTask {
@@ -385,74 +395,86 @@ async fn process_root_task(
                 image_data_urls: None,
             })
             .await;
+        child_notifies.push((child_id, notify));
     }
-    // Aggregator: when all children are done, collect their replies then ask the conversation LLM to synthesize one structured answer.
+    // Aggregator: wait for all child completion notifications (no polling), then synthesize.
     let store_path_buf = store_path.to_path_buf();
     let steps_count = steps.len();
     let user_message = message.clone();
     const GENERIC_MESSAGES: &[&str] = &["Done.", "Terminé.", "Échec.", "Annulé."];
+    // Per-child timeout: mirrors the delegation handler's 5-minute limit.  Children are processed
+    // sequentially by the conversation worker, so total wait is bounded by N × PER_CHILD_TIMEOUT.
+    const PER_CHILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
     tokio::spawn(async move {
+        // Wait for each child in turn; tokio::Notify buffers one pending notification so children
+        // that finish early are captured immediately when their slot comes.
+        for (child_id, notify) in &child_notifies {
+            if tokio::time::timeout(PER_CHILD_TIMEOUT, notify.notified()).await.is_err() {
+                tracing::warn!(child_id = %child_id, parent_id = %root_task_id, "Aggregator: child task timed out");
+            }
+            task_completion.write().await.remove(child_id);
+        }
+        // Ensure any remaining registry entries are cleaned up (timeout path).
+        {
+            let mut reg = task_completion.write().await;
+            for (child_id, _) in &child_notifies {
+                reg.remove(child_id);
+            }
+        }
+        // Single store read to get final child statuses.
         let store = match TaskStore::open(&store_path_buf) {
             Ok(s) => s,
             Err(_) => return,
         };
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
-        loop {
-            interval.tick().await;
-            let children = match store.get_children(root_task_id) {
-                Ok(c) => c,
-                Err(_) => break,
-            };
-            if children.is_empty() {
-                break;
+        let children = match store.get_children(root_task_id) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if children.is_empty() {
+            return;
+        }
+        let all_done = children.iter().all(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Failed));
+        if !all_done {
+            // Some children timed out without completing; treat the root task as failed.
+            let _ = store.update_status(root_task_id, TaskStatus::Failed);
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::TaskFailed,
+                    Some(serde_json::json!({
+                        "task_id": root_task_id.to_string(),
+                        "status": "failed",
+                        "subtasks": steps_count
+                    })),
+                )
+                .with_correlation(root_task_id),
+            );
+            return;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        {
+            let g = progress.read().await;
+            for child in &children {
+                let content = g.get(&child.id).and_then(|q| q.back().map(|e| e.message.trim().to_string()));
+                let content = match content {
+                    Some(ref s) if !s.is_empty() && !GENERIC_MESSAGES.contains(&s.as_str()) => s.clone(),
+                    _ => {
+                        if child.status == TaskStatus::Failed {
+                            "(Sous-tâche en échec)".to_string()
+                        } else {
+                            "(Aucune réponse)".to_string()
+                        }
+                    }
+                };
+                parts.push(format!("[Agent {}]\n{}", child.assigned_agent, content));
             }
-            let all_done = children.iter().all(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Failed));
-            if all_done {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                let mut parts: Vec<String> = Vec::new();
-                {
-                    let g = progress.read().await;
-                    for child in &children {
-                        let content = g.get(&child.id).and_then(|q| q.back().map(|e| e.message.trim().to_string()));
-                        let content = match content {
-                            Some(ref s) if !s.is_empty() && !GENERIC_MESSAGES.contains(&s.as_str()) => s.clone(),
-                            _ => {
-                                if child.status == TaskStatus::Failed {
-                                    "(Sous-tâche en échec)".to_string()
-                                } else {
-                                    "(Aucune réponse)".to_string()
-                                }
-                            }
-                        };
-                        parts.push(format!("[Agent {}]\n{}", child.assigned_agent, content));
-                    }
-                }
-                if parts.len() < children.len() {
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    let g = progress.read().await;
-                    parts.clear();
-                    for child in &children {
-                        let content = g.get(&child.id).and_then(|q| q.back().map(|e| e.message.trim().to_string()));
-                        let content = match content {
-                            Some(ref s) if !s.is_empty() && !GENERIC_MESSAGES.contains(&s.as_str()) => s.clone(),
-                            _ => {
-                                if child.status == TaskStatus::Failed {
-                                    "(Sous-tâche en échec)".to_string()
-                                } else {
-                                    "(Aucune réponse)".to_string()
-                                }
-                            }
-                        };
-                        parts.push(format!("[Agent {}]\n{}", child.assigned_agent, content));
-                    }
-                }
-                let raw_responses = parts.join("\n\n");
-                let aggregated = if raw_responses.is_empty() || raw_responses.trim() == "(Aucune réponse)" {
-                    "Aucune réponse des sous-agents.".to_string()
-                } else {
-                    // Ask the conversation LLM to synthesize all sub-agent replies into one answer that directly addresses the user's question.
-                    let synthesis_prompt = format!(
-                        r#"Tu es un synthétiseur. La question de l'utilisateur est :
+        }
+        let raw_responses = parts.join("\n\n");
+        let aggregated = if raw_responses.is_empty() || raw_responses.trim() == "(Aucune réponse)" {
+            "Aucune réponse des sous-agents.".to_string()
+        } else {
+            // Ask the conversation LLM to synthesize all sub-agent replies into one answer that directly addresses the user's question.
+            let synthesis_prompt = format!(
+                r#"Tu es un synthétiseur. La question de l'utilisateur est :
 
 « {} »
 
@@ -462,63 +484,60 @@ Voici les réponses de différents agents spécialisés :
 
 Produis une seule réponse structurée et claire qui répond exactement à la question de l'utilisateur. Intègre les éléments utiles des réponses ci-dessus sans les lister ni citer les agents ; reformule de façon naturelle et directe pour l'utilisateur.
 N'ajoute aucune information qui ne figure pas dans les réponses des agents ci-dessus. Si les réponses ne permettent pas de répondre à la question, dis simplement que tu n'as pas trouvé d'information."#,
-                        user_message.trim(),
-                        raw_responses
-                    );
-                    let req = CompletionRequest {
-                        prompt: synthesis_prompt,
-                        max_tokens: Some(4096),
-                        temperature: Some(0.3),
-                        preferred_task_type: Some("conversation".to_string()),
-                        image_data_urls: None,
-                    };
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(120),
-                        llm_router.complete(&req),
-                    )
-                    .await
-                    {
-                        Ok(Ok(resp)) if !resp.text.trim().is_empty() => resp.text.trim().to_string(),
-                        _ => {
-                            // Fallback: show joined responses if synthesis fails or times out
-                            if parts.len() == 1 {
-                                parts.into_iter().next().unwrap_or_else(|| raw_responses)
-                            } else {
-                                format!("Réponses des sous-agents :\n\n{}", raw_responses)
-                            }
-                        }
+                user_message.trim(),
+                raw_responses
+            );
+            let req = CompletionRequest {
+                prompt: synthesis_prompt,
+                max_tokens: Some(4096),
+                temperature: Some(0.3),
+                preferred_task_type: Some("conversation".to_string()),
+                image_data_urls: None,
+            };
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                llm_router.complete(&req),
+            )
+            .await
+            {
+                Ok(Ok(resp)) if !resp.text.trim().is_empty() => resp.text.trim().to_string(),
+                _ => {
+                    // Fallback: show joined responses if synthesis fails or times out
+                    if parts.len() == 1 {
+                        parts.into_iter().next().unwrap_or_else(|| raw_responses)
+                    } else {
+                        format!("Réponses des sous-agents :\n\n{}", raw_responses)
                     }
-                };
-                let _ = bus.send(
-                    EventEnvelope::new(
-                        EventType::ProgressUpdate,
-                        Some(serde_json::json!({
-                            "task_id": root_task_id.to_string(),
-                            "progress_pct": 100,
-                            "message": aggregated
-                        })),
-                    )
-                    .with_correlation(root_task_id),
-                );
-                let any_failed = children.iter().any(|t| t.status == TaskStatus::Failed);
-                let root_status = if any_failed { TaskStatus::Failed } else { TaskStatus::Completed };
-                let status_str = root_status.as_str();
-                let _ = store.update_status(root_task_id, root_status);
-                let event_type = if any_failed { EventType::TaskFailed } else { EventType::TaskCompleted };
-                let _ = bus.send(
-                    EventEnvelope::new(
-                        event_type,
-                        Some(serde_json::json!({
-                            "task_id": root_task_id.to_string(),
-                            "status": status_str,
-                            "subtasks": steps_count
-                        })),
-                    )
-                    .with_correlation(root_task_id),
-                );
-                break;
+                }
             }
-        }
+        };
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ProgressUpdate,
+                Some(serde_json::json!({
+                    "task_id": root_task_id.to_string(),
+                    "progress_pct": 100,
+                    "message": aggregated
+                })),
+            )
+            .with_correlation(root_task_id),
+        );
+        let any_failed = children.iter().any(|t| t.status == TaskStatus::Failed);
+        let root_status = if any_failed { TaskStatus::Failed } else { TaskStatus::Completed };
+        let status_str = root_status.as_str();
+        let _ = store.update_status(root_task_id, root_status);
+        let event_type = if any_failed { EventType::TaskFailed } else { EventType::TaskCompleted };
+        let _ = bus.send(
+            EventEnvelope::new(
+                event_type,
+                Some(serde_json::json!({
+                    "task_id": root_task_id.to_string(),
+                    "status": status_str,
+                    "subtasks": steps_count
+                })),
+            )
+            .with_correlation(root_task_id),
+        );
     });
     Ok(())
 }
