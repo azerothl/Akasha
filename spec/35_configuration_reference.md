@@ -83,6 +83,7 @@ Voir [llm_router.example.yaml](llm_router.example.yaml).
 | `web_search_enabled` | booléen | Non (défaut : false) | Activer la recherche web (Brave API). Clé : vault `brave_api_key` ou env `BRAVE_API_KEY`. |
 | `tool_profiles` | objet | Non | Profils d’outils : clé = nom du profil, valeur = liste de noms d’outils (ex. `coding: [read_file, write_file, run_command]`). |
 | `default_profile` | string | Non | Nom du profil actif ; si défini, seuls les outils listés dans `tool_profiles[default_profile]` sont autorisés. |
+| `allowed_skill_install_hosts` | liste de strings | Non (défaut : GitHub uniquement) | Hôtes autorisés pour `install_skill` (ex. `github.com`, `gitlab.com`, `raw.githubusercontent.com`, `mon-site.com`). Utiliser `["*"]` pour autoriser tout hôte HTTPS. Par défaut : GitHub seulement. |
 
 Les chemins peuvent être relatifs (ex. `.`) ou absolus ; sous Windows, utiliser des backslashes échappés ou des chemins normaux.
 

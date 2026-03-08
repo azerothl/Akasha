@@ -409,18 +409,36 @@ fn message_suggests_external_info(message: &str) -> bool {
     keywords.iter().any(|k| m.contains(k))
 }
 
-/// Allowed hosts for install_skill (security: only GitHub).
-const INSTALL_SKILL_ALLOWED_HOSTS: &[&str] = &["github.com", "raw.githubusercontent.com", "www.github.com"];
+/// Default hosts when policy does not set allowed_skill_install_hosts (GitHub only).
+const INSTALL_SKILL_DEFAULT_HOSTS: &[&str] = &["github.com", "raw.githubusercontent.com", "www.github.com"];
 
-/// Parse a GitHub URL into raw SKILL.md URL and skill name. Returns None if URL not allowed or invalid.
-fn parse_github_skill_url(url: &str) -> Option<(String, String)> {
+fn is_github_host(host: &str) -> bool {
+    INSTALL_SKILL_DEFAULT_HOSTS
+        .iter()
+        .any(|h| host == *h || host.ends_with(&format!(".{}", *h)))
+}
+
+/// Result of parsing a skill install URL: raw SKILL.md URL, skill name, and optional GitHub API path for listing contents.
+struct ParsedSkillUrl {
+    raw_skill_url: String,
+    skill_name: String,
+    /// (owner, repo, branch, path) for GitHub API only; None for other hosts (single-file install).
+    api_path: Option<(String, String, String, String)>,
+}
+
+/// Parse a skill install URL (GitHub, GitLab, or any allowed HTTPS host) into raw SKILL.md URL, skill name, and optional API path.
+/// allowed_hosts: from policy; if it contains "*", any HTTPS host is allowed. Otherwise only listed hosts (and subdomains) are allowed.
+fn parse_skill_install_url(url: &str, allowed_hosts: &[String]) -> Option<ParsedSkillUrl> {
     let url = url.trim();
     let parsed = url.parse::<url::Url>().ok()?;
+    let scheme = parsed.scheme();
+    if scheme != "https" && scheme != "http" {
+        return None;
+    }
     let host = parsed.host_str()?.to_lowercase();
-    let allowed = INSTALL_SKILL_ALLOWED_HOSTS
-        .iter()
-        .any(|h| host == *h || host.ends_with(&format!(".{}", *h)));
-    if !allowed {
+    let host_allowed = allowed_hosts.iter().any(|h| h == "*")
+        || allowed_hosts.iter().any(|h| host == *h || host.ends_with(&format!(".{}", h)));
+    if !host_allowed {
         return None;
     }
     let path = parsed.path().trim_matches('/');
@@ -428,83 +446,186 @@ fn parse_github_skill_url(url: &str) -> Option<(String, String)> {
         return None;
     }
     let segments: Vec<&str> = path.split('/').collect();
-    if host.contains("raw.githubusercontent.com") {
-        // Path: owner/repo/branch/path/to/skill or .../skill/SKILL.md
-        if segments.len() < 4 {
-            return None;
-        }
-        let (raw_url, skill_name) = if path.ends_with("SKILL.md") {
-            let skill_name = segments.get(segments.len().saturating_sub(2)).copied().unwrap_or("skill").to_string();
-            (url.to_string(), skill_name)
+
+    if is_github_host(&host) {
+        if host.contains("raw.githubusercontent.com") {
+            if segments.len() < 4 {
+                return None;
+            }
+            let (raw_skill_url, skill_name) = if path.ends_with("SKILL.md") {
+                let skill_name = segments.get(segments.len().saturating_sub(2)).copied().unwrap_or("skill").to_string();
+                (url.to_string(), skill_name)
+            } else {
+                let raw_url = format!("https://raw.githubusercontent.com/{}", path.trim_end_matches('/'));
+                let raw_skill_url = if raw_url.ends_with(".md") { raw_url } else { format!("{}/SKILL.md", raw_url) };
+                let skill_name = segments.last().copied().unwrap_or("skill").to_string();
+                (raw_skill_url, skill_name)
+            };
+            let api_path = if segments.len() >= 4 {
+                let owner = segments[0].to_string();
+                let repo = segments[1].to_string();
+                let branch = segments[2].to_string();
+                let path_part = segments[3..].join("/");
+                let path_part = path_part.strip_suffix("SKILL.md").map(|s| s.trim_end_matches('/')).unwrap_or(&path_part).to_string();
+                Some((owner, repo, branch, path_part))
+            } else {
+                None
+            };
+            Some(ParsedSkillUrl { raw_skill_url, skill_name, api_path })
         } else {
-            let raw_url = format!("https://raw.githubusercontent.com/{}", path.trim_end_matches('/'));
-            let raw_url = if raw_url.ends_with(".md") { raw_url } else { format!("{}/SKILL.md", raw_url) };
-            let skill_name = segments.last().copied().unwrap_or("skill").to_string();
-            (raw_url, skill_name)
-        };
-        Some((raw_url, skill_name))
+            let tree_idx = segments.iter().position(|s| *s == "tree")?;
+            if tree_idx + 2 > segments.len() {
+                return None;
+            }
+            let owner = (*segments.get(0)?).to_string();
+            let repo = (*segments.get(1)?).to_string();
+            let branch = (*segments.get(tree_idx + 1)?).to_string();
+            let path_segments = &segments[tree_idx + 2..];
+            let path_part = path_segments.join("/");
+            let skill_name = path_segments.last().copied().unwrap_or("skill").to_string();
+            let raw_skill_url = if path_part.is_empty() {
+                format!("https://raw.githubusercontent.com/{}/{}/{}/SKILL.md", owner, repo, branch)
+            } else {
+                format!(
+                    "https://raw.githubusercontent.com/{}/{}/{}/{}/SKILL.md",
+                    owner, repo, branch, path_part
+                )
+            };
+            let api_path = Some((owner, repo, branch, path_part));
+            Some(ParsedSkillUrl { raw_skill_url, skill_name, api_path })
+        }
     } else {
-        // github.com/owner/repo/tree/branch/path
-        let tree_idx = segments.iter().position(|s| *s == "tree")?;
-        if tree_idx + 2 > segments.len() {
-            return None;
-        }
-        let owner = *segments.get(0)?;
-        let repo = *segments.get(1)?;
-        let branch = *segments.get(tree_idx + 1)?;
-        let path_segments = &segments[tree_idx + 2..];
-        let path_part = path_segments.join("/");
-        let skill_name = path_segments.last().copied().unwrap_or("skill").to_string();
-        let raw_url = if path_part.is_empty() {
-            format!("https://raw.githubusercontent.com/{}/{}/{}/SKILL.md", owner, repo, branch)
+        // Generic host (site web, GitLab, etc.): single-file install. URL must point to a .md file or we use path as skill name.
+        let raw_skill_url = if path.ends_with(".md") {
+            url.to_string()
+        } else if path.ends_with('/') {
+            format!("{}SKILL.md", url.trim_end_matches('/'))
         } else {
-            format!(
-                "https://raw.githubusercontent.com/{}/{}/{}/{}/SKILL.md",
-                owner, repo, branch, path_part
-            )
+            format!("{}/SKILL.md", url.trim_end_matches('/'))
         };
-        Some((raw_url, skill_name))
+        let skill_name = segments
+            .last()
+            .and_then(|s| s.strip_suffix(".md"))
+            .or_else(|| segments.last().copied())
+            .unwrap_or("skill")
+            .to_string();
+        Some(ParsedSkillUrl {
+            raw_skill_url,
+            skill_name: skill_name.to_lowercase().replace(' ', "-"),
+            api_path: None,
+        })
     }
 }
 
-/// Install a skill from a GitHub URL: fetch SKILL.md, write to data_dir/skills/<name>/, reload registry.
+/// Extract the Markdown body (instructions) from SKILL.md content (after the second ---).
+fn skill_md_body(content: &str) -> &str {
+    let rest = match content.strip_prefix("---") {
+        Some(r) => r,
+        None => return content,
+    };
+    let body_start = match rest.find("\n---") {
+        Some(i) => 3 + 1 + i + 4, // "---" + "\n" + "---" + "\n" after second ---
+        None => return content,
+    };
+    content.get(body_start..).unwrap_or(content).trim()
+}
+
+/// Fetch additional files from a GitHub repo path (scripts, references, etc.) and write into skill_dir. Uses a queue to avoid recursive async.
+async fn fetch_github_skill_extra_files(
+    client: &reqwest::Client,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    root_path: &str,
+    skill_dir: &Path,
+) -> Vec<String> {
+    let mut downloaded = Vec::new();
+    let mut queue: Vec<(String, PathBuf)> = vec![(root_path.to_string(), skill_dir.to_path_buf())];
+    while let Some((path, dir)) = queue.pop() {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/contents/{}?ref={}",
+            owner, repo, path, branch
+        );
+        let resp = match client.get(&url).header("User-Agent", "Akasha").send().await {
+            Ok(r) if r.status().is_success() => r,
+            _ => continue,
+        };
+        let items: Vec<serde_json::Value> = match resp.json().await {
+            Ok(arr) => arr,
+            Err(_) => continue,
+        };
+        for item in items {
+            let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let typ = item.get("type").and_then(|t| t.as_str()).unwrap_or("file");
+            if typ == "file" && name != "SKILL.md" {
+                let download_url = item.get("download_url").and_then(|u| u.as_str());
+                if let Some(url) = download_url {
+                    if let Ok(resp) = client.get(url).send().await {
+                        if let Ok(content) = resp.text().await {
+                            let dest = dir.join(name);
+                            if std::fs::write(&dest, &content).is_ok() {
+                                let rel = if path == root_path { name.to_string() } else { format!("{}/{}", path.strip_prefix(root_path).unwrap_or(path.as_str()).trim_start_matches('/'), name) };
+                                downloaded.push(rel);
+                            }
+                        }
+                    }
+                }
+            } else if typ == "dir" {
+                let subpath = if path.is_empty() { name.to_string() } else { format!("{}/{}", path, name) };
+                let subdir = dir.join(name);
+                let _ = std::fs::create_dir_all(&subdir);
+                queue.push((subpath, subdir));
+            }
+        }
+    }
+    downloaded
+}
+
+/// Install a skill from a URL (Agent Skills spec: https://agentskills.io/specification).
+/// Supports GitHub (with directory listing), or any HTTPS host allowed in tools_policy (allowed_skill_install_hosts).
+/// Fetches SKILL.md, optional scripts/references/assets (GitHub only), writes to data_dir/skills/<name>/,
+/// reloads the registry, then returns the skill body and skill dir path.
 async fn do_install_skill(
     url: &str,
     data_dir: &Path,
     spec_dir: &Path,
     skill_registry: &crate::skills::SkillRegistry,
+    allowed_hosts: &[String],
 ) -> (bool, String) {
-    let (raw_url, skill_name) = match parse_github_skill_url(url) {
+    let parsed = match parse_skill_install_url(url, allowed_hosts) {
         Some(x) => x,
         None => {
-            return (
-                false,
+            let hint = if allowed_hosts.iter().any(|h| h == "*") {
+                "URL invalide ou schéma non supporté (utilisez https://).".to_string()
+            } else {
                 format!(
-                    "[install_skill] URL non autorisée ou invalide. Utilisez une URL GitHub (ex. https://github.com/owner/repo/tree/main/skillname). Hôtes autorisés: {}.",
-                    INSTALL_SKILL_ALLOWED_HOSTS.join(", ")
-                ),
-            );
+                    "URL non autorisée ou invalide. Hôtes autorisés (tools_policy.yaml allowed_skill_install_hosts) : {}.",
+                    allowed_hosts.join(", ")
+                )
+            };
+            return (false, format!("[install_skill] {}", hint));
         }
     };
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .user_agent("Akasha")
         .build()
     {
         Ok(c) => c,
         Err(e) => return (false, format!("[install_skill] client HTTP: {}", e)),
     };
-    let body = match client.get(&raw_url).send().await {
+    let body = match client.get(&parsed.raw_skill_url).send().await {
         Ok(r) if r.status().is_success() => match r.text().await {
             Ok(t) => t,
             Err(e) => return (false, format!("[install_skill] lecture réponse: {}", e)),
         },
-        Ok(r) => return (false, format!("[install_skill] HTTP {} — {}", r.status(), raw_url)),
+        Ok(r) => return (false, format!("[install_skill] HTTP {} — {}", r.status(), parsed.raw_skill_url)),
         Err(e) => return (false, format!("[install_skill] requête: {}", e)),
     };
     if body.trim().is_empty() {
-        return (false, format!("[install_skill] SKILL.md vide ou introuvable: {}", raw_url));
+        return (false, format!("[install_skill] SKILL.md vide ou introuvable: {}", parsed.raw_skill_url));
     }
-    let skill_dir = data_dir.join("skills").join(&skill_name);
+    let skill_dir = data_dir.join("skills").join(&parsed.skill_name);
     if let Err(e) = std::fs::create_dir_all(&skill_dir) {
         return (
             false,
@@ -518,11 +639,33 @@ async fn do_install_skill(
             format!("[install_skill] écriture {}: {}", skill_md_path.display(), e),
         );
     }
+    let extra_files = if let Some((ref owner, ref repo, ref branch, ref path)) = parsed.api_path {
+        fetch_github_skill_extra_files(&client, owner, repo, branch, path, &skill_dir).await
+    } else {
+        vec![]
+    };
     match skill_registry.reload(data_dir, spec_dir).await {
-        Ok(count) => (
-            true,
-            format!("[install_skill] Skill « {} » installé et rechargé ({} skill(s) chargé(s)).", skill_name, count),
-        ),
+        Ok(count) => {
+            let body_instructions = skill_md_body(&body);
+            let body_preview = if body_instructions.len() > 8000 {
+                format!("{}... [tronqué, {} caractères au total]", &body_instructions[..8000], body_instructions.len())
+            } else {
+                body_instructions.to_string()
+            };
+            let extra_msg = if extra_files.is_empty() {
+                String::new()
+            } else {
+                format!(" Fichiers additionnels récupérés (scripts/, references/, assets/) : {}.", extra_files.join(", "))
+            };
+            let skill_dir_display = skill_dir.display().to_string();
+            let msg = format!(
+                "[install_skill] Skill « {} » installé et rechargé ({} skill(s) chargé(s)).{}\n\
+                 Répertoire du skill (pour read_file sur references/, scripts/, assets/) : {}\n\n\
+                 Contenu du skill (à utiliser pour savoir comment l'utiliser) :\n\n---\n{}",
+                parsed.skill_name, count, extra_msg, skill_dir_display, body_preview
+            );
+            (true, msg)
+        }
         Err(e) => (
             false,
             format!("[install_skill] skill écrit mais rechargement échoué: {}", e),
@@ -1758,11 +1901,12 @@ pub(crate) async fn run_message_via_llm(
                 } else if actual_tool == "install_skill" {
                     let url = args.get(0).map(String::as_str).unwrap_or("").trim();
                     if url.is_empty() {
-                        (false, "[install_skill] usage: install_skill <url> (ex. https://github.com/BankrBot/skills/tree/main/bankr)".to_string())
+                        (false, "[install_skill] usage: install_skill <url> (ex. https://github.com/BankrBot/skills/tree/main/bankr ou toute URL HTTPS autorisée dans tools_policy allowed_skill_install_hosts)".to_string())
                     } else {
                         let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+                        let allowed_hosts = exec.policy.skill_install_allowed_hosts();
                         match &skill_registry {
-                            Some(reg) => do_install_skill(url, data_dir, &spec_dir, reg).await,
+                            Some(reg) => do_install_skill(url, data_dir, &spec_dir, reg, &allowed_hosts).await,
                             None => (false, "[install_skill] skill registry not available".to_string()),
                         }
                     }

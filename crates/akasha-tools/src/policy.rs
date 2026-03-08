@@ -37,6 +37,10 @@ pub struct ToolsPolicy {
     /// Optional: default profile name. When set, only tools listed in tool_profiles[default_profile] are allowed.
     #[serde(default)]
     pub default_profile: Option<String>,
+    /// Optional: hosts allowed for install_skill (e.g. "github.com", "gitlab.com", "raw.githubusercontent.com", "myserver.com").
+    /// If absent, only GitHub is allowed. Use ["*"] to allow any HTTPS host.
+    #[serde(default)]
+    pub allowed_skill_install_hosts: Option<Vec<String>>,
 }
 
 impl ToolsPolicy {
@@ -110,6 +114,18 @@ impl ToolsPolicy {
         self.default_profile
             .as_ref()
             .and_then(|p| self.tool_profiles.get(p).cloned())
+    }
+
+    /// Hosts allowed for install_skill. If None or empty, returns default GitHub hosts. If list contains "*", any host is allowed (caller must check).
+    pub fn skill_install_allowed_hosts(&self) -> Vec<String> {
+        match &self.allowed_skill_install_hosts {
+            Some(v) if !v.is_empty() => v.iter().map(|s| s.trim().to_lowercase()).collect(),
+            _ => vec![
+                "github.com".into(),
+                "raw.githubusercontent.com".into(),
+                "www.github.com".into(),
+            ],
+        }
     }
 
     /// Check if a URL's host is allowed for web_fetch.
