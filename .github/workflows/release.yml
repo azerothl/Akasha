@@ -70,19 +70,22 @@ jobs:
       - name: Prepare artifact (Linux / macOS)
         if: matrix.os != 'windows-latest'
         run: |
-          mkdir -p staging
+          mkdir -p staging/docs
           cp target/${{ matrix.target }}/release/akasha${{ matrix.ext }} staging/
           cp target/${{ matrix.target }}/release/akasha-daemon${{ matrix.ext }} staging/
           cp target/${{ matrix.target }}/release/akasha-tui${{ matrix.ext }} staging/
+          cp docs/user_guide_final.md staging/docs/user_guide.md
           chmod +x staging/*
 
       - name: Prepare artifact (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           mkdir staging
+          mkdir staging\docs
           cp target/${{ matrix.target }}/release/akasha.exe staging/
           cp target/${{ matrix.target }}/release/akasha-daemon.exe staging/
           cp target/${{ matrix.target }}/release/akasha-tui.exe staging/
+          cp docs/user_guide_final.md staging/docs/user_guide.md
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -116,5 +119,5 @@ jobs:
 
           gh release create "$VERSION" \
             --title "$VERSION" \
-            --notes "Précompilés Akasha (CLI + daemon + TUI). Décompressez l’archive pour votre OS puis lancez \`akasha init\` puis \`akasha start\`. Voir spec/distribution.md." \
+            --notes "Précompilés Akasha (CLI + daemon + TUI) + doc (docs/user_guide.md). Décompressez l’archive pour votre OS puis lancez \`akasha init\` puis \`akasha start\`. Voir spec/distribution.md." \
             release/*.zip

@@ -2,6 +2,8 @@
 
 Documentation accessible depuis l'interface TUI et l'interface web. Elle décrit les commandes, l'onboarding, les options de configuration et le lancement des différentes interfaces.
 
+**Utilisateurs des binaires uniquement** : le guide dédié aux utilisateurs qui n'ont pas accès au code source est dans [docs/user_guide_final.md](../docs/user_guide_final.md). Il est servi dans l'onglet Doc des interfaces lorsque vous lancez le daemon depuis le dossier d'extraction contenant `docs/user_guide.md` (voir [spec/distribution.md](distribution.md)).
+
 ---
 
 ## 1. Prérequis

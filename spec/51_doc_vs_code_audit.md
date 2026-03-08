@@ -1,6 +1,6 @@
 # Audit documentation vs code
 
-Comparaison de la documentation (README, spec, user_guide) avec l’implémentation réelle. Dernière mise à jour : mars 2025.
+Comparaison de la documentation (README, spec, user_guide) avec l’implémentation réelle. Dernière mise à jour : mars 2026.
 
 ---
 
@@ -47,6 +47,8 @@ Tous les crates listés dans le README sont bien présents dans `Cargo.toml` (wo
 | `akasha router show MODEL` | ✅ | Nécessite le daemon (appel API) |
 | `akasha plugin list/reload/install/uninstall/catalog` | ✅ | |
 | `akasha tui` | ✅ | |
+| `akasha paths` | ✅ | Affiche data_dir et chemins des fichiers de config. |
+| `akasha doctor --fix` | ✅ | Crée data_dir, llm_router.yaml, tools_policy.yaml, connectors.env si absents. |
 
 Aucune commande documentée n’est absente du code.
 
@@ -103,6 +105,11 @@ La doc utilisateur (spec/user_guide.md) contient un tableau plus complet ; le RE
 | GET /api/plugins | ✅ |
 | POST /api/plugins/reload | ✅ |
 | GET /api/skills | ✅ |
+| POST /api/skills/reload | ✅ |
+| POST /api/message | ✅ (pièces jointes, PDF) |
+| GET /api/calendar/events | ✅ (vue calendrier, tâches récentes, récurrentes) |
+| GET /api/task_runs | ✅ |
+| GET /api/user-rag/documents | ✅ (RAG utilisateur) |
 | POST /api/complete | ✅ |
 | GET /api/router/metrics | ✅ |
 | GET /api/router/models | ✅ (tous les providers) |
@@ -118,7 +125,7 @@ Cohérent avec la doc (user_guide, README).
 
 Toutes les commandes slash documentées dans le user_guide sont implémentées en TUI et dans l’UI web :
 
-- `/help`, `/?`, `/status`, `/doctor`, `/advice`, `/metrics`, `/models`, `/config list|get|set`, `/vault list`, `/plugins`, `/reload`, `/restart`.
+- `/help`, `/?`, `/status`, `/doctor`, `/advice`, `/embedded`, `/embedded reload`, `/metrics`, `/models`, `/models list`, `/routes`, `/models set ...`, `/config list|get|set`, `/vault list`, `/plugins`, `/reload`, `/skills reload`, `/restart`.
 
 Correction effectuée : le texte d’aide intégré (TUI et Web) indiquait « liste des modèles Ollama » pour `/models` ; il a été remplacé par « liste des modèles (tous les providers) » pour refléter l’appel à `GET /api/router/models`.
 

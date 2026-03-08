@@ -17,10 +17,13 @@ Ce document décrit comment **obtenir et utiliser Akasha sans installer Rust ni 
    - **macOS Apple Silicon (M1/M2/M3)** : `akasha-macos-aarch64.zip`
 4. Décompressez l’archive dans un dossier (ex. `C:\Akasha` ou `~/Akasha`).
 
-Vous obtenez trois exécutables (ou deux sur certaines variantes) :
+Vous obtenez :
 - **akasha** (ou `akasha.exe`) — CLI : init, start, stop, doctor, tui, config…
 - **akasha-daemon** — serveur 24/7 (lancé par `akasha start`)
 - **akasha-tui** — interface en terminal (lancée par `akasha tui`)
+- **docs/user_guide.md** — documentation utilisateur (guide pour les binaires uniquement)
+
+**Documentation dans l’interface** : lancez `akasha start` depuis le dossier où vous avez extrait l’archive. L’onglet **Doc** des interfaces (TUI et Web) affiche alors cette documentation. Si le fichier `docs/user_guide.md` est absent du zip, l’onglet Doc affichera « Documentation non disponible ».
 
 ---
 

@@ -2504,8 +2504,9 @@ pub async fn handle_api(
                     .parent()
                     .and_then(|p| std::fs::read_to_string(p.join("docs").join("user_guide.md")).ok())
             })
+            .or_else(|| std::fs::read_to_string(data_dir.join("docs").join("user_guide.md")).ok())
             .unwrap_or_else(|| {
-                "# Documentation\n\nDocumentation non disponible. Voir README et spec/onboarding.md dans le dépôt.\n"
+                "# Documentation\n\nDocumentation non disponible. Placez docs/user_guide.md dans le dossier d'extraction ou dans le data_dir (voir akasha paths).\n"
                     .to_string()
             });
         let body_json = serde_json::json!({ "content": content }).to_string();
