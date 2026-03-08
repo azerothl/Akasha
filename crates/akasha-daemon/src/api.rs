@@ -642,13 +642,17 @@ async fn fetch_github_skill_extra_files(
 /// Install a skill from a URL (Agent Skills spec: https://agentskills.io/specification).
 /// Supports GitHub (with directory listing), or any HTTPS host allowed in tools_policy (allowed_skill_install_hosts).
 /// Fetches SKILL.md, optional scripts/references/assets (GitHub only), writes to data_dir/skills/<name>/,
-/// reloads the registry, then returns the skill body and skill dir path.
+/// reloads the registry, adds required commands to tools_policy.yaml, and optionally hot-reloads the in-memory policy.
 async fn do_install_skill(
     url: &str,
     data_dir: &Path,
     spec_dir: &Path,
     skill_registry: &crate::skills::SkillRegistry,
     allowed_hosts: &[String],
+    tools_reload: Option<(
+        &std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>,
+        &Path,
+    )>,
 ) -> (bool, String) {
     let parsed = match parse_skill_install_url(url, allowed_hosts) {
         Some(x) => x,
@@ -717,24 +721,36 @@ async fn do_install_skill(
             } else {
                 format!(" Fichiers additionnels récupérés (scripts/, references/, assets/) : {}.", extra_files.join(", "))
             };
-            let commands_added_msg = {
+            let (mut commands_added_msg, need_hot_reload) = {
                 let bins = skill_required_bins(&body, &parsed.skill_name);
                 let policy_path = data_dir.join("tools_policy.yaml");
                 if let Ok(mut policy) = akasha_tools::ToolsPolicy::load_from_path(&policy_path) {
                     let added = policy.add_allowed_commands(&bins);
                     if !added.is_empty() {
                         if let Err(e) = policy.save_to_path(&policy_path) {
-                            format!(" Commandes {} non ajoutées à tools_policy.yaml (écriture: {}).", added.join(", "), e)
+                            (format!(" Commandes {} non ajoutées à tools_policy.yaml (écriture: {}).", added.join(", "), e), false)
                         } else {
-                            format!(" Commande(s) ajoutée(s) à tools_policy.yaml (allowed_commands) : {}. Redémarrez le daemon (/restart) pour que la politique soit rechargée.", added.join(", "))
+                            let added_joined = added.join(", ");
+                            (format!(" Commande(s) ajoutée(s) à tools_policy.yaml (allowed_commands) : {}.", added_joined), true)
                         }
                     } else {
-                        String::new()
+                        (String::new(), false)
                     }
                 } else {
-                    String::new()
+                    (String::new(), false)
                 }
             };
+            if need_hot_reload {
+                if let Some((r, path)) = tools_reload {
+                    if let Ok(mut reloaded) = akasha_tools::ToolsPolicy::load_from_path(path) {
+                        if let Ok(v) = akasha_vault::open_vault(data_dir) {
+                            reloaded.brave_api_key = v.get("brave_api_key").ok();
+                        }
+                        *r.write().await = std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
+                        commands_added_msg = commands_added_msg.replace(" (allowed_commands) :", " ; politique rechargée à chaud :");
+                    }
+                }
+            }
             let skill_dir_display = skill_dir.display().to_string();
             let msg = format!(
                 "[install_skill] Skill « {} » installé et rechargé ({} skill(s) chargé(s)).{}{}\n\
@@ -1553,7 +1569,8 @@ pub(crate) async fn run_message_via_llm(
     image_data_urls: Option<Vec<String>>,
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
-    tools_executor: Option<std::sync::Arc<akasha_tools::ToolExecutor>>,
+    tools_executor: Option<std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>>,
+    tools_policy_path: Option<std::path::PathBuf>,
     skill_registry: Option<std::sync::Arc<crate::skills::SkillRegistry>>,
     process_registry: Option<ProcessRegistry>,
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
@@ -1568,6 +1585,11 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
+
+    let tools_executor_snapshot = match &tools_executor {
+        Some(r) => Some((*r.read().await).clone()),
+        None => None,
+    };
 
     let message_webhook_url = std::env::var("AKASHA_MESSAGE_WEBHOOK_URL").ok();
 
@@ -1598,8 +1620,8 @@ pub(crate) async fn run_message_via_llm(
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(4096);
 
-    let tool_instruction = if tools_executor.is_some() {
-        let allowed_tools = tools_executor.as_ref().and_then(|e| e.policy.allowed_tool_list());
+    let tool_instruction = if tools_executor_snapshot.is_some() {
+        let allowed_tools = tools_executor_snapshot.as_ref().and_then(|e| e.policy.allowed_tool_list());
         let base = available_tools_instruction(allowed_tools.as_deref());
         let skills_part = match &skill_registry {
             Some(reg) => {
@@ -1726,7 +1748,7 @@ pub(crate) async fn run_message_via_llm(
         ""
     };
     let web_search_reminder = if message_suggests_external_info(&message)
-        && tools_executor
+        && tools_executor_snapshot
             .as_ref()
             .map(|e| e.policy.can_use_tool("web_search"))
             .unwrap_or(false)
@@ -1880,12 +1902,12 @@ pub(crate) async fn run_message_via_llm(
             break;
         }
 
-        let tool_calls = tools_executor.as_ref().and_then(|_| {
+        let tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
             let calls = parse_tool_calls(&response);
             if calls.is_empty() { None } else { Some(calls) }
         });
 
-        if let (Some(exec), Some(calls)) = (tools_executor.as_ref(), tool_calls) {
+        if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), tool_calls) {
             round += 1;
             let mut tool_results = Vec::new();
             for (name, args) in &calls {
@@ -1984,8 +2006,11 @@ pub(crate) async fn run_message_via_llm(
                     } else {
                         let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
                         let allowed_hosts = exec.policy.skill_install_allowed_hosts();
+                        let tools_reload = tools_executor.as_ref().and_then(|arc| {
+                            tools_policy_path.as_ref().map(|p| (arc, p.as_path()))
+                        });
                         match &skill_registry {
-                            Some(reg) => do_install_skill(url, data_dir, &spec_dir, reg, &allowed_hosts).await,
+                            Some(reg) => do_install_skill(url, data_dir, &spec_dir, reg, &allowed_hosts, tools_reload).await,
                             None => (false, "[install_skill] skill registry not available".to_string()),
                         }
                     }
@@ -2290,7 +2315,7 @@ pub async fn handle_api(
     ollama_base_url: Option<&str>,
     spec_dir: &Path,
     restart_tx: RestartTx,
-    _tools_executor: Option<&std::sync::Arc<akasha_tools::ToolExecutor>>,
+    _tools_executor: Option<&std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>>,
     skill_registry: &std::sync::Arc<crate::skills::SkillRegistry>,
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,

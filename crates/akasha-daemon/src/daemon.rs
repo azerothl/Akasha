@@ -315,13 +315,15 @@ impl Daemon {
                     }
                 }
             }
-            let tools_executor = {
+            let tools_executor: Option<Arc<tokio::sync::RwLock<Arc<akasha_tools::ToolExecutor>>>> = {
                 match akasha_tools::ToolsPolicy::load_from_path(&tools_policy_path) {
                     Ok(mut policy) => {
                         if let Ok(v) = &vault {
                             policy.brave_api_key = v.get("brave_api_key").ok();
                         }
-                        Some(Arc::new(akasha_tools::ToolExecutor::new(policy)))
+                        Some(Arc::new(tokio::sync::RwLock::new(Arc::new(
+                            akasha_tools::ToolExecutor::new(policy),
+                        ))))
                     }
                     Err(_) => None,
                 }
@@ -414,12 +416,14 @@ impl Daemon {
             });
             // Conversation worker: receives (task_id, message, session_id) from orchestrator, runs LLM with memory + optional tools, pushes progress/completion.
             let spec_dir = self.spec_dir.clone();
+            let tools_policy_path = tools_policy_path.clone();
             tokio::spawn({
                 let bus = bus.clone();
                 let llm_router = llm_router.clone();
                 let store_path = db_path.clone();
                 let spec_dir = spec_dir.clone();
                 let tools_executor = tools_executor.clone();
+                let tools_policy_path = tools_policy_path.clone();
                 let skill_registry = skill_registry.clone();
                 let process_registry = process_registry.clone();
                 let conv_tx = conv_tx.clone();
@@ -440,6 +444,7 @@ impl Daemon {
                             Some(short_term.clone()),
                             long_term_client.clone(),
                             tools_executor.clone(),
+                            Some(tools_policy_path.clone()),
                             Some(skill_registry.clone()),
                             Some(process_registry.clone()),
                             Some(conv_tx.clone()),
