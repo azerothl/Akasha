@@ -1158,16 +1158,20 @@ pub(crate) async fn run_message_via_llm(
 
     // User RAG: retrieve relevant chunks from user-uploaded documents (keyword match)
     let user_rag_store = crate::user_rag::UserRagStore::new(data_dir);
-    if let Ok(chunks) = user_rag_store.retrieve(&message, 5) {
-        if !chunks.is_empty() {
-            context_prefix.push_str("[Documents utilisateur — utilise ces extraits si pertinent pour répondre]\n");
-            for c in &chunks {
-                context_prefix.push_str("- ");
-                context_prefix.push_str(&c.replace('\n', " "));
-                context_prefix.push_str("\n");
-            }
+    let rag_query = message.clone();
+    let chunks = tokio::task::spawn_blocking(move || user_rag_store.retrieve(&rag_query, 5))
+        .await
+        .ok()
+        .and_then(|res| res.ok())
+        .unwrap_or_default();
+    if !chunks.is_empty() {
+        context_prefix.push_str("[Documents utilisateur — utilise ces extraits si pertinent pour répondre]\n");
+        for c in &chunks {
+            context_prefix.push_str("- ");
+            context_prefix.push_str(&c.replace('\n', " "));
             context_prefix.push_str("\n");
         }
+        context_prefix.push_str("\n");
     }
 
     if let Some(ref st) = short_term {
