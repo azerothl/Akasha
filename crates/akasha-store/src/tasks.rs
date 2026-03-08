@@ -225,6 +225,39 @@ impl TaskStore {
         Ok(None)
     }
 
+    /// List tasks with created_at in the given range (for calendar view of ad-hoc tasks).
+    pub fn list_tasks_created_between(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at FROM tasks \
+             WHERE created_at >= ?1 AND created_at <= ?2 ORDER BY created_at ASC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![from.to_rfc3339(), to.to_rfc3339(), limit as i64],
+            |row| {
+                let status_str: String = row.get(2)?;
+                let status = TaskStatus::from_str(&status_str);
+                Ok(Task {
+                    id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or(Uuid::nil()),
+                    parent_task_id: row.get::<_, Option<String>>(1)?.and_then(|s| Uuid::parse_str(&s).ok()),
+                    status,
+                    assigned_agent: row.get(3)?,
+                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                        .unwrap()
+                        .with_timezone(&Utc),
+                    updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                        .unwrap()
+                        .with_timezone(&Utc),
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn get_children(&self, parent_id: Uuid) -> anyhow::Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at FROM tasks WHERE parent_task_id = ?1 ORDER BY created_at",

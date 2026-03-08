@@ -178,6 +178,10 @@ function App() {
   } | null>(null);
   const [scheduleDetailError, setScheduleDetailError] = useState<string | null>(null);
   const [calendarRunsCollapsed, setCalendarRunsCollapsed] = useState(false);
+  type CalendarGridView = "day" | "week" | "month";
+  const [calendarGridView, setCalendarGridView] = useState<CalendarGridView>("week");
+  const [calendarGridEvents, setCalendarGridEvents] = useState<Array<{ at: string; task_id: string; type: string; status: string }>>([]);
+  const [calendarGridDate, setCalendarGridDate] = useState(() => new Date());
   const [memoryShortTerm, setMemoryShortTerm] = useState<Array<{ role: string; content: string }>>([]);
   const [memoryLongTerm, setMemoryLongTerm] = useState<Array<{ id?: string; content: string; created_at: string; source: string }>>([]);
   const [memoryLongTermAvailable, setMemoryLongTermAvailable] = useState(false);
@@ -389,6 +393,41 @@ function App() {
       setCalendarLoading(false);
     }
   }, []);
+
+  const fetchCalendarGridEvents = useCallback(async () => {
+    const d = calendarGridDate;
+    let from: Date;
+    let to: Date;
+    if (calendarGridView === "day") {
+      from = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0);
+      to = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59);
+    } else if (calendarGridView === "week") {
+      const day = d.getDay();
+      const monday = new Date(d);
+      monday.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
+      from = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate(), 0, 0, 0);
+      to = new Date(monday);
+      to.setDate(monday.getDate() + 6);
+      to.setHours(23, 59, 59, 999);
+    } else {
+      from = new Date(d.getFullYear(), d.getMonth(), 1, 0, 0, 0);
+      to = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59);
+    }
+    try {
+      const data = await invoke<{ events?: Array<{ at: string; task_id: string; type: string; status: string }> }>("get_calendar_events", {
+        port: DAEMON_PORT,
+        from: from.toISOString(),
+        to: to.toISOString(),
+      });
+      setCalendarGridEvents(data?.events ?? []);
+    } catch {
+      setCalendarGridEvents([]);
+    }
+  }, [calendarGridView, calendarGridDate]);
+
+  useEffect(() => {
+    if (tab === "calendar") fetchCalendarGridEvents();
+  }, [tab, fetchCalendarGridEvents]);
 
   useEffect(() => {
     if (tab === "tasks") fetchTasksList();
@@ -1710,6 +1749,111 @@ function App() {
             )}
             {!calendarLoading && (
               <>
+                <h3 className="calendar-grid-header">Vue calendrier (tâches lancées)</h3>
+                <div className="calendar-grid-toolbar">
+                  <select
+                    value={calendarGridView}
+                    onChange={(e) => { setCalendarGridView(e.target.value as CalendarGridView); setCalendarGridDate(new Date()); }}
+                    className="calendar-grid-select"
+                    aria-label="Vue"
+                  >
+                    <option value="day">Jour (par heure)</option>
+                    <option value="week">Semaine (par jour)</option>
+                    <option value="month">Mois (par jour)</option>
+                  </select>
+                  <input
+                    type="date"
+                    value={calendarGridDate.toISOString().slice(0, 10)}
+                    onChange={(e) => setCalendarGridDate(new Date(e.target.value + "T12:00:00"))}
+                    className="calendar-grid-date"
+                    aria-label="Date"
+                  />
+                  <button type="button" className="refresh-btn calendar-grid-refresh" onClick={fetchCalendarGridEvents} aria-label="Rafraîchir">Rafraîchir</button>
+                </div>
+                <div className="calendar-grid-wrap">
+                  {(() => {
+                    const events = calendarGridEvents;
+                    if (calendarGridView === "day") {
+                      const byHour: Record<number, typeof events> = {};
+                      for (let h = 0; h < 24; h++) byHour[h] = [];
+                      events.forEach((ev) => {
+                        const date = new Date(ev.at);
+                        const h = date.getHours();
+                        byHour[h].push(ev);
+                      });
+                      return (
+                        <ul className="calendar-grid-list" role="list">
+                          {Array.from({ length: 24 }, (_, h) => (
+                            <li key={h} className="calendar-grid-slot">
+                              <span className="calendar-grid-slot-label">{h}h00</span>
+                              <ul className="calendar-grid-slot-events" role="list">
+                                {byHour[h].map((e, i) => (
+                                  <li key={i}>{e.type} — {e.status} — task …{e.task_id.slice(-8)}</li>
+                                ))}
+                              </ul>
+                            </li>
+                          ))}
+                        </ul>
+                      );
+                    }
+                    if (calendarGridView === "week") {
+                      const d = calendarGridDate;
+                      const day = d.getDay();
+                      const monday = new Date(d);
+                      monday.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
+                      const byDay: Record<string, typeof events> = {};
+                      for (let i = 0; i < 7; i++) {
+                        const date = new Date(monday);
+                        date.setDate(monday.getDate() + i);
+                        byDay[date.toISOString().slice(0, 10)] = [];
+                      }
+                      events.forEach((ev) => {
+                        const key = new Date(ev.at).toISOString().slice(0, 10);
+                        if (byDay[key]) byDay[key].push(ev);
+                      });
+                      const days = Array.from({ length: 7 }, (_, i) => {
+                        const date = new Date(monday);
+                        date.setDate(monday.getDate() + i);
+                        return date.toISOString().slice(0, 10);
+                      });
+                      return (
+                        <ul className="calendar-grid-list calendar-grid-week" role="list">
+                          {days.map((key) => (
+                            <li key={key} className="calendar-grid-slot">
+                              <span className="calendar-grid-slot-label">{new Date(key + "T12:00:00").toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" })}</span>
+                              <ul className="calendar-grid-slot-events" role="list">
+                                {(byDay[key] ?? []).map((e, i) => (
+                                  <li key={i}>{e.type} — {e.status} — …{e.task_id.slice(-8)}</li>
+                                ))}
+                              </ul>
+                            </li>
+                          ))}
+                        </ul>
+                      );
+                    }
+                    const byDay: Record<string, typeof events> = {};
+                    events.forEach((ev) => {
+                      const key = new Date(ev.at).toISOString().slice(0, 10);
+                      if (!byDay[key]) byDay[key] = [];
+                      byDay[key].push(ev);
+                    });
+                    const keys = Object.keys(byDay).sort();
+                    return (
+                      <ul className="calendar-grid-list" role="list">
+                        {keys.length === 0 ? <li className="calendar-grid-slot">Aucune tâche sur la période.</li> : keys.map((key) => (
+                          <li key={key} className="calendar-grid-slot">
+                            <span className="calendar-grid-slot-label">{new Date(key + "T12:00:00").toLocaleDateString("fr-FR", { day: "numeric", month: "short", year: "numeric" })}</span>
+                            <ul className="calendar-grid-slot-events" role="list">
+                              {byDay[key].map((e, i) => (
+                                <li key={i}>{e.type} — {e.status} — …{e.task_id.slice(-8)}</li>
+                              ))}
+                            </ul>
+                          </li>
+                        ))}
+                      </ul>
+                    );
+                  })()}
+                </div>
                 <h3>Récurrences</h3>
                 {schedules.length === 0 ? (
                   <p className="empty-state">Aucune récurrence. Créez-en via l'API ou un outil.</p>

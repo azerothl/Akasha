@@ -2227,6 +2227,9 @@ pub async fn handle_api(
             }
         }
     }
+    if method == "GET" && path.starts_with("/api/calendar/events") {
+        return get_calendar_events(store_path, path).await;
+    }
     if method == "GET" && path == "/api/task_runs" {
         return get_task_runs_list(store_path, path).await;
     }
@@ -2990,6 +2993,67 @@ async fn delete_schedule(store_path: &Path, id: Uuid) -> String {
         return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
     }
     json_response("200 OK", &serde_json::json!({ "deleted": id.to_string() }).to_string())
+}
+
+async fn get_calendar_events(store_path: &Path, path: &str) -> String {
+    let query = path.split('?').nth(1).unwrap_or("");
+    let from_ts = query
+        .split('&')
+        .find(|p| p.starts_with("from="))
+        .and_then(|p| p.strip_prefix("from="))
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    let to_ts = query
+        .split('&')
+        .find(|p| p.starts_with("to="))
+        .and_then(|p| p.strip_prefix("to="))
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    let (from_ts, to_ts) = match (from_ts, to_ts) {
+        (Some(f), Some(t)) if f <= t => (f, t),
+        _ => {
+            let now = chrono::Utc::now();
+            let start = now - chrono::Duration::days(7);
+            (start, now)
+        }
+    };
+    let mut events: Vec<serde_json::Value> = Vec::new();
+    if let Ok(schedule_store) = ScheduleStore::open(store_path) {
+        if let Ok(runs) = schedule_store.list_task_runs_between(from_ts, to_ts, 500) {
+            for r in runs {
+                let at = r.started_at.unwrap_or(r.planned_for);
+                events.push(serde_json::json!({
+                    "at": at.to_rfc3339(),
+                    "task_id": r.task_id.to_string(),
+                    "type": "run",
+                    "status": r.status.as_str(),
+                    "run_id": r.id.to_string(),
+                    "planned_for": r.planned_for.to_rfc3339(),
+                }));
+            }
+        }
+    }
+    if let Ok(task_store) = TaskStore::open(store_path) {
+        if let Ok(tasks) = task_store.list_tasks_created_between(from_ts, to_ts, 500) {
+            for t in tasks {
+                if t.parent_task_id.is_none() {
+                    events.push(serde_json::json!({
+                        "at": t.created_at.to_rfc3339(),
+                        "task_id": t.id.to_string(),
+                        "type": "ad_hoc",
+                        "status": t.status.as_str(),
+                    }));
+                }
+            }
+        }
+    }
+    events.sort_by(|a, b| {
+        let a_at = a.get("at").and_then(|v| v.as_str()).unwrap_or("");
+        let b_at = b.get("at").and_then(|v| v.as_str()).unwrap_or("");
+        a_at.cmp(b_at)
+    });
+    let body = serde_json::json!({ "events": events });
+    json_response("200 OK", &body.to_string())
 }
 
 async fn get_task_runs_list(store_path: &Path, path: &str) -> String {

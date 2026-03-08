@@ -656,6 +656,25 @@ async fn get_schedule_by_id(schedule_id: String, port: Option<u16>) -> Result<se
     Ok(json)
 }
 
+/// Calendar events in range: GET /api/calendar/events?from=...&to=... (for calendar grid view).
+#[tauri::command]
+async fn get_calendar_events(port: Option<u16>, from: String, to: String) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let from_enc = urlencoding::encode(&from);
+    let to_enc = urlencoding::encode(&to);
+    let url = format!("{}/api/calendar/events?from={}&to={}", daemon_base_url(port), from_enc, to_enc);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// Task runs: GET /api/task_runs (optionally ?schedule_id=...) for Calendrier.
 #[tauri::command]
 async fn get_task_runs(port: Option<u16>, schedule_id: Option<String>) -> Result<serde_json::Value, String> {
@@ -891,6 +910,7 @@ pub fn run() {
             get_schedule_by_id,
             create_schedule,
             delete_schedule,
+            get_calendar_events,
             get_task_runs,
             get_memory_short_term,
             get_memory_long_term,

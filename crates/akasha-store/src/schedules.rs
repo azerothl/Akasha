@@ -358,6 +358,27 @@ impl ScheduleStore {
         let rows = stmt.query_map(rusqlite::params![from.to_rfc3339(), limit as i64], row_to_task_run)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    /// List task runs with planned_for or started_at in the given range (for calendar view).
+    pub fn list_task_runs_between(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<TaskRun>> {
+        let from_s = from.to_rfc3339();
+        let to_s = to.to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, schedule_id, task_id, status, planned_for, started_at, ended_at, dedup_key FROM task_runs \
+             WHERE (planned_for >= ?1 AND planned_for <= ?2) OR (started_at >= ?1 AND started_at <= ?2) \
+             ORDER BY planned_for ASC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![from_s, to_s, limit as i64],
+            row_to_task_run,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
 }
 
 fn row_to_schedule(row: &rusqlite::Row) -> rusqlite::Result<Schedule> {
