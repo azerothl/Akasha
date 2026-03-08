@@ -148,20 +148,20 @@ pub fn parse_content_length(buf: &[u8]) -> Option<(usize, usize)> {
     let sep = b"\r\n\r\n";
     let header_end = buf.windows(sep.len()).position(|w| w == sep)?;
     let header_slice = &buf[..header_end];
-    let mut content_length = 0usize;
+    let mut content_length: Option<usize> = None;
     for line in header_slice.split(|&b| b == b'\n') {
         let line_str = String::from_utf8_lossy(line).to_string();
         let line_str = line_str.trim_end_matches('\r');
         if let Some((name, value)) = line_str.split_once(':') {
             if name.trim().eq_ignore_ascii_case("content-length") {
                 if let Ok(n) = value.trim().parse::<usize>() {
-                    content_length = n;
+                    content_length = Some(n);
                 }
                 break;
             }
         }
     }
-    Some((header_end, content_length))
+    content_length.map(|cl| (header_end, cl))
 }
 
 /// Parsed HTTP request: method, path, body, and lowercase header map.
@@ -1243,7 +1243,11 @@ pub(crate) async fn run_message_via_llm(
             max_tokens: Some(max_tokens),
             temperature: Some(0.7),
             preferred_task_type: None,
-            image_data_urls: image_data_urls.clone(),
+            image_data_urls: if tool_loop_history.is_empty() {
+                image_data_urls.clone()
+            } else {
+                None
+            },
         };
         // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
         // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.

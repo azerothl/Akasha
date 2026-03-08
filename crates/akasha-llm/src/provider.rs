@@ -207,9 +207,22 @@ impl OpenAIProvider {
         }
         let client = reqwest::Client::new();
         let url = format!("{}/chat/completions", self.base_url);
+        let messages = match &request.image_data_urls {
+            Some(urls) if !urls.is_empty() => {
+                let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
+                for url in urls {
+                    content.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": url }
+                    }));
+                }
+                serde_json::json!([{ "role": "user", "content": content }])
+            }
+            _ => serde_json::json!([{ "role": "user", "content": request.prompt }]),
+        };
         let body = serde_json::json!({
             "model": model,
-            "messages": [{"role": "user", "content": request.prompt}],
+            "messages": messages,
             "max_tokens": request.max_tokens.unwrap_or(1024),
             "temperature": request.temperature.unwrap_or(0.7)
         });
