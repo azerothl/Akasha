@@ -468,6 +468,43 @@ fn match_glob(glob: &str, path: &str) -> bool {
     }
 }
 
+/// On Windows, many commands (npm, npx, yarn, etc.) are .cmd/.bat scripts; Command::new("npm") fails.
+/// If the name has no extension, try .cmd and .bat so any script in PATH works.
+#[cfg(windows)]
+fn windows_spawn(
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+) -> Result<tokio::process::Child, std::io::Error> {
+    let base = command.trim().split_whitespace().next().unwrap_or(command);
+    let has_ext = base.contains('.') || std::path::Path::new(base).extension().is_some();
+    let candidates: Vec<std::borrow::Cow<'_, str>> = if has_ext {
+        vec![std::borrow::Cow::Borrowed(command)]
+    } else {
+        vec![
+            std::borrow::Cow::Borrowed(command),
+            std::borrow::Cow::Owned(format!("{}.cmd", base)),
+            std::borrow::Cow::Owned(format!("{}.bat", base)),
+        ]
+    };
+    let mut last_err = None;
+    for exe in &candidates {
+        match tokio::process::Command::new(exe.as_ref())
+            .args(args)
+            .current_dir(cwd)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => return Ok(child),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "command not found")
+    }))
+}
+
 /// Run a command with timeout. Command name must be allowed by policy.
 pub async fn run_command(
     command: &str,
@@ -492,9 +529,13 @@ pub async fn run_command(
         ));
     }
     let timeout_secs = policy.command_timeout_secs;
+    let cwd = cwd.unwrap_or_else(|| Path::new("."));
+    #[cfg(windows)]
+    let child = windows_spawn(command, args, cwd).with_context(|| format!("run_command {}", command))?;
+    #[cfg(not(windows))]
     let child = tokio::process::Command::new(command)
         .args(args)
-        .current_dir(cwd.unwrap_or_else(|| Path::new(".")))
+        .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
