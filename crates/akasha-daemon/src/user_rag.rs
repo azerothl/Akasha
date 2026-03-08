@@ -34,7 +34,7 @@ fn sanitize_filename(name: &str) -> String {
 /// Returns true if `filename` is a safe single-component relative filename (no path separators, no `..`).
 /// This prevents path traversal attacks when joining manifest-stored paths with the documents directory.
 /// A safe filename must consist of exactly one `Normal` path component (no `.`, `..`, root, or prefix components).
-fn is_safe_relative_filename(filename: &str) -> bool {
+pub(crate) fn is_safe_relative_filename(filename: &str) -> bool {
     let p = std::path::Path::new(filename);
     let mut components = p.components();
     match components.next() {
