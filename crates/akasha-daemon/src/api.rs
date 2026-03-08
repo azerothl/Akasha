@@ -138,12 +138,22 @@ pub fn new_process_registry() -> ProcessRegistry {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
 }
 
+/// Registry of task-completion notifiers: task_id → Notify. Written by the conversation worker
+/// on task completion; awaited by run_delegation_handler and the orchestrator aggregator so they
+/// can react immediately instead of polling TaskStore every 500 ms.
+pub type TaskCompletionRegistry = Arc<RwLock<std::collections::HashMap<Uuid, Arc<tokio::sync::Notify>>>>;
+
+pub fn new_task_completion_registry() -> TaskCompletionRegistry {
+    Arc::new(RwLock::new(std::collections::HashMap::new()))
+}
+
 /// Runs in a loop: receives DelegationRequest, checks depth (root or direct child only), creates child task, sends to conv_tx, waits for child completion, sends reply on oneshot.
 pub async fn run_delegation_handler(
     mut delegation_rx: mpsc::Receiver<DelegationRequest>,
     conv_tx: mpsc::Sender<OrchestratorTask>,
     store_path: PathBuf,
     progress: ProgressCache,
+    task_completion: TaskCompletionRegistry,
 ) {
     while let Some(req) = delegation_rx.recv().await {
         let store = match TaskStore::open(&store_path) {
@@ -199,6 +209,13 @@ pub async fn run_delegation_handler(
             let _ = req.reply_tx.send(Err("store insert failed".to_string()));
             continue;
         }
+        // Register a completion notifier *before* sending to conv_tx so the worker can notify
+        // even if it completes before the spawned waiter calls notified().
+        let notify = Arc::new(tokio::sync::Notify::new());
+        {
+            let mut reg = task_completion.write().await;
+            reg.insert(child_id, notify.clone());
+        }
         if conv_tx
             .send(OrchestratorTask {
                 task_id: child_id,
@@ -209,13 +226,24 @@ pub async fn run_delegation_handler(
             .await
             .is_err()
         {
+            task_completion.write().await.remove(&child_id);
             let _ = req.reply_tx.send(Err("conv_tx closed".to_string()));
             continue;
         }
         let reply_tx = req.reply_tx;
         let store_path = store_path.clone();
         let progress = progress.clone();
+        let task_completion = task_completion.clone();
         tokio::spawn(async move {
+            const DELEGATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+            let timed_out = tokio::time::timeout(DELEGATION_TIMEOUT, notify.notified()).await.is_err();
+            // Ensure the registry entry is removed regardless of outcome.
+            task_completion.write().await.remove(&child_id);
+            if timed_out {
+                let _ = reply_tx.send(Err("delegation timeout (5 min)".to_string()));
+                return;
+            }
+            // Single store read to retrieve the final task status and result message.
             let store = match TaskStore::open(&store_path) {
                 Ok(s) => s,
                 Err(e) => {
@@ -223,30 +251,25 @@ pub async fn run_delegation_handler(
                     return;
                 }
             };
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
-            loop {
-                interval.tick().await;
-                if tokio::time::Instant::now() > deadline {
-                    let _ = reply_tx.send(Err("delegation timeout (5 min)".to_string()));
-                    break;
+            let task = match store.get(child_id) {
+                Ok(Some(t)) => t,
+                _ => {
+                    let _ = reply_tx.send(Err("child task not found in store".to_string()));
+                    return;
                 }
-                let task = match store.get(child_id) {
-                    Ok(Some(t)) => t,
-                    _ => continue,
-                };
-                if matches!(task.status, TaskStatus::Completed | TaskStatus::Failed) {
-                    let msg = {
-                        let g = progress.read().await;
-                        g.get(&child_id)
-                            .and_then(|q| q.back())
-                            .map(|e| e.message.clone())
-                            .unwrap_or_else(|| if matches!(task.status, TaskStatus::Failed) { "Échec.".to_string() } else { "Terminé.".to_string() })
-                    };
-                    let _ = reply_tx.send(Ok(msg));
-                    break;
-                }
-            }
+            };
+            let msg = {
+                let g = progress.read().await;
+                g.get(&child_id)
+                    .and_then(|q| q.back())
+                    .map(|e| e.message.clone())
+                    .unwrap_or_else(|| if matches!(task.status, TaskStatus::Failed) { "Échec.".to_string() } else { "Terminé.".to_string() })
+            };
+            let _ = reply_tx.send(match task.status {
+                TaskStatus::Completed => Ok(msg),
+                TaskStatus::Failed => Err(msg),
+                _ => Err("child task did not complete successfully".to_string()),
+            });
         });
     }
 }
@@ -1728,11 +1751,13 @@ pub(crate) async fn run_message_via_llm(
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     human_input_store: Option<HumanInputStore>,
     delegation_tx: Option<mpsc::Sender<DelegationRequest>>,
+    task_completion_registry: Option<TaskCompletionRegistry>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "LLM task: store open failed");
+            notify_task_completion(&task_completion_registry, task_id).await;
             return;
         }
     };
@@ -2475,6 +2500,16 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
         .with_correlation(task_id),
     );
     let _ = store.update_status(task_id, TaskStatus::Completed);
+    notify_task_completion(&task_completion_registry, task_id).await;
+}
+
+/// Notify any waiter in the TaskCompletionRegistry that `task_id` has finished.
+async fn notify_task_completion(registry: &Option<TaskCompletionRegistry>, task_id: Uuid) {
+    if let Some(reg) = registry {
+        if let Some(notify) = reg.write().await.remove(&task_id) {
+            notify.notify_one();
+        }
+    }
 }
 
 /// Optional channel to trigger daemon shutdown (for POST /api/restart).

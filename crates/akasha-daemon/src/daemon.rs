@@ -13,7 +13,7 @@ use futures_util::future::Either;
 use tracing::{error, info, warn};
 
 use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask};
-use crate::api::{handle_api, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, RestartTx};
+use crate::api::{handle_api, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, RestartTx};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
@@ -391,12 +391,14 @@ impl Daemon {
             let (orch_tx, orch_rx) = mpsc::channel::<OrchestratorTask>(64);
             let (conv_tx, mut conv_rx) = mpsc::channel::<OrchestratorTask>(64);
             let (delegation_tx, delegation_rx) = mpsc::channel::<crate::api::DelegationRequest>(32);
+            let task_completion = new_task_completion_registry();
             let db_path_for_delegation = db_path.clone();
             tokio::spawn({
                 let conv_tx = conv_tx.clone();
                 let progress = progress.clone();
+                let task_completion = task_completion.clone();
                 async move {
-                    run_delegation_handler(delegation_rx, conv_tx, db_path_for_delegation, progress).await;
+                    run_delegation_handler(delegation_rx, conv_tx, db_path_for_delegation, progress, task_completion).await;
                 }
             });
             let orch_tx_for_scheduler = orch_tx.clone();
@@ -407,6 +409,7 @@ impl Daemon {
                 conv_tx.clone(),
                 progress.clone(),
                 llm_router.clone(),
+                task_completion.clone(),
             ));
             tokio::spawn({
                 let orch = orchestrator.clone();
@@ -430,6 +433,7 @@ impl Daemon {
                 let short_term = short_term.clone();
                 let long_term_client = long_term_client.clone();
                 let human_input_store = human_input_store.clone();
+                let task_completion = task_completion.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
                         run_message_via_llm(
@@ -450,6 +454,7 @@ impl Daemon {
                             Some(conv_tx.clone()),
                             Some(human_input_store.clone()),
                             Some(delegation_tx.clone()),
+                            Some(task_completion.clone()),
                         )
                         .await;
                     }
