@@ -517,6 +517,51 @@ fn parse_skill_install_url(url: &str, allowed_hosts: &[String]) -> Option<Parsed
     }
 }
 
+/// Extract required CLI commands (bins) from SKILL.md front matter.
+/// Looks for metadata.<key>.requires.bins or requires.bins (array of strings). Falls back to [skill_name] for CLI skills.
+fn skill_required_bins(skill_md_content: &str, skill_name: &str) -> Vec<String> {
+    let yaml_str = match skill_md_content.strip_prefix("---") {
+        Some(r) => r,
+        None => return vec![skill_name.to_string()],
+    };
+    let end = match yaml_str.find("\n---") {
+        Some(i) => i,
+        None => return vec![skill_name.to_string()],
+    };
+    let yaml_str = yaml_str[..end].trim();
+    let value: serde_yaml::Value = match serde_yaml::from_str(yaml_str) {
+        Ok(v) => v,
+        Err(_) => return vec![skill_name.to_string()],
+    };
+    fn bins_from_value(v: &serde_yaml::Value) -> Option<Vec<String>> {
+        let arr = v.get("bins")?.as_sequence()?;
+        let list: Vec<String> = arr
+            .iter()
+            .filter_map(|a| a.as_str().map(String::from))
+            .collect();
+        if list.is_empty() {
+            None
+        } else {
+            Some(list)
+        }
+    }
+    if let Some(requires) = value.get("requires") {
+        if let Some(bins) = bins_from_value(requires) {
+            return bins;
+        }
+    }
+    if let Some(metadata) = value.get("metadata").and_then(|m| m.as_mapping()) {
+        for (_key, val) in metadata {
+            if let Some(requires) = val.get("requires") {
+                if let Some(bins) = bins_from_value(requires) {
+                    return bins;
+                }
+            }
+        }
+    }
+    vec![skill_name.to_string()]
+}
+
 /// Extract the Markdown body (instructions) from SKILL.md content (after the second ---).
 fn skill_md_body(content: &str) -> &str {
     let rest = match content.strip_prefix("---") {
@@ -657,12 +702,30 @@ async fn do_install_skill(
             } else {
                 format!(" Fichiers additionnels récupérés (scripts/, references/, assets/) : {}.", extra_files.join(", "))
             };
+            let commands_added_msg = {
+                let bins = skill_required_bins(&body, &parsed.skill_name);
+                let policy_path = data_dir.join("tools_policy.yaml");
+                if let Ok(mut policy) = akasha_tools::ToolsPolicy::load_from_path(&policy_path) {
+                    let added = policy.add_allowed_commands(&bins);
+                    if !added.is_empty() {
+                        if let Err(e) = policy.save_to_path(&policy_path) {
+                            format!(" Commandes {} non ajoutées à tools_policy.yaml (écriture: {}).", added.join(", "), e)
+                        } else {
+                            format!(" Commande(s) ajoutée(s) à tools_policy.yaml (allowed_commands) : {}. Redémarrez le daemon (/restart) pour que la politique soit rechargée.", added.join(", "))
+                        }
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            };
             let skill_dir_display = skill_dir.display().to_string();
             let msg = format!(
-                "[install_skill] Skill « {} » installé et rechargé ({} skill(s) chargé(s)).{}\n\
+                "[install_skill] Skill « {} » installé et rechargé ({} skill(s) chargé(s)).{}{}\n\
                  Répertoire du skill (pour read_file sur references/, scripts/, assets/) : {}\n\n\
                  Contenu du skill (à utiliser pour savoir comment l'utiliser) :\n\n---\n{}",
-                parsed.skill_name, count, extra_msg, skill_dir_display, body_preview
+                parsed.skill_name, count, extra_msg, commands_added_msg, skill_dir_display, body_preview
             );
             (true, msg)
         }
@@ -682,7 +745,7 @@ const APP_CONTEXT: &str = "[Contexte Akasha] Tu es l'assistant intégré à Akas
 Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : \
 commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Mémoire/Doc/Activité), \
 commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, /skills reload, etc.). \
-Skills (capacités supplémentaires) : l'utilisateur peut en ajouter sans modifier le code. Quand l'utilisateur demande d'installer un skill depuis une URL (ex. « installe le skill bankr depuis https://github.com/BankrBot/skills/tree/main/bankr »), tu DOIS utiliser l'outil install_skill : répondre par une ligne TOOL: install_skill <url>. Sinon, l'utilisateur peut placer les fichiers dans le dossier skills et exécuter /skills reload. \
+Skills (capacités supplémentaires) : l'utilisateur peut en ajouter sans modifier le code. Quand l'utilisateur demande d'installer un skill depuis une URL (ex. « installe le skill bankr depuis … »), tu DOIS répondre par TOOL: install_skill <url>. Quand l'utilisateur te demande d'effectuer une action avec un skill (ex. « vérifie mon wallet bankr », « lance bankr whoami »), tu DOIS répondre UNIQUEMENT par une ligne TOOL: <nom_du_skill> <arguments> (ex. TOOL: bankr whoami) pour que le système exécute la commande ; ne dis pas à l'utilisateur de lancer la commande lui-même. Sinon, l'utilisateur peut placer les fichiers dans le dossier skills et exécuter /skills reload. \
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
 Réponds en français sauf si l'utilisateur utilise une autre langue. \
 Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »). \
@@ -1545,6 +1608,7 @@ pub(crate) async fn run_message_via_llm(
              WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix.\n\
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user.\n\
              INSTALL SKILL RULE: When the user asks to install a skill from a URL (e.g. \"install the bankr skill from https://github.com/BankrBot/skills/tree/main/bankr\"), you MUST reply ONLY with TOOL: install_skill <url>. Do not give manual steps; perform the installation yourself.\n\
+             SKILL USE RULE: When the user asks you to perform an action using a skill (e.g. \"vérifie mon wallet bankr\", \"check my balance with bankr\", \"run bankr whoami\"), you MUST reply ONLY with a single line: TOOL: <skill_name> <args> (e.g. TOOL: bankr whoami). The system will execute the command and return the result. Do NOT tell the user to run the command themselves or to \"use TOOL: bankr whoami\"; you must output that line yourself so the tool is executed.\n\
              If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
@@ -1911,16 +1975,33 @@ pub(crate) async fn run_message_via_llm(
                         }
                     }
                 } else if actual_tool.is_empty() {
-                    // Skill with no tool_ref (Agent Skills doc-only): inject SKILL.md body as context for next round
-                    match &skill_registry {
-                        Some(reg) => {
-                            if let Some(body) = reg.get_body(name).await {
-                                (true, format!("[Skill: {}] Instructions:\n{}", name, body))
-                            } else {
-                                (false, format!("[Skill: {}] No instructions body.", name))
+                    // Skill with no tool_ref: if args provided, run as run_command(skill_name, ...args) (e.g. bankr whoami)
+                    if !args.is_empty() {
+                        let run_args: Vec<String> = std::iter::once(name.clone()).chain(args.iter().cloned()).collect();
+                        execute_tool_call(
+                            exec,
+                            "run_command",
+                            &run_args,
+                            process_registry.as_ref(),
+                            long_term_client.as_ref(),
+                            task_id,
+                            Some(store_path.as_path()),
+                            conv_tx.clone(),
+                            message_webhook_url.as_deref(),
+                        )
+                        .await
+                    } else {
+                        // No args: inject SKILL.md body as context for next round (doc-only)
+                        match &skill_registry {
+                            Some(reg) => {
+                                if let Some(body) = reg.get_body(name).await {
+                                    (true, format!("[Skill: {}] Instructions:\n{}", name, body))
+                                } else {
+                                    (false, format!("[Skill: {}] No instructions body.", name))
+                                }
                             }
+                            None => (false, "Skill registry not available.".to_string()),
                         }
-                        None => (false, "Skill registry not available.".to_string()),
                     }
                 } else {
                     execute_tool_call(

@@ -1,6 +1,6 @@
 //! Security policy for agent tools: allowed paths, commands, timeouts.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -9,7 +9,7 @@ fn path_normalize(p: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", default)]
 pub struct ToolsPolicy {
     /// Path prefixes allowed for read and search.
@@ -55,6 +55,29 @@ impl ToolsPolicy {
         }
         let policy: ToolsPolicy = serde_yaml::from_str(&content)?;
         Ok(policy)
+    }
+
+    /// Save policy to a YAML file. Used e.g. after adding allowed_commands for a newly installed skill.
+    pub fn save_to_path(&self, path: &Path) -> anyhow::Result<()> {
+        let yaml = serde_yaml::to_string(self)?;
+        std::fs::write(path, yaml)?;
+        Ok(())
+    }
+
+    /// Add commands to allowed_commands if not already present. Returns the list of newly added commands.
+    pub fn add_allowed_commands(&mut self, commands: &[String]) -> Vec<String> {
+        let mut added = Vec::new();
+        for cmd in commands {
+            let c = cmd.trim().to_lowercase();
+            if c.is_empty() {
+                continue;
+            }
+            if !self.allowed_commands.iter().any(|a| a.trim().to_lowercase() == c) {
+                self.allowed_commands.push(cmd.trim().to_string());
+                added.push(cmd.trim().to_string());
+            }
+        }
+        added
     }
 
     /// Check if a path is allowed for read (path must be under one of allowed_read_paths).

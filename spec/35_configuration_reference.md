@@ -94,7 +94,7 @@ Voir [tools_policy.example.yaml](tools_policy.example.yaml).
 ### Cas d’usage
 
 - **Autoriser le répertoire courant** : `allowed_read_paths: ["."]`, `allowed_write_paths: ["."]`.
-- **Autoriser des commandes** : `allowed_commands: ["cargo", "npm", "node", "git"]`.
+- **Autoriser des commandes** : `allowed_commands: ["cargo", "npm", "node", "git"]`. Pour les skills qui s’exécutent via une CLI (ex. bankr), ajouter le nom de l’exécutable : `allowed_commands: ["bankr"]` afin que l’agent puisse exécuter `TOOL: bankr whoami` (ou autre sous-commande).
 - **Restreindre l’écriture** : n’ajouter que des répertoires précis dans `allowed_write_paths`.
 - **Initiative recherche web (météo, actualités)** : pour que l'agent utilise spontanément `web_search` pour répondre aux demandes d'information externes (météo, prévisions, actualités, horaires, etc.) au lieu de suggérer des sites à l'utilisateur, définir `web_search_enabled: true` et configurer une clé Brave (variable d'environnement `BRAVE_API_KEY` ou vault `brave_api_key`). Sans cela, l'agent pourra au mieux suggérer des sites ou expliquer comment activer la recherche web.
 
