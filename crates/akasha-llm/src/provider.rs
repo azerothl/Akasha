@@ -309,9 +309,9 @@ impl LLMProvider for OpenAIProvider {
 pub struct OpenRouterProvider {
     api_key: String,
     base_url: String,
-    /// HTTP-Referer header (optional; from config or OPENROUTER_SITE_URL env).
+    /// HTTP-Referer header (optional; from config or OPENROUTER_SITE_URL env; default https://Akasha.local).
     site_url: Option<String>,
-    /// X-OpenRouter-Title header (optional; from config or OPENROUTER_APP_TITLE env).
+    /// X-Title header (optional; from config or OPENROUTER_APP_TITLE env; default Akasha).
     app_title: Option<String>,
 }
 
@@ -324,10 +324,12 @@ impl OpenRouterProvider {
     ) -> Self {
         let site_url = site_url
             .filter(|s| !s.is_empty())
-            .or_else(|| std::env::var("OPENROUTER_SITE_URL").ok().filter(|s| !s.is_empty()));
+            .or_else(|| std::env::var("OPENROUTER_SITE_URL").ok().filter(|s| !s.is_empty()))
+            .or_else(|| Some("https://Akasha.local".into()));
         let app_title = app_title
             .filter(|s| !s.is_empty())
-            .or_else(|| std::env::var("OPENROUTER_APP_TITLE").ok().filter(|s| !s.is_empty()));
+            .or_else(|| std::env::var("OPENROUTER_APP_TITLE").ok().filter(|s| !s.is_empty()))
+            .or_else(|| Some("Akasha".into()));
         Self {
             api_key: api_key.unwrap_or_default(),
             base_url: base_url
@@ -389,13 +391,11 @@ impl LLMProvider for OpenRouterProvider {
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json");
-        if let Some(ref referer) = self.site_url {
-            req = req.header("HTTP-Referer", referer.as_str());
-        }
-        req = req.header(
-            "X-OpenRouter-Title",
-            self.app_title.as_deref().unwrap_or("Akasha"),
-        );
+        let referer = self.site_url.as_deref().unwrap_or("https://Akasha.local");
+        let title = self.app_title.as_deref().unwrap_or("Akasha");
+        req = req
+            .header("HTTP-Referer", referer)
+            .header("X-Title", title);
         let resp = req
             .json(&body)
             .timeout(timeout)
