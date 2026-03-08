@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 use uuid::Uuid;
 
 const MANIFEST_FILENAME: &str = "index.json";
@@ -28,6 +29,18 @@ fn sanitize_filename(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
         .collect::<String>()
+}
+
+/// Returns true if `filename` is a safe single-component relative filename (no path separators, no `..`).
+/// This prevents path traversal attacks when joining manifest-stored paths with the documents directory.
+/// A safe filename must consist of exactly one `Normal` path component (no `.`, `..`, root, or prefix components).
+fn is_safe_relative_filename(filename: &str) -> bool {
+    let p = std::path::Path::new(filename);
+    let mut components = p.components();
+    match components.next() {
+        Some(std::path::Component::Normal(_)) => components.next().is_none(),
+        _ => false,
+    }
 }
 
 /// In-memory chunk for retrieval.
@@ -113,9 +126,13 @@ impl UserRagStore {
             return Ok(false);
         };
         let meta = manifest.documents.remove(pos);
-        let full_path = self.base_dir.join(DOCUMENTS_DIR).join(&meta.path);
-        if full_path.exists() {
-            let _ = std::fs::remove_file(&full_path);
+        if is_safe_relative_filename(&meta.path) {
+            let full_path = self.base_dir.join(DOCUMENTS_DIR).join(&meta.path);
+            if full_path.exists() {
+                let _ = std::fs::remove_file(&full_path);
+            }
+        } else {
+            warn!(id = %meta.id, path = %meta.path, "Skipping file deletion for document with unsafe path");
         }
         self.save_manifest(&manifest)?;
         Ok(true)
@@ -144,6 +161,10 @@ impl UserRagStore {
         let mut chunks: Vec<Chunk> = Vec::new();
         let docs_dir = self.documents_dir();
         for doc in &manifest.documents {
+            if !is_safe_relative_filename(&doc.path) {
+                warn!(id = %doc.id, path = %doc.path, "Skipping document with unsafe path in retrieve");
+                continue;
+            }
             let path = docs_dir.join(&doc.path);
             if !path.is_file() {
                 continue;

@@ -2121,17 +2121,7 @@ function App() {
                 const file = e.target.files?.[0];
                 if (!file) return;
                 try {
-                  const { content_base64, mime_type } = await new Promise<{ content_base64: string; mime_type: string }>((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                      const dataUrl = reader.result as string;
-                      const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-                      if (match) resolve({ content_base64: match[2], mime_type: match[1] });
-                      else reject(new Error("Invalid file"));
-                    };
-                    reader.onerror = () => reject(reader.error);
-                    reader.readAsDataURL(file);
-                  });
+                  const { content_base64, mime_type } = await readFileAsBase64(file);
                   await invoke("add_user_rag_document", {
                     name: file.name,
                     content_base64,
