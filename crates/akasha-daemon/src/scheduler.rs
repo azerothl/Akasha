@@ -68,6 +68,12 @@ async fn tick(
                 }
                 let task_id = Uuid::new_v4();
                 let run_id = Uuid::new_v4();
+                let initial_message = schedule
+                    .channel_context
+                    .as_deref()
+                    .map(String::from)
+                    .or_else(|| Some(schedule.name.clone()))
+                    .filter(|s| !s.is_empty());
                 let task = Task {
                     id: task_id,
                     parent_task_id: None,
@@ -75,6 +81,7 @@ async fn tick(
                     assigned_agent: "conversation".to_string(),
                     created_at: now,
                     updated_at: now,
+                    initial_message,
                 };
                 task_store.insert(&task)?;
                 let task_run = TaskRun {
@@ -237,6 +244,7 @@ mod tests {
                 assigned_agent: "conversation".to_string(),
                 created_at: now,
                 updated_at: now,
+                initial_message: None,
             })
             .expect("insert task");
 

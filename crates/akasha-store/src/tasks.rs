@@ -64,6 +64,9 @@ pub struct Task {
     pub assigned_agent: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// User message or context that started the task (title/summary for calendar and lists).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_message: Option<String>,
 }
 
 pub struct TaskStore {
@@ -81,7 +84,8 @@ impl TaskStore {
                 status TEXT NOT NULL,
                 assigned_agent TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                initial_message TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
             CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
@@ -96,6 +100,15 @@ impl TaskStore {
             CREATE INDEX IF NOT EXISTS idx_task_progress_task_id ON task_progress(task_id);
             "#,
         )?;
+        // Migration: add initial_message if missing (existing DBs).
+        let has_col: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='initial_message'",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+        if has_col == 0 {
+            let _ = conn.execute("ALTER TABLE tasks ADD COLUMN initial_message TEXT", []);
+        }
         Ok(Self { conn })
     }
 
@@ -140,8 +153,8 @@ impl TaskStore {
     pub fn insert(&self, task: &Task) -> anyhow::Result<()> {
         self.conn.execute(
             r#"
-            INSERT INTO tasks (id, parent_task_id, status, assigned_agent, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            INSERT INTO tasks (id, parent_task_id, status, assigned_agent, created_at, updated_at, initial_message)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#,
             rusqlite::params![
                 task.id.to_string(),
@@ -150,6 +163,7 @@ impl TaskStore {
                 task.assigned_agent,
                 task.created_at.to_rfc3339(),
                 task.updated_at.to_rfc3339(),
+                task.initial_message.as_deref(),
             ],
         )?;
         Ok(())
@@ -166,7 +180,7 @@ impl TaskStore {
 
     pub fn get_all(&self) -> anyhow::Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at FROM tasks ORDER BY created_at",
+            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at, initial_message FROM tasks ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], |row| {
             let status_str: String = row.get(2)?;
@@ -182,6 +196,7 @@ impl TaskStore {
                 updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
                     .unwrap()
                     .with_timezone(&Utc),
+                initial_message: row.get(6).ok(),
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -203,7 +218,7 @@ impl TaskStore {
 
     pub fn get(&self, id: Uuid) -> anyhow::Result<Option<Task>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at FROM tasks WHERE id = ?1",
+            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at, initial_message FROM tasks WHERE id = ?1",
         )?;
         let mut rows = stmt.query([id.to_string()])?;
         if let Some(row) = rows.next()? {
@@ -220,6 +235,7 @@ impl TaskStore {
                 updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
                     .unwrap()
                     .with_timezone(&Utc),
+                initial_message: row.get(6).ok(),
             }));
         }
         Ok(None)
@@ -233,7 +249,7 @@ impl TaskStore {
         limit: usize,
     ) -> anyhow::Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at FROM tasks \
+            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at, initial_message FROM tasks \
              WHERE created_at >= ?1 AND created_at <= ?2 ORDER BY created_at ASC LIMIT ?3",
         )?;
         let rows = stmt.query_map(
@@ -252,6 +268,7 @@ impl TaskStore {
                     updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
                         .unwrap()
                         .with_timezone(&Utc),
+                    initial_message: row.get(6).ok(),
                 })
             },
         )?;
@@ -260,7 +277,7 @@ impl TaskStore {
 
     pub fn get_children(&self, parent_id: Uuid) -> anyhow::Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at FROM tasks WHERE parent_task_id = ?1 ORDER BY created_at",
+            "SELECT id, parent_task_id, status, assigned_agent, created_at, updated_at, initial_message FROM tasks WHERE parent_task_id = ?1 ORDER BY created_at",
         )?;
         let rows = stmt.query_map([parent_id.to_string()], |row| {
             let status_str: String = row.get(2)?;
@@ -276,6 +293,7 @@ impl TaskStore {
                 updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
                     .unwrap()
                     .with_timezone(&Utc),
+                initial_message: row.get(6).ok(),
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

@@ -353,6 +353,16 @@ async fn process_root_task(
             assigned_agent: agent_type.clone(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            initial_message: {
+                const MAX: usize = 500;
+                if sub_message.len() > MAX {
+                    Some(sub_message.chars().take(MAX).chain(std::iter::once('…')).collect::<String>())
+                } else if sub_message.is_empty() {
+                    None
+                } else {
+                    Some(sub_message.clone())
+                }
+            },
         };
         store.insert(&task)?;
         let _ = bus.send(

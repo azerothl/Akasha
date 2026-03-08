@@ -56,6 +56,16 @@ impl MainAgent {
             .with_correlation(task_id),
         );
 
+        const MAX_INITIAL_MESSAGE: usize = 500;
+        let initial_message = if message.is_empty() {
+            None
+        } else {
+            Some(if message.chars().count() > MAX_INITIAL_MESSAGE {
+                message.chars().take(MAX_INITIAL_MESSAGE).chain(std::iter::once('…')).collect::<String>()
+            } else {
+                message.to_string()
+            })
+        };
         let store = TaskStore::open(store_path)?;
         let task = Task {
             id: task_id,
@@ -64,6 +74,7 @@ impl MainAgent {
             assigned_agent: if forward_to_orchestrator { "orchestrator" } else { "llm" }.to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            initial_message,
         };
         store.insert(&task)?;
         let _ = self.bus.send(

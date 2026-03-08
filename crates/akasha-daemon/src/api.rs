@@ -46,13 +46,15 @@ async fn get_task_list(store_path: &Path) -> String {
         .rev()
         .take(50)
         .map(|t| {
+            let label = task_label(t.initial_message.as_ref(), &t.id);
             serde_json::json!({
                 "id": t.id.to_string(),
                 "parent_task_id": t.parent_task_id.map(|u| u.to_string()),
                 "status": t.status.as_str(),
                 "assigned_agent": t.assigned_agent,
                 "created_at": t.created_at.to_rfc3339(),
-                "updated_at": t.updated_at.to_rfc3339()
+                "updated_at": t.updated_at.to_rfc3339(),
+                "label": label,
             })
         })
         .collect();
@@ -176,6 +178,14 @@ pub async fn run_delegation_handler(
         } else {
             "conversation".to_string()
         };
+        const MAX_INITIAL_MSG: usize = 500;
+        let initial_message = if req.message.len() > MAX_INITIAL_MSG {
+            Some(req.message.chars().take(MAX_INITIAL_MSG).chain(std::iter::once('…')).collect::<String>())
+        } else if req.message.is_empty() {
+            None
+        } else {
+            Some(req.message.clone())
+        };
         let child_task = Task {
             id: child_id,
             parent_task_id: Some(req.requesting_task_id),
@@ -183,6 +193,7 @@ pub async fn run_delegation_handler(
             assigned_agent: agent_type.clone(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            initial_message,
         };
         if store.insert(&child_task).is_err() {
             let _ = req.reply_tx.send(Err("store insert failed".to_string()));
@@ -752,6 +763,14 @@ async fn execute_tool_call(
                 (Some(path), Some(tx)) => {
                     let new_id = Uuid::new_v4();
                     let now = chrono::Utc::now();
+                    const MAX_MSG: usize = 500;
+                    let initial_message = if message.len() > MAX_MSG {
+                        Some(message.chars().take(MAX_MSG).chain(std::iter::once('…')).collect::<String>())
+                    } else if message.is_empty() {
+                        None
+                    } else {
+                        Some(message.clone())
+                    };
                     let task = Task {
                         id: new_id,
                         parent_task_id: Some(task_id),
@@ -759,6 +778,7 @@ async fn execute_tool_call(
                         assigned_agent: "conversation".to_string(),
                         created_at: now,
                         updated_at: now,
+                        initial_message,
                     };
                     match TaskStore::open(path) {
                         Ok(store) => {
@@ -3130,6 +3150,25 @@ async fn delete_schedule(store_path: &Path, id: Uuid) -> String {
     json_response("200 OK", &serde_json::json!({ "deleted": id.to_string() }).to_string())
 }
 
+fn task_label(initial_message: Option<&String>, task_id: &Uuid) -> String {
+    const LABEL_MAX: usize = 100;
+    match initial_message {
+        Some(m) if !m.trim().is_empty() => {
+            let s = m.trim();
+            if s.chars().count() > LABEL_MAX {
+                format!("{}…", s.chars().take(LABEL_MAX).collect::<String>())
+            } else {
+                s.to_string()
+            }
+        }
+        _ => {
+            let s = task_id.to_string();
+            let suffix = if s.len() >= 8 { &s[s.len() - 8..] } else { s.as_str() };
+            format!("Tâche …{suffix}")
+        }
+    }
+}
+
 async fn get_calendar_events(store_path: &Path, path: &str) -> String {
     let query = path.split('?').nth(1).unwrap_or("");
     let from_ts = query
@@ -3152,11 +3191,18 @@ async fn get_calendar_events(store_path: &Path, path: &str) -> String {
             (start, now)
         }
     };
+    let task_store = TaskStore::open(store_path);
     let mut events: Vec<serde_json::Value> = Vec::new();
     if let Ok(schedule_store) = ScheduleStore::open(store_path) {
         if let Ok(runs) = schedule_store.list_task_runs_between(from_ts, to_ts, 500) {
             for r in runs {
                 let at = r.started_at.unwrap_or(r.planned_for);
+                let label = task_store
+                    .as_ref()
+                    .ok()
+                    .and_then(|ts| ts.get(r.task_id).ok().flatten())
+                    .map(|t| task_label(t.initial_message.as_ref(), &r.task_id))
+                    .unwrap_or_else(|| task_label(None, &r.task_id));
                 events.push(serde_json::json!({
                     "at": at.to_rfc3339(),
                     "task_id": r.task_id.to_string(),
@@ -3164,19 +3210,22 @@ async fn get_calendar_events(store_path: &Path, path: &str) -> String {
                     "status": r.status.as_str(),
                     "run_id": r.id.to_string(),
                     "planned_for": r.planned_for.to_rfc3339(),
+                    "label": label,
                 }));
             }
         }
     }
-    if let Ok(task_store) = TaskStore::open(store_path) {
+    if let Ok(ref task_store) = task_store {
         if let Ok(tasks) = task_store.list_tasks_created_between(from_ts, to_ts, 500) {
             for t in tasks {
                 if t.parent_task_id.is_none() {
+                    let label = task_label(t.initial_message.as_ref(), &t.id);
                     events.push(serde_json::json!({
                         "at": t.created_at.to_rfc3339(),
                         "task_id": t.id.to_string(),
                         "type": "ad_hoc",
                         "status": t.status.as_str(),
+                        "label": label,
                     }));
                 }
             }
@@ -3206,9 +3255,16 @@ async fn get_task_runs_list(store_path: &Path, path: &str) -> String {
         Ok(l) => l,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
+    let task_store = TaskStore::open(store_path);
     let arr: Vec<serde_json::Value> = list
         .into_iter()
         .map(|r| {
+            let label = task_store
+                .as_ref()
+                .ok()
+                .and_then(|ts| ts.get(r.task_id).ok().flatten())
+                .map(|t| task_label(t.initial_message.as_ref(), &r.task_id))
+                .unwrap_or_else(|| task_label(None, &r.task_id));
             serde_json::json!({
                 "id": r.id.to_string(),
                 "schedule_id": r.schedule_id.map(|u| u.to_string()),
@@ -3217,7 +3273,8 @@ async fn get_task_runs_list(store_path: &Path, path: &str) -> String {
                 "planned_for": r.planned_for.to_rfc3339(),
                 "started_at": r.started_at.map(|t| t.to_rfc3339()),
                 "ended_at": r.ended_at.map(|t| t.to_rfc3339()),
-                "dedup_key": r.dedup_key
+                "dedup_key": r.dedup_key,
+                "label": label,
             })
         })
         .collect();
