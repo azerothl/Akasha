@@ -216,6 +216,10 @@ struct App {
     activity_list_scroll: usize,
     /// Tasks tab: if true, task list body is collapsed (only header visible; Space/Enter to expand).
     activity_list_collapsed: bool,
+    /// Tasks tab: if true, list shows only root tasks (one row per discussion). Toggle with 'd' for "discussions".
+    activity_show_roots_only: bool,
+    /// Indices into activity_tasks for the visible list (roots only or all). Updated on fetch and when toggling activity_show_roots_only.
+    activity_visible_indices: Vec<usize>,
     /// Tasks tab: list widget rect (for mouse click to select task).
     activity_list_rect: Option<ratatui::prelude::Rect>,
     /// Tabs bar rect (for mouse click to switch tab).
@@ -288,6 +292,8 @@ impl App {
             calendar_schedule_detail: None,
             activity_list_scroll: 0,
             activity_list_collapsed: false,
+            activity_show_roots_only: true,
+            activity_visible_indices: Vec::new(),
             activity_list_rect: None,
             tabs_rect: None,
             calendar_content_rect: None,
@@ -495,8 +501,16 @@ impl App {
                             Some(ActivityTaskRow { id, status, created_at, assigned_agent, parent_task_id })
                         })
                         .collect();
-                    if self.activity_selected >= self.activity_tasks.len() && !self.activity_tasks.is_empty() {
-                        self.activity_selected = self.activity_tasks.len() - 1;
+                    self.activity_visible_indices = if self.activity_show_roots_only {
+                        self.activity_tasks.iter().enumerate()
+                            .filter(|(_, r)| r.parent_task_id.is_none())
+                            .map(|(i, _)| i)
+                            .collect()
+                    } else {
+                        (0..self.activity_tasks.len()).collect()
+                    };
+                    if self.activity_selected >= self.activity_visible_indices.len() && !self.activity_visible_indices.is_empty() {
+                        self.activity_selected = self.activity_visible_indices.len() - 1;
                     }
                     if !self.activity_tasks.is_empty() {
                         self.fetch_activity_events_for_selected();
@@ -511,8 +525,11 @@ impl App {
     }
 
     fn fetch_activity_events_for_selected(&mut self) {
-        let id = match self.activity_tasks.get(self.activity_selected) {
-            Some(row) => row.id.clone(),
+        let id = self.activity_visible_indices.get(self.activity_selected)
+            .and_then(|&idx| self.activity_tasks.get(idx))
+            .map(|row| row.id.clone());
+        let id = match id {
+            Some(id) => id,
             None => {
                 self.activity_events.clear();
                 self.activity_task_detail = None;
@@ -558,7 +575,9 @@ impl App {
     }
 
     fn fetch_activity_task_detail(&mut self) {
-        let id = match self.activity_tasks.get(self.activity_selected) {
+        let id = match self.activity_visible_indices.get(self.activity_selected)
+            .and_then(|&idx| self.activity_tasks.get(idx))
+        {
             Some(row) => row.id.clone(),
             None => return,
         };
@@ -1979,7 +1998,12 @@ fn ui(f: &mut Frame, app: &mut App) {
                     Style::default().fg(theme.palette().muted),
                 )));
             } else {
-                for (i, row) in app.activity_tasks.iter().enumerate() {
+                let visible_len = app.activity_visible_indices.len();
+                for (i, &idx) in app.activity_visible_indices.iter().enumerate() {
+                    let row = match app.activity_tasks.get(idx) {
+                        Some(r) => r,
+                        None => continue,
+                    };
                     let short_date = if row.created_at.len() >= 16 {
                         format!("{} {}", &row.created_at[5..10], &row.created_at[11..16])
                     } else {
@@ -2003,13 +2027,18 @@ fn ui(f: &mut Frame, app: &mut App) {
                         style,
                     )));
                 }
-                if app.activity_tasks.is_empty() {
-                    list_lines.push(Line::from("  Aucune tâche. Envoyez un message dans Chat ou /task create \"message\"."));
+                if visible_len == 0 {
+                    list_lines.push(Line::from(if app.activity_tasks.is_empty() {
+                        "  Aucune tâche. Envoyez un message dans Chat ou /task create \"message\"."
+                    } else {
+                        "  Aucune discussion (racine). Touche 'd' : afficher toutes les tâches."
+                    }));
                 }
             }
             let list_len = list_lines.len();
-            if !app.activity_tasks.is_empty() {
-                let selected_line = 3 + app.activity_selected.min(app.activity_tasks.len() - 1);
+            let visible_len = app.activity_visible_indices.len();
+            if visible_len > 0 {
+                let selected_line = 3 + app.activity_selected.min(visible_len - 1);
                 if selected_line >= app.activity_list_scroll + list_inner_h && list_inner_h > 0 {
                     app.activity_list_scroll = selected_line - list_inner_h + 1;
                 }
@@ -2021,7 +2050,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             app.activity_list_scroll = app.activity_list_scroll.min(max_scroll);
             let list_block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Liste des tâches ")
+                .title(if app.activity_show_roots_only { " Discussions (racines) [d=toutes] " } else { " Liste des tâches [d=racines] " })
                 .border_style(theme.block_border());
             app.activity_list_rect = Some(list_area);
             f.render_widget(
@@ -2062,8 +2091,8 @@ fn ui(f: &mut Frame, app: &mut App) {
             for ev in &app.activity_events {
                 detail_lines.push(Line::from(format!("  {}", ev)));
             }
-            if app.activity_task_detail.is_none() && !app.activity_tasks.is_empty() {
-                detail_lines.push(Line::from("  Sélectionnez une tâche ci-dessus pour voir la demande et la réponse."));
+            if app.activity_task_detail.is_none() && !app.activity_visible_indices.is_empty() {
+                detail_lines.push(Line::from("  Sélectionnez une tâche ci-dessus pour voir la demande et la réponse. (d = discussions / toutes)"));
             }
             let detail_len = detail_lines.len();
             let detail_inner_height = detail_area.height.saturating_sub(2) as usize; // block borders
@@ -2500,7 +2529,7 @@ fn run_app(
                                 let content_line = app.activity_list_scroll + inner_y as usize;
                                 if content_line >= 3 {
                                     let task_idx = content_line - 3;
-                                    if task_idx < app.activity_tasks.len() {
+                                    if task_idx < app.activity_visible_indices.len() {
                                         app.activity_selected = task_idx;
                                         app.activity_detail_scroll = 0;
                                         app.fetch_activity_events_for_selected();
@@ -2736,12 +2765,28 @@ fn run_app(
                         }
                     }
                     (Mode::Tasks, KeyCode::Down, _) => {
-                        if app.activity_selected + 1 < app.activity_tasks.len() {
+                        if app.activity_selected + 1 < app.activity_visible_indices.len() {
                             app.activity_selected += 1;
                             app.activity_detail_scroll = 0;
                             app.fetch_activity_events_for_selected();
                             app.fetch_activity_task_detail();
                         }
+                    }
+                    (Mode::Tasks, KeyCode::Char('d') | KeyCode::Char('D'), _) => {
+                        app.activity_show_roots_only = !app.activity_show_roots_only;
+                        app.activity_visible_indices = if app.activity_show_roots_only {
+                            app.activity_tasks.iter().enumerate()
+                                .filter(|(_, r)| r.parent_task_id.is_none())
+                                .map(|(i, _)| i)
+                                .collect()
+                        } else {
+                            (0..app.activity_tasks.len()).collect()
+                        };
+                        if app.activity_selected >= app.activity_visible_indices.len() && !app.activity_visible_indices.is_empty() {
+                            app.activity_selected = app.activity_visible_indices.len() - 1;
+                        }
+                        app.fetch_activity_events_for_selected();
+                        app.fetch_activity_task_detail();
                     }
                     (Mode::Tasks, KeyCode::PageUp, _) => {
                         app.activity_detail_scroll = app.activity_detail_scroll.saturating_sub(1);

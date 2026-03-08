@@ -145,6 +145,8 @@ function App() {
   /** Reply text for the inline ask_user form in the chat (when modal is not used). */
   const [inlineHumanReplyText, setInlineHumanReplyText] = useState("");
   const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(true);
+  /** Per-root task: whether the discussion block is collapsed in the sub-agent panel (true = collapsed). */
+  const [collapsedRootTasks, setCollapsedRootTasks] = useState<Record<string, boolean>>({});
   const [schedules, setSchedules] = useState<Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>>([]);
   const [taskRuns, setTaskRuns] = useState<Array<{
     id: string;
@@ -1213,31 +1215,56 @@ function App() {
                       ) : (
                         Object.entries(runningTaskEvents).map(([rootTaskId, events]) => {
                           if (events.length === 0) return null;
-                          // Group by task_id (root vs child) so we show "Tâche racine" and "Sous-tâche #xxx"
-                          const byTask: Record<string, typeof events> = {};
-                          for (const ev of events) {
-                            const tid = ev.task_id ?? rootTaskId;
-                            if (!byTask[tid]) byTask[tid] = [];
-                            byTask[tid].push(ev);
-                          }
-                          return Object.entries(byTask).map(([tid, evs]) => (
-                            <div key={`${rootTaskId}-${tid}`} className="chat-subagents-task">
-                              <div className="chat-subagents-task-id">
-                                {tid === rootTaskId ? `Tâche racine #${tid.slice(-8)}` : `Sous-tâche #${tid.slice(-8)}`}
-                              </div>
-                              <ul className="chat-subagents-events">
-                                {evs.map((ev, idx) => (
-                                  <li key={`${tid}-${idx}`} className="chat-subagents-event" data-type={ev.event_type}>
-                                    <span className="chat-subagents-event-type">{eventTypeLabel(ev.event_type)}</span>
-                                    {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload && (
-                                      <span className="chat-subagents-event-agent"> → {(ev.payload as { agent?: string }).agent}</span>
-                                    )}
-                                    {ev.at && <span className="chat-subagents-event-at"> {ev.at.slice(0, 19)}</span>}
-                                  </li>
-                                ))}
-                              </ul>
+                          const isCollapsed = collapsedRootTasks[rootTaskId] ?? false;
+                          const chip = runningTaskChips[rootTaskId];
+                          const pct = chip?.pct ?? 0;
+                          return (
+                            <div key={rootTaskId} className="chat-subagents-discussion">
+                              <button
+                                type="button"
+                                className="chat-subagents-discussion-toggle"
+                                onClick={() => setCollapsedRootTasks((prev) => ({ ...prev, [rootTaskId]: !prev[rootTaskId] }))}
+                                aria-expanded={!isCollapsed}
+                                aria-controls={`subagents-discussion-${rootTaskId}`}
+                              >
+                                <span className="chat-subagents-discussion-icon" aria-hidden>{isCollapsed ? "▶" : "▼"}</span>
+                                <span className="chat-subagents-discussion-label">
+                                  Discussion — Task #{rootTaskId.slice(-8)}
+                                  {pct != null && pct < 100 ? ` (${pct}%)` : ""}
+                                </span>
+                              </button>
+                              {!isCollapsed && (
+                                <div id={`subagents-discussion-${rootTaskId}`} className="chat-subagents-discussion-body">
+                                  {(() => {
+                                    const byTask: Record<string, typeof events> = {};
+                                    for (const ev of events) {
+                                      const tid = ev.task_id ?? rootTaskId;
+                                      if (!byTask[tid]) byTask[tid] = [];
+                                      byTask[tid].push(ev);
+                                    }
+                                    return Object.entries(byTask).map(([tid, evs]) => (
+                                      <div key={`${rootTaskId}-${tid}`} className="chat-subagents-task">
+                                        <div className="chat-subagents-task-id">
+                                          {tid === rootTaskId ? `Tâche racine #${tid.slice(-8)}` : `Sous-tâche #${tid.slice(-8)}`}
+                                        </div>
+                                        <ul className="chat-subagents-events">
+                                          {evs.map((ev, idx) => (
+                                            <li key={`${tid}-${idx}`} className="chat-subagents-event" data-type={ev.event_type}>
+                                              <span className="chat-subagents-event-type">{eventTypeLabel(ev.event_type)}</span>
+                                              {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload && (
+                                                <span className="chat-subagents-event-agent"> → {(ev.payload as { agent?: string }).agent}</span>
+                                              )}
+                                              {ev.at && <span className="chat-subagents-event-at"> {ev.at.slice(0, 19)}</span>}
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    ));
+                                  })()}
+                                </div>
+                              )}
                             </div>
-                          ));
+                          );
                         })
                       )}
                     </div>

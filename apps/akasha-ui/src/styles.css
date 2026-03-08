@@ -570,6 +570,55 @@ body {
   font-size: 0.8125rem;
 }
 
+.chat-subagents-discussion {
+  margin-bottom: 0.75rem;
+  border: 1px solid var(--akasha-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.chat-subagents-discussion:last-child {
+  margin-bottom: 0;
+}
+
+.chat-subagents-discussion-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.4rem 0.75rem;
+  background: var(--akasha-bg-surface);
+  border: none;
+  color: var(--akasha-text);
+  font-size: 0.8125rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chat-subagents-discussion-toggle:hover {
+  background: var(--akasha-bg-surface-hover);
+}
+
+.chat-subagents-discussion-toggle:focus-visible {
+  outline: 2px solid var(--akasha-accent);
+  outline-offset: -2px;
+}
+
+.chat-subagents-discussion-icon {
+  font-size: 0.65rem;
+  color: var(--akasha-text-dim);
+}
+
+.chat-subagents-discussion-label {
+  font-weight: 500;
+}
+
+.chat-subagents-discussion-body {
+  padding: 0.5rem 0.75rem;
+  background: var(--akasha-bg-elevated);
+  border-top: 1px solid var(--akasha-border);
+}
+
 .chat-subagents-task {
   margin-bottom: 0.75rem;
 }
