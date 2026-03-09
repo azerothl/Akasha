@@ -2165,6 +2165,22 @@ pub(crate) async fn run_message_via_llm(
         .unwrap_or_else(|| llm_timeout_secs.min(300));
 
     'tool_rounds: loop {
+        // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
+        if let Some(ref store) = task_usage_store {
+            let (session_tokens, session_cost) = store.get_session(&session_id).await.unwrap_or((0, 0.0));
+            if let Ok(max_cost) = std::env::var("AKASHA_MAX_COST_PER_SESSION_USD").ok().and_then(|s| s.parse::<f64>()) {
+                if max_cost > 0.0 && session_cost >= max_cost {
+                    reply_text = "Budget dépassé pour cette session (AKASHA_MAX_COST_PER_SESSION_USD). Démarrez une nouvelle session ou augmentez le plafond.".to_string();
+                    break 'tool_rounds;
+                }
+            }
+            if let Ok(max_tokens) = std::env::var("AKASHA_MAX_TOKENS_PER_SESSION").ok().and_then(|s| s.parse::<u64>()) {
+                if max_tokens > 0 && session_tokens >= max_tokens {
+                    reply_text = "Quota de tokens dépassé pour cette session (AKASHA_MAX_TOKENS_PER_SESSION). Démarrez une nouvelle session ou augmentez le plafond.".to_string();
+                    break 'tool_rounds;
+                }
+            }
+        }
         let request = CompletionRequest {
             prompt: format!("{}{}", current_prompt, tool_instruction),
             max_tokens: Some(max_tokens),

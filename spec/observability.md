@@ -59,3 +59,9 @@ Pour réduire les appels répétés au retrieval RAG (runbooks, spec) :
 - **Invalidation** : à la modification du pack (détection du mtime du répertoire ou du fichier index) ou via un webhook si implémenté. Après invalidation, la prochaine requête recalcule et remet en cache.
 
 Comportement à documenter pour éviter les surprises (données obsolètes si le pack change sans redémarrage).
+
+---
+
+## 5. NFR-008 : mise à jour de progression (< 1 s)
+
+La cible est une latence perçue **< 1 s** entre un événement côté daemon (progress, task_completed, pending_human_input) et son affichage dans l'UI (Tauri, TUI). Aujourd'hui les clients utilisent du **polling** (GET /api/tasks/:id, GET pending human-input) avec un intervalle typique de 1–2 s. Pour valider la cible : mesurer l'intervalle de poll et la latence entre émission de l'événement et prochain poll. Si la cible n'est pas atteinte, un mécanisme **SSE** (Server-Sent Events) ou **WebSocket** peut être ajouté pour pousser les événements en temps réel.
