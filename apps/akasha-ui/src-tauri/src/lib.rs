@@ -425,11 +425,10 @@ fn open_url(url: String) -> Result<(), String> {
     if !url.starts_with("https://") {
         return Err("Only https URLs are allowed".to_string());
     }
-    if let Ok(parsed) = url.parse::<url::Url>() {
-        let host = parsed.host_str().unwrap_or("");
-        if !host.ends_with("github.io") && !host.ends_with("github.com") && host != "ollama.com" {
-            return Err("URL host not allowed for security".to_string());
-        }
+    let parsed = url.parse::<url::Url>().map_err(|e| format!("Invalid URL: {}", e))?;
+    let host = parsed.host_str().unwrap_or("");
+    if !host.ends_with("github.io") && !host.ends_with("github.com") && host != "ollama.com" {
+        return Err("URL host not allowed for security".to_string());
     }
     let _ = match std::env::consts::OS {
         "windows" => std::process::Command::new("cmd").args(["/c", "start", "", url]).status(),

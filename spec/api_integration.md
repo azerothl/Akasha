@@ -49,6 +49,10 @@ Pour un export ou une intégration (dashboard, audit), on peut s’appuyer sur l
 
 ---
 
-## 5. Authentification
+## 5. Authentification et sécurité CSRF
 
-À ce jour, l’API du daemon ne met pas en place d’authentification (écoute en localhost). Pour une exposition sur le réseau, il est recommandé de placer le daemon derrière un reverse proxy avec authentification (ex. nginx + basic auth ou OAuth) ou d’ajouter une couche d’auth dans une évolution future.
+L’API du daemon écoute uniquement sur `127.0.0.1` (localhost). Pour renforcer la sécurité :
+
+- **Protection CSRF** : le daemon valide l’en-tête `Origin` sur toutes les requêtes mutantes (POST/PUT/DELETE/PATCH). Toute requête dont l’Origin n’est pas une origine locale (`localhost`, `127.0.0.1`, `tauri://`, `https://tauri.localhost`) est rejetée avec `403 Forbidden`. Cela bloque les attaques CSRF depuis des pages web malveillantes ouvertes dans le navigateur de l’utilisateur. Les clients non-navigateur (curl, scripts) n’envoient pas d’en-tête `Origin` et ne sont pas affectés.
+
+- **Exposition sur le réseau** : si le daemon est exposé hors de localhost, il est recommandé de placer un reverse proxy avec authentification (nginx + basic auth ou OAuth) devant le daemon. Une couche d’authentification forte (jeton aléatoire dans un header personnalisé) peut également être ajoutée dans une évolution future.

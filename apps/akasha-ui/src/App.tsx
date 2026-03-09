@@ -1238,7 +1238,7 @@ function App() {
     <div className="app">
       <a href="#main-content" className="skip-link">Aller au contenu principal</a>
       {updateBannerInfo && (
-        <div className="update-banner" role="region" aria-label="Mise à jour disponible">
+        <div className="update-banner" role="region" aria-label={t("update.banner_label")}>
           <div className="update-banner-inner">
             <p className="update-banner-text">
               {t("update.available")} <strong>{updateBannerInfo.remote_version}</strong> ({t("update.you_have")} {updateBannerInfo.current_version}). {t("update.banner_install")}
