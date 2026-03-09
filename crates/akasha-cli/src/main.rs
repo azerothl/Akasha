@@ -802,7 +802,7 @@ fn ollama_list_models(base_url: &str) -> Vec<String> {
         Ok(j) => j,
         Err(_) => return vec![],
     };
-    let models = json.get("models").and_then(|m| m.as_array()).unwrap_or(&[]);
+    let models: &[serde_json::Value] = json.get("models").and_then(|m| m.as_array()).map_or(&[], |v| v.as_slice());
     models
         .iter()
         .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
