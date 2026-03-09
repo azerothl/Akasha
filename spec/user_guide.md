@@ -128,6 +128,7 @@ Fichiers créés dans le data_dir (ex. `%LOCALAPPDATA%\akasha` sous Windows) :
 | `AKASHA_PORT` | Port du daemon | 3876 |
 | `AKASHA_LOG` | Niveau de log (trace, debug, info, warn, error) | info |
 | `AKASHA_MAX_RESPONSE_TOKENS` | Nombre max de tokens pour les réponses chat | 4096 |
+| `AKASHA_MAX_CONCURRENT_DELEGATIONS` | Nombre max de délégations (sous-tâches) traitées en parallèle ; au-delà, « système surchargé » | 15 |
 | `AKASHA_DATA_DIR` | Répertoire de données (vault, plugins, llm_router.yaml, etc.) | %LOCALAPPDATA%\akasha (Windows) / ~/.local/share/akasha (Linux/macOS) |
 | `AKASHA_SLACK_ENABLED` | `1` pour activer l'adaptateur Slack | — |
 | `AKASHA_DISCORD_ENABLED` | `1` pour activer le bot Discord | — |

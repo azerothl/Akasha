@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+use tracing::Instrument;
 
 /// In-memory cache for AgentProfile to avoid repeated disk reads (invalidated on POST /api/agent-profile and after profile save in run_message_via_llm).
 pub type AgentProfileCache = Arc<RwLock<Option<AgentProfile>>>;
@@ -249,14 +250,30 @@ pub fn new_task_completion_registry() -> TaskCompletionRegistry {
 }
 
 /// Runs in a loop: receives DelegationRequest, checks depth (root or direct child only), creates child task, sends to conv_tx, waits for child completion, sends reply on oneshot.
+/// `delegation_sem`: semaphore for backpressure; when full, replies with "système surchargé".
 pub async fn run_delegation_handler(
     mut delegation_rx: mpsc::Receiver<DelegationRequest>,
     conv_tx: mpsc::Sender<OrchestratorTask>,
     store_path: PathBuf,
     progress: ProgressCache,
     task_completion: TaskCompletionRegistry,
+    delegation_sem: std::sync::Arc<tokio::sync::Semaphore>,
 ) {
     while let Some(req) = delegation_rx.recv().await {
+        let permit = match delegation_sem.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!("Delegation backpressure: max concurrent delegations reached");
+                let _ = req.reply_tx.send(Err("Système surchargé, réessayez plus tard.".to_string()));
+                continue;
+            }
+        };
+        let _ = tracing::info_span!(
+            "delegation",
+            requesting_task_id = %req.requesting_task_id,
+            agent_type = %req.agent_type
+        )
+        .entered();
         let store = match TaskStore::open(&store_path) {
             Ok(s) => s,
             Err(e) => {
@@ -335,11 +352,24 @@ pub async fn run_delegation_handler(
         let store_path = store_path.clone();
         let progress = progress.clone();
         let task_completion = task_completion.clone();
+        let child_id_span = child_id;
+        let agent_type_span = agent_type.clone();
         tokio::spawn(async move {
+            let _permit = permit;
+            let span = tracing::info_span!(
+                "delegation_wait",
+                child_task_id = %child_id_span,
+                assigned_agent = %agent_type_span
+            );
             const DELEGATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-            let timed_out = tokio::time::timeout(DELEGATION_TIMEOUT, notify.notified()).await.is_err();
+            let timed_out = tokio::time::timeout(
+                DELEGATION_TIMEOUT,
+                notify.notified().instrument(span),
+            )
+            .await
+            .is_err();
             // Ensure the registry entry is removed regardless of outcome.
-            task_completion.write().await.remove(&child_id);
+            task_completion.write().await.remove(&child_id_span);
             if timed_out {
                 let _ = reply_tx.send(Err("delegation timeout (5 min)".to_string()));
                 return;
@@ -352,7 +382,7 @@ pub async fn run_delegation_handler(
                     return;
                 }
             };
-            let task = match store.get(child_id) {
+            let task = match store.get(child_id_span) {
                 Ok(Some(t)) => t,
                 _ => {
                     let _ = reply_tx.send(Err("child task not found in store".to_string()));
@@ -361,7 +391,7 @@ pub async fn run_delegation_handler(
             };
             let msg = {
                 let g = progress.read().await;
-                g.get(&child_id)
+                g.get(&child_id_span)
                     .and_then(|q| q.back())
                     .map(|e| e.message.clone())
                     .unwrap_or_else(|| if matches!(task.status, TaskStatus::Failed) { "Échec.".to_string() } else { "Terminé.".to_string() })
@@ -1715,6 +1745,7 @@ async fn execute_tool_call(
 
 /// Compact short-term memory when it would exceed context: summarize oldest turns via LLM and replace in store.
 /// Optionally promote the summary to long-term memory (embed + store).
+/// Refuses compaction beyond MAX_COMPACTIONS_PER_SESSION per session to avoid costly loops.
 async fn compact_short_term_if_needed(
     short_term: &Arc<ShortTermStore>,
     session_id: &str,
@@ -1722,6 +1753,10 @@ async fn compact_short_term_if_needed(
     new_message_tokens: usize,
     long_term_client: Option<&LongTermMemoryClient>,
 ) {
+    if short_term.get_compaction_count(session_id).await >= crate::memory::MAX_COMPACTIONS_PER_SESSION {
+        tracing::info!(session_id, "Short-term compaction skipped: max compactions per session reached (start a new session if context is too long)");
+        return;
+    }
     const MAX_CONTEXT_DEFAULT: usize = 8192;
     let max_context_tokens = std::env::var("AKASHA_MAX_CONTEXT_TOKENS")
         .ok()
@@ -1758,6 +1793,7 @@ async fn compact_short_term_if_needed(
             let summary = resp.text.trim();
             if !summary.is_empty() {
                 short_term.replace_oldest_with_summary(session_id, summary.to_string(), to_summarize).await;
+                short_term.increment_compaction_count(session_id).await;
                 tracing::debug!(session_id, to_summarize, "Short-term memory compacted");
                 // Promote summary to long-term memory (spec 06)
                 if let Some(client) = long_term_client {
@@ -1864,7 +1900,7 @@ pub(crate) async fn run_message_via_llm(
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!(error = %e, "LLM task: store open failed");
+            tracing::error!(task_id = %task_id, error_kind = "store_open", error = %e, "LLM task: store open failed");
             notify_task_completion(&task_completion_registry, task_id).await;
             return;
         }
@@ -3446,6 +3482,7 @@ pub async fn handle_api(
                                 fallback_success: v.fallback_success,
                                 last_success: v.last_success,
                                 last_failure: v.last_failure,
+                                latency_samples: std::collections::VecDeque::new(),
                             })).collect())
                             .unwrap_or_default(),
                         Err(_) => llm_router.metrics().list(),
@@ -3457,6 +3494,13 @@ pub async fn handle_api(
             llm_router.metrics().list()
         };
         let body = serde_json::to_string(&list).unwrap_or_else(|_| "{}".to_string());
+        return json_response("200 OK", &body);
+    }
+
+    // GET /api/metrics/summary — metrics with latency percentiles (P50, P95, P99) per provider/model
+    if method == "GET" && path == "/api/metrics/summary" {
+        let summary = llm_router.metrics().summary();
+        let body = serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_string());
         return json_response("200 OK", &body);
     }
 

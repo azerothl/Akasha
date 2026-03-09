@@ -12,11 +12,16 @@ pub struct ConversationTurn {
     pub content: String,
 }
 
+/// Max compactions per session to avoid costly loops (spec observability / Phase 1.5).
+pub const MAX_COMPACTIONS_PER_SESSION: u32 = 5;
+
 /// In-memory short-term store: session_id -> last N turns.
 /// When persistence_dir is set, sessions whose id starts with "day-" are persisted to JSON and reloaded on startup.
 pub struct ShortTermStore {
     /// session_id -> list of turns (oldest first)
     sessions: RwLock<HashMap<String, Vec<ConversationTurn>>>,
+    /// session_id -> number of compactions already done this session (ceiling to avoid infinite compaction loops).
+    compaction_count: RwLock<HashMap<String, u32>>,
     pub max_turns_per_session: usize,
     /// When estimated tokens exceed this ratio of max_context_tokens, compact.
     pub compaction_trigger_ratio: f64,
@@ -28,6 +33,7 @@ impl ShortTermStore {
     pub fn new(max_turns_per_session: usize, compaction_trigger_ratio: f64) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            compaction_count: RwLock::new(HashMap::new()),
             max_turns_per_session,
             compaction_trigger_ratio,
             persistence_dir: None,
@@ -42,10 +48,23 @@ impl ShortTermStore {
     ) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            compaction_count: RwLock::new(HashMap::new()),
             max_turns_per_session,
             compaction_trigger_ratio,
             persistence_dir,
         }
+    }
+
+    /// Number of compactions already performed for this session (used to enforce MAX_COMPACTIONS_PER_SESSION).
+    pub async fn get_compaction_count(&self, session_id: &str) -> u32 {
+        let g = self.compaction_count.read().await;
+        *g.get(session_id).unwrap_or(&0)
+    }
+
+    /// Increment compaction count for the session after a successful compaction.
+    pub async fn increment_compaction_count(&self, session_id: &str) {
+        let mut g = self.compaction_count.write().await;
+        *g.entry(session_id.to_string()).or_insert(0) += 1;
     }
 
     /// Rough token estimate (chars / 4).

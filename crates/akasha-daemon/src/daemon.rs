@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
 use futures_util::future::Either;
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Instrument};
 
 use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask};
 use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
@@ -396,12 +396,19 @@ impl Daemon {
             let (delegation_tx, delegation_rx) = mpsc::channel::<crate::api::DelegationRequest>(32);
             let task_completion = new_task_completion_registry();
             let db_path_for_delegation = db_path.clone();
+            let max_delegations = std::env::var("AKASHA_MAX_CONCURRENT_DELEGATIONS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(15)
+                .max(1);
+            let delegation_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_delegations));
             tokio::spawn({
                 let conv_tx = conv_tx.clone();
                 let progress = progress.clone();
                 let task_completion = task_completion.clone();
+                let delegation_sem = delegation_sem.clone();
                 async move {
-                    run_delegation_handler(delegation_rx, conv_tx, db_path_for_delegation, progress, task_completion).await;
+                    run_delegation_handler(delegation_rx, conv_tx, db_path_for_delegation, progress, task_completion, delegation_sem).await;
                 }
             });
             let orch_tx_for_scheduler = orch_tx.clone();
@@ -440,6 +447,7 @@ impl Daemon {
                 let agent_profile_cache = agent_profile_cache.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
+                        let span = tracing::info_span!("task", task_id = %task.task_id, session_id = %task.session_id);
                         run_message_via_llm(
                             bus.clone(),
                             llm_router.clone(),
@@ -461,6 +469,7 @@ impl Daemon {
                             Some(task_completion.clone()),
                             Some(agent_profile_cache.clone()),
                         )
+                        .instrument(span)
                         .await;
                     }
                 }
