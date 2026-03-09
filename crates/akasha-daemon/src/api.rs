@@ -2380,8 +2380,17 @@ pub(crate) async fn run_message_via_llm(
                                 Ok(Ok(reply)) => reply.trim().eq_ignore_ascii_case("Approuver"),
                                 _ => {
                                     // Timeout or channel error: remove stale pending entry to avoid it staying forever.
-                                    let mut g = store.write().await;
-                                    g.remove(&task_id);
+                                    {
+                                        let mut g = store.write().await;
+                                        g.remove(&task_id);
+                                    }
+                                    let expired_payload = serde_json::json!({
+                                        "task_id": task_id.to_string(),
+                                        "tool": actual_tool,
+                                    });
+                                    let _ = bus.send(
+                                        EventEnvelope::new(EventType::ToolApprovalExpired, Some(expired_payload)).with_correlation(task_id),
+                                    );
                                     false
                                 }
                             };
