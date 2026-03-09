@@ -115,5 +115,11 @@
   "human_input.submit": "Valider",
   "human_input.action_required": "Action requise",
   "human_input.placeholder": "Saisissez votre réponse…",
-  "common.close": "Fermer"
+  "common.close": "Fermer",
+  "onboarding.title": "Premier pas",
+  "onboarding.intro": "Quelques pistes pour bien démarrer avec Akasha :",
+  "onboarding.step1": "Envoyer un message : onglet Chat, saisir un message et envoyer. La tâche apparaît dans l'onglet Tâches avec sa progression.",
+  "onboarding.step2": "Créer une récurrence : via l'API (schedules) ou un message du type « rappelle-moi chaque jour de … ».",
+  "onboarding.step3": "Consulter l'onglet Tâches : voir l'état des tâches, les sous-tâches, et répondre aux questions en attente (bannière ou modal).",
+  "onboarding.dismiss": "Ne plus afficher"
 }

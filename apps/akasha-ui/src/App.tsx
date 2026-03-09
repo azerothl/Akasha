@@ -115,6 +115,13 @@ function App() {
   );
   const [tab, setTab] = useState<Tab>("chat");
   const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
+  const [showOnboarding, setShowOnboarding] = useState(() => {
+    try {
+      return localStorage.getItem("akasha_onboarding_dismissed") !== "1";
+    } catch {
+      return true;
+    }
+  });
   const eventLabel = useCallback(
     (typ: string) => {
       const key = "events." + typ;
@@ -1398,6 +1405,28 @@ function App() {
       </header>
 
       <main className="main" id="main-content" tabIndex={-1}>
+        {/* Onboarding: first steps modal (dismissible, "Ne plus afficher" stored in localStorage) */}
+        {showOnboarding && (
+          <div className="human-input-overlay onboarding-overlay" role="dialog" aria-labelledby="onboarding-title" aria-modal="true">
+            <div className="human-input-modal onboarding-modal">
+              <h2 id="onboarding-title">{t("onboarding.title")}</h2>
+              <p className="onboarding-intro">{t("onboarding.intro")}</p>
+              <ul className="onboarding-steps">
+                <li>{t("onboarding.step1")}</li>
+                <li>{t("onboarding.step2")}</li>
+                <li>{t("onboarding.step3")}</li>
+              </ul>
+              <div className="onboarding-actions">
+                <button type="button" className="onboarding-dismiss" onClick={() => { try { localStorage.setItem("akasha_onboarding_dismissed", "1"); } catch { /* ignore */ } setShowOnboarding(false); }}>
+                  {t("onboarding.dismiss")}
+                </button>
+                <button type="button" className="human-input-close" onClick={() => setShowOnboarding(false)} aria-label={t("common.close")}>
+                  ×
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {/* Human-in-the-loop: visible on all tabs */}
         {Object.keys(pendingHumanInput).length > 0 && !humanInputModalTaskId && (
           <div className="chat-human-input-banner global-human-input-banner" role="status">
