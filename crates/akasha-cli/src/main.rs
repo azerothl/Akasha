@@ -731,6 +731,84 @@ fn cmd_tui() -> anyhow::Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
+/// Default light model to suggest and pull when user chooses Ollama (documented in plan).
+const DEFAULT_OLLAMA_MODEL: &str = "tinyllama";
+/// Official Ollama download page (open in browser when Ollama not detected at init).
+const OLLAMA_DOWNLOAD_URL: &str = "https://ollama.com/download";
+
+/// Returns true if Ollama is reachable at base_url (GET /api/tags).
+fn ollama_detected(base_url: &str) -> bool {
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{}/api/tags", base);
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let resp = match client.get(&url).send() {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    resp.status().is_success()
+}
+
+/// Open URL in the default browser (Windows, macOS, Linux).
+fn open_url_in_browser(url: &str) {
+    let _ = match std::env::consts::OS {
+        "windows" => Command::new("cmd").args(["/c", "start", "", url]).status(),
+        "macos" => Command::new("open").arg(url).status(),
+        _ => Command::new("xdg-open").arg(url).status(),
+    };
+}
+
+/// Trigger Ollama to pull a model (POST /api/pull). Runs synchronously; may take a long time.
+fn ollama_pull_model(base_url: &str, model: &str) -> anyhow::Result<()> {
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{}/api/pull", base);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .build()?;
+    let body = serde_json::json!({ "name": model });
+    let resp = client.post(&url).json(&body).send()?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Ollama pull failed: {}", resp.status());
+    }
+    // Consume body (Ollama streams JSON lines; we wait for completion)
+    let _ = resp.bytes()?;
+    Ok(())
+}
+
+/// List model names from Ollama GET /api/tags; returns empty vec on error.
+fn ollama_list_models(base_url: &str) -> Vec<String> {
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{}/api/tags", base);
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let resp = match client.get(&url).send() {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    if !resp.status().is_success() {
+        return vec![];
+    }
+    let json: serde_json::Value = match resp.json() {
+        Ok(j) => j,
+        Err(_) => return vec![],
+    };
+    let models: &[serde_json::Value] = json.get("models").and_then(|m| m.as_array()).map_or(&[], |v| v.as_slice());
+    models
+        .iter()
+        .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect()
+}
+
 /// Fetch model metadata from Ollama POST /api/show; returns None if unreachable or parse error.
 fn fetch_ollama_model_option(base_url: &str, model: &str) -> Option<akasha_llm::ModelOption> {
     let base = base_url.trim_end_matches('/');
@@ -1062,44 +1140,63 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
     let mut openai_model = String::from("gpt-4o-mini");
     let mut openrouter_key: Option<String> = None;
     let mut openrouter_model = String::from("openai/gpt-4o-mini");
+    // Provider choice: "1"=Ollama, "2"=Modèles locaux Akasha, "3"=OpenAI, "4"=OpenRouter, "5"=Ollama+OpenAI, "6"=Ollama+OpenRouter
+    let mut provider_choice = String::from("1");
 
     if !use_defaults {
         println!("--- Provider LLM ---");
-        println!("  1) Ollama uniquement (local)");
-        println!("  2) OpenAI (cloud)");
-        println!("  3) OpenRouter (cloud, multi-modèles)");
-        println!("  4) Ollama + OpenAI");
-        println!("  5) Ollama + OpenRouter");
+        println!("  1) Ollama (recommandé si déjà installé : GPU, nombreux modèles)");
+        println!("  2) Modèles locaux Akasha (Qwen3 0.6B / Baguettotron intégrés, sans installation)");
+        println!("  3) OpenAI (cloud)");
+        println!("  4) OpenRouter (cloud, multi-modèles)");
+        println!("  5) Ollama + OpenAI");
+        println!("  6) Ollama + OpenRouter");
         let choice = init_prompt("Choix [1] :\n> ");
-        let choice = choice.as_str();
-        let choice = if choice.is_empty() { "1" } else { choice };
+        provider_choice = if choice.trim().is_empty() {
+            "1".to_string()
+        } else {
+            choice.trim().to_string()
+        };
 
-        if choice != "2" && choice != "3" {
+        if provider_choice != "2" && provider_choice != "3" && provider_choice != "4" {
             let url = init_prompt("Ollama URL [http://localhost:11434] :\n> ");
-            if !url.is_empty() {
-                ollama_url = url;
+            if !url.trim().is_empty() {
+                ollama_url = url.trim().to_string();
             }
         }
-        if choice == "2" || choice == "4" {
+        if provider_choice == "3" || provider_choice == "5" {
             let key = init_prompt("Clé API OpenAI (sk-...) :\n> ");
-            if !key.is_empty() {
-                openai_key = Some(key);
+            if !key.trim().is_empty() {
+                openai_key = Some(key.trim().to_string());
             }
             let model = init_prompt("Modèle OpenAI [gpt-4o-mini] :\n> ");
-            if !model.is_empty() {
-                openai_model = model;
+            if !model.trim().is_empty() {
+                openai_model = model.trim().to_string();
             }
         }
-        if choice == "3" || choice == "5" {
+        if provider_choice == "4" || provider_choice == "6" {
             let key = init_prompt("Clé API OpenRouter :\n> ");
-            if !key.is_empty() {
-                openrouter_key = Some(key);
+            if !key.trim().is_empty() {
+                openrouter_key = Some(key.trim().to_string());
             }
             let model = init_prompt("Modèle OpenRouter [openai/gpt-4o-mini] :\n> ");
-            if !model.is_empty() {
-                openrouter_model = model;
+            if !model.trim().is_empty() {
+                openrouter_model = model.trim().to_string();
             }
         }
+    }
+
+    // If user chose Ollama (1, 5 or 6): detect Ollama; if not detected, offer to open download page
+    let ollama_chosen = provider_choice == "1" || provider_choice == "5" || provider_choice == "6";
+    let ollama_available = ollama_chosen && ollama_detected(&ollama_url);
+    if ollama_chosen && !ollama_available && !use_defaults {
+        println!("\n  Ollama n'est pas détecté à {} (non installé ou non démarré).", ollama_url);
+        let open_dl = init_prompt("Ouvrir la page de téléchargement Ollama dans le navigateur ? [O/n] :\n> ");
+        if open_dl.trim().is_empty() || open_dl.trim().eq_ignore_ascii_case("o") || open_dl.trim().eq_ignore_ascii_case("y") {
+            open_url_in_browser(OLLAMA_DOWNLOAD_URL);
+            println!("  Ouverture de {} dans le navigateur.", OLLAMA_DOWNLOAD_URL);
+        }
+        println!("  Après installation, relancez \"akasha init\" pour télécharger le modèle par défaut ({}).", DEFAULT_OLLAMA_MODEL);
     }
 
     // --- 2. Vault (store API keys and connector tokens) ---
@@ -1132,18 +1229,23 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
         }
     }
 
-    // --- 3. llm_router.yaml --- (default primary = internal Akasha model)
-    let primary_provider = if openai_key.is_some() && !use_defaults {
-        "openai"
-    } else if openrouter_key.is_some() && !use_defaults {
-        "openrouter"
+    // --- 3. llm_router.yaml --- (primary from provider choice; with --defaults: Ollama if available else akasha_embedded)
+    let (primary_provider, primary_model) = if use_defaults {
+        if ollama_detected(&ollama_url) {
+            ("ollama", DEFAULT_OLLAMA_MODEL)
+        } else {
+            ("akasha_embedded", "default")
+        }
     } else {
-        "akasha_embedded"
-    };
-    let primary_model = match primary_provider {
-        "openai" => openai_model.as_str(),
-        "openrouter" => openrouter_model.as_str(),
-        _ => "default",
+        match provider_choice.as_str() {
+            "1" => ("ollama", DEFAULT_OLLAMA_MODEL),
+            "2" => ("akasha_embedded", "default"),
+            "3" => ("openai", openai_model.as_str()),
+            "4" => ("openrouter", openrouter_model.as_str()),
+            "5" => ("openai", openai_model.as_str()),
+            "6" => ("openrouter", openrouter_model.as_str()),
+            _ => ("akasha_embedded", "default"),
+        }
     };
 
     let yaml = format!(
@@ -1229,6 +1331,22 @@ providers:
     let router_path = data_dir.join("llm_router.yaml");
     std::fs::write(&router_path, &yaml)?;
     println!("\n  Fichier écrit : {}", router_path.display());
+
+    // If primary is Ollama and Ollama is available: ensure default model is pulled
+    if primary_provider == "ollama" && ollama_available {
+        let base_url = ollama_url.trim_end_matches('/');
+        let existing = ollama_list_models(base_url);
+        let model_to_use = primary_model;
+        let need_pull = !existing.iter().any(|n| n == model_to_use || n.starts_with(&format!("{}:", model_to_use)));
+        if need_pull {
+            println!("  Téléchargement du modèle par défaut ({})… (peut prendre plusieurs minutes)", model_to_use);
+            if let Err(e) = ollama_pull_model(base_url, model_to_use) {
+                eprintln!("  Attention : impossible de télécharger le modèle {} : {}. Vous pouvez lancer plus tard : ollama pull {}", model_to_use, e, model_to_use);
+            } else {
+                println!("  Modèle {} téléchargé.", model_to_use);
+            }
+        }
+    }
 
     // Fetch Ollama model info (context_length_max, num_ctx, etc.) for each model and write to config
     if let Ok(mut config) = akasha_llm::RoutingConfig::load_from_path(&router_path) {

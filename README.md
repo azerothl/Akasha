@@ -24,7 +24,7 @@ Assistant personnel **sécurisé**, **local-first**, conçu comme une infrastruc
 - **Rust** 1.70+ ([rustup](https://rustup.rs))
 - **Node.js** 18+ et npm (pour l’UI Tauri)
 - **Tauri CLI** (installé via npm dans `apps/akasha-ui`)
-- Optionnel : **Ollama** pour les réponses LLM locales
+- **Modèles locaux** : à l’init, choix entre **Ollama** (GPU, nombreux modèles) et **modèles locaux Akasha** (Qwen3 0.6B, Baguettotron intégrés). Voir [spec/user_guide.md](spec/user_guide.md).
 
 **Utilisateurs sans Rust (binaires tout prêts)** : téléchargez l’archive pour votre OS depuis la page **Releases** du dépôt, décompressez, puis lancez `akasha init` puis `akasha start`. Voir [spec/distribution.md](spec/distribution.md).
 

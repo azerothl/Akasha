@@ -69,6 +69,10 @@ Liste exposée dans le code (`AVAILABLE_TOOLS`) et via **GET /api/tools** (JSON 
 
 Politique : `tool_profiles`, `default_profile` ; détection de boucle (3 répétitions) ; journal des modifications si `AKASHA_TOOLS_JOURNAL_PATH`. Pour web_fetch : `allowed_web_domains` peut contenir `"*"` pour autoriser tous les domaines ; `blocked_web_domains` liste les domaines (et sous-domaines) interdits, prioritaire sur l'autorisation.
 
+**Approbation utilisateur (require_approval)** : dans `tools_policy.yaml`, la liste `require_approval` (ex. `[write_file, run_command, run_in_container, apply_patch, edit_file]`) impose une confirmation explicite avant exécution. Pour chaque outil listé, le daemon enregistre une entrée `TaskWaitingUserInput` avec question « Approuver l'action : &lt;outil&gt; — &lt;args&gt; ? » et choix « Approuver » / « Refuser ». Si l'utilisateur refuse ou timeout (300 s), le résultat est « Action refusée par l'utilisateur (approbation requise). ».
+
+**Escalade et retry** : en cas d'échec (timeout LLM, budget dépassé, boucle détectée, etc.), le daemon émet `task_escalated_to_human` avec `reason` pour affichage dans l'UI. Le routeur LLM applique un backoff exponentiel (1 s, 2 s, 4 s… plafonné à 16 s) entre tentatives sur le même provider.
+
 Activation : placer un fichier **tools_policy.yaml** dans le data_dir (voir `spec/tools_policy.example.yaml`) avec `allowed_read_paths`, `allowed_write_paths`, `allowed_commands`. Sans politique chargée, aucun outil n’est exécuté (conversation sans boucle d’outils).
 
 ---

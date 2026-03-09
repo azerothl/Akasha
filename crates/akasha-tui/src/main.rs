@@ -2,6 +2,7 @@
 //! Onglets Chat et Routeur (métriques), statut daemon, envoi de messages avec polling tâche.
 //! Thèmes (cycle F2) et rendu markdown (tables, listes, blocs de code).
 
+mod i18n;
 mod markdown;
 mod theme;
 
@@ -16,6 +17,7 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, Tabs, Wrap},
 };
+use i18n::I18n;
 use theme::{Theme, ThemeName};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
@@ -49,28 +51,6 @@ fn save_theme_to_disk(theme: ThemeName) {
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join(TUI_THEME_FILENAME);
     let _ = std::fs::write(path, theme.to_saved_str());
-}
-
-/// Label in French for task/event types (Task Center, spec 09_event_model).
-fn activity_event_label(typ: &str) -> String {
-    match typ {
-        "user_request_received" => "Demande reçue".into(),
-        "acknowledgment_sent" => "Accusé de réception envoyé".into(),
-        "task_created" => "Tâche créée".into(),
-        "task_started" => "Tâche démarrée".into(),
-        "task_decomposed" => "Tâche décomposée (délégation à des sous-agents)".into(),
-        "sub_agent_spawned" => "Délégué à un agent spécialisé".into(),
-        "progress_update" => "Progression".into(),
-        "task_progress_updated" => "Progression mise à jour".into(),
-        "task_step_completed" => "Étape terminée".into(),
-        "task_completed" => "Tâche terminée".into(),
-        "task_failed" => "Tâche en échec".into(),
-        "task_run_created" => "Run planifié créé".into(),
-        "schedule_created" => "Récurrence créée".into(),
-        "schedule_updated" => "Récurrence mise à jour".into(),
-        "schedule_deleted" => "Récurrence supprimée".into(),
-        _ => typ.to_string(),
-    }
 }
 
 fn daemon_base_url(port: u16) -> String {
@@ -167,6 +147,7 @@ struct ModelMetrics {
 }
 
 struct App {
+    i18n: I18n,
     mode: Mode,
     messages: Vec<ChatMessage>,
     input: String,
@@ -264,6 +245,7 @@ struct App {
 impl App {
     fn new(port: u16, tx: mpsc::Sender<Result<(String, String, Option<String>), String>>, progress_tx: Option<mpsc::Sender<(String, u8)>>) -> Self {
         Self {
+            i18n: i18n::load(i18n::detect_locale()),
             mode: Mode::Chat,
             messages: Vec::new(),
             input: String::new(),
@@ -501,9 +483,9 @@ impl App {
                 let role = t.get("role")?.as_str()?;
                 let content = t.get("content")?.as_str()?.to_string();
                 let role_label = match role {
-                    "user" => "Vous",
-                    "assistant" => "Akasha",
-                    _ => "Système",
+                    "user" => "user",
+                    "assistant" => "assistant",
+                    _ => "system",
                 };
                 Some(ChatMessage {
                     role: role_label.to_string(),
@@ -615,7 +597,9 @@ impl App {
                         .iter()
                         .filter_map(|e| {
                             let typ = e.get("event_type").and_then(|v| v.as_str()).unwrap_or("?");
-                            let label = activity_event_label(typ);
+                            let key = format!("events.{}", typ);
+                            let label = self.i18n.t(&key);
+                            let label = if label == key { typ.to_string() } else { label };
                             let at = e.get("at").and_then(|v| v.as_str()).unwrap_or("");
                             let payload = e.get("payload").cloned();
                             let line = if let Some(p) = payload {
@@ -910,7 +894,7 @@ impl App {
                 }
             }
         }
-        self.doc_content = "Documentation non disponible (daemon requis : akasha start).".to_string();
+        self.doc_content = self.i18n.t("tui.doc_unavailable").to_string();
     }
 
     /// Max scroll offset (0 if content fits in area). Uses rendered rows when wrap-aware (Chat).
@@ -988,6 +972,7 @@ impl App {
         port: u16,
         session_id: Option<String>,
         new_session: bool,
+        i18n: I18n,
     ) {
         let base = daemon_base_url(port);
         let url = format!("{}/api/message", base);
@@ -1028,12 +1013,13 @@ impl App {
         };
         let task_id = json.get("task_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let session_id = json.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let ack_msg = json.get("message").and_then(|v| v.as_str()).unwrap_or("Je prends en compte votre demande.");
+        let default_ack = i18n.t("chat.ack_default");
+        let ack_msg = json.get("message").and_then(|v| v.as_str()).unwrap_or_else(|| default_ack.as_str());
         let ack_text = if task_id.is_empty() {
             ack_msg.to_string()
         } else {
             let short = if task_id.len() > 8 { &task_id[task_id.len()-8..] } else { &task_id[..] };
-            format!("{}\n\nTu peux suivre l'avancement dans l'onglet Tâches. Task #{}", ack_msg, short)
+            format!("{}\n\n{} Task #{}", ack_msg, i18n.t("chat.follow_tasks"), short)
         };
         let _ = tx.send(Ok((ack_text, session_id.clone(), if task_id.is_empty() { None } else { Some(task_id.clone()) })));
         if task_id.is_empty() {
@@ -1045,7 +1031,7 @@ impl App {
         loop {
             if std::time::Instant::now() > deadline {
                 let _ = tx.send(Ok((
-                    if last_message.is_empty() { "Délai dépassé. Consultez l'onglet Tâches.".to_string() } else { last_message },
+                    if last_message.is_empty() { i18n.t("chat.timeout") } else { last_message },
                     session_id,
                     None,
                 )));
@@ -1080,7 +1066,7 @@ impl App {
             let status = task_json.get("status").and_then(|v| v.as_str()).unwrap_or("");
             if status == "completed" {
                 let _ = tx.send(Ok((
-                    if last_message.is_empty() { "Terminé.".to_string() } else { last_message },
+                    if last_message.is_empty() { i18n.t("chat.done") } else { last_message },
                     session_id,
                     None,
                 )));
@@ -1088,19 +1074,19 @@ impl App {
             }
             if status == "failed" {
                 let _ = tx.send(Ok((
-                    if last_message.is_empty() { "Tâche en échec.".to_string() } else { last_message },
+                    if last_message.is_empty() { i18n.t("chat.task_failed") } else { last_message },
                     session_id,
                     None,
                 )));
                 return;
             }
             if status == "cancelled" {
-                let _ = tx.send(Ok(("Annulé.".to_string(), session_id, None)));
+                let _ = tx.send(Ok((i18n.t("chat.cancelled"), session_id, None)));
                 return;
             }
             if status == "waiting_user_input" {
                 let _ = tx.send(Ok((
-                    "En attente de votre saisie. Consultez l'onglet Tâches.".to_string(),
+                    i18n.t("chat.waiting_input"),
                     session_id,
                     None,
                 )));
@@ -1108,7 +1094,7 @@ impl App {
             }
             if status == "paused" {
                 let _ = tx.send(Ok((
-                    "Tâche en pause. Consultez l'onglet Tâches.".to_string(),
+                    i18n.t("chat.task_paused"),
                     session_id,
                     None,
                 )));
@@ -1198,7 +1184,7 @@ impl App {
     }
 
     /// Run a slash command (e.g. /status, /metrics), return result text.
-    fn run_slash_command_blocking(port: u16, input: &str) -> String {
+    fn run_slash_command_blocking(port: u16, input: &str, i18n: &I18n) -> String {
         let input = input.trim().trim_start_matches('/').trim();
         let parts: Vec<&str> = input.split_whitespace().collect();
         let cmd = parts.get(0).map(|s| *s).unwrap_or("").to_lowercase();
@@ -1359,7 +1345,7 @@ impl App {
                         if let Ok(json) = r.json::<serde_json::Value>() {
                             let empty: Vec<serde_json::Value> = vec![];
                             let checks = json.get("checks").and_then(|c| c.as_array()).unwrap_or(&empty);
-                            let mut out = String::from("Doctor — diagnostic\n");
+                            let mut out = format!("{}\n", i18n.t("doctor.title"));
                             for c in checks {
                                 let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                                 let ok = c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -1367,13 +1353,14 @@ impl App {
                                 out.push_str(&format!("  [{}] {} — {}\n", if ok { "OK" } else { "KO" }, id, desc));
                             }
                             let all_ok = json.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                            out.push_str(if all_ok { "\nTous les checks sont OK." } else { "\nCertains checks ont échoué." });
+                            let status_msg = if all_ok { i18n.t("doctor.all_ok") } else { i18n.t("doctor.some_failed") };
+                            out.push_str(&status_msg);
                             return out;
                         }
                     }
                     _ => {}
                 }
-                return "Impossible de récupérer le diagnostic.".to_string();
+                return i18n.t("doctor.unavailable");
             }
             "advice" => {
                 let doctor_url = format!("{}/api/doctor", base);
@@ -1856,7 +1843,8 @@ fn ui(f: &mut Frame, app: &mut App) {
         theme.palette().error
     };
     let header = Paragraph::new(format!(
-        "Akasha — {} — Port {} — Thème: {} (F2)",
+        "{} — {} — Port {} — {} (F2)",
+        app.i18n.t("app.title"),
         status,
         app.port,
         app.theme.label()
@@ -1868,7 +1856,14 @@ fn ui(f: &mut Frame, app: &mut App) {
         )
         .style(Style::default().fg(status_color));
     f.render_widget(header, top_chunks[0]);
-    let titles = vec![" Chat ", " Routeur ", " Doc ", " Tâches ", " Calendrier ", " Mémoire "];
+    let titles = vec![
+        format!(" {} ", app.i18n.t("tabs.chat")),
+        format!(" {} ", app.i18n.t("tabs.router")),
+        format!(" {} ", app.i18n.t("tabs.docs")),
+        format!(" {} ", app.i18n.t("tabs.tasks")),
+        format!(" {} ", app.i18n.t("tabs.calendar")),
+        format!(" {} ", app.i18n.t("tabs.memory")),
+    ];
     let tab_index = match app.mode {
         Mode::Chat => 0,
         Mode::Router => 1,
@@ -1877,8 +1872,8 @@ fn ui(f: &mut Frame, app: &mut App) {
         Mode::Calendar => 4,
         Mode::Memory => 5,
     };
-    let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::BOTTOM).title(" Clic ou Tab pour changer d'onglet ").border_style(theme.block_border()))
+    let tabs = Tabs::new(titles.clone())
+        .block(Block::default().borders(Borders::BOTTOM).title(format!(" {} ", app.i18n.t("tui.tab_switch_hint"))).border_style(theme.block_border()))
         .select(tab_index)
         .style(theme.tab_inactive())
         .highlight_style(theme.tab_active());
@@ -1886,12 +1881,9 @@ fn ui(f: &mut Frame, app: &mut App) {
     app.tabs_rect = Some(top_chunks[1]);
 
     let help_line = if !app.pending_human_input_list.is_empty() {
-        format!(
-            " ⚠ Demandes en attente: {} — répondez ci-dessous (Entrée pour envoyer) · 1=Chat 2=Routeur … · Esc=quitter ",
-            app.pending_human_input_list.len()
-        )
+        app.i18n.t("tui.help_pending").replacen("{}", &app.pending_human_input_list.len().to_string(), 1)
     } else {
-        " 1=Chat 2=Routeur 3=Doc 4=Tâches 5=Calendrier 6=Mémoire · Tab=onglet suivant · R=actualiser · F2=thème · Esc=quitter ".to_string()
+        app.i18n.t("tui.help_footer")
     };
     let help_para = Paragraph::new(help_line)
         .style(Style::default().fg(theme.palette().muted));
@@ -1904,19 +1896,20 @@ fn ui(f: &mut Frame, app: &mut App) {
             for (name, msg) in &app.schedule_reports {
                 lines.push(Line::from(""));
                 let style_muted = Style::default().fg(theme.palette().muted).add_modifier(Modifier::BOLD);
-                lines.push(Line::from(Span::styled("  ─── Rappel exécuté ───", style_muted)));
+                lines.push(Line::from(Span::styled(format!("  ─── {} ───", app.i18n.t("tui.schedule_executed")), style_muted)));
                 lines.push(Line::from(Span::styled(format!("  « {} »", name), Style::default().fg(theme.palette().muted))));
                 let md_styles = theme.markdown_styles();
                 let marked = markdown::from_str_with_width(msg, &md_styles, Some(content_width.saturating_sub(2) as u16));
                 lines.extend(marked.to_flat_lines());
             }
             for m in &app.messages {
-                let (role_style, _base_style) = if m.role == "Vous" {
+                let role_display = if m.is_error { app.i18n.t("common.error") } else { app.i18n.t(&format!("chat.role_{}", m.role)) };
+                let (role_style, _base_style) = if m.role == "user" {
                     (
                         Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD),
                         Style::default().fg(theme.palette().fg),
                     )
-                } else if m.role == "Système" {
+                } else if m.role == "system" {
                     (
                         Style::default().fg(theme.palette().muted).add_modifier(Modifier::BOLD),
                         Style::default().fg(theme.palette().muted),
@@ -1934,10 +1927,10 @@ fn ui(f: &mut Frame, app: &mut App) {
                 };
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    format!("  ─── {} ───", m.role),
+                    format!("  ─── {} ───", role_display),
                     role_style,
                 )));
-                if m.role == "Système" {
+                if m.role == "system" {
                     for line in m.text.lines() {
                         lines.push(Line::from(Span::styled(
                             format!("  {}", line),
@@ -1956,14 +1949,19 @@ fn ui(f: &mut Frame, app: &mut App) {
                 let short = if tid.len() > 8 { &tid[tid.len()-8..] } else { tid.as_str() };
                 let pct_str = app.pending_reply_pct.map(|p| format!(" {}%", p)).unwrap_or_default();
                 lines.push(Line::from(Span::styled(
-                    format!("  [ Task #{} en cours{}… ]", short, pct_str),
+                    {
+                    let s = app.i18n.t("tui.task_in_progress");
+                    let s = s.replacen("{}", short, 1);
+                    let s = s.replacen("{}", &pct_str, 1);
+                    format!("  [ {} ]", s)
+                },
                     Style::default().fg(theme.palette().warning).add_modifier(Modifier::ITALIC),
                 )));
             }
             if app.loading {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "  … Akasha réfléchit …",
+                    format!(" {}", app.i18n.t("chat.thinking")),
                     Style::default().fg(theme.palette().warning).add_modifier(Modifier::ITALIC),
                 )));
             }
@@ -1994,7 +1992,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Chat (↑↓ PgUp/PgDn ou molette, F2 thème) ")
+                        .title(app.i18n.t("tui.chat_block_title"))
                         .border_style(theme.block_border()),
                 )
                 .wrap(Wrap { trim: true })
@@ -2030,18 +2028,18 @@ fn ui(f: &mut Frame, app: &mut App) {
                 ],
             )
             .header(Row::new(vec![
-                "Modèle",
-                "Requêtes",
-                "Réussies",
-                "Échecs",
-                "Latence ms",
-                "Tokens",
-                "Fallbacks",
+                app.i18n.t("tui.router_model"),
+                app.i18n.t("tui.router_requests"),
+                app.i18n.t("tui.router_success"),
+                app.i18n.t("tui.router_failed"),
+                app.i18n.t("tui.router_latency"),
+                app.i18n.t("tui.router_tokens"),
+                app.i18n.t("tui.router_fallbacks"),
             ]).style(Style::default().fg(theme.palette().accent)))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Métriques routeur (R: rafraîchir) ")
+                    .title(app.i18n.t("tui.router_block"))
                     .border_style(theme.block_border()),
             );
             f.render_widget(table, content_area);
@@ -2067,7 +2065,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Documentation (↑↓ PgUp/PgDn ou molette, R: actualiser, F2: thème) ")
+                        .title(app.i18n.t("tui.doc_block_title"))
                         .border_style(theme.block_border()),
                 )
                 .wrap(Wrap { trim: true })
@@ -2094,17 +2092,17 @@ fn ui(f: &mut Frame, app: &mut App) {
             let mut list_lines: Vec<Line<'static>> = vec![
                 Line::from(""),
                 Line::from(Span::styled(
-                    " Tâches récentes — ↑↓ sélectionner, clic = sélection, Espace = plier/déplier, R = actualiser.",
+                    app.i18n.t("tui.tasks_block_title"),
                     Style::default().fg(theme.palette().accent),
                 )),
                 Line::from(Span::styled(
-                    " Date       │ Statut    │ Agent  │ Parent  │ ID (extrait) ",
+                    app.i18n.t("tui.tasks_list_header"),
                     Style::default().fg(theme.palette().muted),
                 )),
             ];
             if app.activity_list_collapsed {
                 list_lines.push(Line::from(Span::styled(
-                    "  [ Liste repliée — Espace ou Entrée pour déplier ]",
+                    app.i18n.t("tasks.list_collapsed"),
                     Style::default().fg(theme.palette().muted),
                 )));
             } else {
@@ -2160,7 +2158,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             app.activity_list_scroll = app.activity_list_scroll.min(max_scroll);
             let list_block = Block::default()
                 .borders(Borders::ALL)
-                .title(if app.activity_show_roots_only { " Discussions (racines) [d=toutes] " } else { " Liste des tâches [d=racines] " })
+                .title(if app.activity_show_roots_only { app.i18n.t("tui.tasks_discussions") } else { app.i18n.t("tui.tasks_list_all") })
                 .border_style(theme.block_border());
             app.activity_list_rect = Some(list_area);
             f.render_widget(
@@ -2170,11 +2168,11 @@ fn ui(f: &mut Frame, app: &mut App) {
 
             let mut detail_lines: Vec<Line<'static>> = vec![Line::from("")];
             if let Some(d) = &app.activity_task_detail {
-                detail_lines.push(Line::from(Span::styled(" Détails de la tâche sélectionnée ", Style::default().fg(theme.palette().accent))));
+                detail_lines.push(Line::from(Span::styled(app.i18n.t("tui.tasks_detail_title"), Style::default().fg(theme.palette().accent))));
                 detail_lines.push(Line::from(""));
                 if let Some(ref msg) = d.user_message {
                     let preview = if msg.len() > 80 { format!("{}…", &msg[..80]) } else { msg.clone() };
-                    detail_lines.push(Line::from(Span::styled(" Demande : ", Style::default().fg(theme.palette().warning))));
+                    detail_lines.push(Line::from(Span::styled(app.i18n.t("tui.tasks_request_label"), Style::default().fg(theme.palette().warning))));
                     for line in preview.lines() {
                         detail_lines.push(Line::from(format!("   {}", line)));
                     }
@@ -2187,22 +2185,32 @@ fn ui(f: &mut Frame, app: &mut App) {
                     } else {
                         last.1.clone()
                     };
-                    detail_lines.push(Line::from(Span::styled(" Réponse : ", Style::default().fg(theme.palette().success))));
+                    detail_lines.push(Line::from(Span::styled(app.i18n.t("tui.tasks_response_label"), Style::default().fg(theme.palette().success))));
                     let md_styles = theme.markdown_styles();
                     let detail_width = detail_area.width.saturating_sub(4) as u16;
                     let marked = markdown::from_str_with_width(&reply_preview, &md_styles, Some(detail_width));
                     detail_lines.extend(marked.to_flat_lines());
                     detail_lines.push(Line::from(""));
                 }
-                detail_lines.push(Line::from(format!("  Créé : {}  │  Mis à jour : {}  │  Statut : {}  │  Agent : {}", d.created_at, d.updated_at, d.status, d.assigned_agent)));
+                detail_lines.push(Line::from(format!(
+                    "  {} {}  │  {} {}  │  {} {}  │  {} {}",
+                    app.i18n.t("tui.created"),
+                    d.created_at,
+                    app.i18n.t("tui.updated"),
+                    d.updated_at,
+                    app.i18n.t("tui.status_label"),
+                    d.status,
+                    app.i18n.t("tui.agent"),
+                    d.assigned_agent
+                )));
                 detail_lines.push(Line::from(""));
-                detail_lines.push(Line::from(Span::styled(" Événements ", Style::default().fg(theme.palette().muted))));
+                detail_lines.push(Line::from(Span::styled(app.i18n.t("tui.tasks_events"), Style::default().fg(theme.palette().muted))));
             }
             for ev in &app.activity_events {
                 detail_lines.push(Line::from(format!("  {}", ev)));
             }
             if app.activity_task_detail.is_none() && !app.activity_visible_indices.is_empty() {
-                detail_lines.push(Line::from("  Sélectionnez une tâche ci-dessus pour voir la demande et la réponse. (d = discussions / toutes)"));
+                detail_lines.push(Line::from(app.i18n.t("tasks.select_above")));
             }
             let detail_len = detail_lines.len();
             let detail_inner_height = detail_area.height.saturating_sub(2) as usize; // block borders
@@ -2210,7 +2218,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             app.activity_detail_scroll = app.activity_detail_scroll.min(max_detail_scroll);
             let detail_block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Détails et événements (PgUp/PgDn défilement) ")
+                .title(app.i18n.t("tui.tasks_detail_block"))
                 .border_style(theme.block_border());
             f.render_widget(
                 Paragraph::new(detail_lines)
@@ -2239,17 +2247,17 @@ fn ui(f: &mut Frame, app: &mut App) {
             let mut list_lines: Vec<Line<'static>> = vec![
                 Line::from(""),
                 Line::from(Span::styled(
-                    " Récurrences (schedules) — clic ou ↑↓ = sélectionner · ← → = récurrences / runs · molette = défiler · R = actualiser ",
+                    app.i18n.t("tui.calendar_schedules_title"),
                     Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
             ];
             if app.calendar_schedules.is_empty() {
-                list_lines.push(Line::from(Span::styled("  Aucune récurrence.", Style::default().fg(theme.palette().muted))));
+                list_lines.push(Line::from(Span::styled(app.i18n.t("calendar.no_schedule"), Style::default().fg(theme.palette().muted))));
             } else {
                 for (i, (id, name, enabled, interval_secs)) in app.calendar_schedules.iter().enumerate() {
                     let short_id = if id.len() > 8 { format!("…{}", &id[id.len()-8..]) } else { id.clone() };
-                    let status = if *enabled { "activée" } else { "en pause" };
+                    let status = if *enabled { app.i18n.t("tui.calendar_enabled") } else { app.i18n.t("tui.calendar_paused") };
                     let interval = interval_secs.map(|s| format!(" — {}s", s)).unwrap_or_default();
                     let sel = app.calendar_focus_schedules && app.calendar_schedule_index == i;
                     let style = if sel { Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme.palette().fg) };
@@ -2261,12 +2269,12 @@ fn ui(f: &mut Frame, app: &mut App) {
             }
             list_lines.push(Line::from(""));
             list_lines.push(Line::from(Span::styled(
-                " Runs récents (task_runs) ",
+                app.i18n.t("tui.calendar_runs_block"),
                 Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD),
             )));
             list_lines.push(Line::from(""));
             if app.calendar_task_runs.is_empty() {
-                list_lines.push(Line::from(Span::styled("  Aucun run. ↑↓ = sélectionner.", Style::default().fg(theme.palette().muted))));
+                list_lines.push(Line::from(Span::styled(app.i18n.t("calendar.no_run"), Style::default().fg(theme.palette().muted))));
             } else {
                 for (i, run) in app.calendar_task_runs.iter().enumerate() {
                     let short_id = if run.id.len() > 8 { &run.id[run.id.len()-8..] } else { run.id.as_str() };
@@ -2291,7 +2299,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             }
             let list_block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Calendrier — liste (clic = sélectionner, molette = défiler) ")
+                .title(app.i18n.t("tui.calendar_block_title"))
                 .border_style(theme.block_border());
             app.calendar_content_rect = Some(list_area);
             f.render_widget(
@@ -2350,7 +2358,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             let mut lines: Vec<Line<'static>> = vec![
                 Line::from(""),
                 Line::from(Span::styled(
-                    " Mémoire court terme (session en cours — perdue si daemon redémarre) ",
+                    app.i18n.t("memory.short_term_title"),
                     Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
@@ -2371,13 +2379,13 @@ fn ui(f: &mut Frame, app: &mut App) {
                 lines.push(Line::from(""));
             }
             if app.memory_short_term.is_empty() {
-                lines.push(Line::from(Span::styled("  (aucun tour pour cette session)", Style::default().fg(theme.palette().muted))));
+                lines.push(Line::from(Span::styled(app.i18n.t("memory.no_turn"), Style::default().fg(theme.palette().muted))));
                 lines.push(Line::from(""));
             }
             let lt_status = if app.memory_long_term_available {
-                "Mémoire long terme (persistante)"
+                app.i18n.t("memory.long_term_on")
             } else {
-                "Mémoire long terme (désactivée — compiler daemon avec embeddings ou embeddings-tract)"
+                app.i18n.t("memory.long_term_off")
             };
             lines.push(Line::from(Span::styled(
                 lt_status,
@@ -2415,7 +2423,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             }
             let mem_block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Mémoire agent (↑↓ sélection, D = supprimer, R = actualiser, Tab ou clic = onglet) ")
+                .title(app.i18n.t("memory.block_title"))
                 .border_style(theme.block_border());
             f.render_widget(
                 Paragraph::new(lines).block(mem_block).wrap(Wrap { trim: true }).scroll((app.scroll as u16, 0)),
@@ -2428,7 +2436,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         let theme = Theme::new(app.theme);
         let style_warning = Style::default().fg(theme.palette().error).add_modifier(Modifier::BOLD);
         let mut banner_lines = vec![
-            Line::from(Span::styled("⚠ Action requise — répondez ci-dessous (Entrée pour envoyer)", style_warning)),
+            Line::from(Span::styled(app.i18n.t("tui.action_required"), style_warning)),
             Line::from(question.as_str()),
         ];
         if !context.is_empty() {
@@ -2441,15 +2449,15 @@ fn ui(f: &mut Frame, app: &mut App) {
         }
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" Réponse pour l'agent ")
+            .title(app.i18n.t("tui.reply_prompt"))
             .border_style(theme.block_border());
         f.render_widget(Paragraph::new(banner_lines).block(block).wrap(Wrap { trim: true }), rect);
     }
     if let Some(input_rect) = input_area_opt {
         let input_label = if app.pending_human_input.is_some() {
-            " Votre réponse (Entrée = envoyer à l'agent) "
+            app.i18n.t("tui.input_label_reply")
         } else {
-            " Message (Entrée = envoyer, Maj+Entrée = nouvelle ligne, ↑↓ = chat, Ctrl+↑↓ = saisie, Tab = onglet) "
+            app.i18n.t("tui.input_label_chat")
         };
         let input_area_width = input_rect.width.saturating_sub(2) as usize;
         app.input_inner_height = input_rect.height.saturating_sub(2) as usize;
@@ -2506,7 +2514,7 @@ fn run_app(
             app.loading = false;
             match result {
                 Ok((text, session_id, pending_task_id)) => {
-                    let role = if session_id.is_empty() { "Système" } else { "Akasha" };
+                    let role = if session_id.is_empty() { "system" } else { "assistant" };
                     if !session_id.is_empty() {
                         app.session_id = Some(session_id);
                     }
@@ -2525,7 +2533,7 @@ fn run_app(
                     app.pending_reply_task_id = None;
                     app.pending_human_input = None;
                     app.messages.push(ChatMessage {
-                        role: "Erreur".into(),
+                        role: "system".into(),
                         text: e,
                         is_error: true,
                     });
@@ -2735,7 +2743,7 @@ fn run_app(
                                 };
                                 if app.submit_human_reply(&task_id, &response) {
                                     app.messages.push(ChatMessage {
-                                        role: "Vous".into(),
+                                        role: "user".into(),
                                         text: msg,
                                         is_error: false,
                                     });
@@ -2746,7 +2754,7 @@ fn run_app(
                                 continue;
                             }
                             app.messages.push(ChatMessage {
-                                role: "Vous".into(),
+                                role: "user".into(),
                                 text: msg.clone(),
                                 is_error: false,
                             });
@@ -2758,8 +2766,8 @@ fn run_app(
                                 app.session_id = None;
                                 app.force_new_session = true;
                                 app.messages.push(ChatMessage {
-                                    role: "Système".into(),
-                                    text: "Nouvelle session demandée. Votre prochain message repartira de zéro (contexte court terme effacé).".into(),
+                                    role: "system".into(),
+                                    text: app.i18n.t("tui.new_session").into(),
                                     is_error: false,
                                 });
                                 app.scroll = usize::MAX;
@@ -2770,14 +2778,15 @@ fn run_app(
                                     let port = app.port;
                                     let tx = app.tx.clone();
                                     let cmd = msg.clone();
+                                    let i18n = app.i18n.clone();
                                     thread::spawn(move || {
-                                        let result = App::run_slash_command_blocking(port, &cmd);
+                                        let result = App::run_slash_command_blocking(port, &cmd, &i18n);
                                         let _ = tx.send(Ok((result, String::new(), None)));
                                     });
                                 } else {
-                                    let result = App::run_slash_command_blocking(app.port, &msg);
+                                    let result = App::run_slash_command_blocking(app.port, &msg, &app.i18n);
                                     app.messages.push(ChatMessage {
-                                        role: "Système".into(),
+                                        role: "system".into(),
                                         text: result,
                                         is_error: false,
                                     });
@@ -2793,8 +2802,9 @@ fn run_app(
                             let new_session = app.force_new_session;
                             app.force_new_session = false;
                             let progress_tx = app.progress_tx.clone();
+                            let i18n = app.i18n.clone();
                             thread::spawn(move || {
-                                App::send_message_non_blocking(tx, progress_tx, msg, port, session_id, new_session);
+                                App::send_message_non_blocking(tx, progress_tx, msg, port, session_id, new_session, i18n);
                             });
                         }
                         }

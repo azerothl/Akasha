@@ -44,9 +44,18 @@ pub struct ToolsPolicy {
     /// If absent, only GitHub is allowed. Use ["*"] to allow any HTTPS host.
     #[serde(default)]
     pub allowed_skill_install_hosts: Option<Vec<String>>,
+    /// Optional: tools that require explicit user approval before execution (e.g. write_file, run_command, run_in_container).
+    #[serde(default)]
+    pub require_approval: Vec<String>,
 }
 
 impl ToolsPolicy {
+    /// Returns true if the given tool name is in the require_approval list (case-insensitive).
+    pub fn requires_approval(&self, tool_name: &str) -> bool {
+        let name = tool_name.trim().to_lowercase();
+        self.require_approval.iter().any(|a| a.trim().to_lowercase() == name)
+    }
+
     /// Load policy from a YAML file. Missing file or empty content returns default (deny-all).
     pub fn load_from_path(path: &Path) -> anyhow::Result<Self> {
         let content = match std::fs::read_to_string(path) {

@@ -10,10 +10,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
 use futures_util::future::Either;
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Instrument};
 
 use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask};
-use crate::api::{handle_api, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, RestartTx};
+use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
@@ -344,8 +344,11 @@ impl Daemon {
             let (bus, _) = crate::agents::new_event_bus();
             let progress = new_progress_cache();
             let events = new_events_cache();
+            let agent_profile_cache = new_agent_profile_cache();
+            let update_check_cache = new_update_check_cache();
             let process_registry = new_process_registry();
             let human_input_store = new_human_input_store();
+            let task_usage_store = std::sync::Arc::new(crate::api::TaskUsageStore::new());
             let user_rag_store = crate::user_rag::UserRagStore::new_shared(&data_dir);
             let (progress_persistence_tx, progress_persistence_rx) = std::sync::mpsc::channel::<(uuid::Uuid, u8, String)>();
             {
@@ -390,20 +393,51 @@ impl Daemon {
                 });
             }
             let (orch_tx, orch_rx) = mpsc::channel::<OrchestratorTask>(64);
+            let (high_tx, high_rx) = mpsc::channel::<OrchestratorTask>(64);
+            let (normal_tx, normal_rx) = mpsc::channel::<OrchestratorTask>(64);
+            tokio::spawn({
+                let mut high_rx = high_rx;
+                let mut normal_rx = normal_rx;
+                let orch_tx = orch_tx.clone();
+                async move {
+                    loop {
+                        tokio::select! {
+                            Some(task) = high_rx.recv() => {
+                                if orch_tx.send(task).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Some(task) = normal_rx.recv() => {
+                                if orch_tx.send(task).await.is_err() {
+                                    break;
+                                }
+                            }
+                            else => break,
+                        }
+                    }
+                }
+            });
             let (conv_tx, mut conv_rx) = mpsc::channel::<OrchestratorTask>(64);
             let (delegation_tx, delegation_rx) = mpsc::channel::<crate::api::DelegationRequest>(32);
             let task_completion = new_task_completion_registry();
             let db_path_for_delegation = db_path.clone();
+            let max_delegations = std::env::var("AKASHA_MAX_CONCURRENT_DELEGATIONS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(15)
+                .max(1);
+            let delegation_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_delegations));
             tokio::spawn({
                 let conv_tx = conv_tx.clone();
                 let progress = progress.clone();
                 let task_completion = task_completion.clone();
+                let delegation_sem = delegation_sem.clone();
                 async move {
-                    run_delegation_handler(delegation_rx, conv_tx, db_path_for_delegation, progress, task_completion).await;
+                    run_delegation_handler(delegation_rx, conv_tx, db_path_for_delegation, progress, task_completion, delegation_sem).await;
                 }
             });
-            let orch_tx_for_scheduler = orch_tx.clone();
-            let main_agent = MainAgent::new(bus.clone(), orch_tx);
+            let orchestrator_sender = crate::agents::OrchestratorSender::new(high_tx, normal_tx.clone());
+            let main_agent = MainAgent::new(bus.clone(), orchestrator_sender);
             let orchestrator = Arc::new(Orchestrator::new(
                 bus.clone(),
                 db_path.clone(),
@@ -435,8 +469,26 @@ impl Daemon {
                 let long_term_client = long_term_client.clone();
                 let human_input_store = human_input_store.clone();
                 let task_completion = task_completion.clone();
+                let agent_profile_cache = agent_profile_cache.clone();
+                let task_usage_store = task_usage_store.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
+                        // Phase 4: skip if task was cancelled (e.g. via POST /api/tasks/:id/cancel) before worker started.
+                        if let Ok(store) = akasha_store::TaskStore::open(store_path.as_path()) {
+                            if let Ok(Some(t)) = store.get(task.task_id) {
+                                if t.status == akasha_store::TaskStatus::Cancelled {
+                                    let _ = bus.send(
+                                        akasha_core::EventEnvelope::new(
+                                            akasha_core::EventType::TaskCancelled,
+                                            Some(serde_json::json!({ "task_id": task.task_id.to_string() })),
+                                        )
+                                        .with_correlation(task.task_id),
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                        let span = tracing::info_span!("task", task_id = %task.task_id, session_id = %task.session_id);
                         run_message_via_llm(
                             bus.clone(),
                             llm_router.clone(),
@@ -456,7 +508,10 @@ impl Daemon {
                             Some(human_input_store.clone()),
                             Some(delegation_tx.clone()),
                             Some(task_completion.clone()),
+                            Some(agent_profile_cache.clone()),
+                            Some(task_usage_store.clone()),
                         )
+                        .instrument(span)
                         .await;
                     }
                 }
@@ -477,12 +532,30 @@ impl Daemon {
                 }
             });
 
-            // Scheduler: tick, create task_runs, push to orchestrator (FR-028, 37_scheduler_design)
+            // Scheduler: tick, create task_runs, push to orchestrator (normal priority queue).
             tokio::spawn({
                 let store_path = db_path.clone();
                 let bus = bus.clone();
+                let scheduler_tx = normal_tx;
                 async move {
-                    crate::scheduler::run_scheduler(store_path, orch_tx_for_scheduler, bus).await;
+                    crate::scheduler::run_scheduler(store_path, scheduler_tx, bus).await;
+                }
+            });
+
+            // Update check: fetch api/latest.json at start and every 12h (for UI update banner)
+            const UPDATE_CHECK_INTERVAL_SECS: u64 = 43_200; // 12 hours
+            tokio::spawn({
+                let cache = update_check_cache.clone();
+                let base_url = std::env::var("AKASHA_APP_BASE_URL")
+                    .unwrap_or_else(|_| "https://azerothl.github.io/Akasha_app".to_string());
+                async move {
+                    run_update_check_once(&cache, &base_url).await;
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(UPDATE_CHECK_INTERVAL_SECS));
+                    loop {
+                        interval.tick().await;
+                        run_update_check_once(&cache, &base_url).await;
+                    }
                 }
             });
 
@@ -605,14 +678,17 @@ impl Daemon {
                                 let rag_pack = rag_pack.clone();
                                 let spec_dir = spec_dir.clone();
                                 let restart_tx: RestartTx = Some(restart_tx.clone());
-                                let tools_executor = tools_executor.clone();
-                                let skill_registry = skill_registry.clone();
-                                let short_term = short_term.clone();
-                                let long_term_client = long_term_client.clone();
-                                let human_input_store = human_input_store.clone();
-                                let user_rag_store = user_rag_store.clone();
-                                // Body reading is done inside the spawned task so slow/large uploads
+                let tools_executor = tools_executor.clone();
+                let skill_registry = skill_registry.clone();
+                let short_term = short_term.clone();
+                let long_term_client = long_term_client.clone();
+                let human_input_store = human_input_store.clone();
+                let user_rag_store = user_rag_store.clone();
+                let agent_profile_cache = agent_profile_cache.clone();
+                let task_usage_store = task_usage_store.clone();
+                // Body reading is done inside the spawned task so slow/large uploads
                                 // don't block the accept loop from handling other connections or signals.
+                                let update_check_cache_clone = update_check_cache.clone();
                                 tokio::spawn(async move {
                                     const INITIAL_READ: usize = 65536;
                                     const MAX_BODY: usize = 10 * 1024 * 1024; // 10 MiB for POST body (e.g. documents in base64)
@@ -662,6 +738,9 @@ impl Daemon {
                                         long_term_client,
                                         Some(human_input_store),
                                         &user_rag_store,
+                                        &agent_profile_cache,
+                                        &update_check_cache_clone,
+                                        task_usage_store.as_ref(),
                                     )
                                     .await;
                                     let _ = stream.write_all(response.as_bytes()).await;

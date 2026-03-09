@@ -7,7 +7,7 @@ use crate::metrics::{MetricsCollector, MetricsPersistence};
 use crate::provider::{CompletionRequest, CompletionResponse, LLMProvider};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use tracing::info;
+use tracing::{info, Instrument};
 
 pub struct LLMRouter {
     config: Arc<RwLock<RoutingConfig>>,
@@ -151,6 +151,7 @@ impl LLMRouter {
             let (task_type, _) = classify_task_type(&request.prompt);
             task_type.as_str()
         });
+        let span = tracing::info_span!("llm_call", task_type = task_type_str);
         if preferred.is_some() {
             info!(task_type = task_type_str, "Router using preferred task type (system/memory)");
         } else {
@@ -188,6 +189,7 @@ impl LLMRouter {
                 self.metrics.as_ref(),
                 self.degraded_mode,
             )
+            .instrument(span)
             .await
     }
 

@@ -48,3 +48,9 @@ Les mises à jour de progression doivent arriver en **&lt; 1 s** en local et **&
 | Calendrier  | Récurrences, occurrences, CRUD, exceptions | FR-028, FR-029 |
 
 Transport : WS/SSE (local), NATS → gateway → WS/SSE (cluster).
+
+---
+
+## 4. Non-blocage et réactivité
+
+L’application est conçue pour rester réactive : les appels au backend (daemon) passent par des commandes **async** (Tauri `invoke`, I/O HTTP). Aucune boucle synchrone longue ni traitement CPU lourd ne doit s’exécuter sur le thread principal de l’UI. Côté React : les mises à jour d’état sont asynchrones ; les traitements lourds (gros JSON, listes massives) doivent rester async ou être déportés dans un **Web Worker** si nécessaire. Côté Tauri (Rust) : les commandes sont async (Tokio) ; tout calcul CPU prolongé doit être exécuté via `tauri::async_runtime::spawn_blocking` pour ne pas bloquer le runtime.

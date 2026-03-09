@@ -10,7 +10,7 @@ Documentation accessible depuis l'interface TUI et l'interface web. Elle décrit
 
 - **Rust** 1.70+ ([rustup](https://rustup.rs))
 - **Node.js** 18+ et npm (pour l'UI Tauri)
-- Optionnel : **Ollama** pour les réponses LLM locales
+- **Modèles locaux** : au choix lors de l’init — **Ollama** (recommandé si installé : GPU, nombreux modèles) ou **modèles locaux Akasha** (Qwen3 0.6B, Baguettotron intégrés, sans installation). Plus tard, un modèle entraîné spécifiquement pour Akasha pourra s’ajouter à l’offre locale.
 
 ---
 
@@ -28,6 +28,16 @@ Pour l'interface TUI : `cargo build -p akasha-cli -p akasha-tui`
 
 ---
 
+## 2.1 Premier pas (après init)
+
+1. **Envoyer un message** : lancer l’UI Tauri ou la TUI, ouvrir l’onglet Chat, saisir un message et envoyer. La tâche apparaît dans l’onglet Tâches avec sa progression.
+2. **Créer une récurrence** : via l’API (schedules) ou un message du type « rappelle-moi chaque jour de … » selon les capacités configurées.
+3. **Consulter l’onglet Tâches** : voir l’état des tâches, les sous-tâches, et répondre aux questions en attente (human-in-the-loop) depuis la bannière ou le modal.
+
+En premier lancement, l’UI peut proposer un guide court (premier objectif) ; option « Ne plus afficher » (localStorage).
+
+---
+
 ## 3. Commandes exposées à l'utilisateur
 
 ### Daemon
@@ -42,8 +52,8 @@ Pour l'interface TUI : `cargo build -p akasha-cli -p akasha-tui`
 
 | Commande | Description |
 |----------|-------------|
-| `akasha init` | Assistant interactif : provider LLM, vault, connecteurs (Telegram, Slack, Discord), génère `llm_router.yaml` et `connectors.env` |
-| `akasha init --defaults` | Initialisation minimale sans questions (Ollama uniquement, aucun connecteur) |
+| `akasha init` | Assistant interactif : choix du provider LLM (**Ollama** ou **modèles locaux Akasha** Qwen3 0.6B / Baguettotron, puis OpenAI/OpenRouter), vault, connecteurs ; génère `llm_router.yaml` et `connectors.env`. Si vous choisissez Ollama et qu’il n’est pas détecté, l’app peut ouvrir la page de téléchargement et proposer de télécharger un modèle léger par défaut une fois Ollama installé. |
+| `akasha init --defaults` | Initialisation minimale sans questions : Ollama si disponible (avec modèle par défaut), sinon modèles locaux Akasha ; aucun connecteur |
 
 ### Diagnostic
 
@@ -128,6 +138,9 @@ Fichiers créés dans le data_dir (ex. `%LOCALAPPDATA%\akasha` sous Windows) :
 | `AKASHA_PORT` | Port du daemon | 3876 |
 | `AKASHA_LOG` | Niveau de log (trace, debug, info, warn, error) | info |
 | `AKASHA_MAX_RESPONSE_TOKENS` | Nombre max de tokens pour les réponses chat | 4096 |
+| `AKASHA_MAX_CONCURRENT_DELEGATIONS` | Nombre max de délégations (sous-tâches) traitées en parallèle ; au-delà, « système surchargé » | 15 |
+| `AKASHA_MAX_COST_PER_SESSION_USD` | Plafond de coût LLM (USD) par session ; au-delà, la tâche s'arrête avec « Budget dépassé » | — |
+| `AKASHA_MAX_TOKENS_PER_SESSION` | Plafond de tokens par session ; au-delà, la tâche s'arrête avec « Quota dépassé » | — |
 | `AKASHA_DATA_DIR` | Répertoire de données (vault, plugins, llm_router.yaml, etc.) | %LOCALAPPDATA%\akasha (Windows) / ~/.local/share/akasha (Linux/macOS) |
 | `AKASHA_SLACK_ENABLED` | `1` pour activer l'adaptateur Slack | — |
 | `AKASHA_DISCORD_ENABLED` | `1` pour activer le bot Discord | — |
@@ -144,6 +157,8 @@ Fichiers créés dans le data_dir (ex. `%LOCALAPPDATA%\akasha` sous Windows) :
 | `OLLAMA_HOST` | URL Ollama si pas de `llm_router.yaml` | http://localhost:11434 |
 | `OPENROUTER_API_KEY` | Clé API OpenRouter (permet d’utiliser openrouter en primary même sans section `providers.openrouter`) | — |
 | `OPENAI_API_KEY` | Clé API OpenAI (idem pour `providers.openai`) | — |
+| `AKASHA_APP_BASE_URL` | URL de base du site des releases (pour la vérification de mise à jour : `api/latest.json`) | https://azerothl.github.io/Akasha_app |
+| `AKASHA_LANG` | Langue de l’interface TUI (prioritaire sur `LANG`). Valeurs commençant par `en` = anglais, sinon français | (détection via `LANG` / `LC_ALL`) |
 
 **PowerShell** : `$env:AKASHA_TELEGRAM_ENABLED="1"` (et non `set`).  
 **CMD** : `set AKASHA_TELEGRAM_ENABLED=1`.
@@ -170,6 +185,14 @@ Pour les **formats, types de données et exemples** de chaque fichier, voir [35_
 
 Le **data_dir** s'affiche avec `akasha paths` ; par défaut : `~/.local/share/akasha` (Linux/macOS) ou `%LOCALAPPDATA%\akasha` (Windows), sauf si `AKASHA_DATA_DIR` est défini.
 
+### Windows
+
+Sous **Windows**, le data_dir par défaut est **`%LOCALAPPDATA%\akasha`** (souvent `C:\Users\<user>\AppData\Local\akasha`). Les chemins dans `tools_policy.yaml` (allowed_read_paths, allowed_write_paths) utilisent des barres obliques ou des backslashes selon le contexte ; le daemon normalise les chemins. Si le build par défaut du daemon échoue à lier les **embeddings** (mémoire long terme) à cause d’ONNX Runtime (ort_sys), compiler avec **`--no-default-features --features embedded,embeddings-tract`** pour utiliser tract-onnx (pur Rust) à la place de fastembed/ONNX. Les modèles LLM embarqués (Qwen, Baguettotron) utilisent le cache Hugging Face ; définir **`HF_HOME`** (ex. `%LOCALAPPDATA%\akasha\hf_cache`) pour garder le cache dans le data_dir si souhaité.
+
+### Mise à jour
+
+L’application vérifie la dernière version disponible sur le site Akasha (**api/latest.json**) au démarrage du daemon et environ **deux fois par jour** tant que le daemon tourne. Si une mise à jour est disponible, l’interface (Tauri) affiche une bannière proposant de **télécharger** la nouvelle version et rappelle les **étapes pour valider les configs** après installation : vérifier `llm_router.yaml`, `tools_policy.yaml`, `connectors.env` ; relancer le daemon si besoin (`akasha stop` puis `akasha start`) ; lancer `akasha doctor` pour vérifier. L’URL utilisée pour la vérification est configurable via **`AKASHA_APP_BASE_URL`** (défaut : `https://azerothl.github.io/Akasha_app`). En ligne de commande, `akasha update check` affiche si une nouvelle version est disponible ; `akasha update install` ouvre la page de téléchargement dans le navigateur.
+
 ---
 
 ## 6. Lancement des interfaces et du daemon
@@ -187,6 +210,8 @@ akasha start --foreground
 Le daemon écoute par défaut sur le port **3876** (`AKASHA_PORT`).
 
 ### Interface terminal (TUI)
+
+La langue d’affichage de la TUI (onglets, messages, aide) suit la variable d’environnement **`AKASHA_LANG`** si elle est définie, sinon **`LANG`** ou **`LC_ALL`**. Une valeur commençant par `en` (ex. `en`, `en_US`) affiche l’interface en anglais ; sinon le français est utilisé.
 
 ```bash
 cargo build -p akasha-cli -p akasha-tui

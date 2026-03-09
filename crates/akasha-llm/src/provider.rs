@@ -23,6 +23,9 @@ pub struct CompletionResponse {
     pub text: String,
     pub usage: Option<TokenUsage>,
     pub model_used: String,
+    /// Cost in USD for this call (set by router/fallback when available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +149,7 @@ impl OllamaProvider {
             text,
             usage,
             model_used: model.to_string(),
+            cost_usd: None,
         })
     }
 }
@@ -271,6 +275,7 @@ impl OpenAIProvider {
             text,
             usage,
             model_used,
+            cost_usd: None,
         })
     }
 }
@@ -442,6 +447,7 @@ impl LLMProvider for OpenRouterProvider {
             text,
             usage,
             model_used,
+            cost_usd: None,
         })
     }
 }
@@ -468,6 +474,7 @@ fn placeholder_response(prompt_len: usize) -> CompletionResponse {
             completion_tokens,
         }),
         model_used: "core".into(),
+        cost_usd: None,
     }
 }
 
@@ -512,6 +519,7 @@ impl LLMProvider for AkashaCoreProvider {
                                 completion_tokens,
                             }),
                             model_used: "core".into(),
+                            cost_usd: None,
                         });
                     }
                     Ok(Err(e)) => {
@@ -588,6 +596,7 @@ impl LLMProvider for AkashaEmbeddedProvider {
                                 completion_tokens,
                             }),
                             model_used: "embedded".into(),
+                            cost_usd: None,
                         });
                     }
                     Ok(Err(e)) => return Err(ProviderError::Api(e.to_string())),
@@ -630,6 +639,7 @@ impl LLMProvider for AkashaEmbeddedProvider {
                             completion_tokens,
                         }),
                         model_used: "embedded".into(),
+                        cost_usd: None,
                     })
                 }
                 Ok(Err(e)) => Err(ProviderError::Api(e.to_string())),

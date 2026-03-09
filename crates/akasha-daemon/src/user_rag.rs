@@ -2,6 +2,7 @@
 //! Storage in data_dir/user_rag/, keyword-based retrieval (MVP).
 
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,7 +22,7 @@ pub struct UserDocMeta {
     pub added_at: String,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct Manifest {
     documents: Vec<UserDocMeta>,
 }
@@ -55,12 +56,15 @@ pub type SharedUserRagStore = Arc<tokio::sync::Mutex<UserRagStore>>;
 
 pub struct UserRagStore {
     base_dir: PathBuf,
+    /// In-memory cache of the manifest to avoid repeated disk reads (invalidated on add/delete).
+    manifest_cache: RefCell<Option<Manifest>>,
 }
 
 impl UserRagStore {
     pub fn new(data_dir: &Path) -> Self {
         Self {
             base_dir: data_dir.join("user_rag"),
+            manifest_cache: RefCell::new(None),
         }
     }
 
@@ -79,12 +83,17 @@ impl UserRagStore {
     }
 
     fn load_manifest(&self) -> anyhow::Result<Manifest> {
-        let p = self.manifest_path();
-        if !p.exists() {
-            return Ok(Manifest::default());
+        if let Some(ref m) = *self.manifest_cache.borrow() {
+            return Ok(m.clone());
         }
-        let s = std::fs::read_to_string(&p)?;
-        let m: Manifest = serde_json::from_str(&s).unwrap_or_default();
+        let p = self.manifest_path();
+        let m = if !p.exists() {
+            Manifest::default()
+        } else {
+            let s = std::fs::read_to_string(&p)?;
+            serde_json::from_str(&s).unwrap_or_default()
+        };
+        *self.manifest_cache.borrow_mut() = Some(m.clone());
         Ok(m)
     }
 
@@ -93,6 +102,7 @@ impl UserRagStore {
         let p = self.manifest_path();
         let s = serde_json::to_string_pretty(manifest)?;
         std::fs::write(p, s)?;
+        *self.manifest_cache.borrow_mut() = Some(manifest.clone());
         Ok(())
     }
 

@@ -8,15 +8,23 @@ fn daemon_base_url(port: u16) -> String {
     format!("http://127.0.0.1:{}", port)
 }
 
+/// Shared HTTP client for all daemon requests (avoids creating a new client per command).
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("HTTP client init")
+    })
+}
+
 /// Health check: GET / returns {"status":"ok"} when daemon is up.
 #[tauri::command]
 async fn check_health(port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if resp.status().is_success() {
         let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
@@ -35,10 +43,7 @@ async fn get_router_metrics(port: Option<u16>, period: Option<String>) -> Result
         Some(p) => format!("{}/api/router/metrics?period={}", daemon_base_url(port), p),
         None => format!("{}/api/router/metrics", daemon_base_url(port)),
     };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("Daemon returned {}", resp.status()));
@@ -81,10 +86,7 @@ async fn send_message_ack(
     let port = port.unwrap_or(DAEMON_PORT);
     let base = daemon_base_url(port);
     let url = format!("{}/api/message", base);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     // Si pièces jointes présentes et message vide, envoyer un libellé pour que la tâche reçoive un contenu (évite "message": "").
     let message_for_body = match attachments.as_deref() {
         Some(a) if !a.is_empty() && message.trim().is_empty() => "(Pièce(s) jointe(s))".to_string(),
@@ -138,10 +140,7 @@ async fn send_message(message: String, session_id: Option<String>, port: Option<
     let port = port.unwrap_or(DAEMON_PORT);
     let base = daemon_base_url(port);
     let url = format!("{}/api/message", base);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let body = match session_id.as_deref() {
         Some(s) if !s.is_empty() => serde_json::json!({ "message": message, "session_id": s }),
         _ => serde_json::json!({ "message": message }),
@@ -219,10 +218,7 @@ async fn send_message(message: String, session_id: Option<String>, port: Option<
 async fn get_config(port: Option<u16>) -> Result<std::collections::HashMap<String, String>, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/config", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -245,10 +241,7 @@ async fn get_config(port: Option<u16>) -> Result<std::collections::HashMap<Strin
 async fn set_config(key: String, value: String, port: Option<u16>) -> Result<(), String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/config", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let body = serde_json::json!({ "key": key, "value": value });
     let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
@@ -262,10 +255,7 @@ async fn set_config(key: String, value: String, port: Option<u16>) -> Result<(),
 async fn get_vault_keys(port: Option<u16>) -> Result<Vec<String>, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/vault/keys", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -284,10 +274,7 @@ async fn get_vault_keys(port: Option<u16>) -> Result<Vec<String>, String> {
 async fn get_ollama_models(port: Option<u16>) -> Result<Vec<String>, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/router/ollama/models", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -313,10 +300,7 @@ async fn get_ollama_models(port: Option<u16>) -> Result<Vec<String>, String> {
 async fn get_router_models(port: Option<u16>) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/router/models", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -347,10 +331,7 @@ async fn get_router_models(port: Option<u16>) -> Result<std::collections::HashMa
 async fn get_router_routes(port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/router/routes", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -364,10 +345,7 @@ async fn get_router_routes(port: Option<u16>) -> Result<serde_json::Value, Strin
 async fn set_router_route(category: String, provider: String, model: String, port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/router/route", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let body = serde_json::json!({ "category": category, "provider": provider, "model": model });
     let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
@@ -383,10 +361,7 @@ async fn set_router_route(category: String, provider: String, model: String, por
 async fn get_embedded_status(port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/router/embedded-status", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -400,10 +375,7 @@ async fn get_embedded_status(port: Option<u16>) -> Result<serde_json::Value, Str
 async fn embedded_reload(port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/router/embedded/reload", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -417,10 +389,7 @@ async fn embedded_reload(port: Option<u16>) -> Result<serde_json::Value, String>
 async fn get_doctor(port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/doctor", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -429,17 +398,60 @@ async fn get_doctor(port: Option<u16>) -> Result<serde_json::Value, String> {
     Ok(json)
 }
 
+/// GET /api/update/status — cached latest version info from daemon (for update banner).
+#[tauri::command]
+async fn get_update_status(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/update/status", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// App version (from Cargo.toml) for update comparison.
+#[tauri::command]
+fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Open URL in default browser. Only allows https URLs for known update/release hosts.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    let url = url.trim();
+    if !url.starts_with("https://") {
+        return Err("Only https URLs are allowed".to_string());
+    }
+    let parsed = url.parse::<url::Url>().map_err(|e| format!("Invalid URL: {}", e))?;
+    let host = parsed.host_str().unwrap_or("");
+    if !host.ends_with("github.io") && !host.ends_with("github.com") && host != "ollama.com" {
+        return Err("URL host not allowed for security".to_string());
+    }
+    let _ = match std::env::consts::OS {
+        "windows" => std::process::Command::new("cmd").args(["/c", "start", "", url]).status(),
+        "macos" => std::process::Command::new("open").arg(url).status(),
+        _ => std::process::Command::new("xdg-open").arg(url).status(),
+    };
+    Ok(())
+}
+
 /// POST /api/diagnostic/advice — get advice from health (for slash /advice).
 #[tauri::command]
 async fn get_advice(health: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/diagnostic/advice", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(180))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let body = serde_json::json!({ "health": health });
-    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    let resp = client
+        .post(&url)
+        .timeout(std::time::Duration::from_secs(180))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
     }
@@ -452,10 +464,7 @@ async fn get_advice(health: serde_json::Value, port: Option<u16>) -> Result<serd
 async fn get_plugins(port: Option<u16>) -> Result<Vec<serde_json::Value>, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/plugins", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -469,10 +478,7 @@ async fn get_plugins(port: Option<u16>) -> Result<Vec<serde_json::Value>, String
 async fn reload_plugins(port: Option<u16>) -> Result<(), String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/plugins/reload", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -485,10 +491,7 @@ async fn reload_plugins(port: Option<u16>) -> Result<(), String> {
 async fn reload_skills(port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/skills/reload", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -502,10 +505,7 @@ async fn reload_skills(port: Option<u16>) -> Result<serde_json::Value, String> {
 async fn uninstall_skill(name: String, port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/skills/uninstall", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let body = serde_json::json!({ "name": name.trim() });
     let resp = client
         .post(&url)
@@ -527,10 +527,7 @@ async fn uninstall_skill(name: String, port: Option<u16>) -> Result<serde_json::
 async fn restart_daemon(port: Option<u16>) -> Result<(), String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/restart", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -543,10 +540,7 @@ async fn restart_daemon(port: Option<u16>) -> Result<(), String> {
 async fn get_docs(port: Option<u16>) -> Result<String, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/docs", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("Daemon returned {}", resp.status()));
@@ -564,10 +558,7 @@ async fn get_docs(port: Option<u16>) -> Result<String, String> {
 async fn get_task_status(task_id: String, port: Option<u16>) -> Result<String, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/tasks/{}", daemon_base_url(port), task_id);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -581,10 +572,7 @@ async fn get_task_status(task_id: String, port: Option<u16>) -> Result<String, S
 async fn get_tasks(port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/tasks", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -598,10 +586,7 @@ async fn get_tasks(port: Option<u16>) -> Result<serde_json::Value, String> {
 async fn get_task_events(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/tasks/{}/events", daemon_base_url(port), task_id);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -615,10 +600,7 @@ async fn get_task_events(task_id: String, port: Option<u16>) -> Result<serde_jso
 async fn cancel_task(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/tasks/{}/cancel", daemon_base_url(port), task_id);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
     let status = resp.status();
     let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({ "error": "invalid_response" }));
@@ -634,10 +616,7 @@ async fn cancel_task(task_id: String, port: Option<u16>) -> Result<serde_json::V
 async fn get_pending_human_input(port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/pending-human-input", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -651,10 +630,7 @@ async fn get_pending_human_input(port: Option<u16>) -> Result<serde_json::Value,
 async fn get_task_human_input(task_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/tasks/{}/human-input", daemon_base_url(port), task_id);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -668,10 +644,7 @@ async fn get_task_human_input(task_id: String, port: Option<u16>) -> Result<serd
 async fn post_task_human_reply(task_id: String, response: String, port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/tasks/{}/human-reply", daemon_base_url(port), task_id);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let body = serde_json::json!({ "response": response });
     let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
@@ -686,10 +659,7 @@ async fn post_task_human_reply(task_id: String, response: String, port: Option<u
 async fn get_schedules(port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/schedules", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -703,10 +673,7 @@ async fn get_schedules(port: Option<u16>) -> Result<serde_json::Value, String> {
 async fn get_schedule_by_id(schedule_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/schedules/{}", daemon_base_url(port), schedule_id);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -722,10 +689,7 @@ async fn get_calendar_events(port: Option<u16>, from: String, to: String) -> Res
     let from_enc = urlencoding::encode(&from);
     let to_enc = urlencoding::encode(&to);
     let url = format!("{}/api/calendar/events?from={}&to={}", daemon_base_url(port), from_enc, to_enc);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -742,10 +706,7 @@ async fn get_task_runs(port: Option<u16>, schedule_id: Option<String>) -> Result
         Some(s) if !s.is_empty() => format!("{}/api/task_runs?schedule_id={}", daemon_base_url(port), s),
         _ => format!("{}/api/task_runs", daemon_base_url(port)),
     };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -773,10 +734,7 @@ async fn create_schedule(
         "interval_seconds": interval_seconds.unwrap_or(3600),
         "channel_context": description
     });
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client
         .post(&url)
         .json(&body)
@@ -796,10 +754,7 @@ async fn create_schedule(
 async fn delete_schedule(schedule_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/schedules/{}", daemon_base_url(port), schedule_id);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -819,10 +774,7 @@ async fn get_memory_short_term(session_id: Option<String>, port: Option<u16>) ->
         ),
         _ => format!("{}/api/memory/short-term", daemon_base_url(port)),
     };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -837,10 +789,7 @@ async fn get_memory_long_term(limit: Option<u32>, port: Option<u16>) -> Result<s
     let port = port.unwrap_or(DAEMON_PORT);
     let limit = limit.unwrap_or(50).min(200);
     let url = format!("{}/api/memory/long-term?limit={}", daemon_base_url(port), limit);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -858,10 +807,7 @@ async fn delete_memory_long_term(id: String, port: Option<u16>) -> Result<(), St
         return Err("missing id".to_string());
     }
     let url = format!("{}/api/memory/long-term/{}", daemon_base_url(port), id);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         let status = resp.status();
@@ -876,10 +822,7 @@ async fn delete_memory_long_term(id: String, port: Option<u16>) -> Result<(), St
 async fn get_schedule_run_reports(port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/schedule_run_reports", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -893,10 +836,7 @@ async fn get_schedule_run_reports(port: Option<u16>) -> Result<serde_json::Value
 async fn get_user_rag_documents(port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/user-rag/documents", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -915,10 +855,7 @@ async fn add_user_rag_document(
 ) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/user-rag/documents", daemon_base_url(port));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let body = serde_json::json!({
         "name": name,
         "content_base64": content_base64,
@@ -939,10 +876,7 @@ async fn add_user_rag_document(
 async fn delete_user_rag_document(id: String, port: Option<u16>) -> Result<(), String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/user-rag/documents/{}", daemon_base_url(port), id.trim());
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
@@ -987,6 +921,9 @@ pub fn run() {
             get_router_models,
             restart_daemon,
             get_doctor,
+            get_update_status,
+            get_app_version,
+            open_url,
             get_advice,
             get_plugins,
             reload_plugins,

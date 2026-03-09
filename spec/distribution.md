@@ -15,9 +15,10 @@ Ce document décrit comment **obtenir et utiliser Akasha sans installer Rust ni 
    - **Linux** : `akasha-linux-x86_64.zip`
    - **macOS Intel** : `akasha-macos-x86_64.zip`
    - **macOS Apple Silicon (M1/M2/M3)** : `akasha-macos-aarch64.zip`
-4. Décompressez l’archive dans un dossier (ex. `C:\Akasha` ou `~/Akasha`).
+   - **App desktop (Tauri)** : installateurs dans les pièces jointes (`.msi`/`.exe`, `.dmg`, `.deb`/`.AppImage`).
+4. Décompressez l’archive dans un dossier (ex. `C:\Akasha` ou `~/Akasha`). Installez l'app desktop avec l'installateur de votre OS si besoin.
 
-Vous obtenez :
+Vous obtenez (dans l'archive CLI) :
 - **akasha** (ou `akasha.exe`) — CLI : init, start, stop, doctor, tui, config…
 - **akasha-daemon** — serveur 24/7 (lancé par `akasha start`)
 - **akasha-tui** — interface en terminal (lancée par `akasha tui`)
@@ -83,7 +84,7 @@ Les binaires sont produits automatiquement par **GitHub Actions** à chaque tag 
 
 ## 5. Application desktop (Tauri)
 
-L’interface graphique **Akasha UI** (Tauri + React) peut être construite en installateur desktop :
+L’interface graphique **Akasha UI** (Tauri + React) est construite par le workflow Release et publiée sur la page Releases (installateurs en pièces jointes). Lancez le daemon avec `akasha start`. Pour construire en local :
 
 ```bash
 cd apps/akasha-ui
@@ -91,7 +92,7 @@ npm install
 npm run tauri build
 ```
 
-Les artefacts (`.msi` / `.exe` sur Windows, `.dmg` sur macOS, `.deb` / `.AppImage` sur Linux) sont générés dans `apps/akasha-ui/src-tauri/target/release/bundle/`.
+Les artefacts sont dans `apps/akasha-ui/src-tauri/target/release/bundle/`. Icônes : `node scripts/gen-ico.js` à la racine si besoin.
 
 L’utilisateur doit dans tous les cas **lancer le daemon** (ou l’avoir déjà lancé) pour que l’UI puisse communiquer avec l’API. À terme, le binaire daemon peut être fourni en **sidecar** de l’app Tauri pour démarrage automatique.
 
