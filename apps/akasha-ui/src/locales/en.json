@@ -110,6 +110,10 @@
   "chat.follow_tasks": "You can follow progress in the Tasks tab.",
   "chat.task_failed": "Task failed.",
   "chat.timeout": "Timeout. Check the Tasks tab.",
+  "human_input.banner": "A question is waiting — click « Reply » to respond from any tab.",
   "human_input.reply": "Reply",
-  "human_input.submit": "Submit"
+  "human_input.submit": "Submit",
+  "human_input.action_required": "Action required",
+  "human_input.placeholder": "Type your response…",
+  "common.close": "Close"
 }

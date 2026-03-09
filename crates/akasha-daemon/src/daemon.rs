@@ -348,6 +348,7 @@ impl Daemon {
             let update_check_cache = new_update_check_cache();
             let process_registry = new_process_registry();
             let human_input_store = new_human_input_store();
+            let task_usage_store = std::sync::Arc::new(crate::api::TaskUsageStore::new());
             let user_rag_store = crate::user_rag::UserRagStore::new_shared(&data_dir);
             let (progress_persistence_tx, progress_persistence_rx) = std::sync::mpsc::channel::<(uuid::Uuid, u8, String)>();
             {
@@ -445,6 +446,7 @@ impl Daemon {
                 let human_input_store = human_input_store.clone();
                 let task_completion = task_completion.clone();
                 let agent_profile_cache = agent_profile_cache.clone();
+                let task_usage_store = task_usage_store.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
                         let span = tracing::info_span!("task", task_id = %task.task_id, session_id = %task.session_id);
@@ -468,6 +470,7 @@ impl Daemon {
                             Some(delegation_tx.clone()),
                             Some(task_completion.clone()),
                             Some(agent_profile_cache.clone()),
+                            Some(task_usage_store.clone()),
                         )
                         .instrument(span)
                         .await;
@@ -642,6 +645,7 @@ impl Daemon {
                 let human_input_store = human_input_store.clone();
                 let user_rag_store = user_rag_store.clone();
                 let agent_profile_cache = agent_profile_cache.clone();
+                let task_usage_store = task_usage_store.clone();
                 // Body reading is done inside the spawned task so slow/large uploads
                                 // don't block the accept loop from handling other connections or signals.
                                 let update_check_cache_clone = update_check_cache.clone();
@@ -696,6 +700,7 @@ impl Daemon {
                                         &user_rag_store,
                                         &agent_profile_cache,
                                         &update_check_cache_clone,
+                                        task_usage_store.as_ref(),
                                     )
                                     .await;
                                     let _ = stream.write_all(response.as_bytes()).await;

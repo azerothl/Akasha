@@ -245,6 +245,39 @@ pub fn new_process_registry() -> ProcessRegistry {
 /// can react immediately instead of polling TaskStore every 500 ms.
 pub type TaskCompletionRegistry = Arc<RwLock<std::collections::HashMap<Uuid, Arc<tokio::sync::Notify>>>>;
 
+/// Per-task and per-session LLM usage (tokens, cost USD) for GET /api/tasks/:id and cost visibility.
+#[derive(Default)]
+pub struct TaskUsageStore {
+    by_task: RwLock<std::collections::HashMap<Uuid, (u64, f64)>>,
+    by_session: RwLock<std::collections::HashMap<String, (u64, f64)>>,
+}
+
+impl TaskUsageStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub async fn add(&self, task_id: Uuid, session_id: &str, tokens: u64, cost_usd: f64) {
+        {
+            let mut g = self.by_task.write().await;
+            let e = g.entry(task_id).or_insert((0, 0.0));
+            e.0 += tokens;
+            e.1 += cost_usd;
+        }
+        if !session_id.is_empty() {
+            let mut g = self.by_session.write().await;
+            let e = g.entry(session_id.to_string()).or_insert((0, 0.0));
+            e.0 += tokens;
+            e.1 += cost_usd;
+        }
+    }
+    pub async fn get_task(&self, task_id: Uuid) -> Option<(u64, f64)> {
+        self.by_task.read().await.get(&task_id).copied()
+    }
+    pub async fn get_session(&self, session_id: &str) -> Option<(u64, f64)> {
+        self.by_session.read().await.get(session_id).copied()
+    }
+}
+
 pub fn new_task_completion_registry() -> TaskCompletionRegistry {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
 }
@@ -1896,6 +1929,7 @@ pub(crate) async fn run_message_via_llm(
     delegation_tx: Option<mpsc::Sender<DelegationRequest>>,
     task_completion_registry: Option<TaskCompletionRegistry>,
     agent_profile_cache: Option<AgentProfileCache>,
+    task_usage_store: Option<std::sync::Arc<TaskUsageStore>>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -2213,7 +2247,14 @@ pub(crate) async fn run_message_via_llm(
             break;
         } else {
             match tokio::time::timeout(remaining, stream_join).await {
-                Ok(Ok(Ok(resp))) => resp.text.trim().to_string(),
+                Ok(Ok(Ok(resp))) => {
+                    if let Some(ref store) = task_usage_store {
+                        let tokens = resp.usage.as_ref().map(|u| u.prompt_tokens + u.completion_tokens).unwrap_or(0);
+                        let cost = resp.cost_usd.unwrap_or(0.0);
+                        store.add(task_id, &session_id, tokens, cost).await;
+                    }
+                    resp.text.trim().to_string()
+                }
                 Ok(Ok(Err(e))) => {
                     tracing::warn!(error = %e, "LLM completion failed");
                     reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
@@ -2695,6 +2736,7 @@ pub async fn handle_api(
     user_rag_store: &crate::user_rag::SharedUserRagStore,
     agent_profile_cache: &AgentProfileCache,
     update_cache: &UpdateCheckCache,
+    task_usage_store: &TaskUsageStore,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
@@ -3215,7 +3257,7 @@ pub async fn handle_api(
                     return json_response("404 Not Found", &serde_json::json!({ "error": "no_pending_human_input", "task_id": id.to_string() }).to_string());
                 }
                 if method == "GET" {
-                    return get_task_status(store_path, progress, id).await;
+                    return get_task_status(store_path, progress, task_usage_store, id).await;
                 }
             }
         }
@@ -3850,7 +3892,7 @@ async fn cancel_task(
     json_response("200 OK", &body.to_string())
 }
 
-async fn get_task_status(store_path: &Path, progress: &ProgressCache, id: Uuid) -> String {
+async fn get_task_status(store_path: &Path, progress: &ProgressCache, task_usage_store: &TaskUsageStore, id: Uuid) -> String {
     let store = match TaskStore::open(store_path) {
         Ok(s) => s,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
@@ -3904,13 +3946,16 @@ async fn get_task_status(store_path: &Path, progress: &ProgressCache, id: Uuid) 
             }
         }
     }
+    let (tokens_used, cost_usd) = task_usage_store.get_task(id).await.unwrap_or((0, 0.0));
     let body = serde_json::json!({
         "task_id": task.id.to_string(),
         "status": task.status.as_str(),
         "assigned_agent": task.assigned_agent,
         "created_at": task.created_at.to_rfc3339(),
         "updated_at": task.updated_at.to_rfc3339(),
-        "progress": progress_list
+        "progress": progress_list,
+        "tokens_used": tokens_used,
+        "cost_usd": cost_usd
     });
     json_response("200 OK", &body.to_string())
 }

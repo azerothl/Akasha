@@ -848,6 +848,25 @@ body {
   font-size: 0.875rem;
   color: var(--akasha-text, #fafafa);
 }
+.global-human-input-banner {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.human-input-banner-action {
+  margin-left: auto;
+  padding: 0.35rem 0.75rem;
+  background: var(--akasha-accent, #6366f1);
+  color: var(--akasha-bg, #0f0f12);
+  border: none;
+  border-radius: 4px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.human-input-banner-action:hover {
+  filter: brightness(1.1);
+}
 
 .chat-inline-human-reply {
   padding: 1rem 1.5rem;

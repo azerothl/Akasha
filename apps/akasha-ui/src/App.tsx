@@ -1398,6 +1398,79 @@ function App() {
       </header>
 
       <main className="main" id="main-content" tabIndex={-1}>
+        {/* Human-in-the-loop: visible on all tabs */}
+        {Object.keys(pendingHumanInput).length > 0 && !humanInputModalTaskId && (
+          <div className="chat-human-input-banner global-human-input-banner" role="status">
+            {t("human_input.banner")}
+            <button type="button" className="human-input-banner-action" onClick={() => setHumanInputModalTaskId(Object.keys(pendingHumanInput)[0])}>
+              {t("human_input.reply")}
+            </button>
+          </div>
+        )}
+        {humanInputModalTaskId && pendingHumanInput[humanInputModalTaskId] && (
+          <div className="human-input-overlay" role="dialog" aria-labelledby="human-input-title" aria-modal="true">
+            <div className="human-input-modal">
+              <h2 id="human-input-title">{t("human_input.action_required")}</h2>
+              <p className="human-input-question">{pendingHumanInput[humanInputModalTaskId].question}</p>
+              {pendingHumanInput[humanInputModalTaskId].context && (
+                <p className="human-input-context">{pendingHumanInput[humanInputModalTaskId].context}</p>
+              )}
+              {pendingHumanInput[humanInputModalTaskId].choices?.length ? (
+                <div className="human-input-choices">
+                  {pendingHumanInput[humanInputModalTaskId].choices!.map((choice, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      className="human-input-choice-btn"
+                      onClick={async () => {
+                        try {
+                          await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: choice, port: DAEMON_PORT });
+                          setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
+                          setHumanInputModalTaskId(null);
+                        } catch (e) {
+                          console.error(e);
+                        }
+                      }}
+                    >
+                      {choice}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="human-input-free">
+                  <input
+                    type="text"
+                    value={humanInputFreeText}
+                    onChange={(e) => setHumanInputFreeText(e.target.value)}
+                    placeholder={t("human_input.placeholder")}
+                    onKeyDown={(e) => e.key === "Enter" && document.getElementById("human-input-submit-btn")?.click()}
+                  />
+                  <button
+                    id="human-input-submit-btn"
+                    type="button"
+                    onClick={async () => {
+                      const text = humanInputFreeText.trim();
+                      if (!text) return;
+                      try {
+                        await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: text, port: DAEMON_PORT });
+                        setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
+                        setHumanInputModalTaskId(null);
+                        setHumanInputFreeText("");
+                      } catch (e) {
+                        console.error(e);
+                      }
+                    }}
+                  >
+                    {t("human_input.submit")}
+                  </button>
+                </div>
+              )}
+              <button type="button" className="human-input-close" onClick={() => setHumanInputModalTaskId(null)} aria-label={t("common.close")}>
+                ×
+              </button>
+            </div>
+          </div>
+        )}
         {tab === "chat" && (
           <section
             id="panel-chat"
@@ -1599,11 +1672,6 @@ function App() {
               )}
               <div ref={chatEndRef} aria-hidden />
             </div>
-            {Object.keys(pendingHumanInput).length > 0 && !humanInputModalTaskId && (
-              <div className="chat-human-input-banner" role="status">
-                Une question vous attend — répondez ci-dessous ou cliquez sur « Action requise » sur la tâche.
-              </div>
-            )}
             {Object.keys(pendingHumanInput).length > 0 && !humanInputModalTaskId && (() => {
               const pendingTaskId = Object.keys(pendingHumanInput)[0];
               const pending = pendingTaskId ? pendingHumanInput[pendingTaskId] : null;
@@ -1727,72 +1795,6 @@ function App() {
             <p id="send-hint" className="hint sr-only">
               Entrée pour envoyer
             </p>
-            {humanInputModalTaskId && pendingHumanInput[humanInputModalTaskId] && (
-              <div className="human-input-overlay" role="dialog" aria-labelledby="human-input-title" aria-modal="true">
-                <div className="human-input-modal">
-                  <h2 id="human-input-title">Action requise</h2>
-                  <p className="human-input-question">{pendingHumanInput[humanInputModalTaskId].question}</p>
-                  {pendingHumanInput[humanInputModalTaskId].context && (
-                    <p className="human-input-context">{pendingHumanInput[humanInputModalTaskId].context}</p>
-                  )}
-                  {pendingHumanInput[humanInputModalTaskId].choices?.length ? (
-                    <div className="human-input-choices">
-                      {pendingHumanInput[humanInputModalTaskId].choices!.map((choice, i) => (
-                        <button
-                          key={i}
-                          type="button"
-                          className="human-input-choice-btn"
-                          onClick={async () => {
-                            try {
-                              await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: choice, port: DAEMON_PORT });
-                              setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
-                              setHumanInputModalTaskId(null);
-                            } catch (e) {
-                              console.error(e);
-                            }
-                          }}
-                        >
-                          {choice}
-                        </button>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="human-input-free">
-                      <label htmlFor="human-input-text">Votre réponse</label>
-                      <input
-                        id="human-input-text"
-                        type="text"
-                        value={humanInputFreeText}
-                        onChange={(e) => setHumanInputFreeText(e.target.value)}
-                        placeholder="Saisissez votre réponse…"
-                        onKeyDown={(e) => e.key === "Enter" && document.getElementById("human-input-submit")?.click()}
-                      />
-                      <button
-                        id="human-input-submit"
-                        type="button"
-                        onClick={async () => {
-                          const text = humanInputFreeText.trim();
-                          if (!text) return;
-                          try {
-                            await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: text, port: DAEMON_PORT });
-                            setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
-                            setHumanInputModalTaskId(null);
-                            setHumanInputFreeText("");
-                          } catch (e) {
-                            console.error(e);
-                          }
-                        }}
-                      >
-                        Envoyer
-                      </button>
-                    </div>
-                  )}
-                  <button type="button" className="human-input-close" onClick={() => setHumanInputModalTaskId(null)} aria-label="Fermer">
-                    Fermer
-                  </button>
-                </div>
-              </div>
-            )}
           </section>
         )}
 

@@ -99,7 +99,9 @@ impl FallbackEngine {
                         } else {
                             metrics.record_success(entry.provider.as_str(), &entry.model, latency_ms, tokens, cost);
                         }
-                        return Ok(resp);
+                        let mut out = resp;
+                        out.cost_usd = Some(cost);
+                        return Ok(out);
                     }
                     Err(e) => {
                         if i > 0 {

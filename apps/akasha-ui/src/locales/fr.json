@@ -110,6 +110,10 @@
   "chat.follow_tasks": "Tu peux suivre l'avancement dans l'onglet Tâches.",
   "chat.task_failed": "Tâche en échec.",
   "chat.timeout": "Délai dépassé. Consultez l'onglet Tâches.",
+  "human_input.banner": "Une question vous attend — cliquez sur « Répondre » pour y accéder depuis n'importe quel onglet.",
   "human_input.reply": "Répondre",
-  "human_input.submit": "Valider"
+  "human_input.submit": "Valider",
+  "human_input.action_required": "Action requise",
+  "human_input.placeholder": "Saisissez votre réponse…",
+  "common.close": "Fermer"
 }
