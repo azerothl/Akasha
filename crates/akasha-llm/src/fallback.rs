@@ -73,7 +73,8 @@ impl FallbackEngine {
                             );
                             last_error = Some(format!("{}: empty response", entry.provider));
                             if attempt + 1 < self.max_retries {
-                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                let backoff_secs = (1u64 << attempt).min(16);
+                                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                                 continue;
                             }
                             // Give next provider in chain a chance.
@@ -112,7 +113,8 @@ impl FallbackEngine {
                         last_error = Some(format!("{}: {}", entry.provider, e));
                         let retry = matches!(e, ProviderError::Timeout | ProviderError::RateLimit);
                         if retry && attempt + 1 < self.max_retries {
-                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            let backoff_secs = (1u64 << attempt).min(16);
+                            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                             continue;
                         }
                         warn!(provider = %entry.provider, error = %e, "Attempt failed, try next in chain");

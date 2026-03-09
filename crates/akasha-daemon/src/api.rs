@@ -2168,13 +2168,13 @@ pub(crate) async fn run_message_via_llm(
         // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
         if let Some(ref store) = task_usage_store {
             let (session_tokens, session_cost) = store.get_session(&session_id).await.unwrap_or((0, 0.0));
-            if let Ok(max_cost) = std::env::var("AKASHA_MAX_COST_PER_SESSION_USD").ok().and_then(|s| s.parse::<f64>()) {
+            if let Some(max_cost) = std::env::var("AKASHA_MAX_COST_PER_SESSION_USD").ok().and_then(|s| s.parse::<f64>().ok()) {
                 if max_cost > 0.0 && session_cost >= max_cost {
                     reply_text = "Budget dépassé pour cette session (AKASHA_MAX_COST_PER_SESSION_USD). Démarrez une nouvelle session ou augmentez le plafond.".to_string();
                     break 'tool_rounds;
                 }
             }
-            if let Ok(max_tokens) = std::env::var("AKASHA_MAX_TOKENS_PER_SESSION").ok().and_then(|s| s.parse::<u64>()) {
+            if let Some(max_tokens) = std::env::var("AKASHA_MAX_TOKENS_PER_SESSION").ok().and_then(|s| s.parse::<u64>().ok()) {
                 if max_tokens > 0 && session_tokens >= max_tokens {
                     reply_text = "Quota de tokens dépassé pour cette session (AKASHA_MAX_TOKENS_PER_SESSION). Démarrez une nouvelle session ou augmentez le plafond.".to_string();
                     break 'tool_rounds;
@@ -2324,6 +2324,64 @@ pub(crate) async fn run_message_via_llm(
                     if tool_loop_history.iter().rev().take(3).all(|e| e.0 == last.0 && e.1 == last.1) {
                         reply_text = "Loop detected: same tool and arguments repeated. Stopping.".to_string();
                         break 'tool_rounds;
+                    }
+                }
+                // Phase 3.1: tools in require_approval need user confirmation before execution.
+                if exec.policy.requires_approval(&actual_tool) {
+                    match &human_input_store {
+                        Some(store) => {
+                            const APPROVAL_TIMEOUT_SECS: u64 = 300;
+                            let args_preview: String = if args.len() > 3 {
+                                format!("{}... ({} args)", args.iter().take(3).cloned().collect::<Vec<_>>().join(" "), args.len())
+                            } else {
+                                args.join(" ")
+                            };
+                            let question = format!("Approuver l'action : {} — {} ?", actual_tool, args_preview);
+                            let choices = vec!["Approuver".to_string(), "Refuser".to_string()];
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            let pending = PendingHumanInput {
+                                question: question.clone(),
+                                context: format!("Outil sensible (nécessite confirmation) : {}", actual_tool),
+                                choices: Some(choices.clone()),
+                                response_tx: tx,
+                            };
+                            {
+                                let mut g = store.write().await;
+                                g.insert(task_id, pending);
+                            }
+                            let payload = serde_json::json!({
+                                "task_id": task_id.to_string(),
+                                "question": question,
+                                "context": format!("Outil : {}", actual_tool),
+                                "choices": choices,
+                                "tool_approval": true
+                            });
+                            let _ = bus.send(
+                                EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload)).with_correlation(task_id),
+                            );
+                            let granted = match tokio::time::timeout(
+                                std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS),
+                                rx,
+                            ).await {
+                                Ok(Ok(reply)) => reply.trim().eq_ignore_ascii_case("Approuver"),
+                                _ => false,
+                            };
+                            if !granted {
+                                tool_results.push("Action refusée par l'utilisateur (approbation requise).".to_string());
+                                let payload = serde_json::json!({
+                                    "tool": actual_tool,
+                                    "approved": false
+                                });
+                                let _ = bus.send(
+                                    EventEnvelope::new(EventType::ToolInvoked, Some(payload)).with_correlation(task_id),
+                                );
+                                continue;
+                            }
+                        }
+                        None => {
+                            tool_results.push("Action nécessitant approbation impossible (human_input_store indisponible).".to_string());
+                            continue;
+                        }
                     }
                 }
                 let (success, res) = if actual_tool == "ask_user" {
@@ -2702,6 +2760,28 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
         )
         .with_correlation(task_id),
     );
+    // Phase 3.3: when task ends with an error-like outcome, emit TaskEscalatedToHuman for UI banner / retry.
+    let reply_lower = reply_text.to_lowercase();
+    let is_error_outcome = reply_lower.contains("sorry, i couldn't")
+        || reply_lower.contains("timed out")
+        || reply_lower.contains("timeout")
+        || reply_lower.contains("budget dépassé")
+        || reply_lower.contains("quota de tokens")
+        || reply_lower.contains("loop detected")
+        || reply_lower.contains("refusée par l'utilisateur")
+        || reply_lower.contains("action refusée");
+    if is_error_outcome {
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::TaskEscalatedToHuman,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "reason": reply_text.chars().take(500).collect::<String>()
+                })),
+            )
+            .with_correlation(task_id),
+        );
+    }
     let _ = bus.send(
         EventEnvelope::new(
             EventType::TaskCompleted,

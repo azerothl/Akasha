@@ -47,6 +47,8 @@ pub enum EventType {
     ToolInvoked,
     AgentDelegated,
     AgentReplied,
+    /// Phase 3.3: task ended with error; UI may show banner and offer retry.
+    TaskEscalatedToHuman,
 }
 
 impl EventType {
@@ -86,6 +88,7 @@ impl EventType {
             Self::ToolInvoked => "tool_invoked",
             Self::AgentDelegated => "agent_delegated",
             Self::AgentReplied => "agent_replied",
+            Self::TaskEscalatedToHuman => "task_escalated_to_human",
         }
     }
 
@@ -125,6 +128,7 @@ impl EventType {
             "tool_invoked" => Some(Self::ToolInvoked),
             "agent_delegated" => Some(Self::AgentDelegated),
             "agent_replied" => Some(Self::AgentReplied),
+            "task_escalated_to_human" => Some(Self::TaskEscalatedToHuman),
             _ => None,
         }
     }
