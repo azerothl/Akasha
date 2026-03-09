@@ -70,6 +70,27 @@ enum Commands {
     },
     /// Show paths used for config and data (data_dir, spec_dir, main files)
     Paths,
+    /// Check for updates (fetches api/latest.json from the showcase site)
+    Update {
+        #[command(subcommand)]
+        sub: UpdateSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum UpdateSub {
+    /// Check if a newer version is available; print download URL if so
+    Check {
+        /// Base URL for the API (default: AKASHA_APP_BASE_URL env or https://azerothl.github.io/Akasha_app)
+        #[arg(long)]
+        api_url: Option<String>,
+    },
+    /// Open the latest release download page in the default browser
+    Install {
+        /// Base URL for the API (default: AKASHA_APP_BASE_URL env or https://azerothl.github.io/Akasha_app)
+        #[arg(long)]
+        api_url: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -230,6 +251,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Tui => cmd_tui(),
         Commands::Config { sub } => cmd_config(sub),
         Commands::Paths => cmd_paths(),
+        Commands::Update { sub } => cmd_update(sub),
     }
 }
 
@@ -518,6 +540,110 @@ fn cmd_paths() -> anyhow::Result<()> {
     println!();
     println!("  Pour utiliser la même config sous WSL que sous Windows, définir par exemple :");
     println!("    export AKASHA_DATA_DIR=/mnt/c/Users/VOTRE_USER/AppData/Local/akasha");
+    Ok(())
+}
+
+const DEFAULT_AKASHA_APP_BASE: &str = "https://azerothl.github.io/Akasha_app";
+
+fn update_api_base(api_url: Option<String>) -> String {
+    api_url
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("AKASHA_APP_BASE_URL").ok())
+        .unwrap_or_else(|| DEFAULT_AKASHA_APP_BASE.to_string())
+}
+
+fn cmd_update(sub: UpdateSub) -> anyhow::Result<()> {
+    match sub {
+        UpdateSub::Check { api_url } => cmd_update_check(update_api_base(api_url)),
+        UpdateSub::Install { api_url } => cmd_update_install(update_api_base(api_url)),
+    }
+}
+
+/// Compare two version strings "X.Y.Z"; returns true if remote > current.
+fn version_gt(remote: &str, current: &str) -> bool {
+    let parse = |s: &str| {
+        let s = s.trim_start_matches('v');
+        let parts: Vec<u32> = s
+            .split('.')
+            .map(|p| p.parse::<u32>().unwrap_or(0))
+            .collect();
+        (parts.get(0).copied().unwrap_or(0), parts.get(1).copied().unwrap_or(0), parts.get(2).copied().unwrap_or(0))
+    };
+    let (rmaj, rmin, rpatch) = parse(remote);
+    let (cmaj, cmin, cpatch) = parse(current);
+    (rmaj, rmin, rpatch) > (cmaj, cmin, cpatch)
+}
+
+fn cmd_update_check(base: String) -> anyhow::Result<()> {
+    let base = base.trim_end_matches('/');
+    let url = format!("{}/api/latest.json", base);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let resp = client.get(&url).send()?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Failed to fetch latest version: HTTP {}", resp.status());
+    }
+    let data: serde_json::Value = resp.json()?;
+    let remote_version = data
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0.0.0");
+    let download_url = data
+        .get("download_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let current = env!("CARGO_PKG_VERSION");
+    if version_gt(remote_version, current) {
+        println!("A new version is available: {} (you have {}).", remote_version, current);
+        if !download_url.is_empty() {
+            println!("Download: {}", download_url);
+        }
+        if let Some(notes) = data.get("release_notes_url").and_then(|v| v.as_str()) {
+            println!("Release notes: {}", notes);
+        }
+    } else {
+        println!("You are up to date ({}).", current);
+    }
+    Ok(())
+}
+
+fn cmd_update_install(base: String) -> anyhow::Result<()> {
+    let base = base.trim_end_matches('/');
+    let url = format!("{}/api/latest.json", base);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let resp = client.get(&url).send()?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Failed to fetch latest version: HTTP {}", resp.status());
+    }
+    let data: serde_json::Value = resp.json()?;
+    let fallback = format!("{}/releases.html", base);
+    let download_url = data
+        .get("download_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&fallback);
+    let open_url = if download_url.starts_with("http") {
+        download_url.to_string()
+    } else {
+        format!("{}/{}", base, download_url.trim_start_matches('/'))
+    };
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd").args(["/C", "start", "", &open_url]).spawn()?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(&open_url).spawn()?;
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&open_url).spawn()
+            .or_else(|_| std::process::Command::new("open").arg(&open_url).spawn());
+    }
+    println!("Opened: {}", open_url);
+    println!("Download the archive for your OS, extract it, then run akasha init and akasha start.");
     Ok(())
 }
 

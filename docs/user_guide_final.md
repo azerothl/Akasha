@@ -134,6 +134,15 @@ Le répertoire de données est créé automatiquement par `akasha init` ou `akas
 
 Si vous avez installé l’**application desktop** (Akasha UI), lancez-la ; elle se connecte au daemon sur le port 3876 (configurable via la variable d’environnement `AKASHA_PORT`).
 
+### Mise à jour
+
+| Commande | Description |
+|----------|-------------|
+| `akasha update check` | Vérifie si une nouvelle version est disponible (interroge le site vitrine). Affiche l’URL de téléchargement si une mise à jour existe. |
+| `akasha update install` | Ouvre la page de téléchargement de la dernière release dans le navigateur. |
+
+L’URL de l’API est configurable via la variable d’environnement `AKASHA_APP_BASE_URL` (défaut : `https://azerothl.github.io/Akasha_app`).
+
 ---
 
 ## 4. Parcours type (onboarding)
@@ -258,5 +267,7 @@ Les variables d’activation sont chargées depuis le fichier **connectors.env**
 | Lancer l’interface terminal | `akasha tui` |
 | Recharger les skills | `/skills reload` dans le chat |
 | Redémarrer le daemon | `/restart` dans le chat |
+| Vérifier une mise à jour | `akasha update check` |
+| Ouvrir la page de téléchargement | `akasha update install` |
 
 Cette documentation est également affichée dans l’**onglet Doc** des interfaces lorsque le daemon est démarré depuis le dossier d’extraction contenant le dossier `docs`.
