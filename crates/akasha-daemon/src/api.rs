@@ -6,7 +6,7 @@ use akasha_llm::CompletionRequest;
 use akasha_store::{Schedule, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use crate::agent_profile::AgentProfile;
-use crate::agents::{EventBus, OrchestratorTask};
+use crate::agents::{EventBus, OrchestratorTask, TaskPriority};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use std::path::{Path, PathBuf};
@@ -16,6 +16,108 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+use tracing::Instrument;
+
+/// In-memory cache for AgentProfile to avoid repeated disk reads (invalidated on POST /api/agent-profile and after profile save in run_message_via_llm).
+pub type AgentProfileCache = Arc<RwLock<Option<AgentProfile>>>;
+
+pub fn new_agent_profile_cache() -> AgentProfileCache {
+    Arc::new(RwLock::new(None))
+}
+
+/// Load profile from cache or disk and update cache.
+pub async fn get_or_load_agent_profile(data_dir: &Path, cache: &AgentProfileCache) -> AgentProfile {
+    {
+        let g = cache.read().await;
+        if let Some(ref p) = *g {
+            return p.clone();
+        }
+    }
+    let profile = AgentProfile::load(data_dir);
+    {
+        let mut g = cache.write().await;
+        *g = Some(profile.clone());
+    }
+    profile
+}
+
+/// Update cache after profile save (call after writing to disk).
+pub async fn set_agent_profile_cache(cache: &AgentProfileCache, profile: AgentProfile) {
+    let mut g = cache.write().await;
+    *g = Some(profile);
+}
+
+/// Cached result of fetching api/latest.json from the Akasha_app site (version, download_url, etc.).
+#[derive(Default, Clone)]
+pub struct UpdateStatus {
+    pub remote_version: String,
+    pub download_url: String,
+    pub release_notes_url: Option<String>,
+    pub last_checked_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub error: Option<String>,
+}
+
+pub type UpdateCheckCache = Arc<RwLock<UpdateStatus>>;
+
+pub fn new_update_check_cache() -> UpdateCheckCache {
+    Arc::new(RwLock::new(UpdateStatus::default()))
+}
+
+/// Fetch {base}/api/latest.json and update the cache. Does not crash on network/parse errors.
+pub async fn run_update_check_once(cache: &UpdateCheckCache, base_url: &str) {
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{}/api/latest.json", base);
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let mut g = cache.write().await;
+            g.error = Some(e.to_string());
+            g.last_checked_at = Some(chrono::Utc::now());
+            return;
+        }
+    };
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            let mut g = cache.write().await;
+            g.error = Some(e.to_string());
+            g.last_checked_at = Some(chrono::Utc::now());
+            return;
+        }
+    };
+    if !resp.status().is_success() {
+        let mut g = cache.write().await;
+        g.error = Some(format!("HTTP {}", resp.status()));
+        g.last_checked_at = Some(chrono::Utc::now());
+        return;
+    }
+    let data: serde_json::Value = match resp.json().await {
+        Ok(d) => d,
+        Err(e) => {
+            let mut g = cache.write().await;
+            g.error = Some(e.to_string());
+            g.last_checked_at = Some(chrono::Utc::now());
+            return;
+        }
+    };
+    let mut g = cache.write().await;
+    g.remote_version = data
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0.0.0")
+        .to_string();
+    g.download_url = data
+        .get("download_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    g.release_notes_url = data.get("release_notes_url").and_then(|v| v.as_str()).map(String::from);
+    g.last_checked_at = Some(chrono::Utc::now());
+    g.error = None;
+}
 
 /// Request for a sub-agent delegation (from a worker to the orchestrator). Reply is sent on reply_tx.
 pub struct DelegationRequest {
@@ -143,19 +245,68 @@ pub fn new_process_registry() -> ProcessRegistry {
 /// can react immediately instead of polling TaskStore every 500 ms.
 pub type TaskCompletionRegistry = Arc<RwLock<std::collections::HashMap<Uuid, Arc<tokio::sync::Notify>>>>;
 
+/// Per-task and per-session LLM usage (tokens, cost USD) for GET /api/tasks/:id and cost visibility.
+#[derive(Default)]
+pub struct TaskUsageStore {
+    by_task: RwLock<std::collections::HashMap<Uuid, (u64, f64)>>,
+    by_session: RwLock<std::collections::HashMap<String, (u64, f64)>>,
+}
+
+impl TaskUsageStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub async fn add(&self, task_id: Uuid, session_id: &str, tokens: u64, cost_usd: f64) {
+        {
+            let mut g = self.by_task.write().await;
+            let e = g.entry(task_id).or_insert((0, 0.0));
+            e.0 += tokens;
+            e.1 += cost_usd;
+        }
+        if !session_id.is_empty() {
+            let mut g = self.by_session.write().await;
+            let e = g.entry(session_id.to_string()).or_insert((0, 0.0));
+            e.0 += tokens;
+            e.1 += cost_usd;
+        }
+    }
+    pub async fn get_task(&self, task_id: Uuid) -> Option<(u64, f64)> {
+        self.by_task.read().await.get(&task_id).copied()
+    }
+    pub async fn get_session(&self, session_id: &str) -> Option<(u64, f64)> {
+        self.by_session.read().await.get(session_id).copied()
+    }
+}
+
 pub fn new_task_completion_registry() -> TaskCompletionRegistry {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
 }
 
 /// Runs in a loop: receives DelegationRequest, checks depth (root or direct child only), creates child task, sends to conv_tx, waits for child completion, sends reply on oneshot.
+/// `delegation_sem`: semaphore for backpressure; when full, replies with "système surchargé".
 pub async fn run_delegation_handler(
     mut delegation_rx: mpsc::Receiver<DelegationRequest>,
     conv_tx: mpsc::Sender<OrchestratorTask>,
     store_path: PathBuf,
     progress: ProgressCache,
     task_completion: TaskCompletionRegistry,
+    delegation_sem: std::sync::Arc<tokio::sync::Semaphore>,
 ) {
     while let Some(req) = delegation_rx.recv().await {
+        let permit = match delegation_sem.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!("Delegation backpressure: max concurrent delegations reached");
+                let _ = req.reply_tx.send(Err("Système surchargé, réessayez plus tard.".to_string()));
+                continue;
+            }
+        };
+        let span_guard = tracing::info_span!(
+            "delegation",
+            requesting_task_id = %req.requesting_task_id,
+            agent_type = %req.agent_type
+        )
+        .entered();
         let store = match TaskStore::open(&store_path) {
             Ok(s) => s,
             Err(e) => {
@@ -209,6 +360,9 @@ pub async fn run_delegation_handler(
             let _ = req.reply_tx.send(Err("store insert failed".to_string()));
             continue;
         }
+        // Drop the span guard before any await point: EnteredSpan is not Send and must
+        // not be held across await boundaries in a Send future.
+        drop(span_guard);
         // Register a completion notifier *before* sending to conv_tx so the worker can notify
         // even if it completes before the spawned waiter calls notified().
         let notify = Arc::new(tokio::sync::Notify::new());
@@ -234,11 +388,24 @@ pub async fn run_delegation_handler(
         let store_path = store_path.clone();
         let progress = progress.clone();
         let task_completion = task_completion.clone();
+        let child_id_span = child_id;
+        let agent_type_span = agent_type.clone();
         tokio::spawn(async move {
+            let _permit = permit;
+            let span = tracing::info_span!(
+                "delegation_wait",
+                child_task_id = %child_id_span,
+                assigned_agent = %agent_type_span
+            );
             const DELEGATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-            let timed_out = tokio::time::timeout(DELEGATION_TIMEOUT, notify.notified()).await.is_err();
+            let timed_out = tokio::time::timeout(
+                DELEGATION_TIMEOUT,
+                notify.notified().instrument(span),
+            )
+            .await
+            .is_err();
             // Ensure the registry entry is removed regardless of outcome.
-            task_completion.write().await.remove(&child_id);
+            task_completion.write().await.remove(&child_id_span);
             if timed_out {
                 let _ = reply_tx.send(Err("delegation timeout (5 min)".to_string()));
                 return;
@@ -251,7 +418,7 @@ pub async fn run_delegation_handler(
                     return;
                 }
             };
-            let task = match store.get(child_id) {
+            let task = match store.get(child_id_span) {
                 Ok(Some(t)) => t,
                 _ => {
                     let _ = reply_tx.send(Err("child task not found in store".to_string()));
@@ -260,7 +427,7 @@ pub async fn run_delegation_handler(
             };
             let msg = {
                 let g = progress.read().await;
-                g.get(&child_id)
+                g.get(&child_id_span)
                     .and_then(|q| q.back())
                     .map(|e| e.message.clone())
                     .unwrap_or_else(|| if matches!(task.status, TaskStatus::Failed) { "Échec.".to_string() } else { "Terminé.".to_string() })
@@ -1614,6 +1781,7 @@ async fn execute_tool_call(
 
 /// Compact short-term memory when it would exceed context: summarize oldest turns via LLM and replace in store.
 /// Optionally promote the summary to long-term memory (embed + store).
+/// Refuses compaction beyond MAX_COMPACTIONS_PER_SESSION per session to avoid costly loops.
 async fn compact_short_term_if_needed(
     short_term: &Arc<ShortTermStore>,
     session_id: &str,
@@ -1621,6 +1789,10 @@ async fn compact_short_term_if_needed(
     new_message_tokens: usize,
     long_term_client: Option<&LongTermMemoryClient>,
 ) {
+    if short_term.get_compaction_count(session_id).await >= crate::memory::MAX_COMPACTIONS_PER_SESSION {
+        tracing::info!(session_id, "Short-term compaction skipped: max compactions per session reached (start a new session if context is too long)");
+        return;
+    }
     const MAX_CONTEXT_DEFAULT: usize = 8192;
     let max_context_tokens = std::env::var("AKASHA_MAX_CONTEXT_TOKENS")
         .ok()
@@ -1657,6 +1829,7 @@ async fn compact_short_term_if_needed(
             let summary = resp.text.trim();
             if !summary.is_empty() {
                 short_term.replace_oldest_with_summary(session_id, summary.to_string(), to_summarize).await;
+                short_term.increment_compaction_count(session_id).await;
                 tracing::debug!(session_id, to_summarize, "Short-term memory compacted");
                 // Promote summary to long-term memory (spec 06)
                 if let Some(client) = long_term_client {
@@ -1758,11 +1931,13 @@ pub(crate) async fn run_message_via_llm(
     human_input_store: Option<HumanInputStore>,
     delegation_tx: Option<mpsc::Sender<DelegationRequest>>,
     task_completion_registry: Option<TaskCompletionRegistry>,
+    agent_profile_cache: Option<AgentProfileCache>,
+    task_usage_store: Option<std::sync::Arc<TaskUsageStore>>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!(error = %e, "LLM task: store open failed");
+            tracing::error!(task_id = %task_id, error_kind = "store_open", error = %e, "LLM task: store open failed");
             notify_task_completion(&task_completion_registry, task_id).await;
             return;
         }
@@ -1863,7 +2038,10 @@ pub(crate) async fn run_message_via_llm(
 
     // Agent profile: name, personality, rules, can/cannot (persisted in data_dir/agent_profile.json)
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
-    let agent_profile = AgentProfile::load(data_dir);
+    let agent_profile = match &agent_profile_cache {
+        Some(cache) => get_or_load_agent_profile(data_dir, cache).await,
+        None => AgentProfile::load(data_dir),
+    };
     let profile_block = agent_profile.format_for_prompt();
     if !profile_block.is_empty() {
         context_prefix.push_str(&profile_block);
@@ -1990,6 +2168,22 @@ pub(crate) async fn run_message_via_llm(
         .unwrap_or_else(|| llm_timeout_secs.min(300));
 
     'tool_rounds: loop {
+        // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
+        if let Some(ref store) = task_usage_store {
+            let (session_tokens, session_cost) = store.get_session(&session_id).await.unwrap_or((0, 0.0));
+            if let Some(max_cost) = std::env::var("AKASHA_MAX_COST_PER_SESSION_USD").ok().and_then(|s| s.parse::<f64>().ok()) {
+                if max_cost > 0.0 && session_cost >= max_cost {
+                    reply_text = "Budget dépassé pour cette session (AKASHA_MAX_COST_PER_SESSION_USD). Démarrez une nouvelle session ou augmentez le plafond.".to_string();
+                    break 'tool_rounds;
+                }
+            }
+            if let Some(max_tokens) = std::env::var("AKASHA_MAX_TOKENS_PER_SESSION").ok().and_then(|s| s.parse::<u64>().ok()) {
+                if max_tokens > 0 && session_tokens >= max_tokens {
+                    reply_text = "Quota de tokens dépassé pour cette session (AKASHA_MAX_TOKENS_PER_SESSION). Démarrez une nouvelle session ou augmentez le plafond.".to_string();
+                    break 'tool_rounds;
+                }
+            }
+        }
         let request = CompletionRequest {
             prompt: format!("{}{}", current_prompt, tool_instruction),
             max_tokens: Some(max_tokens),
@@ -2072,7 +2266,14 @@ pub(crate) async fn run_message_via_llm(
             break;
         } else {
             match tokio::time::timeout(remaining, stream_join).await {
-                Ok(Ok(Ok(resp))) => resp.text.trim().to_string(),
+                Ok(Ok(Ok(resp))) => {
+                    if let Some(ref store) = task_usage_store {
+                        let tokens = resp.usage.as_ref().map(|u| u.prompt_tokens + u.completion_tokens).unwrap_or(0);
+                        let cost = resp.cost_usd.unwrap_or(0.0);
+                        store.add(task_id, &session_id, tokens, cost).await;
+                    }
+                    resp.text.trim().to_string()
+                }
                 Ok(Ok(Err(e))) => {
                     tracing::warn!(error = %e, "LLM completion failed");
                     reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
@@ -2128,6 +2329,89 @@ pub(crate) async fn run_message_via_llm(
                         break 'tool_rounds;
                     }
                 }
+                // Phase 3.1: tools in require_approval need user confirmation before execution.
+                if exec.policy.requires_approval(&actual_tool) {
+                    match &human_input_store {
+                        Some(store) => {
+                            const APPROVAL_TIMEOUT_SECS: u64 = 300;
+                            // Redact write-like tool args entirely; truncate others to avoid leaking secrets/blobs.
+                            const MAX_APPROVAL_ARG_LEN: usize = 80;
+                            let args_preview: String = if matches!(actual_tool.as_str(), "apply_patch" | "edit_file" | "write_file") {
+                                "[redacted]".to_string()
+                            } else {
+                                let truncated: Vec<String> = args.iter()
+                                    .take(3)
+                                    .map(|a| if a.chars().count() > MAX_APPROVAL_ARG_LEN {
+                                        format!("{}…", a.chars().take(MAX_APPROVAL_ARG_LEN).collect::<String>())
+                                    } else {
+                                        a.clone()
+                                    })
+                                    .collect();
+                                let suffix = if args.len() > 3 { format!(" … ({} args)", args.len()) } else { String::new() };
+                                truncated.join(" ") + &suffix
+                            };
+                            let question = format!("Approuver l'action : {} — {} ?", actual_tool, args_preview);
+                            let choices = vec!["Approuver".to_string(), "Refuser".to_string()];
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            let pending = PendingHumanInput {
+                                question: question.clone(),
+                                context: format!("Outil sensible (nécessite confirmation) : {}", actual_tool),
+                                choices: Some(choices.clone()),
+                                response_tx: tx,
+                            };
+                            {
+                                let mut g = store.write().await;
+                                g.insert(task_id, pending);
+                            }
+                            let payload = serde_json::json!({
+                                "task_id": task_id.to_string(),
+                                "question": question,
+                                "context": format!("Outil : {}", actual_tool),
+                                "choices": choices,
+                                "tool_approval": true
+                            });
+                            let _ = bus.send(
+                                EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload)).with_correlation(task_id),
+                            );
+                            let granted = match tokio::time::timeout(
+                                std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS),
+                                rx,
+                            ).await {
+                                Ok(Ok(reply)) => reply.trim().eq_ignore_ascii_case("Approuver"),
+                                _ => {
+                                    // Timeout or channel error: remove stale pending entry to avoid it staying forever.
+                                    {
+                                        let mut g = store.write().await;
+                                        g.remove(&task_id);
+                                    }
+                                    let expired_payload = serde_json::json!({
+                                        "task_id": task_id.to_string(),
+                                        "tool": actual_tool,
+                                    });
+                                    let _ = bus.send(
+                                        EventEnvelope::new(EventType::ToolApprovalExpired, Some(expired_payload)).with_correlation(task_id),
+                                    );
+                                    false
+                                }
+                            };
+                            if !granted {
+                                tool_results.push("Action refusée par l'utilisateur (approbation requise).".to_string());
+                                let payload = serde_json::json!({
+                                    "tool": actual_tool,
+                                    "approved": false
+                                });
+                                let _ = bus.send(
+                                    EventEnvelope::new(EventType::ToolInvoked, Some(payload)).with_correlation(task_id),
+                                );
+                                continue;
+                            }
+                        }
+                        None => {
+                            tool_results.push("Action nécessitant approbation impossible (human_input_store indisponible).".to_string());
+                            continue;
+                        }
+                    }
+                }
                 let (success, res) = if actual_tool == "ask_user" {
                     // Human in the loop: register pending request, emit event, wait for user reply.
                     match &human_input_store {
@@ -2171,8 +2455,16 @@ pub(crate) async fn run_message_via_llm(
                                     rx,
                                 ).await {
                                     Ok(Ok(reply)) => (true, format!("[ask_user] User replied: {}", reply)),
-                                    Ok(Err(_)) => (false, "[ask_user] Channel closed.".to_string()),
-                                    Err(_) => (false, format!("[ask_user] Timeout after {}s; no user reply.", HUMAN_INPUT_TIMEOUT_SECS)),
+                                    Ok(Err(_)) => {
+                                        let mut g = store.write().await;
+                                        g.remove(&task_id);
+                                        (false, "[ask_user] Channel closed.".to_string())
+                                    }
+                                    Err(_) => {
+                                        let mut g = store.write().await;
+                                        g.remove(&task_id);
+                                        (false, format!("[ask_user] Timeout after {}s; no user reply.", HUMAN_INPUT_TIMEOUT_SECS))
+                                    }
                                 }
                             }
                         }
@@ -2291,7 +2583,8 @@ pub(crate) async fn run_message_via_llm(
                     "skill": if &actual_tool != name { Some(name.as_str()) } else { None::<&str> },
                     "args": redacted_args,
                     "result_preview": if res.len() > 300 { format!("{}...", &res[..300]) } else { res.clone() },
-                    "success": success
+                    "success": success,
+                    "explanation": serde_json::Value::Null
                 });
                 let _ = bus.send(
                     EventEnvelope::new(EventType::ToolInvoked, Some(payload)).with_correlation(task_id),
@@ -2386,6 +2679,7 @@ pub(crate) async fn run_message_via_llm(
         let heuristic_set: std::collections::HashSet<String> = heuristic_facts.iter().cloned().collect();
         let sem = extract_semaphore();
         let data_dir_for_extract = data_dir.to_path_buf();
+        let agent_profile_cache_for_extract = agent_profile_cache.clone();
         tokio::spawn(async move {
             let _permit = match sem.try_acquire() {
                 Ok(p) => p,
@@ -2458,13 +2752,21 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
                 }
             }
             if !agent_updates.is_empty() {
-                let mut profile = AgentProfile::load(&data_dir_for_extract);
+                let data_dir_extract = data_dir_for_extract.clone();
+                let cache = agent_profile_cache_for_extract.clone();
+                let mut profile = match &cache {
+                    Some(c) => get_or_load_agent_profile(&data_dir_extract, c).await,
+                    None => AgentProfile::load(&data_dir_for_extract),
+                };
                 for (kind, value) in agent_updates {
                     profile.apply_extracted(&kind, value);
                 }
                 if let Err(e) = profile.save(&data_dir_for_extract) {
                     tracing::warn!(error = %e, "Failed to save agent profile");
                 } else {
+                    if let Some(c) = &cache {
+                        set_agent_profile_cache(c, profile).await;
+                    }
                     tracing::info!("Agent profile updated from conversation");
                 }
             }
@@ -2495,6 +2797,28 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
         )
         .with_correlation(task_id),
     );
+    // Phase 3.3: when task ends with an error-like outcome, emit TaskEscalatedToHuman for UI banner / retry.
+    let reply_lower = reply_text.to_lowercase();
+    let is_error_outcome = reply_lower.contains("sorry, i couldn't")
+        || reply_lower.contains("timed out")
+        || reply_lower.contains("timeout")
+        || reply_lower.contains("budget dépassé")
+        || reply_lower.contains("quota de tokens")
+        || reply_lower.contains("loop detected")
+        || reply_lower.contains("refusée par l'utilisateur")
+        || reply_lower.contains("action refusée");
+    if is_error_outcome {
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::TaskEscalatedToHuman,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "reason": reply_text.chars().take(500).collect::<String>()
+                })),
+            )
+            .with_correlation(task_id),
+        );
+    }
     let _ = bus.send(
         EventEnvelope::new(
             EventType::TaskCompleted,
@@ -2543,16 +2867,53 @@ pub async fn handle_api(
     long_term_client: Option<LongTermMemoryClient>,
     human_input_store: Option<HumanInputStore>,
     user_rag_store: &crate::user_rag::SharedUserRagStore,
+    agent_profile_cache: &AgentProfileCache,
+    update_cache: &UpdateCheckCache,
+    task_usage_store: &TaskUsageStore,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+
+    // CSRF protection: reject state-changing requests that originate from a non-local web page.
+    // Browsers include an Origin header on cross-origin requests; same-origin or non-browser clients
+    // (curl, CLI) typically do not. Allowing only localhost/tauri origins for mutating methods blocks
+    // attacks from malicious web pages opened in the same browser as the Tauri app.
+    if matches!(method, "POST" | "PUT" | "DELETE" | "PATCH") {
+        if let Some(origin) = headers.get("origin") {
+            let origin = origin.trim();
+            let is_local = origin == "null"
+                || origin.starts_with("http://localhost")
+                || origin.starts_with("http://127.0.0.1")
+                || origin.starts_with("https://localhost")
+                || origin.starts_with("https://127.0.0.1")
+                || origin.starts_with("tauri://")
+                || origin.starts_with("https://tauri.localhost");
+            if !is_local {
+                tracing::warn!(origin = %origin, method = %method, path = %path, "CSRF: rejected request from non-local origin");
+                return json_response("403 Forbidden", r#"{"error":"origin_not_allowed"}"#);
+            }
+        }
+    }
 
     if method == "GET" && (path == "/" || path.is_empty()) {
         return json_response("200 OK", r#"{"status":"ok"}"#);
     }
 
+    // GET /api/update/status — cached result of latest.json from Akasha_app (for UI update banner)
+    if method == "GET" && path == "/api/update/status" {
+        let status = update_cache.read().await;
+        let body = serde_json::json!({
+            "remote_version": status.remote_version,
+            "download_url": status.download_url,
+            "release_notes_url": status.release_notes_url,
+            "last_checked_at": status.last_checked_at.map(|t| t.to_rfc3339()),
+            "error": status.error,
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+
     // GET /api/agent-profile — read agent profile (name, personality, rules, can_do, cannot_do)
     if method == "GET" && path == "/api/agent-profile" {
-        let profile = AgentProfile::load(data_dir);
+        let profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         let body_json = serde_json::json!({
             "name": profile.name,
             "personality": profile.personality,
@@ -2565,7 +2926,7 @@ pub async fn handle_api(
 
     // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, rules?, can_do?, cannot_do? }
     if method == "POST" && path == "/api/agent-profile" {
-        let mut profile = AgentProfile::load(data_dir);
+        let mut profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         if let Some(body) = body.as_deref() {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
                 if let Some(s) = v.get("name").and_then(|x| x.as_str()) {
@@ -2586,7 +2947,10 @@ pub async fn handle_api(
             }
         }
         match profile.save(data_dir) {
-            Ok(()) => return json_response("200 OK", r#"{"ok":true,"message":"Profil agent mis à jour"}"#),
+            Ok(()) => {
+                set_agent_profile_cache(agent_profile_cache, profile).await;
+                return json_response("200 OK", r#"{"ok":true,"message":"Profil agent mis à jour"}"#);
+            }
             Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
         }
     }
@@ -2963,8 +3327,13 @@ pub async fn handle_api(
             return json_response("400 Bad Request", &body.to_string());
         }
         let correlation_id = uuid::Uuid::new_v4();
+        let priority = body_json
+            .as_ref()
+            .and_then(|v| v.get("priority").and_then(|p| p.as_str()))
+            .map(|s| if s.eq_ignore_ascii_case("high") { TaskPriority::UserHigh } else { TaskPriority::UserNormal })
+            .unwrap_or(TaskPriority::UserNormal);
         // User talks only to orchestrator: ack immediately, delegate to conversation worker in background (non-blocking). session_id used for short-term memory.
-        match main_agent.handle_message(store_path, &message, correlation_id, true, &session_id, image_data_urls) {
+        match main_agent.handle_message(store_path, &message, correlation_id, true, &session_id, image_data_urls, priority) {
             Ok(task_id) => {
                 let body = serde_json::json!({
                     "ack": true,
@@ -3047,7 +3416,7 @@ pub async fn handle_api(
                     return json_response("404 Not Found", &serde_json::json!({ "error": "no_pending_human_input", "task_id": id.to_string() }).to_string());
                 }
                 if method == "GET" {
-                    return get_task_status(store_path, progress, id).await;
+                    return get_task_status(store_path, progress, task_usage_store, id).await;
                 }
             }
         }
@@ -3314,6 +3683,7 @@ pub async fn handle_api(
                                 fallback_success: v.fallback_success,
                                 last_success: v.last_success,
                                 last_failure: v.last_failure,
+                                latency_samples: std::collections::VecDeque::new(),
                             })).collect())
                             .unwrap_or_default(),
                         Err(_) => llm_router.metrics().list(),
@@ -3325,6 +3695,13 @@ pub async fn handle_api(
             llm_router.metrics().list()
         };
         let body = serde_json::to_string(&list).unwrap_or_else(|_| "{}".to_string());
+        return json_response("200 OK", &body);
+    }
+
+    // GET /api/metrics/summary — metrics with latency percentiles (P50, P95, P99) per provider/model
+    if method == "GET" && path == "/api/metrics/summary" {
+        let summary = llm_router.metrics().summary();
+        let body = serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_string());
         return json_response("200 OK", &body);
     }
 
@@ -3674,7 +4051,7 @@ async fn cancel_task(
     json_response("200 OK", &body.to_string())
 }
 
-async fn get_task_status(store_path: &Path, progress: &ProgressCache, id: Uuid) -> String {
+async fn get_task_status(store_path: &Path, progress: &ProgressCache, task_usage_store: &TaskUsageStore, id: Uuid) -> String {
     let store = match TaskStore::open(store_path) {
         Ok(s) => s,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
@@ -3728,13 +4105,16 @@ async fn get_task_status(store_path: &Path, progress: &ProgressCache, id: Uuid) 
             }
         }
     }
+    let (tokens_used, cost_usd) = task_usage_store.get_task(id).await.unwrap_or((0, 0.0));
     let body = serde_json::json!({
         "task_id": task.id.to_string(),
         "status": task.status.as_str(),
         "assigned_agent": task.assigned_agent,
         "created_at": task.created_at.to_rfc3339(),
         "updated_at": task.updated_at.to_rfc3339(),
-        "progress": progress_list
+        "progress": progress_list,
+        "tokens_used": tokens_used,
+        "cost_usd": cost_usd
     });
     json_response("200 OK", &body.to_string())
 }

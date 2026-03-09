@@ -132,6 +132,71 @@ body {
   flex-shrink: 0;
 }
 
+/* Update banner (new version available) */
+.update-banner {
+  flex-shrink: 0;
+  padding: 0.75rem 1.5rem;
+  background: var(--akasha-bg-surface);
+  border-bottom: 1px solid var(--akasha-border);
+}
+.update-banner-inner {
+  max-width: 60rem;
+  margin: 0 auto;
+}
+.update-banner-text {
+  margin: 0 0 0.75rem;
+  font-size: 0.9375rem;
+  color: var(--akasha-text);
+}
+.update-banner-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+.update-banner-download-btn {
+  padding: 0.35rem 0.75rem;
+  background: var(--akasha-accent);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+.update-banner-download-btn:hover {
+  background: var(--akasha-accent-hover);
+}
+.update-banner-dismiss-btn {
+  padding: 0.35rem 0.75rem;
+  background: transparent;
+  color: var(--akasha-text-muted);
+  border: 1px solid var(--akasha-border);
+  border-radius: 4px;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+.update-banner-dismiss-btn:hover {
+  color: var(--akasha-text);
+  border-color: var(--akasha-text-dim);
+}
+.update-banner-steps {
+  font-size: 0.8125rem;
+  color: var(--akasha-text-muted);
+}
+.update-banner-steps summary {
+  cursor: pointer;
+  margin-bottom: 0.35rem;
+}
+.update-banner-steps ol {
+  margin: 0.35rem 0 0 1.25rem;
+  padding: 0;
+}
+.update-banner-steps code {
+  font-size: 0.8em;
+  background: var(--akasha-bg-elevated);
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+}
+
 .logo {
   margin: 0;
   font-size: 1.5rem;
@@ -782,6 +847,25 @@ body {
   margin: 0 1.5rem 0.5rem;
   font-size: 0.875rem;
   color: var(--akasha-text, #fafafa);
+}
+.global-human-input-banner {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.human-input-banner-action {
+  margin-left: auto;
+  padding: 0.35rem 0.75rem;
+  background: var(--akasha-accent, #6366f1);
+  color: var(--akasha-bg, #0f0f12);
+  border: none;
+  border-radius: 4px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.human-input-banner-action:hover {
+  filter: brightness(1.1);
 }
 
 .chat-inline-human-reply {

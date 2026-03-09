@@ -378,7 +378,8 @@ async fn process_root_task(
                 Some(serde_json::json!({
                     "task_id": child_id.to_string(),
                     "parent_id": root_task_id.to_string(),
-                    "agent": agent_type
+                    "agent": agent_type,
+                    "delegation_reason": serde_json::Value::Null
                 })),
             )
             .with_correlation(root_task_id),
