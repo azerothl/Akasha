@@ -46,6 +46,78 @@ pub async fn set_agent_profile_cache(cache: &AgentProfileCache, profile: AgentPr
     *g = Some(profile);
 }
 
+/// Cached result of fetching api/latest.json from the Akasha_app site (version, download_url, etc.).
+#[derive(Default, Clone)]
+pub struct UpdateStatus {
+    pub remote_version: String,
+    pub download_url: String,
+    pub release_notes_url: Option<String>,
+    pub last_checked_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub error: Option<String>,
+}
+
+pub type UpdateCheckCache = Arc<RwLock<UpdateStatus>>;
+
+pub fn new_update_check_cache() -> UpdateCheckCache {
+    Arc::new(RwLock::new(UpdateStatus::default()))
+}
+
+/// Fetch {base}/api/latest.json and update the cache. Does not crash on network/parse errors.
+pub async fn run_update_check_once(cache: &UpdateCheckCache, base_url: &str) {
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{}/api/latest.json", base);
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let mut g = cache.write().await;
+            g.error = Some(e.to_string());
+            g.last_checked_at = Some(chrono::Utc::now());
+            return;
+        }
+    };
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            let mut g = cache.write().await;
+            g.error = Some(e.to_string());
+            g.last_checked_at = Some(chrono::Utc::now());
+            return;
+        }
+    };
+    if !resp.status().is_success() {
+        let mut g = cache.write().await;
+        g.error = Some(format!("HTTP {}", resp.status()));
+        g.last_checked_at = Some(chrono::Utc::now());
+        return;
+    }
+    let data: serde_json::Value = match resp.json().await {
+        Ok(d) => d,
+        Err(e) => {
+            let mut g = cache.write().await;
+            g.error = Some(e.to_string());
+            g.last_checked_at = Some(chrono::Utc::now());
+            return;
+        }
+    };
+    let mut g = cache.write().await;
+    g.remote_version = data
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0.0.0")
+        .to_string();
+    g.download_url = data
+        .get("download_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    g.release_notes_url = data.get("release_notes_url").and_then(|v| v.as_str()).map(String::from);
+    g.last_checked_at = Some(chrono::Utc::now());
+    g.error = None;
+}
+
 /// Request for a sub-agent delegation (from a worker to the orchestrator). Reply is sent on reply_tx.
 pub struct DelegationRequest {
     pub requesting_task_id: Uuid,
@@ -2586,11 +2658,25 @@ pub async fn handle_api(
     human_input_store: Option<HumanInputStore>,
     user_rag_store: &crate::user_rag::SharedUserRagStore,
     agent_profile_cache: &AgentProfileCache,
+    update_cache: &UpdateCheckCache,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
     if method == "GET" && (path == "/" || path.is_empty()) {
         return json_response("200 OK", r#"{"status":"ok"}"#);
+    }
+
+    // GET /api/update/status — cached result of latest.json from Akasha_app (for UI update banner)
+    if method == "GET" && path == "/api/update/status" {
+        let status = update_cache.read().await;
+        let body = serde_json::json!({
+            "remote_version": status.remote_version,
+            "download_url": status.download_url,
+            "release_notes_url": status.release_notes_url,
+            "last_checked_at": status.last_checked_at.map(|t| t.to_rfc3339()),
+            "error": status.error,
+        });
+        return json_response("200 OK", &body.to_string());
     }
 
     // GET /api/agent-profile — read agent profile (name, personality, rules, can_do, cannot_do)

@@ -144,6 +144,7 @@ Fichiers créés dans le data_dir (ex. `%LOCALAPPDATA%\akasha` sous Windows) :
 | `OLLAMA_HOST` | URL Ollama si pas de `llm_router.yaml` | http://localhost:11434 |
 | `OPENROUTER_API_KEY` | Clé API OpenRouter (permet d’utiliser openrouter en primary même sans section `providers.openrouter`) | — |
 | `OPENAI_API_KEY` | Clé API OpenAI (idem pour `providers.openai`) | — |
+| `AKASHA_APP_BASE_URL` | URL de base du site des releases (pour la vérification de mise à jour : `api/latest.json`) | https://azerothl.github.io/Akasha_app |
 
 **PowerShell** : `$env:AKASHA_TELEGRAM_ENABLED="1"` (et non `set`).  
 **CMD** : `set AKASHA_TELEGRAM_ENABLED=1`.
@@ -169,6 +170,10 @@ Pour les **formats, types de données et exemples** de chaque fichier, voir [35_
 | **Modèles LLM embarqués** (Qwen, Baguettotron) | Cache Hugging Face | Par défaut : **`~/.cache/huggingface/hub`** (Linux/macOS) ou **`%USERPROFILE%\.cache\huggingface\hub`** (Windows). Rediriger avec **`HF_HOME`** (ex. `HF_HOME=%LOCALAPPDATA%\akasha\hf_cache`). |
 
 Le **data_dir** s'affiche avec `akasha paths` ; par défaut : `~/.local/share/akasha` (Linux/macOS) ou `%LOCALAPPDATA%\akasha` (Windows), sauf si `AKASHA_DATA_DIR` est défini.
+
+### Mise à jour
+
+L’application vérifie la dernière version disponible sur le site Akasha (**api/latest.json**) au démarrage du daemon et environ **deux fois par jour** tant que le daemon tourne. Si une mise à jour est disponible, l’interface (Tauri) affiche une bannière proposant de **télécharger** la nouvelle version et rappelle les **étapes pour valider les configs** après installation : vérifier `llm_router.yaml`, `tools_policy.yaml`, `connectors.env` ; relancer le daemon si besoin (`akasha stop` puis `akasha start`) ; lancer `akasha doctor` pour vérifier. L’URL utilisée pour la vérification est configurable via **`AKASHA_APP_BASE_URL`** (défaut : `https://azerothl.github.io/Akasha_app`). En ligne de commande, `akasha update check` affiche si une nouvelle version est disponible ; `akasha update install` ouvre la page de téléchargement dans le navigateur.
 
 ---
 

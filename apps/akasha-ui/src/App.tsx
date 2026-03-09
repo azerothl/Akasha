@@ -60,6 +60,20 @@ function formatDurationSec(sec: number): string {
   return s > 0 ? `${m} min ${s} s` : `${m} min`;
 }
 
+/** Compare version strings "X.Y.Z"; returns true if remote > current. */
+function versionGt(remote: string, current: string): boolean {
+  const parse = (s: string) => {
+    const t = s.replace(/^v/, "").trim();
+    const parts = t.split(".").map((p) => parseInt(p, 10) || 0);
+    return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0] as const;
+  };
+  const [r0, r1, r2] = parse(remote);
+  const [c0, c1, c2] = parse(current);
+  if (r0 !== c0) return r0 > c0;
+  if (r1 !== c1) return r1 > c1;
+  return r2 > c2;
+}
+
 /** Parse "TOOL: ask_user" + JSON from assistant message text. Returns null if not present or invalid. */
 function parseAskUserMessage(
   text: string
@@ -209,6 +223,13 @@ function App() {
   /** Whether the "pending actions" notification dropdown is open. */
   const [pendingNotifOpen, setPendingNotifOpen] = useState(false);
   const pendingNotifRef = useRef<HTMLDivElement>(null);
+  /** Update banner: when set, a new version is available. Null when dismissed or no update. */
+  const [updateBannerInfo, setUpdateBannerInfo] = useState<{
+    remote_version: string;
+    current_version: string;
+    download_url: string;
+    release_notes_url?: string | null;
+  } | null>(null);
 
   const checkHealth = useCallback(async () => {
     try {
@@ -226,6 +247,38 @@ function App() {
     const id = setInterval(checkHealth, 10000);
     return () => clearInterval(id);
   }, [checkHealth]);
+
+  // Check for app update (daemon caches latest.json; compare with app version)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [currentVersion, status] = await Promise.all([
+          invoke<string>("get_app_version"),
+          invoke<{ remote_version?: string; download_url?: string; error?: string | null }>("get_update_status", {
+            port: DAEMON_PORT,
+          }),
+        ]);
+        if (cancelled) return;
+        if (status?.error || !status?.remote_version) return;
+        const remote = (status.remote_version ?? "0.0.0").trim();
+        const current = (currentVersion ?? "0.0.0").trim();
+        if (versionGt(remote, current) && status.download_url) {
+          setUpdateBannerInfo({
+            remote_version: remote,
+            current_version: current,
+            download_url: status.download_url,
+            release_notes_url: (status as { release_notes_url?: string | null }).release_notes_url,
+          });
+        }
+      } catch {
+        /* daemon may be down; skip banner */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Fetch all pending human-input (agent questions) on load and periodically, so user sees them after relaunch or when popup was missed.
   const fetchPendingHumanInput = useCallback(async () => {
@@ -1187,6 +1240,46 @@ function App() {
   return (
     <div className="app">
       <a href="#main-content" className="skip-link">Aller au contenu principal</a>
+      {updateBannerInfo && (
+        <div className="update-banner" role="region" aria-label="Mise à jour disponible">
+          <div className="update-banner-inner">
+            <p className="update-banner-text">
+              Une nouvelle version <strong>{updateBannerInfo.remote_version}</strong> est disponible (vous avez {updateBannerInfo.current_version}). Téléchargez et installez-la, puis suivez les étapes ci-dessous pour valider vos configs.
+            </p>
+            <div className="update-banner-actions">
+              <button
+                type="button"
+                className="update-banner-download-btn"
+                onClick={async () => {
+                  try {
+                    await invoke("open_url", { url: updateBannerInfo!.download_url });
+                  } catch (e) {
+                    console.error(e);
+                  }
+                }}
+              >
+                Télécharger
+              </button>
+              <button
+                type="button"
+                className="update-banner-dismiss-btn"
+                onClick={() => setUpdateBannerInfo(null)}
+              >
+                Plus tard
+              </button>
+            </div>
+            <details className="update-banner-steps">
+              <summary>Étapes pour valider les configs après mise à jour</summary>
+              <ol>
+                <li>Téléchargez et installez la dernière version depuis le lien ci-dessus.</li>
+                <li>Vérifiez vos fichiers de config (<code>llm_router.yaml</code>, <code>tools_policy.yaml</code>, <code>connectors.env</code>) dans le répertoire de données Akasha.</li>
+                <li>Si le daemon tourne, relancez-le : <code>akasha stop</code> puis <code>akasha start</code>.</li>
+                <li>Vérifiez que tout est correct avec <code>akasha doctor</code>.</li>
+              </ol>
+            </details>
+          </div>
+        </div>
+      )}
       <header className="header">
         <h1 className="logo">Akasha</h1>
         <p className="tagline">Local-first AI assistant · 1–7 : onglets</p>

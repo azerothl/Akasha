@@ -13,7 +13,7 @@ use futures_util::future::Either;
 use tracing::{error, info, warn};
 
 use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask};
-use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, RestartTx};
+use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
@@ -345,6 +345,7 @@ impl Daemon {
             let progress = new_progress_cache();
             let events = new_events_cache();
             let agent_profile_cache = new_agent_profile_cache();
+            let update_check_cache = new_update_check_cache();
             let process_registry = new_process_registry();
             let human_input_store = new_human_input_store();
             let user_rag_store = crate::user_rag::UserRagStore::new_shared(&data_dir);
@@ -489,6 +490,23 @@ impl Daemon {
                 }
             });
 
+            // Update check: fetch api/latest.json at start and every 12h (for UI update banner)
+            const UPDATE_CHECK_INTERVAL_SECS: u64 = 43_200; // 12 hours
+            tokio::spawn({
+                let cache = update_check_cache.clone();
+                let base_url = std::env::var("AKASHA_APP_BASE_URL")
+                    .unwrap_or_else(|_| "https://azerothl.github.io/Akasha_app".to_string());
+                async move {
+                    run_update_check_once(&cache, &base_url).await;
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(UPDATE_CHECK_INTERVAL_SECS));
+                    loop {
+                        interval.tick().await;
+                        run_update_check_once(&cache, &base_url).await;
+                    }
+                }
+            });
+
             // Phase 4: Discord bot (optional)
             let discord_enabled = if std::env::var("AKASHA_DISCORD_ENABLED").as_deref() == Ok("1") {
                 if let Ok(v) = &vault {
@@ -617,6 +635,7 @@ impl Daemon {
                 let agent_profile_cache = agent_profile_cache.clone();
                 // Body reading is done inside the spawned task so slow/large uploads
                                 // don't block the accept loop from handling other connections or signals.
+                                let update_check_cache_clone = update_check_cache.clone();
                                 tokio::spawn(async move {
                                     const INITIAL_READ: usize = 65536;
                                     const MAX_BODY: usize = 10 * 1024 * 1024; // 10 MiB for POST body (e.g. documents in base64)
@@ -667,6 +686,7 @@ impl Daemon {
                                         Some(human_input_store),
                                         &user_rag_store,
                                         &agent_profile_cache,
+                                        &update_check_cache_clone,
                                     )
                                     .await;
                                     let _ = stream.write_all(response.as_bytes()).await;

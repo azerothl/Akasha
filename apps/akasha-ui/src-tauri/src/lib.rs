@@ -398,6 +398,47 @@ async fn get_doctor(port: Option<u16>) -> Result<serde_json::Value, String> {
     Ok(json)
 }
 
+/// GET /api/update/status — cached latest version info from daemon (for update banner).
+#[tauri::command]
+async fn get_update_status(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/update/status", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// App version (from Cargo.toml) for update comparison.
+#[tauri::command]
+fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Open URL in default browser. Only allows https URLs for known update/release hosts.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    let url = url.trim();
+    if !url.starts_with("https://") {
+        return Err("Only https URLs are allowed".to_string());
+    }
+    if let Ok(parsed) = url.parse::<url::Url>() {
+        let host = parsed.host_str().unwrap_or("");
+        if !host.ends_with("github.io") && !host.ends_with("github.com") && host != "ollama.com" {
+            return Err("URL host not allowed for security".to_string());
+        }
+    }
+    let _ = match std::env::consts::OS {
+        "windows" => std::process::Command::new("cmd").args(["/c", "start", "", url]).status(),
+        "macos" => std::process::Command::new("open").arg(url).status(),
+        _ => std::process::Command::new("xdg-open").arg(url).status(),
+    };
+    Ok(())
+}
+
 /// POST /api/diagnostic/advice — get advice from health (for slash /advice).
 #[tauri::command]
 async fn get_advice(health: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -881,6 +922,9 @@ pub fn run() {
             get_router_models,
             restart_daemon,
             get_doctor,
+            get_update_status,
+            get_app_version,
+            open_url,
             get_advice,
             get_plugins,
             reload_plugins,
