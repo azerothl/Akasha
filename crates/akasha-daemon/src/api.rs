@@ -301,7 +301,7 @@ pub async fn run_delegation_handler(
                 continue;
             }
         };
-        let _ = tracing::info_span!(
+        let span_guard = tracing::info_span!(
             "delegation",
             requesting_task_id = %req.requesting_task_id,
             agent_type = %req.agent_type
@@ -360,6 +360,9 @@ pub async fn run_delegation_handler(
             let _ = req.reply_tx.send(Err("store insert failed".to_string()));
             continue;
         }
+        // Drop the span guard before any await point: EnteredSpan is not Send and must
+        // not be held across await boundaries in a Send future.
+        drop(span_guard);
         // Register a completion notifier *before* sending to conv_tx so the worker can notify
         // even if it completes before the spawned waiter calls notified().
         let notify = Arc::new(tokio::sync::Notify::new());
@@ -2331,10 +2334,21 @@ pub(crate) async fn run_message_via_llm(
                     match &human_input_store {
                         Some(store) => {
                             const APPROVAL_TIMEOUT_SECS: u64 = 300;
-                            let args_preview: String = if args.len() > 3 {
-                                format!("{}... ({} args)", args.iter().take(3).cloned().collect::<Vec<_>>().join(" "), args.len())
+                            // Redact write-like tool args entirely; truncate others to avoid leaking secrets/blobs.
+                            const MAX_APPROVAL_ARG_LEN: usize = 80;
+                            let args_preview: String = if matches!(actual_tool.as_str(), "apply_patch" | "edit_file" | "write_file") {
+                                "[redacted]".to_string()
                             } else {
-                                args.join(" ")
+                                let truncated: Vec<String> = args.iter()
+                                    .take(3)
+                                    .map(|a| if a.chars().count() > MAX_APPROVAL_ARG_LEN {
+                                        format!("{}…", a.chars().take(MAX_APPROVAL_ARG_LEN).collect::<String>())
+                                    } else {
+                                        a.clone()
+                                    })
+                                    .collect();
+                                let suffix = if args.len() > 3 { format!(" … ({} args)", args.len()) } else { String::new() };
+                                truncated.join(" ") + &suffix
                             };
                             let question = format!("Approuver l'action : {} — {} ?", actual_tool, args_preview);
                             let choices = vec!["Approuver".to_string(), "Refuser".to_string()];
@@ -2364,7 +2378,12 @@ pub(crate) async fn run_message_via_llm(
                                 rx,
                             ).await {
                                 Ok(Ok(reply)) => reply.trim().eq_ignore_ascii_case("Approuver"),
-                                _ => false,
+                                _ => {
+                                    // Timeout or channel error: remove stale pending entry to avoid it staying forever.
+                                    let mut g = store.write().await;
+                                    g.remove(&task_id);
+                                    false
+                                }
                             };
                             if !granted {
                                 tool_results.push("Action refusée par l'utilisateur (approbation requise).".to_string());
@@ -2427,8 +2446,16 @@ pub(crate) async fn run_message_via_llm(
                                     rx,
                                 ).await {
                                     Ok(Ok(reply)) => (true, format!("[ask_user] User replied: {}", reply)),
-                                    Ok(Err(_)) => (false, "[ask_user] Channel closed.".to_string()),
-                                    Err(_) => (false, format!("[ask_user] Timeout after {}s; no user reply.", HUMAN_INPUT_TIMEOUT_SECS)),
+                                    Ok(Err(_)) => {
+                                        let mut g = store.write().await;
+                                        g.remove(&task_id);
+                                        (false, "[ask_user] Channel closed.".to_string())
+                                    }
+                                    Err(_) => {
+                                        let mut g = store.write().await;
+                                        g.remove(&task_id);
+                                        (false, format!("[ask_user] Timeout after {}s; no user reply.", HUMAN_INPUT_TIMEOUT_SECS))
+                                    }
                                 }
                             }
                         }
@@ -2836,6 +2863,27 @@ pub async fn handle_api(
     task_usage_store: &TaskUsageStore,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+
+    // CSRF protection: reject state-changing requests that originate from a non-local web page.
+    // Browsers include an Origin header on cross-origin requests; same-origin or non-browser clients
+    // (curl, CLI) typically do not. Allowing only localhost/tauri origins for mutating methods blocks
+    // attacks from malicious web pages opened in the same browser as the Tauri app.
+    if matches!(method, "POST" | "PUT" | "DELETE" | "PATCH") {
+        if let Some(origin) = headers.get("origin") {
+            let origin = origin.trim();
+            let is_local = origin == "null"
+                || origin.starts_with("http://localhost")
+                || origin.starts_with("http://127.0.0.1")
+                || origin.starts_with("https://localhost")
+                || origin.starts_with("https://127.0.0.1")
+                || origin.starts_with("tauri://")
+                || origin.starts_with("https://tauri.localhost");
+            if !is_local {
+                tracing::warn!(origin = %origin, method = %method, path = %path, "CSRF: rejected request from non-local origin");
+                return json_response("403 Forbidden", r#"{"error":"origin_not_allowed"}"#);
+            }
+        }
+    }
 
     if method == "GET" && (path == "/" || path.is_empty()) {
         return json_response("200 OK", r#"{"status":"ok"}"#);

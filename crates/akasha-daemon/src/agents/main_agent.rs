@@ -40,10 +40,24 @@ impl OrchestratorSender {
     }
     pub fn send(&self, task: OrchestratorTask, priority: TaskPriority) {
         let tx = match priority {
-            TaskPriority::UserHigh => &self.high_tx,
-            TaskPriority::UserNormal | TaskPriority::Scheduled => &self.normal_tx,
+            TaskPriority::UserHigh => self.high_tx.clone(),
+            TaskPriority::UserNormal | TaskPriority::Scheduled => self.normal_tx.clone(),
         };
-        let _ = tx.try_send(task);
+        if let Err(e) = tx.try_send(task) {
+            match e {
+                mpsc::error::TrySendError::Full(task) => {
+                    tracing::warn!(task_id = %task.task_id, "orchestrator channel full; sending asynchronously to avoid dropping task");
+                    tokio::spawn(async move {
+                        if let Err(send_err) = tx.send(task).await {
+                            tracing::error!(task_id = %send_err.0.task_id, "orchestrator channel closed; task dropped");
+                        }
+                    });
+                }
+                mpsc::error::TrySendError::Closed(task) => {
+                    tracing::error!(task_id = %task.task_id, "orchestrator channel closed; task dropped");
+                }
+            }
+        }
     }
 }
 

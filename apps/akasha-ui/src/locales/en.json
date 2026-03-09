@@ -28,6 +28,7 @@
   "events.schedule_updated": "Recurrence updated",
   "events.schedule_deleted": "Recurrence deleted",
   "update.available": "New version available",
+  "update.banner_label": "Update available",
   "update.you_have": "you have",
   "update.banner_install": "Download and install it, then follow the steps below to validate your config.",
   "update.download": "Download",
