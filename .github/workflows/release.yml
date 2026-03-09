@@ -198,9 +198,14 @@ jobs:
             while IFS= read -r -d '' f; do RELEASE_FILES+=("$f"); done < <(find release/tauri -type f -print0)
           fi
 
+          git fetch --tags
+          PREV_TAG=$(git tag -l 'v*' --sort=-v:refname | sed -n '2p')
+          NOTES_OPT="--generate-notes"
+          [ -n "$PREV_TAG" ] && NOTES_OPT="$NOTES_OPT --notes-start-tag $PREV_TAG"
+
           gh release create "$VERSION" \
             --title "$VERSION" \
-            --notes "Précompilés Akasha (CLI + daemon + TUI) + application desktop (Tauri). Décompressez l'archive pour votre OS puis lancez \`akasha init\` puis \`akasha start\`. L'app desktop est dans le dossier tauri/ (installateurs .msi/.exe, .dmg, .deb/.AppImage). Voir spec/distribution.md." \
+            $NOTES_OPT \
             "${RELEASE_FILES[@]}"
 
   # Notify the site repo (azerothl/Akasha_app) so it can update releases page and optionally fetch artifacts.
@@ -212,6 +217,7 @@ jobs:
     steps:
       - name: Trigger Akasha_app deployment via repository_dispatch
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ github.ref_name }}
           REPO_OWNER: azerothl
           REPO_APP: Akasha_app
@@ -222,6 +228,8 @@ jobs:
             echo "AKASHA_APP_DISPATCH_TOKEN not set, skipping deployment."
             exit 0
           fi
+          RELEASE_BODY=$(gh release view "$VERSION" --json body -q .body)
+          DESCRIPTION="${RELEASE_BODY:-Release $VERSION}"
           RELEASE_DATE=$(date -u +%Y-%m-%d)
           # release_type: major for x.0.0, minor for x.y.0, patch otherwise
           case "$VERSION" in
@@ -231,7 +239,6 @@ jobs:
           esac
           RELEASE_URL="https://github.com/${AKASHA_REPO}/releases/tag/${VERSION}"
           TITLE="$VERSION"
-          DESCRIPTION="Précompilés Akasha (CLI + daemon + TUI) + doc. Décompressez l'archive pour votre OS puis lancez akasha init puis akasha start."
           DOWNLOAD_URL="$RELEASE_URL"
           # Build JSON payload (changelog empty; Akasha_app can enrich from release notes if needed)
           PAYLOAD=$(jq -n \
