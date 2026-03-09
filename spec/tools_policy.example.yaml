@@ -49,3 +49,8 @@ command_timeout_secs: 60
 # allowed_skill_install_hosts: []
 # Exemple (GitHub + GitLab + votre domaine) : allowed_skill_install_hosts: ["github.com", "raw.githubusercontent.com", "gitlab.com", "mon-entreprise.com"]
 # Pour autoriser toute URL HTTPS : allowed_skill_install_hosts: ["*"]
+
+# Optionnel : outils pour lesquels une confirmation utilisateur est requise avant exécution (human-in-the-loop).
+# Quand un outil est dans cette liste, le daemon affiche un résumé d'intention (ex. « Écrire dans le fichier X », « Exécuter la commande Y »)
+# et n'exécute qu'après approbation explicite (bouton Approuver / Refuser dans l'UI).
+# require_approval: [write_file, run_command, run_in_container, apply_patch, edit_file]

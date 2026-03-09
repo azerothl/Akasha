@@ -28,6 +28,16 @@ Pour l'interface TUI : `cargo build -p akasha-cli -p akasha-tui`
 
 ---
 
+## 2.1 Premier pas (après init)
+
+1. **Envoyer un message** : lancer l’UI Tauri ou la TUI, ouvrir l’onglet Chat, saisir un message et envoyer. La tâche apparaît dans l’onglet Tâches avec sa progression.
+2. **Créer une récurrence** : via l’API (schedules) ou un message du type « rappelle-moi chaque jour de … » selon les capacités configurées.
+3. **Consulter l’onglet Tâches** : voir l’état des tâches, les sous-tâches, et répondre aux questions en attente (human-in-the-loop) depuis la bannière ou le modal.
+
+En premier lancement, l’UI peut proposer un guide court (premier objectif) ; option « Ne plus afficher » (localStorage).
+
+---
+
 ## 3. Commandes exposées à l'utilisateur
 
 ### Daemon
