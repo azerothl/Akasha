@@ -10,7 +10,7 @@ Documentation accessible depuis l'interface TUI et l'interface web. Elle décrit
 
 - **Rust** 1.70+ ([rustup](https://rustup.rs))
 - **Node.js** 18+ et npm (pour l'UI Tauri)
-- Optionnel : **Ollama** pour les réponses LLM locales
+- **Modèles locaux** : au choix lors de l’init — **Ollama** (recommandé si installé : GPU, nombreux modèles) ou **modèles locaux Akasha** (Qwen3 0.6B, Baguettotron intégrés, sans installation). Plus tard, un modèle entraîné spécifiquement pour Akasha pourra s’ajouter à l’offre locale.
 
 ---
 
@@ -42,8 +42,8 @@ Pour l'interface TUI : `cargo build -p akasha-cli -p akasha-tui`
 
 | Commande | Description |
 |----------|-------------|
-| `akasha init` | Assistant interactif : provider LLM, vault, connecteurs (Telegram, Slack, Discord), génère `llm_router.yaml` et `connectors.env` |
-| `akasha init --defaults` | Initialisation minimale sans questions (Ollama uniquement, aucun connecteur) |
+| `akasha init` | Assistant interactif : choix du provider LLM (**Ollama** ou **modèles locaux Akasha** Qwen3 0.6B / Baguettotron, puis OpenAI/OpenRouter), vault, connecteurs ; génère `llm_router.yaml` et `connectors.env`. Si vous choisissez Ollama et qu’il n’est pas détecté, l’app peut ouvrir la page de téléchargement et proposer de télécharger un modèle léger par défaut une fois Ollama installé. |
+| `akasha init --defaults` | Initialisation minimale sans questions : Ollama si disponible (avec modèle par défaut), sinon modèles locaux Akasha ; aucun connecteur |
 
 ### Diagnostic
 
