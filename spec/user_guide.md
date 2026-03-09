@@ -145,6 +145,7 @@ Fichiers créés dans le data_dir (ex. `%LOCALAPPDATA%\akasha` sous Windows) :
 | `OPENROUTER_API_KEY` | Clé API OpenRouter (permet d’utiliser openrouter en primary même sans section `providers.openrouter`) | — |
 | `OPENAI_API_KEY` | Clé API OpenAI (idem pour `providers.openai`) | — |
 | `AKASHA_APP_BASE_URL` | URL de base du site des releases (pour la vérification de mise à jour : `api/latest.json`) | https://azerothl.github.io/Akasha_app |
+| `AKASHA_LANG` | Langue de l’interface TUI (prioritaire sur `LANG`). Valeurs commençant par `en` = anglais, sinon français | (détection via `LANG` / `LC_ALL`) |
 
 **PowerShell** : `$env:AKASHA_TELEGRAM_ENABLED="1"` (et non `set`).  
 **CMD** : `set AKASHA_TELEGRAM_ENABLED=1`.
@@ -192,6 +193,8 @@ akasha start --foreground
 Le daemon écoute par défaut sur le port **3876** (`AKASHA_PORT`).
 
 ### Interface terminal (TUI)
+
+La langue d’affichage de la TUI (onglets, messages, aide) suit la variable d’environnement **`AKASHA_LANG`** si elle est définie, sinon **`LANG`** ou **`LC_ALL`**. Une valeur commençant par `en` (ex. `en`, `en_US`) affiche l’interface en anglais ; sinon le français est utilisé.
 
 ```bash
 cargo build -p akasha-cli -p akasha-tui

@@ -99,8 +99,70 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: staging/
 
+  build-tauri:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: akasha-ui-linux
+          - os: macos-latest
+            artifact_name: akasha-ui-macos
+          - os: windows-latest
+            artifact_name: akasha-ui-windows
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+          cache: "npm"
+          cache-dependency-path: apps/akasha-ui/package-lock.json
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (Tauri)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/akasha-ui/src-tauri/target
+          key: ${{ runner.os }}-tauri-${{ hashFiles('apps/akasha-ui/src-tauri/Cargo.lock', 'apps/akasha-ui/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-tauri-
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Ensure Tauri icon exists
+        run: |
+          node scripts/gen-ico.js
+
+      - name: Install npm dependencies
+        working-directory: apps/akasha-ui
+        run: npm ci
+
+      - name: Build Tauri app
+        working-directory: apps/akasha-ui
+        run: npx tauri build
+
+      - name: Upload Tauri bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: apps/akasha-ui/src-tauri/target/release/bundle/
+
   release:
-    needs: build
+    needs: [build, build-tauri]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -118,17 +180,28 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          mkdir -p release
+          mkdir -p release release/tauri
 
           for dir in artifacts/akasha-*; do
+            [ -d "$dir" ] || continue
             name=$(basename "$dir")
             (cd "$dir" && zip -r "../../release/${name}.zip" .)
           done
 
+          for dir in artifacts/akasha-ui-*; do
+            [ -d "$dir" ] || continue
+            cp -r "$dir"/* release/tauri/ 2>/dev/null || true
+          done
+
+          RELEASE_FILES=(release/*.zip)
+          if [ -d release/tauri ] && [ -n "$(ls -A release/tauri 2>/dev/null)" ]; then
+            while IFS= read -r -d '' f; do RELEASE_FILES+=("$f"); done < <(find release/tauri -type f -print0)
+          fi
+
           gh release create "$VERSION" \
             --title "$VERSION" \
-            --notes "Précompilés Akasha (CLI + daemon + TUI) + doc (docs/user_guide.md). Décompressez l’archive pour votre OS puis lancez \`akasha init\` puis \`akasha start\`. Voir spec/distribution.md." \
-            release/*.zip
+            --notes "Précompilés Akasha (CLI + daemon + TUI) + application desktop (Tauri). Décompressez l'archive pour votre OS puis lancez \`akasha init\` puis \`akasha start\`. L'app desktop est dans le dossier tauri/ (installateurs .msi/.exe, .dmg, .deb/.AppImage). Voir spec/distribution.md." \
+            "${RELEASE_FILES[@]}"
 
   # Notify the site repo (azerothl/Akasha_app) so it can update releases page and optionally fetch artifacts.
   # Payload aligned with Akasha_app Update Release Notes workflow (version, release_date, title, description, download_url, changelog, tag, release_url, repository).

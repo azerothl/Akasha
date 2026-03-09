@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback, useRef, lazy, Suspense } from "react";
+import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCached, setCached } from "./useTabCache";
+import { useI18n } from "./useI18n";
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -9,17 +10,12 @@ const THEME_STORAGE_KEY = "akasha_theme";
 
 export type ThemeId = "dark" | "dark_nord" | "light" | "light_latte";
 
-const THEMES: { id: ThemeId; label: string }[] = [
-  { id: "dark", label: "Sombre (défaut)" },
-  { id: "dark_nord", label: "Sombre Nord" },
-  { id: "light", label: "Clair" },
-  { id: "light_latte", label: "Clair Latte" },
-];
+const THEME_IDS: ThemeId[] = ["dark", "dark_nord", "light", "light_latte"];
 
 function loadSavedTheme(): ThemeId {
   try {
     const s = localStorage.getItem(THEME_STORAGE_KEY);
-    if (s && THEMES.some((t) => t.id === s)) return s as ThemeId;
+    if (s && THEME_IDS.includes(s as ThemeId)) return s as ThemeId;
   } catch {
     /* ignore */
   }
@@ -27,29 +23,6 @@ function loadSavedTheme(): ThemeId {
 }
 
 type Tab = "chat" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
-
-/** French label for Activity event types (delegation, progress, etc.). */
-function eventTypeLabel(typ: string): string {
-  const labels: Record<string, string> = {
-    user_request_received: "Demande reçue",
-    acknowledgment_sent: "Accusé de réception envoyé",
-    task_created: "Tâche créée",
-    task_started: "Tâche démarrée",
-    task_decomposed: "Tâche décomposée (délégation à des sous-agents)",
-    sub_agent_spawned: "Délégué à un agent spécialisé",
-    progress_update: "Progression",
-    task_progress_updated: "Progression mise à jour",
-    task_step_completed: "Étape terminée",
-    task_completed: "Tâche terminée",
-    task_failed: "Tâche en échec",
-    task_run_created: "Run planifié créé",
-    task_run_scheduled: "Run planifié",
-    schedule_created: "Récurrence créée",
-    schedule_updated: "Récurrence mise à jour",
-    schedule_deleted: "Récurrence supprimée",
-  };
-  return labels[typ] ?? typ;
-}
 
 /** Format duration in seconds as "X min Y s" or "Y s". */
 function formatDurationSec(sec: number): string {
@@ -131,8 +104,25 @@ interface ModelMetricsEntry {
 type RouterMetrics = Record<string, ModelMetricsEntry>;
 
 function App() {
+  const { t, locale, setLocale } = useI18n();
+  const themes = useMemo(
+    () =>
+      THEME_IDS.map((id) => ({
+        id,
+        label: t("theme." + id),
+      })),
+    [t]
+  );
   const [tab, setTab] = useState<Tab>("chat");
   const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
+  const eventLabel = useCallback(
+    (typ: string) => {
+      const key = "events." + typ;
+      const s = t(key);
+      return s === key ? typ : s;
+    },
+    [t]
+  );
   const [health, setHealth] = useState<HealthState | null>(null);
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState<
@@ -193,7 +183,7 @@ function App() {
     channel_context?: string | null;
   } | null>(null);
   const [scheduleDetailError, setScheduleDetailError] = useState<string | null>(null);
-  const [calendarRunsCollapsed, setCalendarRunsCollapsed] = useState(false);
+  const [_calendarRunsCollapsed, _setCalendarRunsCollapsed] = useState(false);
   type CalendarGridView = "day" | "week" | "month";
   const [calendarGridView, setCalendarGridView] = useState<CalendarGridView>("week");
   const [calendarGridEvents, setCalendarGridEvents] = useState<Array<{ at: string; task_id: string; type: string; status: string; label?: string }>>([]);
@@ -1132,7 +1122,7 @@ function App() {
       setLoading(false);
       if (ack?.session_id) setSessionId(ack.session_id);
       const ackText = ack?.message ?? "Je prends en compte votre demande.";
-      setMessages((prev) => [...prev, { role: "assistant", text: ackText + (ack?.task_id ? " Tu peux suivre l'avancement dans l'onglet Tâches." : "") }]);
+      setMessages((prev) => [...prev, { role: "assistant", text: ackText + (ack?.task_id ? " Tu peux suivre l'avancement dans Tâches." : "") }]);
       if (ack?.task_id) {
         setRunningTaskChips((prev) => ({ ...prev, [ack.task_id]: { pct: 0, message: "en cours…" } }));
         setRunningTaskEvents((prev) => ({ ...prev, [ack.task_id]: [] }));
@@ -1226,7 +1216,7 @@ function App() {
             delete next[taskId];
             return next;
           });
-          setMessages((prev) => [...prev, { role: "assistant", text: "Délai dépassé. Consultez l'onglet Tâches." }]);
+          setMessages((prev) => [...prev, { role: "assistant", text: "Délai dépassé. Consultez Tâches." }]);
         };
         pollUntilDone();
       }
@@ -1244,7 +1234,7 @@ function App() {
         <div className="update-banner" role="region" aria-label="Mise à jour disponible">
           <div className="update-banner-inner">
             <p className="update-banner-text">
-              Une nouvelle version <strong>{updateBannerInfo.remote_version}</strong> est disponible (vous avez {updateBannerInfo.current_version}). Téléchargez et installez-la, puis suivez les étapes ci-dessous pour valider vos configs.
+              {t("update.available")} <strong>{updateBannerInfo.remote_version}</strong> ({t("update.you_have")} {updateBannerInfo.current_version}). {t("update.banner_install")}
             </p>
             <div className="update-banner-actions">
               <button
@@ -1258,23 +1248,22 @@ function App() {
                   }
                 }}
               >
-                Télécharger
+                {t("update.download")}
               </button>
               <button
                 type="button"
                 className="update-banner-dismiss-btn"
                 onClick={() => setUpdateBannerInfo(null)}
               >
-                Plus tard
+                {t("update.later")}
               </button>
             </div>
             <details className="update-banner-steps">
-              <summary>Étapes pour valider les configs après mise à jour</summary>
+              <summary>{t("update.steps_title")}</summary>
               <ol>
-                <li>Téléchargez et installez la dernière version depuis le lien ci-dessus.</li>
-                <li>Vérifiez vos fichiers de config (<code>llm_router.yaml</code>, <code>tools_policy.yaml</code>, <code>connectors.env</code>) dans le répertoire de données Akasha.</li>
-                <li>Si le daemon tourne, relancez-le : <code>akasha stop</code> puis <code>akasha start</code>.</li>
-                <li>Vérifiez que tout est correct avec <code>akasha doctor</code>.</li>
+                <li>{t("update.step1")}</li>
+                <li>{t("update.step2")}</li>
+                <li>{t("update.step3")}</li>
               </ol>
             </details>
           </div>
@@ -1295,22 +1284,22 @@ function App() {
           )}
         </div>
         {Object.keys(pendingHumanInput).length > 0 && (
-          <div ref={pendingNotifRef} className="header-pending-actions" role="region" aria-label="Demandes d'action en attente">
+          <div ref={pendingNotifRef} className="header-pending-actions" role="region" aria-label={t("pending_actions.region_label")}>
             <button
               type="button"
               className="header-pending-actions-trigger"
               onClick={() => setPendingNotifOpen((o) => !o)}
               aria-expanded={pendingNotifOpen}
               aria-haspopup="true"
-              title="Demandes en attente de votre réponse"
+              title={t("pending_actions.title")}
             >
               <span className="header-pending-actions-icon" aria-hidden>⚠</span>
               <span className="header-pending-actions-badge">{Object.keys(pendingHumanInput).length}</span>
-              <span className="header-pending-actions-label">Action requise</span>
+              <span className="header-pending-actions-label">{t("pending_actions.action_required")}</span>
             </button>
             {pendingNotifOpen && (
               <div className="header-pending-actions-dropdown" role="menu">
-                <p className="header-pending-actions-dropdown-title">Demandes des agents</p>
+                <p className="header-pending-actions-dropdown-title">{t("pending_actions.agents")}</p>
                 {Object.entries(pendingHumanInput).map(([taskId, p]) => (
                   <div key={taskId} className="header-pending-actions-item">
                     <p className="header-pending-actions-item-question" title={p.question}>
@@ -1326,7 +1315,7 @@ function App() {
                         setPendingNotifOpen(false);
                       }}
                     >
-                      Répondre
+                      {t("human_input.reply")}
                     </button>
                   </div>
                 ))}
@@ -1343,9 +1332,9 @@ function App() {
             className={tab === "chat" ? "active" : ""}
             onClick={() => setTab("chat")}
           >
-            Chat
-          </button>
-          <button
+{t("tabs.chat")}
+            </button>
+            <button
             role="tab"
             aria-selected={tab === "router"}
             aria-controls="panel-router"
@@ -1353,9 +1342,9 @@ function App() {
             className={tab === "router" ? "active" : ""}
             onClick={() => setTab("router")}
           >
-            Routeur
-          </button>
-          <button
+{t("tabs.router")}
+            </button>
+            <button
             role="tab"
             aria-selected={tab === "docs"}
             aria-controls="panel-docs"
@@ -1363,7 +1352,7 @@ function App() {
             className={tab === "docs" ? "active" : ""}
             onClick={() => setTab("docs")}
           >
-            Documentation
+            {t("tabs.docs")}
           </button>
           <button
             role="tab"
@@ -1373,9 +1362,9 @@ function App() {
             className={tab === "tasks" ? "active" : ""}
             onClick={() => setTab("tasks")}
           >
-            Tâches
-          </button>
-          <button
+{t("tabs.tasks")}
+            </button>
+            <button
             role="tab"
             aria-selected={tab === "calendar"}
             aria-controls="panel-calendar"
@@ -1383,9 +1372,9 @@ function App() {
             className={tab === "calendar" ? "active" : ""}
             onClick={() => setTab("calendar")}
           >
-            Calendrier
-          </button>
-          <button
+{t("tabs.calendar")}
+            </button>
+            <button
             role="tab"
             aria-selected={tab === "memory"}
             aria-controls="panel-memory"
@@ -1393,9 +1382,9 @@ function App() {
             className={tab === "memory" ? "active" : ""}
             onClick={() => setTab("memory")}
           >
-            Mémoire
-          </button>
-          <button
+{t("tabs.memory")}
+            </button>
+            <button
             role="tab"
             aria-selected={tab === "settings"}
             aria-controls="panel-settings"
@@ -1403,8 +1392,8 @@ function App() {
             className={tab === "settings" ? "active" : ""}
             onClick={() => setTab("settings")}
           >
-            Paramètres
-          </button>
+{t("tabs.settings")}
+            </button>
         </nav>
       </header>
 
@@ -1491,7 +1480,7 @@ function App() {
                   {loading && (
                     <div className="chat-loader" aria-hidden>
                       <span className="chat-loader-spinner" />
-                      <span>Envoi en cours…</span>
+                      <span>{t("chat.sending")}</span>
                     </div>
                   )}
                   {Object.keys(runningTaskChips).length > 0 && (
@@ -1547,8 +1536,8 @@ function App() {
                     <div id="subagents-detail" className="chat-subagents-detail" role="region" aria-label="Actions des sous-agents">
                       {Object.entries(runningTaskEvents).filter(([, ev]) => ev.length > 0).length === 0 ? (
                         <p className="chat-subagents-empty">
-                          Aucune étape reçue pour le moment. Les événements (délégation, sous-agents, progression) s’afficheront ici au fur et à mesure.
-                        </p>
+                          {t("chat.no_events_yet")}
+                          </p>
                       ) : (
                         Object.entries(runningTaskEvents).map(([rootTaskId, events]) => {
                           if (events.length === 0) return null;
@@ -1582,15 +1571,15 @@ function App() {
                                     return Object.entries(byTask).map(([tid, evs]) => (
                                       <div key={`${rootTaskId}-${tid}`} className="chat-subagents-task">
                                         <div className="chat-subagents-task-id">
-                                          {tid === rootTaskId ? `Tâche racine #${tid.slice(-8)}` : `Sous-tâche #${tid.slice(-8)}`}
+                                          {tid === rootTaskId ? `${t("chat.root_task")}${tid.slice(-8)}` : `${t("chat.sub_task")}${tid.slice(-8)}`}
                                         </div>
                                         <ul className="chat-subagents-events">
                                           {evs.map((ev, idx) => (
                                             <li key={`${tid}-${idx}`} className="chat-subagents-event" data-type={ev.event_type}>
-                                              <span className="chat-subagents-event-type">{eventTypeLabel(ev.event_type)}</span>
-                                              {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload && (
-                                                <span className="chat-subagents-event-agent"> → {(ev.payload as { agent?: string }).agent}</span>
-                                              )}
+                                              <span className="chat-subagents-event-type">{eventLabel(ev.event_type)}</span>
+                                              {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload ? (
+                                                <span className="chat-subagents-event-agent"> → {String((ev.payload as { agent?: string }).agent ?? "")}</span>
+                                              ) : null}
                                               {ev.at && <span className="chat-subagents-event-at"> {ev.at.slice(0, 19)}</span>}
                                             </li>
                                           ))}
@@ -1818,7 +1807,7 @@ function App() {
             {routerLoading && (
               <p className="panel-loading" aria-busy="true">
                 <span className="panel-loading-spinner" aria-hidden />
-                Chargement…
+                {t("common.loading")}
               </p>
             )}
             {routerError && (
@@ -1856,7 +1845,7 @@ function App() {
                 </div>
                 {Object.keys(routerMetrics).length === 0 ? (
                   <p className="empty-state">
-                    Aucune requête enregistrée. Envoyez un message dans le Chat
+                    {t("chat.empty")}
                     pour générer des métriques.
                   </p>
                 ) : (
@@ -1907,11 +1896,11 @@ function App() {
             aria-labelledby="tab-docs"
             className="panel docs-panel"
           >
-            <h2 className="panel-title">Documentation utilisateur</h2>
+            <h2 className="panel-title">{t("docs.title")}</h2>
             {docLoading && (
               <p className="panel-loading" aria-busy="true">
                 <span className="panel-loading-spinner" aria-hidden />
-                Chargement…
+                {t("common.loading")}
               </p>
             )}
             {docError && (
@@ -1947,7 +1936,7 @@ function App() {
             aria-labelledby="tab-tasks"
             className="panel activity-panel"
           >
-            <h2 className="panel-title">Tâches (Task Center)</h2>
+            <h2 className="panel-title">{t("tasks.title")}</h2>
             <button
               type="button"
               className="refresh-btn"
@@ -1960,7 +1949,7 @@ function App() {
             {tasksLoading && (
               <p className="panel-loading" aria-busy="true">
                 <span className="panel-loading-spinner" aria-hidden />
-                Chargement…
+                {t("common.loading")}
               </p>
             )}
             {!tasksLoading && (
@@ -1968,7 +1957,7 @@ function App() {
                 <div className="activity-tasks-block">
                   <h3>Liste des tâches</h3>
                   {tasksList.length === 0 ? (
-                    <p className="empty-state">Aucune tâche. Envoyez un message dans le Chat.</p>
+                    <p className="empty-state">{t("tasks.empty")}</p>
                   ) : (
                     <ul className="activity-task-list" role="list">
                       {tasksList.map((t, i) => (
@@ -1999,13 +1988,13 @@ function App() {
                   <h3>Événements</h3>
                   {tasksEvents.length === 0 ? (
                     <p className="empty-state">
-                      {tasksList.length > 0 ? "Aucun événement pour cette tâche." : "Sélectionnez une tâche."}
+                      {tasksList.length > 0 ? t("tasks.no_events") : t("tasks.select_task")}
                     </p>
                   ) : (
                     <ul className="activity-events-list" role="list">
                       {tasksEvents.map((e, i) => (
                         <li key={i}>
-                          <strong>{eventTypeLabel(e.event_type)}</strong> @ {e.at}
+                          <strong>{eventLabel(e.event_type)}</strong> @ {e.at}
                           {e.payload != null && (
                             <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
                           )}
@@ -2026,8 +2015,8 @@ function App() {
             aria-labelledby="tab-calendar"
             className="panel calendar-panel"
           >
-            <h2 className="panel-title">Calendrier</h2>
-            <div className="calendar-subtabs" role="tablist" aria-label="Sous-onglets Calendrier">
+            <h2 className="panel-title">{t("calendar.title")}</h2>
+            <div className="calendar-subtabs" role="tablist" aria-label={t("calendar.subtabs_label")}>
               <button
                 type="button"
                 role="tab"
@@ -2044,7 +2033,7 @@ function App() {
                 className={calendarSubTab === "recent" ? "active" : ""}
                 onClick={() => setCalendarSubTab("recent")}
               >
-                Tâches récentes
+                {t("calendar.recent")}
               </button>
               <button
                 type="button"
@@ -2053,7 +2042,7 @@ function App() {
                 className={calendarSubTab === "schedules" ? "active" : ""}
                 onClick={() => setCalendarSubTab("schedules")}
               >
-                Tâches récurrentes
+                {t("calendar.recurring")}
               </button>
             </div>
             <button
@@ -2067,7 +2056,7 @@ function App() {
             </button>
             {calendarLoading && (
               <p className="loading-inline" aria-busy="true">
-                Chargement…
+                {t("common.loading")}
               </p>
             )}
             {!calendarLoading && calendarSubTab === "grid" && (
@@ -2154,7 +2143,7 @@ function App() {
                       });
                       const weekDayNames = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"];
                       return (
-                        <table className="calendar-grid-table calendar-grid-week" role="grid" aria-label="Calendrier semaine">
+                        <table className="calendar-grid-table calendar-grid-week" role="grid" aria-label={t("calendar.grid_week")}>
                           <thead>
                             <tr>
                               <th scope="col" className="calendar-grid-col-hour">Heure</th>
@@ -2262,7 +2251,7 @@ function App() {
               <div className="calendar-recent-panel">
                 <h3 className="calendar-runs-header">Lancements récents</h3>
                 {taskRuns.length === 0 ? (
-                  <p className="empty-state">Aucun run.</p>
+                  <p className="empty-state">{t("calendar.no_runs")}</p>
                 ) : (
                   <div className="calendar-runs-list-wrap">
                     {(() => {
@@ -2327,9 +2316,9 @@ function App() {
             )}
             {!calendarLoading && calendarSubTab === "schedules" && (
               <div className="calendar-schedules-panel">
-                <h3>Tâches récurrentes</h3>
+                <h3>{t("calendar.recurring")}</h3>
                 {schedules.length === 0 ? (
-                  <p className="empty-state">Aucune récurrence. Créez-en via l'API ou un outil.</p>
+                  <p className="empty-state">{t("calendar.no_schedules")}</p>
                 ) : (
                   <ul className="calendar-schedule-list" role="list">
                     {schedules.map((s) => (
@@ -2401,7 +2390,7 @@ function App() {
                             {(() => {
                               const run = taskRuns.find((r) => r.task_id === calendarSelectedTaskId);
                               const parent = run?.schedule_id ? schedules.find((s) => s.id === run.schedule_id) : null;
-                              return parent ? <p><strong>Récurrence parente:</strong> {parent.name || parent.id.slice(0, 8)}</p> : null;
+                              return parent ? <p><strong>{t("calendar.parent_schedule")}</strong> {parent.name || parent.id.slice(0, 8)}</p> : null;
                             })()}
                             {calendarTaskDetail.updated_at && (
                               <p><strong>Dernière mise à jour:</strong> {new Date(calendarTaskDetail.updated_at).toLocaleString()}</p>
@@ -2429,7 +2418,7 @@ function App() {
                             })()}
                             {calendarTaskDetail.progress && calendarTaskDetail.progress.length > 0 && (
                               <div className="task-detail-progress">
-                                <strong>Progression / étapes:</strong>
+                                <strong>{t("calendar.progression_steps")}</strong>
                                 <p className="task-detail-progress-hint">
                                   Les lignes « État » sont des étapes intermédiaires ; le pourcentage indique l’avancement.
                                 </p>
@@ -2451,7 +2440,7 @@ function App() {
                             )}
                           </>
                         ) : (
-                          <p className="loading-inline">Chargement…</p>
+                          <p className="loading-inline">{t("common.loading")}</p>
                         )}
                       </div>
                     </div>
@@ -2504,7 +2493,7 @@ function App() {
                             )}
                             {(scheduleDetail.channel_context ?? scheduleDetail.description) ? (
                               <div className="task-detail-reply">
-                                <strong>Demande envoyée aux agents à chaque itération:</strong>
+                                <strong>{t("calendar.channel_context")}</strong>
                                 <div className="task-detail-reply-content markdown-rendered">
                                   <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
                                     {scheduleDetail.channel_context ?? scheduleDetail.description}
@@ -2512,14 +2501,14 @@ function App() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="muted">Aucune demande configurée pour cette récurrence (channel_context et description vides).</p>
+                              <p className="muted">{t("calendar.no_channel")}</p>
                             )}
                             {scheduleDetail.rrule && (
                               <p className="schedule-rrule"><strong>Règle:</strong> <code>{scheduleDetail.rrule}</code></p>
                             )}
                           </>
                         ) : (
-                          <p className="loading-inline">Chargement…</p>
+                          <p className="loading-inline">{t("common.loading")}</p>
                         )}
                       </div>
                     </div>
@@ -2535,7 +2524,7 @@ function App() {
             aria-labelledby="tab-memory"
             className="panel memory-panel"
           >
-            <h2 className="panel-title">Mémoire</h2>
+            <h2 className="panel-title">{t("memory.title")}</h2>
             <button
               type="button"
               className="refresh-btn"
@@ -2553,7 +2542,7 @@ function App() {
             {memoryLoading && (
               <p className="panel-loading" aria-busy="true">
                 <span className="panel-loading-spinner" aria-hidden />
-                Chargement…
+                {t("common.loading")}
               </p>
             )}
             {!memoryLoading && !memoryError && (
@@ -2616,9 +2605,9 @@ function App() {
                     className="memory-subpanel"
                   >
                     {!memoryLongTermAvailable ? (
-                      <p className="muted">Mémoire long terme non disponible (embeddings non configurés ou désactivés).</p>
+                      <p className="muted">{t("memory.long_unavailable")}</p>
                     ) : memoryLongTerm.length === 0 ? (
-                      <p className="empty-state">Aucune entrée en mémoire long terme.</p>
+                      <p className="empty-state">{t("memory.long_empty")}</p>
                     ) : (
                       <div className="memory-list-scroll">
                         <ul className="memory-long-term-list">
@@ -2667,9 +2656,9 @@ function App() {
             aria-labelledby="tab-settings"
             className="panel settings-panel"
           >
-            <h2 className="panel-title">Paramètres</h2>
+            <h2 className="panel-title">{t("settings.title")}</h2>
             <dl className="settings-list">
-              <dt>Thème</dt>
+              <dt>{t("settings.theme")}</dt>
               <dd>
                 <select
                   aria-label="Choisir le thème d’affichage"
@@ -2677,27 +2666,39 @@ function App() {
                   value={theme}
                   onChange={(e) => setThemeAndSave(e.target.value as ThemeId)}
                 >
-                  {THEMES.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.label}
+                  {themes.map((th) => (
+                    <option key={th.id} value={th.id}>
+                      {th.label}
                     </option>
                   ))}
                 </select>
-                <span className="settings-theme-hint">Thème par défaut enregistré.</span>
+                <span className="settings-theme-hint">{t("settings.theme_saved")}</span>
               </dd>
-              <dt>Port du daemon</dt>
+              <dt>{t("settings.daemon_port")}</dt>
               <dd>
-                <code>{DAEMON_PORT}</code> (défaut)
+                <code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})
               </dd>
-              <dt>Répertoire de données</dt>
+              <dt>{t("settings.language")}</dt>
+              <dd>
+                <select
+                  aria-label={t("settings.language")}
+                  className="settings-theme-select"
+                  value={locale}
+                  onChange={(e) => setLocale(e.target.value as "fr" | "en")}
+                >
+                  <option value="fr">Français</option>
+                  <option value="en">English</option>
+                </select>
+              </dd>
+              <dt>{t("settings.data_dir")}</dt>
               <dd>
                 <code>%LOCALAPPDATA%\akasha</code> (Windows) ou{" "}
                 <code>~/.local/share/akasha</code> (Linux/macOS)
               </dd>
             </dl>
-            <h3 className="settings-subtitle">Mes documents (RAG utilisateur)</h3>
+            <h3 className="settings-subtitle">{t("settings.user_rag_title")}</h3>
             <p className="settings-doc muted">
-              Les documents ajoutés ici sont indexés et utilisés par les agents pour répondre à vos questions. Formats supportés : texte (.txt, .md, .csv, .json).
+              {t("settings.user_rag_desc")}
             </p>
             {userRagError && (
               <p className="error-inline" role="alert">{userRagError}</p>
@@ -2732,11 +2733,11 @@ function App() {
               onClick={() => userRagFileInputRef.current?.click()}
               disabled={userRagLoading}
             >
-              Ajouter un document
+              {t("settings.add_document")}
             </button>
-            {userRagLoading && <p className="panel-loading" aria-busy="true">Chargement…</p>}
+            {userRagLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
             {!userRagLoading && userRagDocuments.length === 0 && (
-              <p className="empty-state">Aucun document. Cliquez sur « Ajouter un document » pour en ajouter.</p>
+              <p className="empty-state">{t("settings.no_documents")}</p>
             )}
             {!userRagLoading && userRagDocuments.length > 0 && (
               <ul className="settings-doc-list" role="list">
@@ -2757,16 +2758,14 @@ function App() {
                         }
                       }}
                     >
-                      Supprimer
+                      {t("settings.delete")}
                     </button>
                   </li>
                 ))}
               </ul>
             )}
             <p className="settings-doc">
-              Configuration : variables d’environnement <code>AKASHA_*</code>,{" "}
-              <code>OLLAMA_HOST</code>. Voir l’onglet Documentation pour le guide complet.
-            </p>
+              {t("settings.config_note")} </p>
           </section>
         )}
       </main>
