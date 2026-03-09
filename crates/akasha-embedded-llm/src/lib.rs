@@ -232,9 +232,17 @@ fn load_pipeline() -> Result<CandlePipeline> {
     let builder = TextGenerationPipelineBuilder::qwen3(Qwen3::Size0_6B)
         .temperature(0.3)
         .max_len(256);
+    // When cuda feature is enabled: try GPU first, fall back to CPU if no GPU or CUDA unavailable.
     #[cfg(feature = "cuda")]
-    let builder = builder.cuda(0);
     let pipeline = builder
+        .clone()
+        .cuda(0)
+        .build()
+        .or_else(|_| builder.cpu().build())
+        .map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
+    #[cfg(not(feature = "cuda"))]
+    let pipeline = builder
+        .cpu()
         .build()
         .map_err(|e| EmbeddedLlmError::Load(e.to_string()))?;
 
