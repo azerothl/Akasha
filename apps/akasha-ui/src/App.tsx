@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { getCached, setCached } from "./useTabCache";
+
+const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
 const DAEMON_PORT = 3876;
 const THEME_STORAGE_KEY = "akasha_theme";
@@ -350,7 +351,9 @@ function App() {
         port: DAEMON_PORT,
         period: routerMetricsPeriod === "all" ? undefined : routerMetricsPeriod,
       });
-      setRouterMetrics(data as RouterMetrics);
+      const metrics = data as RouterMetrics;
+      setRouterMetrics(metrics);
+      setCached("router", metrics);
     } catch (e) {
       setRouterError(String(e));
       setRouterMetrics(null);
@@ -360,7 +363,15 @@ function App() {
   }, [routerMetricsPeriod]);
 
   useEffect(() => {
-    if (tab === "router") fetchRouterMetrics();
+    if (tab !== "router") return;
+    const cached = getCached<RouterMetrics>("router");
+    if (cached != null) {
+      setRouterMetrics(cached);
+      setRouterLoading(false);
+      setRouterError(null);
+      return;
+    }
+    fetchRouterMetrics();
   }, [tab, fetchRouterMetrics]);
 
   const fetchDocs = useCallback(async () => {
@@ -369,6 +380,7 @@ function App() {
     try {
       const content = await invoke<string>("get_docs", { port: DAEMON_PORT });
       setDocContent(content);
+      setCached("docs", content);
     } catch (e) {
       setDocError(String(e));
       setDocContent(null);
@@ -378,7 +390,15 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (tab === "docs") fetchDocs();
+    if (tab !== "docs") return;
+    const cached = getCached<string>("docs");
+    if (cached != null) {
+      setDocContent(cached);
+      setDocLoading(false);
+      setDocError(null);
+      return;
+    }
+    fetchDocs();
   }, [tab, fetchDocs]);
 
   const fetchTasksList = useCallback(async () => {
@@ -393,6 +413,7 @@ function App() {
         .filter((t) => t.id);
       setTasksList(tasks);
       setTasksSelected((prev) => (prev >= tasks.length && tasks.length > 0 ? tasks.length - 1 : prev));
+      setCached("tasks", tasks);
     } catch {
       setTasksList([]);
     } finally {
@@ -426,8 +447,8 @@ function App() {
         invoke<{ schedules?: Array<{ id?: string; name?: string; enabled?: boolean; interval_seconds?: number }> }>("get_schedules", { port: DAEMON_PORT }),
         invoke<{ task_runs?: Array<{ id?: string; schedule_id?: string; task_id?: string; status?: string; planned_for?: string; started_at?: string; ended_at?: string; label?: string }> }>("get_task_runs", { port: DAEMON_PORT }),
       ]);
-      setSchedules((schedData?.schedules ?? []).map((s) => ({ id: s.id ?? "", name: s.name ?? "", enabled: s.enabled ?? false, interval_seconds: s.interval_seconds })));
-      setTaskRuns((runsData?.task_runs ?? []).map((r) => ({
+      const sched = (schedData?.schedules ?? []).map((s) => ({ id: s.id ?? "", name: s.name ?? "", enabled: s.enabled ?? false, interval_seconds: s.interval_seconds }));
+      const runs = (runsData?.task_runs ?? []).map((r) => ({
         id: r.id ?? "",
         schedule_id: r.schedule_id,
         task_id: r.task_id ?? "",
@@ -436,7 +457,10 @@ function App() {
         started_at: r.started_at,
         ended_at: r.ended_at,
         label: r.label,
-      })));
+      }));
+      setSchedules(sched);
+      setTaskRuns(runs);
+      setCached("calendar", { schedules: sched, taskRuns: runs });
     } catch {
       setSchedules([]);
       setTaskRuns([]);
@@ -481,7 +505,15 @@ function App() {
   }, [tab, fetchCalendarGridEvents]);
 
   useEffect(() => {
-    if (tab === "tasks") fetchTasksList();
+    if (tab !== "tasks") return;
+    const cached = getCached<Array<{ id: string; status: string }>>("tasks");
+    if (cached != null) {
+      setTasksList(cached);
+      setTasksSelected((prev) => (prev >= cached.length && cached.length > 0 ? cached.length - 1 : prev));
+      setTasksLoading(false);
+      return;
+    }
+    fetchTasksList();
   }, [tab, fetchTasksList]);
 
   useEffect(() => {
@@ -491,7 +523,15 @@ function App() {
   }, [tasksList, tasksSelected, fetchTasksEvents]);
 
   useEffect(() => {
-    if (tab === "calendar") fetchCalendar();
+    if (tab !== "calendar") return;
+    const cached = getCached<{ schedules: Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>; taskRuns: Array<{ id: string; schedule_id?: string; task_id: string; status: string; planned_for: string; started_at?: string; ended_at?: string; label?: string }> }>("calendar");
+    if (cached != null) {
+      setSchedules(cached.schedules);
+      setTaskRuns(cached.taskRuns);
+      setCalendarLoading(false);
+      return;
+    }
+    fetchCalendar();
   }, [tab, fetchCalendar]);
 
   const fetchMemory = useCallback(async () => {
@@ -508,9 +548,12 @@ function App() {
           port: DAEMON_PORT,
         }),
       ]);
-      setMemoryShortTerm(shortRes?.turns ?? []);
-      setMemoryLongTerm(longRes?.entries ?? []);
+      const short = shortRes?.turns ?? [];
+      const long = longRes?.entries ?? [];
+      setMemoryShortTerm(short);
+      setMemoryLongTerm(long);
       setMemoryLongTermAvailable(longRes?.long_term_available ?? false);
+      setCached("memory", { short, long, longTermAvailable: longRes?.long_term_available ?? false });
     } catch (e) {
       setMemoryError(String(e));
       setMemoryShortTerm([]);
@@ -522,7 +565,17 @@ function App() {
   }, [sessionId]);
 
   useEffect(() => {
-    if (tab === "memory") fetchMemory();
+    if (tab !== "memory") return;
+    const cached = getCached<{ short: Array<{ role: string; content: string }>; long: Array<{ id?: string; content: string; created_at: string; source: string }>; longTermAvailable: boolean }>("memory");
+    if (cached != null) {
+      setMemoryShortTerm(cached.short);
+      setMemoryLongTerm(cached.long);
+      setMemoryLongTermAvailable(cached.longTermAvailable);
+      setMemoryLoading(false);
+      setMemoryError(null);
+      return;
+    }
+    fetchMemory();
   }, [tab, fetchMemory]);
 
   const fetchScheduleReports = useCallback(async () => {
@@ -546,12 +599,14 @@ function App() {
         "get_user_rag_documents",
         { port: DAEMON_PORT }
       );
-      setUserRagDocuments((data?.documents ?? []).map((d) => ({
+      const docs = (data?.documents ?? []).map((d) => ({
         id: d.id ?? "",
         name: d.name ?? "",
         mime_type: d.mime_type ?? "",
         added_at: d.added_at ?? "",
-      })));
+      }));
+      setUserRagDocuments(docs);
+      setCached("userRag", docs);
     } catch (e) {
       setUserRagError(String(e));
       setUserRagDocuments([]);
@@ -561,7 +616,15 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (tab === "settings") fetchUserRagDocuments();
+    if (tab !== "settings") return;
+    const cached = getCached<Array<{ id: string; name: string; mime_type: string; added_at: string }>>("userRag");
+    if (cached != null) {
+      setUserRagDocuments(cached);
+      setUserRagLoading(false);
+      setUserRagError(null);
+      return;
+    }
+    fetchUserRagDocuments();
   }, [tab, fetchUserRagDocuments]);
 
   useEffect(() => {
@@ -1025,8 +1088,14 @@ function App() {
         const taskId = ack.task_id;
         const pollUntilDone = async () => {
           const maxWait = 600;
+          const MIN_INTERVAL = 1500;
+          const MAX_INTERVAL = 5000;
+          let pollIntervalMs = MIN_INTERVAL;
+          let ticksWithoutChange = 0;
+          let lastStatus = "";
+          let lastMsg = "";
           for (let i = 0; i < maxWait; i++) {
-            await new Promise((r) => setTimeout(r, 1500));
+            await new Promise((r) => setTimeout(r, pollIntervalMs));
             try {
               const [raw, eventsData, humanInputData] = await Promise.all([
                 invoke<string>("get_task_status", { taskId, port: DAEMON_PORT }),
@@ -1036,6 +1105,19 @@ function App() {
               const status = JSON.parse(raw) as { status?: string; progress?: Array<{ progress_pct?: number; message?: string }> };
               const pct = status?.progress?.slice(-1)[0]?.progress_pct ?? 0;
               const msg = status?.progress?.slice(-1)[0]?.message ?? "";
+              const currentStatus = status?.status ?? "";
+              if (currentStatus === lastStatus && msg === lastMsg) {
+                ticksWithoutChange++;
+                if (ticksWithoutChange >= 4 && pollIntervalMs < MAX_INTERVAL) {
+                  pollIntervalMs = Math.min(pollIntervalMs + 1500, MAX_INTERVAL);
+                  ticksWithoutChange = 0;
+                }
+              } else {
+                lastStatus = currentStatus;
+                lastMsg = msg;
+                ticksWithoutChange = 0;
+                pollIntervalMs = MIN_INTERVAL;
+              }
               setRunningTaskChips((prev) => (prev[taskId] !== undefined ? { ...prev, [taskId]: { pct, message: msg } } : prev));
               const events = (eventsData?.events ?? []).map((e) => ({
                 event_type: e.event_type ?? "?",
@@ -1258,9 +1340,9 @@ function App() {
                     <div key={`report-${i}`} className="message system report">
                       <span className="role" aria-hidden>Rappel exécuté</span>
                       <div className="text markdown-rendered">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
                           {`**« ${r.schedule_name} »** — ${r.message}`}
-                        </ReactMarkdown>
+                        </LazyMarkdownContent></Suspense>
                       </div>
                     </div>
                   ))}
@@ -1281,9 +1363,9 @@ function App() {
                         ) : askUserData ? (
                           <div className="message-ask-user-card">
                             <div className="message-ask-user-question markdown-rendered">
-                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
                                 {askUserData.question}
-                              </ReactMarkdown>
+                              </LazyMarkdownContent></Suspense>
                             </div>
                             {askUserData.context && (
                               <p className="message-ask-user-context">{askUserData.context}</p>
@@ -1301,9 +1383,9 @@ function App() {
                           </div>
                         ) : (
                           <div className="text markdown-rendered">
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
                               {m.text}
-                            </ReactMarkdown>
+                            </LazyMarkdownContent></Suspense>
                           </div>
                         )}
                       </div>
@@ -1756,9 +1838,9 @@ function App() {
                   Rafraîchir
                 </button>
                 <div className="doc-content doc-markdown">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
                     {docContent}
-                  </ReactMarkdown>
+                  </LazyMarkdownContent></Suspense>
                 </div>
               </>
             )}
@@ -2247,7 +2329,7 @@ function App() {
                                 <div className="task-detail-reply">
                                   <strong>Réponse de l'agent:</strong>
                                   <div className="task-detail-reply-content markdown-rendered">
-                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{last}</ReactMarkdown>
+                                    <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>{last}</LazyMarkdownContent></Suspense>
                                   </div>
                                 </div>
                               ) : null;
@@ -2265,9 +2347,9 @@ function App() {
                                         ? `${p.progress_pct}% — `
                                         : "État: "}
                                       <div className="markdown-rendered progress-message">
-                                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                        <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
                                           {p.message ?? ""}
-                                        </ReactMarkdown>
+                                        </LazyMarkdownContent></Suspense>
                                       </div>
                                     </li>
                                   ))}
@@ -2331,9 +2413,9 @@ function App() {
                               <div className="task-detail-reply">
                                 <strong>Demande envoyée aux agents à chaque itération:</strong>
                                 <div className="task-detail-reply-content markdown-rendered">
-                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                  <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
                                     {scheduleDetail.channel_context ?? scheduleDetail.description}
-                                  </ReactMarkdown>
+                                  </LazyMarkdownContent></Suspense>
                                 </div>
                               </div>
                             ) : (

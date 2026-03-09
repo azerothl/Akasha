@@ -13,5 +13,12 @@ export default defineConfig({
     target: ["es2021", "chrome100", "safari13"],
     minify: !process.env.TAURI_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_DEBUG,
+    rollupOptions: {
+      output: {
+        manualChunks: (id) => {
+          if (id.includes("node_modules/react-markdown") || id.includes("node_modules/remark-gfm")) return "markdown";
+        },
+      },
+    },
   },
 });
