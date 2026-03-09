@@ -6,7 +6,7 @@ use akasha_llm::CompletionRequest;
 use akasha_store::{Schedule, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use crate::agent_profile::AgentProfile;
-use crate::agents::{EventBus, OrchestratorTask};
+use crate::agents::{EventBus, OrchestratorTask, TaskPriority};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use std::path::{Path, PathBuf};
@@ -2547,7 +2547,8 @@ pub(crate) async fn run_message_via_llm(
                     "skill": if &actual_tool != name { Some(name.as_str()) } else { None::<&str> },
                     "args": redacted_args,
                     "result_preview": if res.len() > 300 { format!("{}...", &res[..300]) } else { res.clone() },
-                    "success": success
+                    "success": success,
+                    "explanation": serde_json::Value::Null
                 });
                 let _ = bus.send(
                     EventEnvelope::new(EventType::ToolInvoked, Some(payload)).with_correlation(task_id),
@@ -3269,8 +3270,13 @@ pub async fn handle_api(
             return json_response("400 Bad Request", &body.to_string());
         }
         let correlation_id = uuid::Uuid::new_v4();
+        let priority = body_json
+            .as_ref()
+            .and_then(|v| v.get("priority").and_then(|p| p.as_str()))
+            .map(|s| if s.eq_ignore_ascii_case("high") { TaskPriority::UserHigh } else { TaskPriority::UserNormal })
+            .unwrap_or(TaskPriority::UserNormal);
         // User talks only to orchestrator: ack immediately, delegate to conversation worker in background (non-blocking). session_id used for short-term memory.
-        match main_agent.handle_message(store_path, &message, correlation_id, true, &session_id, image_data_urls) {
+        match main_agent.handle_message(store_path, &message, correlation_id, true, &session_id, image_data_urls, priority) {
             Ok(task_id) => {
                 let body = serde_json::json!({
                     "ack": true,

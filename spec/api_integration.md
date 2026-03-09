@@ -19,7 +19,8 @@ Ce document décrit les points d’intégration stables pour utiliser Akasha com
 | Méthode | Chemin | Description |
 |--------|--------|-------------|
 | GET | `/` | Santé (status ok) |
-| POST | `/api/message` | Envoyer un message (body: message, session_id?, image_data_urls?) ; crée une tâche et renvoie task_id, session_id. |
+| POST | `/api/message` | Envoyer un message (body: message, session_id?, image_data_urls?, priority?) ; priority "high" traite la tâche avant les autres. |
+| POST | `/api/tasks/:id/cancel` | Annuler une tâche (Pending/Queued/Running) ; émet task_cancelled. |
 | GET | `/api/tasks/:id` | Statut d’une tâche (progress, status, tokens_used, cost_usd). |
 | GET | `/api/tasks/:id/events` | Liste des événements (délégation, progression, complétion). |
 | GET | `/api/tasks/:id/human-input` | Question en attente (human-in-the-loop). |
@@ -34,7 +35,7 @@ Les réponses sont en JSON. Le daemon écoute par défaut sur le port 3876 (`AKA
 
 ## 3. Modèle d’événements
 
-Les événements sont exposés via **GET /api/tasks/:id/events** et (en interne) via le bus d’événements. Chaque événement a un `event_type` et un `payload` optionnel. Types principaux : `user_request_received`, `task_created`, `progress_update`, `sub_agent_spawned`, `task_completed`, `task_failed`, `task_waiting_user_input`, `tool_invoked`.
+Les événements sont exposés via **GET /api/tasks/:id/events** et (en interne) via le bus d’événements. Chaque événement a un `event_type` et un `payload` optionnel. Types principaux : `user_request_received`, `task_created`, `progress_update`, `sub_agent_spawned`, `task_completed`, `task_failed`, `task_waiting_user_input`, `tool_invoked`, `task_escalated_to_human`, `task_cancelled`. Explicabilité : `tool_invoked` peut inclure `explanation` (null si non fourni) ; `sub_agent_spawned` peut inclure `delegation_reason` (null si non fourni).
 
 Pour un export ou une intégration (dashboard, audit), on peut s’appuyer sur les champs structurés des logs (tracing) et sur les métriques exposées par l’API.
 

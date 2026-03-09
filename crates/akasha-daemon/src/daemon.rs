@@ -393,6 +393,30 @@ impl Daemon {
                 });
             }
             let (orch_tx, orch_rx) = mpsc::channel::<OrchestratorTask>(64);
+            let (high_tx, high_rx) = mpsc::channel::<OrchestratorTask>(64);
+            let (normal_tx, normal_rx) = mpsc::channel::<OrchestratorTask>(64);
+            tokio::spawn({
+                let mut high_rx = high_rx;
+                let mut normal_rx = normal_rx;
+                let orch_tx = orch_tx.clone();
+                async move {
+                    loop {
+                        tokio::select! {
+                            Some(task) = high_rx.recv() => {
+                                if orch_tx.send(task).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Some(task) = normal_rx.recv() => {
+                                if orch_tx.send(task).await.is_err() {
+                                    break;
+                                }
+                            }
+                            else => break,
+                        }
+                    }
+                }
+            });
             let (conv_tx, mut conv_rx) = mpsc::channel::<OrchestratorTask>(64);
             let (delegation_tx, delegation_rx) = mpsc::channel::<crate::api::DelegationRequest>(32);
             let task_completion = new_task_completion_registry();
@@ -412,8 +436,8 @@ impl Daemon {
                     run_delegation_handler(delegation_rx, conv_tx, db_path_for_delegation, progress, task_completion, delegation_sem).await;
                 }
             });
-            let orch_tx_for_scheduler = orch_tx.clone();
-            let main_agent = MainAgent::new(bus.clone(), orch_tx);
+            let orchestrator_sender = crate::agents::OrchestratorSender::new(high_tx, normal_tx.clone());
+            let main_agent = MainAgent::new(bus.clone(), orchestrator_sender);
             let orchestrator = Arc::new(Orchestrator::new(
                 bus.clone(),
                 db_path.clone(),
@@ -449,6 +473,21 @@ impl Daemon {
                 let task_usage_store = task_usage_store.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
+                        // Phase 4: skip if task was cancelled (e.g. via POST /api/tasks/:id/cancel) before worker started.
+                        if let Ok(store) = akasha_store::TaskStore::open(store_path.as_path()) {
+                            if let Ok(Some(t)) = store.get(task.task_id) {
+                                if t.status == akasha_store::TaskStatus::Cancelled {
+                                    let _ = bus.send(
+                                        akasha_core::EventEnvelope::new(
+                                            akasha_core::EventType::TaskCancelled,
+                                            Some(serde_json::json!({ "task_id": task.task_id.to_string() })),
+                                        )
+                                        .with_correlation(task.task_id),
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
                         let span = tracing::info_span!("task", task_id = %task.task_id, session_id = %task.session_id);
                         run_message_via_llm(
                             bus.clone(),
@@ -493,12 +532,13 @@ impl Daemon {
                 }
             });
 
-            // Scheduler: tick, create task_runs, push to orchestrator (FR-028, 37_scheduler_design)
+            // Scheduler: tick, create task_runs, push to orchestrator (normal priority queue).
             tokio::spawn({
                 let store_path = db_path.clone();
                 let bus = bus.clone();
+                let scheduler_tx = normal_tx;
                 async move {
-                    crate::scheduler::run_scheduler(store_path, orch_tx_for_scheduler, bus).await;
+                    crate::scheduler::run_scheduler(store_path, scheduler_tx, bus).await;
                 }
             });
 
