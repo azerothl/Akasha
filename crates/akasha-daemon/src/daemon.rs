@@ -13,7 +13,7 @@ use futures_util::future::Either;
 use tracing::{error, info, warn};
 
 use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask};
-use crate::api::{handle_api, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, RestartTx};
+use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, RestartTx};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
@@ -344,6 +344,7 @@ impl Daemon {
             let (bus, _) = crate::agents::new_event_bus();
             let progress = new_progress_cache();
             let events = new_events_cache();
+            let agent_profile_cache = new_agent_profile_cache();
             let process_registry = new_process_registry();
             let human_input_store = new_human_input_store();
             let user_rag_store = crate::user_rag::UserRagStore::new_shared(&data_dir);
@@ -435,6 +436,7 @@ impl Daemon {
                 let long_term_client = long_term_client.clone();
                 let human_input_store = human_input_store.clone();
                 let task_completion = task_completion.clone();
+                let agent_profile_cache = agent_profile_cache.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
                         run_message_via_llm(
@@ -456,6 +458,7 @@ impl Daemon {
                             Some(human_input_store.clone()),
                             Some(delegation_tx.clone()),
                             Some(task_completion.clone()),
+                            Some(agent_profile_cache.clone()),
                         )
                         .await;
                     }
@@ -605,13 +608,14 @@ impl Daemon {
                                 let rag_pack = rag_pack.clone();
                                 let spec_dir = spec_dir.clone();
                                 let restart_tx: RestartTx = Some(restart_tx.clone());
-                                let tools_executor = tools_executor.clone();
-                                let skill_registry = skill_registry.clone();
-                                let short_term = short_term.clone();
-                                let long_term_client = long_term_client.clone();
-                                let human_input_store = human_input_store.clone();
-                                let user_rag_store = user_rag_store.clone();
-                                // Body reading is done inside the spawned task so slow/large uploads
+                let tools_executor = tools_executor.clone();
+                let skill_registry = skill_registry.clone();
+                let short_term = short_term.clone();
+                let long_term_client = long_term_client.clone();
+                let human_input_store = human_input_store.clone();
+                let user_rag_store = user_rag_store.clone();
+                let agent_profile_cache = agent_profile_cache.clone();
+                // Body reading is done inside the spawned task so slow/large uploads
                                 // don't block the accept loop from handling other connections or signals.
                                 tokio::spawn(async move {
                                     const INITIAL_READ: usize = 65536;
@@ -662,6 +666,7 @@ impl Daemon {
                                         long_term_client,
                                         Some(human_input_store),
                                         &user_rag_store,
+                                        &agent_profile_cache,
                                     )
                                     .await;
                                     let _ = stream.write_all(response.as_bytes()).await;

@@ -17,6 +17,35 @@ use tokio::sync::oneshot;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+/// In-memory cache for AgentProfile to avoid repeated disk reads (invalidated on POST /api/agent-profile and after profile save in run_message_via_llm).
+pub type AgentProfileCache = Arc<RwLock<Option<AgentProfile>>>;
+
+pub fn new_agent_profile_cache() -> AgentProfileCache {
+    Arc::new(RwLock::new(None))
+}
+
+/// Load profile from cache or disk and update cache.
+pub async fn get_or_load_agent_profile(data_dir: &Path, cache: &AgentProfileCache) -> AgentProfile {
+    {
+        let g = cache.read().await;
+        if let Some(ref p) = *g {
+            return p.clone();
+        }
+    }
+    let profile = AgentProfile::load(data_dir);
+    {
+        let mut g = cache.write().await;
+        *g = Some(profile.clone());
+    }
+    profile
+}
+
+/// Update cache after profile save (call after writing to disk).
+pub async fn set_agent_profile_cache(cache: &AgentProfileCache, profile: AgentProfile) {
+    let mut g = cache.write().await;
+    *g = Some(profile);
+}
+
 /// Request for a sub-agent delegation (from a worker to the orchestrator). Reply is sent on reply_tx.
 pub struct DelegationRequest {
     pub requesting_task_id: Uuid,
@@ -1758,6 +1787,7 @@ pub(crate) async fn run_message_via_llm(
     human_input_store: Option<HumanInputStore>,
     delegation_tx: Option<mpsc::Sender<DelegationRequest>>,
     task_completion_registry: Option<TaskCompletionRegistry>,
+    agent_profile_cache: Option<AgentProfileCache>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -1863,7 +1893,10 @@ pub(crate) async fn run_message_via_llm(
 
     // Agent profile: name, personality, rules, can/cannot (persisted in data_dir/agent_profile.json)
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
-    let agent_profile = AgentProfile::load(data_dir);
+    let agent_profile = match &agent_profile_cache {
+        Some(cache) => get_or_load_agent_profile(data_dir, cache).await,
+        None => AgentProfile::load(data_dir),
+    };
     let profile_block = agent_profile.format_for_prompt();
     if !profile_block.is_empty() {
         context_prefix.push_str(&profile_block);
@@ -2386,6 +2419,7 @@ pub(crate) async fn run_message_via_llm(
         let heuristic_set: std::collections::HashSet<String> = heuristic_facts.iter().cloned().collect();
         let sem = extract_semaphore();
         let data_dir_for_extract = data_dir.to_path_buf();
+        let agent_profile_cache_for_extract = agent_profile_cache.clone();
         tokio::spawn(async move {
             let _permit = match sem.try_acquire() {
                 Ok(p) => p,
@@ -2458,13 +2492,21 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
                 }
             }
             if !agent_updates.is_empty() {
-                let mut profile = AgentProfile::load(&data_dir_for_extract);
+                let data_dir_extract = data_dir_for_extract.clone();
+                let cache = agent_profile_cache_for_extract.clone();
+                let mut profile = match &cache {
+                    Some(c) => get_or_load_agent_profile(&data_dir_extract, c).await,
+                    None => AgentProfile::load(&data_dir_for_extract),
+                };
                 for (kind, value) in agent_updates {
                     profile.apply_extracted(&kind, value);
                 }
                 if let Err(e) = profile.save(&data_dir_for_extract) {
                     tracing::warn!(error = %e, "Failed to save agent profile");
                 } else {
+                    if let Some(c) = &cache {
+                        set_agent_profile_cache(c, profile).await;
+                    }
                     tracing::info!("Agent profile updated from conversation");
                 }
             }
@@ -2543,6 +2585,7 @@ pub async fn handle_api(
     long_term_client: Option<LongTermMemoryClient>,
     human_input_store: Option<HumanInputStore>,
     user_rag_store: &crate::user_rag::SharedUserRagStore,
+    agent_profile_cache: &AgentProfileCache,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
@@ -2552,7 +2595,7 @@ pub async fn handle_api(
 
     // GET /api/agent-profile — read agent profile (name, personality, rules, can_do, cannot_do)
     if method == "GET" && path == "/api/agent-profile" {
-        let profile = AgentProfile::load(data_dir);
+        let profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         let body_json = serde_json::json!({
             "name": profile.name,
             "personality": profile.personality,
@@ -2565,7 +2608,7 @@ pub async fn handle_api(
 
     // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, rules?, can_do?, cannot_do? }
     if method == "POST" && path == "/api/agent-profile" {
-        let mut profile = AgentProfile::load(data_dir);
+        let mut profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         if let Some(body) = body.as_deref() {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
                 if let Some(s) = v.get("name").and_then(|x| x.as_str()) {
@@ -2586,7 +2629,10 @@ pub async fn handle_api(
             }
         }
         match profile.save(data_dir) {
-            Ok(()) => return json_response("200 OK", r#"{"ok":true,"message":"Profil agent mis à jour"}"#),
+            Ok(()) => {
+                set_agent_profile_cache(agent_profile_cache, profile).await;
+                return json_response("200 OK", r#"{"ok":true,"message":"Profil agent mis à jour"}"#);
+            }
             Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
         }
     }
