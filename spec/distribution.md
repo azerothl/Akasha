@@ -18,6 +18,10 @@ Ce document décrit comment **obtenir et utiliser Akasha sans installer Rust ni 
    - **App desktop (Tauri)** : installateurs dans les pièces jointes (`.msi`/`.exe`, `.dmg`, `.deb`/`.AppImage`).
 4. Décompressez l’archive dans un dossier (ex. `C:\Akasha` ou `~/Akasha`). Installez l'app desktop avec l'installateur de votre OS si besoin.
 
+**Installation rapide (recommandé)** : après extraction, exécutez le script d’installation qui copie les binaires, lance l’init et enregistre le daemon au démarrage :
+- **Windows** : `.\scripts\install.ps1` (PowerShell). Optionnel : `-InstallDir C:\Akasha`, `-NoAutoStart`.
+- **Linux / macOS** : `./scripts/install.sh`. Optionnel : `--dir /usr/local/bin`, `--no-auto-start`.
+
 Vous obtenez (dans l'archive CLI) :
 - **akasha** (ou `akasha.exe`) — CLI : init, start, stop, doctor, tui, config…
 - **akasha-daemon** — serveur 24/7 (lancé par `akasha start`)
@@ -29,6 +33,17 @@ Vous obtenez (dans l'archive CLI) :
 ---
 
 ## 2. Premier lancement
+
+### Avec le script d’installation (recommandé)
+
+Après avoir extrait l’archive, exécutez le script : il déploie les binaires, lance `akasha init --defaults` et enregistre le daemon pour qu’il démarre au prochain logon.
+
+- **Windows** : `.\scripts\install.ps1`
+- **Linux / macOS** : `chmod +x scripts/install.sh && ./scripts/install.sh`
+
+Puis démarrez le daemon (ou redémarrez la session pour le lancement automatique) : `akasha start`.
+
+### Installation manuelle
 
 ### Windows (PowerShell ou CMD)
 

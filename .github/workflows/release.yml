@@ -83,22 +83,25 @@ jobs:
       - name: Prepare artifact (Linux / macOS)
         if: matrix.os != 'windows-latest'
         run: |
-          mkdir -p staging/docs
+          mkdir -p staging/docs staging/scripts
           cp target/${{ matrix.target }}/release/akasha${{ matrix.ext }} staging/
           cp target/${{ matrix.target }}/release/akasha-daemon${{ matrix.ext }} staging/
           cp target/${{ matrix.target }}/release/akasha-tui${{ matrix.ext }} staging/
           cp docs/user_guide_final.md staging/docs/user_guide.md
-          chmod +x staging/*
+          cp scripts/install.sh staging/scripts/
+          chmod +x staging/* staging/scripts/install.sh
 
       - name: Prepare artifact (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           mkdir staging
           mkdir staging\docs
+          mkdir staging\scripts
           cp target/${{ matrix.target }}/release/akasha.exe staging/
           cp target/${{ matrix.target }}/release/akasha-daemon.exe staging/
           cp target/${{ matrix.target }}/release/akasha-tui.exe staging/
           cp docs/user_guide_final.md staging/docs/user_guide.md
+          cp scripts/install.ps1 staging/scripts/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
