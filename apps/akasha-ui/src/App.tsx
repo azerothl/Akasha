@@ -157,6 +157,7 @@ function App() {
   const [devicePendingRequest, setDevicePendingRequest] = useState<{
     request_id: string;
     interface: string;
+    device_id: string;
     action: string;
     params: unknown;
   } | null>(null);
@@ -389,7 +390,7 @@ function App() {
   const fetchDevicePending = useCallback(async () => {
     if (!health?.ok || devicePendingRequest != null) return;
     try {
-      const data = await invoke<{ pending?: boolean; request_id?: string; interface?: string; action?: string; params?: unknown }>(
+      const data = await invoke<{ pending?: boolean; request_id?: string; interface?: string; device_id?: string; action?: string; params?: unknown }>(
         "get_device_pending",
         { port: DAEMON_PORT }
       );
@@ -397,6 +398,7 @@ function App() {
         setDevicePendingRequest({
           request_id: data.request_id,
           interface: data.interface,
+          device_id: data.device_id ?? "",
           action: data.action,
           params: data.params ?? {},
         });
@@ -1646,9 +1648,9 @@ function App() {
         {devicePendingRequest && (
           <div className="human-input-overlay" role="dialog" aria-labelledby="device-request-title" aria-modal="true">
             <div className="human-input-modal">
-              <h2 id="device-request-title">Accès appareil</h2>
+              <h2 id="device-request-title">{t("device_bridge.title")}</h2>
               <p className="human-input-question">
-                L’agent souhaite utiliser : <strong>{devicePendingRequest.interface}</strong> — <strong>{devicePendingRequest.action}</strong>
+                {t("device_bridge.description")} <strong>{devicePendingRequest.interface}</strong> — <strong>{devicePendingRequest.action}</strong>
               </p>
               <div className="human-input-choices">
                 <button
@@ -1674,7 +1676,7 @@ function App() {
                         if (ctx) ctx.drawImage(video, 0, 0);
                         stream.getTracks().forEach((t) => t.stop());
                         const data = canvas.toDataURL("image/png").split(",")[1] ?? "";
-                        await invoke("post_device_result", { requestId: request_id, success: true, data, port: DAEMON_PORT });
+                        await invoke("post_device_result", { request_id, success: true, data, port: DAEMON_PORT });
                       } else if (iface === "local_media" && (act === "record" || act === "microphone_record")) {
                         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                         const recorder = new MediaRecorder(stream);
@@ -1700,18 +1702,18 @@ function App() {
                           reader.onerror = reject;
                           reader.readAsDataURL(blob);
                         });
-                        await invoke("post_device_result", { requestId: request_id, success: true, data, port: DAEMON_PORT });
+                        await invoke("post_device_result", { request_id, success: true, data, port: DAEMON_PORT });
                       } else {
-                        await invoke("post_device_result", { requestId: request_id, success: false, data: null, port: DAEMON_PORT });
+                        await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT });
                       }
                     } catch (e) {
                       console.error(e);
-                      await invoke("post_device_result", { requestId: request_id, success: false, data: null, port: DAEMON_PORT });
+                      await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT });
                     }
                     setDevicePendingRequest(null);
                   }}
                 >
-                  Autoriser
+                  {t("device_bridge.allow")}
                 </button>
                 <button
                   type="button"
@@ -1719,7 +1721,7 @@ function App() {
                   onClick={async () => {
                     try {
                       await invoke("post_device_result", {
-                        requestId: devicePendingRequest.request_id,
+                        request_id: devicePendingRequest.request_id,
                         success: false,
                         data: null,
                         port: DAEMON_PORT,
@@ -1730,7 +1732,7 @@ function App() {
                     setDevicePendingRequest(null);
                   }}
                 >
-                  Refuser
+                  {t("device_bridge.deny")}
                 </button>
               </div>
               <button
@@ -1739,7 +1741,7 @@ function App() {
                 onClick={async () => {
                   try {
                     await invoke("post_device_result", {
-                      requestId: devicePendingRequest.request_id,
+                      request_id: devicePendingRequest.request_id,
                       success: false,
                       data: null,
                       port: DAEMON_PORT,
