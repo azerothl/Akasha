@@ -1682,9 +1682,11 @@ function App() {
                         recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
                         recorder.start();
                         await new Promise<void>((resolve) => {
+                          recorder.onstop = () => {
+                            resolve();
+                          };
                           setTimeout(() => {
                             recorder.stop();
-                            resolve();
                           }, 3000);
                         });
                         stream.getTracks().forEach((t) => t.stop());
