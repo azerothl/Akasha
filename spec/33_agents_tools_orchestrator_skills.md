@@ -81,6 +81,8 @@ Activation : placer un fichier **tools_policy.yaml** dans le data_dir (voir `spe
 
 ---
 
+**Projets longs** : pour des livrables substantiels (roman, BD, projet de code), contexte, isolation des fichiers et règles pour ne pas signaler « terminé » prématurément sont décrits dans [projects_long_running.md](projects_long_running.md).
+
 ## 3. Exécution en conteneur (agent de code)
 
 - **Objectif** : lorsqu’un agent de code génère une application (ou un script), l’exécution se fait **toujours** dans un conteneur pour éviter les risques sur l’hôte.

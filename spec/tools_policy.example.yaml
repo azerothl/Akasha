@@ -2,16 +2,22 @@
 # Fichier absent ou vide = tout refusé. Pour autoriser lecture/écriture de fichiers, ajoutez
 # des préfixes de chemins (répertoires ou fichiers) sous allowed_read_paths / allowed_write_paths.
 # L'agent peut alors utiliser read_file / write_file pour les chemins sous ces préfixes.
+#
+# Projets longs (roman, BD, projet de code) : pour isoler le projet du reste du système, créez
+# un répertoire dédié par projet et listez-le SEUL ici. N'utilisez pas "." ou un répertoire parent
+# large si vous voulez limiter l'accès aux fichiers du projet. Voir spec/projects_long_running.md.
 
 allowed_read_paths:
   - "."                    # répertoire de travail du daemon (ex. répertoire du projet)
   # - "C:\\Users\\Vous\\projet"   # Windows : décommenter et adapter
   # - "/home/user/projet"          # Linux/macOS : décommenter et adapter
+  # - "C:\\Users\\Vous\\akasha_projects\\mon_roman"   # Exemple : projet long dédié (roman, BD, code)
 
 allowed_write_paths:
   - "."                    # idem : autoriser l'écriture dans le répertoire courant
   # - "C:\\Users\\VOTRE_UTILISATEUR\\AppData\\Local\\akasha"   # Windows : ex. pour enregistrer des jeux/code dans akasha\games
   # Ajoutez ici les répertoires où l'agent peut écrire des fichiers (génération de code, etc.)
+  # Pour un projet long isolé : un seul répertoire dédié (ex. ~/akasha_projects/mon_roman)
 
 allowed_commands:
   - "cargo"

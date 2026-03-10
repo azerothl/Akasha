@@ -605,6 +605,18 @@ fn message_suggests_external_info(message: &str) -> bool {
     keywords.iter().any(|k| m.contains(k))
 }
 
+/// True if the user message suggests a long-running project (novel, comic, code project) or continuing one.
+fn message_suggests_project(message: &str) -> bool {
+    let m = message.to_lowercase();
+    let keywords = [
+        "roman", "bd", "bande dessinée", "bande dessinee", "comic", "novel",
+        "projet de code", "code project", "écris un", "ecris un", "écris le", "ecris le",
+        "chapitre", "chapter", "continue", "la suite", "and the rest", "poursuis", "reprends",
+        "crée un projet", "cree un projet", "create a project", "set up a project",
+    ];
+    keywords.iter().any(|k| m.contains(k))
+}
+
 /// Default hosts when policy does not set allowed_skill_install_hosts (GitHub only).
 const INSTALL_SKILL_DEFAULT_HOSTS: &[&str] = &["github.com", "raw.githubusercontent.com", "www.github.com"];
 
@@ -2105,6 +2117,7 @@ pub(crate) async fn run_message_via_llm(
              INSTALL SKILL RULE: When the user asks to install a skill from a URL (e.g. \"install the bankr skill from https://github.com/BankrBot/skills/tree/main/bankr\"), you MUST reply ONLY with TOOL: install_skill <url>. Do not give manual steps; perform the installation yourself.\n\
              UNINSTALL SKILL RULE: When the user asks to uninstall or remove a skill (e.g. \"désinstalle bankr\", \"remove the bankr skill\"), you MUST reply ONLY with TOOL: uninstall_skill <name> (e.g. TOOL: uninstall_skill bankr).\n\
              SKILL USE RULE: When the user asks you to perform an action using a skill (e.g. \"vérifie mon wallet bankr\", \"check my balance with bankr\", \"run bankr whoami\"), you MUST reply ONLY with a single line: TOOL: <skill_name> <args> (e.g. TOOL: bankr whoami). The system will execute the command and return the result. Do NOT tell the user to run the command themselves or to \"use TOOL: bankr whoami\"; you must output that line yourself so the tool is executed.\n\
+             PROJECT RULE: For requests that imply a substantial deliverable (novel, comic/BD, code project, series of chapters or files), never claim completion after one response if the full scope is not delivered. State clearly what was done, what remains to do, and that you will continue on the user's next message (or via a sub-task). Do not say \"C'est terminé\" or \"Voilà, c'est fait\" until all requested deliverables are done. If the user says \"continue\", \"la suite\", or \"and the rest\", resume the project in progress (use memory_search for project context if available) and continue without saying \"terminé\" until the full scope is delivered. For project-like work, use memory_store to save project state (objective, steps done, deliverables) after each significant progress, with source project:<name> so context is reloaded on the next message.\n\
              {}\
              If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
@@ -2146,6 +2159,24 @@ pub(crate) async fn run_message_via_llm(
                 context_prefix.push_str("\n");
             }
             context_prefix.push_str("\n");
+        }
+        // Project context (Option A): when the message suggests a project, retrieve project-related memories (stored with source project:<name>) and inject as [Projet en cours]
+        if message_suggests_project(&message) {
+            let query = "projet état livrables objectif étapes fait reste à faire";
+            let client = client.clone();
+            let project_results = tokio::task::spawn_blocking(move || client.search(query.to_string(), 5))
+                .await
+                .ok()
+                .unwrap_or_default();
+            if !project_results.is_empty() {
+                context_prefix.push_str("[Projet en cours — utilise ce contexte pour reprendre ou poursuivre le projet]\n");
+                for (_, content) in &project_results {
+                    context_prefix.push_str("- ");
+                    context_prefix.push_str(&content.replace('\n', " "));
+                    context_prefix.push_str("\n");
+                }
+                context_prefix.push_str("\n");
+            }
         }
     }
 
