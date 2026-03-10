@@ -950,6 +950,39 @@ async fn post_device_result(
     Ok(json)
 }
 
+/// Agent profile: GET /api/agent-profile (name, personality, rules, can_do, cannot_do).
+#[tauri::command]
+async fn get_agent_profile(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/agent-profile", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Agent profile: POST /api/agent-profile (merge body: name?, personality?, rules?, can_do?, cannot_do?).
+#[tauri::command]
+async fn post_agent_profile(body: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/agent-profile", daemon_base_url(port));
+    let client = http_client();
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1001,7 +1034,9 @@ pub fn run() {
             get_embedded_status,
             embedded_reload,
             get_device_pending,
-            post_device_result
+            post_device_result,
+            get_agent_profile,
+            post_agent_profile
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -275,6 +275,17 @@ function App() {
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
   const userRagFileInputRef = useRef<HTMLInputElement>(null);
+  /** Agent profile (name, personality, rules, can_do, cannot_do) for Settings panel. */
+  const [agentProfile, setAgentProfile] = useState<{ name: string; personality: string; rules: string[]; can_do: string[]; cannot_do: string[] }>({
+    name: "",
+    personality: "",
+    rules: [],
+    can_do: [],
+    cannot_do: [],
+  });
+  const [agentProfileLoading, setAgentProfileLoading] = useState(false);
+  const [agentProfileSaving, setAgentProfileSaving] = useState(false);
+  const [agentProfileError, setAgentProfileError] = useState<string | null>(null);
   /** Attachments for the next message: images (vision) and documents (text appended to message). */
   const [attachments, setAttachments] = useState<Array<{ id: string; name: string; typ: "image" | "document"; content_base64: string; mime_type: string }>>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -757,6 +768,28 @@ function App() {
     }
   }, []);
 
+  const fetchAgentProfile = useCallback(async () => {
+    setAgentProfileLoading(true);
+    setAgentProfileError(null);
+    try {
+      const data = await invoke<{ name?: string | null; personality?: string | null; rules?: string[]; can_do?: string[]; cannot_do?: string[] }>(
+        "get_agent_profile",
+        { port: DAEMON_PORT }
+      );
+      setAgentProfile({
+        name: data?.name ?? "",
+        personality: data?.personality ?? "",
+        rules: Array.isArray(data?.rules) ? data.rules : [],
+        can_do: Array.isArray(data?.can_do) ? data.can_do : [],
+        cannot_do: Array.isArray(data?.cannot_do) ? data.cannot_do : [],
+      });
+    } catch (e) {
+      setAgentProfileError(String(e));
+    } finally {
+      setAgentProfileLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (tab !== "settings") return;
     const cached = getCached<Array<{ id: string; name: string; mime_type: string; added_at: string }>>("userRag");
@@ -768,6 +801,10 @@ function App() {
     }
     fetchUserRagDocuments();
   }, [tab, fetchUserRagDocuments]);
+
+  useEffect(() => {
+    if (tab === "settings") fetchAgentProfile();
+  }, [tab, fetchAgentProfile]);
 
   useEffect(() => {
     if (!calendarSelectedTaskId) {
@@ -3016,6 +3053,102 @@ function App() {
                 <code>~/.local/share/akasha</code> (Linux/macOS)
               </dd>
             </dl>
+            <h3 className="settings-subtitle">{t("settings.agent_profile_title")}</h3>
+            <p className="settings-doc muted">
+              {t("settings.agent_profile_desc")}
+            </p>
+            {agentProfileError && (
+              <p className="error-inline" role="alert">{agentProfileError}</p>
+            )}
+            {agentProfileLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
+            {!agentProfileLoading && (
+              <div className="settings-agent-profile">
+                <dl className="settings-list">
+                  <dt>{t("settings.agent_profile_name")}</dt>
+                  <dd>
+                    <input
+                      type="text"
+                      aria-label={t("settings.agent_profile_name")}
+                      className="settings-input"
+                      value={agentProfile.name}
+                      onChange={(e) => setAgentProfile((p) => ({ ...p, name: e.target.value }))}
+                      placeholder="Akasha"
+                    />
+                  </dd>
+                  <dt>{t("settings.agent_profile_personality")}</dt>
+                  <dd>
+                    <textarea
+                      aria-label={t("settings.agent_profile_personality")}
+                      className="settings-textarea"
+                      rows={4}
+                      value={agentProfile.personality}
+                      onChange={(e) => setAgentProfile((p) => ({ ...p, personality: e.target.value }))}
+                      placeholder={t("settings.agent_profile_personality")}
+                    />
+                  </dd>
+                  <dt>{t("settings.agent_profile_rules")}</dt>
+                  <dd>
+                    <textarea
+                      aria-label={t("settings.agent_profile_rules")}
+                      className="settings-textarea"
+                      rows={3}
+                      value={agentProfile.rules.join("\n")}
+                      onChange={(e) => setAgentProfile((p) => ({ ...p, rules: e.target.value.split("\n").map((s) => s.trim()).filter(Boolean) }))}
+                      placeholder={t("settings.agent_profile_rules")}
+                    />
+                  </dd>
+                  <dt>{t("settings.agent_profile_can_do")}</dt>
+                  <dd>
+                    <textarea
+                      aria-label={t("settings.agent_profile_can_do")}
+                      className="settings-textarea"
+                      rows={2}
+                      value={agentProfile.can_do.join("\n")}
+                      onChange={(e) => setAgentProfile((p) => ({ ...p, can_do: e.target.value.split("\n").map((s) => s.trim()).filter(Boolean) }))}
+                      placeholder={t("settings.agent_profile_can_do")}
+                    />
+                  </dd>
+                  <dt>{t("settings.agent_profile_cannot_do")}</dt>
+                  <dd>
+                    <textarea
+                      aria-label={t("settings.agent_profile_cannot_do")}
+                      className="settings-textarea"
+                      rows={2}
+                      value={agentProfile.cannot_do.join("\n")}
+                      onChange={(e) => setAgentProfile((p) => ({ ...p, cannot_do: e.target.value.split("\n").map((s) => s.trim()).filter(Boolean) }))}
+                      placeholder={t("settings.agent_profile_cannot_do")}
+                    />
+                  </dd>
+                </dl>
+                <button
+                  type="button"
+                  className="refresh-btn"
+                  disabled={agentProfileSaving}
+                  onClick={async () => {
+                    setAgentProfileSaving(true);
+                    setAgentProfileError(null);
+                    try {
+                      await invoke("post_agent_profile", {
+                        body: {
+                          name: agentProfile.name.trim() || undefined,
+                          personality: agentProfile.personality.trim() || undefined,
+                          rules: agentProfile.rules,
+                          can_do: agentProfile.can_do,
+                          cannot_do: agentProfile.cannot_do,
+                        },
+                        port: DAEMON_PORT,
+                      });
+                    } catch (err) {
+                      setAgentProfileError(String(err));
+                    } finally {
+                      setAgentProfileSaving(false);
+                    }
+                  }}
+                >
+                  {agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}
+                </button>
+              </div>
+            )}
             <h3 className="settings-subtitle">{t("settings.user_rag_title")}</h3>
             <p className="settings-doc muted">
               {t("settings.user_rag_desc")}

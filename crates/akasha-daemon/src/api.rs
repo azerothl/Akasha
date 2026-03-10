@@ -3074,6 +3074,10 @@ pub async fn handle_api(
                 }
             }
         }
+        // Persist default name if none or empty so the agent always has an identity on disk
+        if profile.name.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+            profile.name = Some(AgentProfile::DEFAULT_NAME.to_string());
+        }
         match profile.save(data_dir) {
             Ok(()) => {
                 set_agent_profile_cache(agent_profile_cache, profile).await;

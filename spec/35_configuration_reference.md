@@ -107,6 +107,48 @@ Voir [tools_policy.example.yaml](tools_policy.example.yaml).
 
 ---
 
+## 2b. agent_profile.json
+
+**Emplacement** : `data_dir/agent_profile.json`.  
+**Format** : JSON.  
+**Utilisé par** : daemon (contexte injecté en tête du prompt LLM), CLI (`akasha init` pour les templates), UI (Paramètres → Profil de l'agent).
+
+Définit l’**identité et la personnalité** de l’agent : nom, ton, règles et contraintes. Ce bloc est formaté par `format_for_prompt()` et injecté en tête du contexte à chaque tour de conversation, afin que l’agent adopte ce profil de façon stable.
+
+### Structure et types
+
+| Clé          | Type            | Obligatoire | Description                                                                 |
+| ------------ | --------------- | ----------- | --------------------------------------------------------------------------- |
+| `name`       | string          | Non         | Nom de l’agent (ex. « Akasha », « Assistant »). Si vide ou absent, « Akasha » est utilisé dans le prompt et, à la sauvegarde (POST ou init), persisté par défaut. |
+| `personality`| string          | Non         | Description du ton et de la personnalité (ex. « Concis et technique », « Bienveillant et pédagogique »). Renforcé dans le prompt par une phrase du type « Tu adoptes ce ton et cette personnalité à chaque réponse. » |
+| `rules`      | liste de strings | Non         | Règles à respecter (une par ligne).                                        |
+| `can_do`     | liste de strings | Non         | Comportements autorisés.                                                    |
+| `cannot_do`   | liste de strings | Non         | Comportements interdits.                                                    |
+
+### Lien avec le prompt
+
+Le daemon charge le profil au démarrage (et après chaque POST `/api/agent-profile`). À chaque tour, il produit un bloc `[Profil et consignes de l'agent]` avec : identité (nom toujours présent, avec formulation du type « Tu es « X ». C’est ton nom. Tu te souviens de ton nom… »), personnalité, règles, can_do, cannot_do. Ce bloc est injecté en tête du contexte système avant la mémoire et le RAG.
+
+### Édition
+
+- **CLI** : `akasha init` propose des templates de personnalité (Neutre, Bienveillant, Concis/technique, Créatif, Strict/sécurisé) et écrit `agent_profile.json`.
+- **UI** : Paramètres → section « Profil de l’agent » : champs Nom, Personnalité, Règles, Autorisé, Interdit ; bouton Enregistrer (POST `/api/agent-profile`).
+- **Manuel** : éditer `data_dir/agent_profile.json` puis redémarrer le daemon (ou envoyer POST pour invalider le cache).
+
+### Exemple
+
+```json
+{
+  "name": "Akasha",
+  "personality": "Concis et technique. Réponses courtes, précises. Pas de longues introductions.",
+  "rules": ["Privilégier le concret : commandes, extraits de code.", "Éviter les longues introductions."],
+  "can_do": [],
+  "cannot_do": []
+}
+```
+
+---
+
 ## 3. akasha.env
 
 **Emplacement** : `data_dir/akasha.env`.  

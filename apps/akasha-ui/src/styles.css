@@ -1519,6 +1519,29 @@ body {
   color: var(--akasha-text-dim);
 }
 
+.settings-input,
+.settings-textarea {
+  width: 100%;
+  max-width: 28rem;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.9375rem;
+  background: var(--akasha-bg-surface);
+  border: 1px solid var(--akasha-border);
+  color: var(--akasha-text);
+  border-radius: 6px;
+}
+
+.settings-textarea {
+  resize: vertical;
+  min-height: 4rem;
+}
+
+.settings-input:focus-visible,
+.settings-textarea:focus-visible {
+  outline: 2px solid var(--akasha-accent);
+  outline-offset: 2px;
+}
+
 /* Activity panel */
 .activity-panel h3 {
   font-size: 1rem;
