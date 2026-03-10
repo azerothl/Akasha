@@ -2178,16 +2178,19 @@ function App() {
                             {Array.from({ length: 24 }, (_, h) => (
                               <tr key={h} className="calendar-grid-row">
                                 <td className="calendar-grid-cell-time">{h}h00</td>
-                                <td className="calendar-grid-cell-events" onClick={() => openCellDetail(`${h}h00`, `day-${h}`, byHour[h])} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && openCellDetail(`${h}h00`, `day-${h}`, byHour[h])}>
-                                  <div className="calendar-cell-inner">
-                                    <ul className="calendar-grid-slot-events" role="list">
-                                    {calendarDedupeByParent(byHour[h]).map(({ representative: e, count }, i) => (
-                                      <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} onClick={(ev) => { ev.stopPropagation(); setCalendarSelectedTaskId(e.task_id); }}>
-                                        <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
-                                        <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
-                                      </li>
-                                    ))}
-                                  </ul>
+                                <td className="calendar-grid-cell-events">
+                                  <div className="calendar-cell-content">
+                                    <div className="calendar-cell-inner">
+                                      <ul className="calendar-grid-slot-events" role="list">
+                                        {calendarDedupeByParent(byHour[h]).slice(0, 2).map(({ representative: e, count }, i) => (
+                                          <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} onClick={() => setCalendarSelectedTaskId(e.task_id)}>
+                                            <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
+                                            <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                    <button type="button" className="calendar-cell-view-all" onClick={() => openCellDetail(`${h}h00`, `day-${h}`, byHour[h])}>Voir tout ({byHour[h].length})</button>
                                   </div>
                                 </td>
                               </tr>
@@ -2242,16 +2245,19 @@ function App() {
                                     const cellEvents = (byDay[key] ?? []).filter((e) => new Date(e.at).getHours() === hour);
                                     const slotLabel = `${key} ${hour}h`;
                                     return (
-                                      <td key={key} className="calendar-grid-cell-day" onClick={() => openCellDetail(slotLabel, `${key}-${hour}`, cellEvents)} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && openCellDetail(slotLabel, `${key}-${hour}`, cellEvents)}>
-                                        <div className="calendar-cell-inner">
-                                          <ul className="calendar-grid-slot-events" role="list">
-                                          {calendarDedupeByParent(cellEvents).map(({ representative: e, count }, i) => (
-                                            <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} onClick={(ev) => { ev.stopPropagation(); setCalendarSelectedTaskId(e.task_id); }}>
-                                              <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
-                                              <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
-                                            </li>
-                                          ))}
-                                        </ul>
+                                      <td key={key} className="calendar-grid-cell-day">
+                                        <div className="calendar-cell-content">
+                                          <div className="calendar-cell-inner">
+                                            <ul className="calendar-grid-slot-events" role="list">
+                                              {calendarDedupeByParent(cellEvents).slice(0, 2).map(({ representative: e, count }, i) => (
+                                                <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} onClick={() => setCalendarSelectedTaskId(e.task_id)}>
+                                                  <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
+                                                  <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
+                                                </li>
+                                              ))}
+                                            </ul>
+                                          </div>
+                                          <button type="button" className="calendar-cell-view-all" onClick={() => openCellDetail(slotLabel, `${key}-${hour}`, cellEvents)}>Voir tout ({cellEvents.length})</button>
                                         </div>
                                       </td>
                                     );
@@ -2309,21 +2315,22 @@ function App() {
                                 const cellEvents = key ? (byDay[key] ?? []) : [];
                                 const slotLabel = key ? new Date(key + "T12:00:00").toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" }) : "";
                                 return (
-                                  <td key={`${wi}-${di}`} className="calendar-grid-cell-month" onClick={key ? () => openCellDetail(slotLabel, key, cellEvents) : undefined} role={key ? "button" : undefined} tabIndex={key ? 0 : undefined} onKeyDown={key ? (e) => e.key === "Enter" && openCellDetail(slotLabel, key, cellEvents) : undefined}>
+                                  <td key={`${wi}-${di}`} className="calendar-grid-cell-month">
                                     {key ? (
-                                      <>
+                                      <div className="calendar-cell-content">
                                         <span className="calendar-grid-day-num">{new Date(key + "T12:00:00").getDate()}</span>
                                         <div className="calendar-cell-inner">
                                           <ul className="calendar-grid-slot-events" role="list">
-                                            {calendarDedupeByParent(cellEvents).map(({ representative: e, count }, i) => (
-                                              <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} onClick={(ev) => { ev.stopPropagation(); setCalendarSelectedTaskId(e.task_id); }}>
+                                            {calendarDedupeByParent(cellEvents).slice(0, 2).map(({ representative: e, count }, i) => (
+                                              <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} onClick={() => setCalendarSelectedTaskId(e.task_id)}>
                                                 <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
                                                 <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
                                               </li>
                                             ))}
                                           </ul>
                                         </div>
-                                      </>
+                                        <button type="button" className="calendar-cell-view-all" onClick={() => openCellDetail(slotLabel, key, cellEvents)}>Voir tout ({cellEvents.length})</button>
+                                      </div>
                                     ) : null}
                                   </td>
                                 );

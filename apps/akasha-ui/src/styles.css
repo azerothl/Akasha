@@ -1764,17 +1764,36 @@ body {
 .calendar-grid-table.calendar-grid-week .calendar-grid-col-hour { width: 3rem; }
 .calendar-grid-table.calendar-grid-week .calendar-grid-col-day { min-width: 4rem; text-align: center; }
 .calendar-grid-day-num { font-size: 1rem; color: var(--akasha-text); flex-shrink: 0; }
+.calendar-grid-table.calendar-grid-month .calendar-grid-cell-month .calendar-cell-content > .calendar-grid-day-num {
+  flex-shrink: 0;
+  margin-bottom: 0.15rem;
+}
 .calendar-grid-table.calendar-grid-month .calendar-grid-col-weekday { text-align: center; font-size: 0.75rem; }
+/* Month view: fixed row height — 2 tasks + "Voir tout" button + day num, no scrollbar */
+.calendar-grid-table.calendar-grid-month tbody tr {
+  height: 9rem;
+  max-height: 9rem;
+}
 .calendar-grid-table.calendar-grid-month .calendar-grid-cell-month {
   min-width: 2.5rem;
-  height: 5.5rem;
-  max-height: 5.5rem;
+  height: 9rem;
+  max-height: 9rem;
   overflow: hidden;
   vertical-align: top;
   box-sizing: border-box;
+  padding: 0.25rem 0.35rem;
+  position: relative;
+}
+.calendar-grid-table.calendar-grid-month .calendar-grid-cell-month .calendar-cell-content {
+  position: absolute;
+  inset: 0.25rem 0.35rem 0.25rem 0.35rem;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 .calendar-grid-table.calendar-grid-month .calendar-grid-cell-month .calendar-cell-inner {
-  height: 100%;
+  flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -1783,18 +1802,36 @@ body {
 .calendar-grid-table.calendar-grid-month .calendar-grid-cell-month .calendar-cell-inner .calendar-grid-slot-events {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: hidden;
+}
+.calendar-grid-table.calendar-grid-month .calendar-grid-cell-month .calendar-cell-view-all {
+  flex-shrink: 0;
+  margin-top: 0.2rem;
+}
+/* Week view: fixed row height — 2 tasks + "Voir tout" button, no scrollbar */
+.calendar-grid-table.calendar-grid-week tbody tr {
+  height: 7.5rem;
+  max-height: 7.5rem;
 }
 .calendar-grid-table.calendar-grid-week .calendar-grid-cell-day {
-  height: 4rem;
-  max-height: 4rem;
+  height: 7.5rem;
+  max-height: 7.5rem;
   overflow: hidden;
   vertical-align: top;
   box-sizing: border-box;
+  padding: 0.25rem 0.35rem;
+  position: relative;
+}
+.calendar-grid-table.calendar-grid-week .calendar-grid-cell-day .calendar-cell-content {
+  position: absolute;
+  inset: 0.25rem 0.35rem 0.25rem 0.35rem;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 .calendar-grid-table.calendar-grid-week .calendar-grid-cell-day .calendar-cell-inner {
-  height: 100%;
+  flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -1803,17 +1840,35 @@ body {
 .calendar-grid-table.calendar-grid-week .calendar-grid-cell-day .calendar-cell-inner .calendar-grid-slot-events {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: hidden;
+}
+.calendar-grid-table.calendar-grid-week .calendar-grid-cell-day .calendar-cell-view-all {
+  flex-shrink: 0;
+  margin-top: 0.15rem;
+}
+/* Day view: 2 tasks + "Voir tout" button, no scrollbar */
+.calendar-grid-table.calendar-grid-day tbody tr {
+  height: 7.5rem;
+  max-height: 7.5rem;
 }
 .calendar-grid-table.calendar-grid-day .calendar-grid-cell-events {
-  height: 4rem;
-  max-height: 4rem;
+  height: 7.5rem;
+  max-height: 7.5rem;
   overflow: hidden;
   box-sizing: border-box;
+  padding: 0.25rem 0.35rem;
+  position: relative;
+}
+.calendar-grid-table.calendar-grid-day .calendar-grid-cell-events .calendar-cell-content {
+  position: absolute;
+  inset: 0.25rem 0.35rem 0.25rem 0.35rem;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 .calendar-grid-table.calendar-grid-day .calendar-grid-cell-events .calendar-cell-inner {
-  height: 100%;
+  flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -1822,13 +1877,33 @@ body {
 .calendar-grid-table.calendar-grid-day .calendar-grid-cell-events .calendar-cell-inner .calendar-grid-slot-events {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: hidden;
 }
-.calendar-grid-cell-month[role="button"],
-.calendar-grid-cell-day[role="button"],
-.calendar-grid-cell-events[role="button"] {
+.calendar-grid-table.calendar-grid-day .calendar-grid-cell-events .calendar-cell-view-all {
+  flex-shrink: 0;
+  margin-top: 0.15rem;
+}
+/* "Voir tout" button — distinct zone to open cell detail */
+.calendar-cell-view-all {
+  display: block;
+  width: 100%;
+  font-size: 0.7rem;
+  color: var(--akasha-text-muted);
+  background: rgba(139, 92, 246, 0.15);
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  border-radius: 4px;
+  padding: 0.2rem 0.35rem;
   cursor: pointer;
+  text-align: center;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.calendar-cell-view-all:hover {
+  background: rgba(139, 92, 246, 0.25);
+  color: var(--akasha-text);
+}
+.calendar-cell-view-all:focus-visible {
+  outline: 2px solid var(--akasha-accent);
+  outline-offset: 1px;
 }
 .calendar-event-block {
   display: block;
