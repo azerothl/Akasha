@@ -127,7 +127,7 @@ Tout le chemin « délégation → agent → sous-agents → résultat » est **
 - **Entrée** : `POST /api/message` (ou équivalent canal) crée toujours une **tâche racine** et envoie son `task_id` à l’orchestrateur (via une file, ex. `orchestrator_tx`).
 - **Réponse immédiate** : le handler API renvoie tout de suite `{ "ack": true, "task_id": "...", "message": "Je prends en compte votre demande." }` (sans attendre la fin du traitement).
 - **Traitement asynchrone** : un worker (orchestrateur) consomme la file des `task_id`, pour chaque tâche :
-  - Décompose la demande via un appel LLM (agent_type|message) ; le type d’agent (conversation, code, search, schedule) est entièrement déterminé par le LLM, sans fallback par mots-clés.
+  - Décompose la demande via un appel LLM (agent_type|message) ; le type d’agent (conversation, code, search, schedule, financial, documentalist, project_manager, technical_writer, research, security_audit, creative) est entièrement déterminé par le LLM, sans fallback par mots-clés.
   - Délègue à l’agent (nouvelle sous-tâche ou envoi sur une file dédiée à l’agent).
   - Les agents (et sous-agents) s’exécutent dans des tâches asynchrones (tokio::spawn ou équivalent).
 - **Remontée du résultat** : quand l’agent final a terminé, il met à jour la tâche racine (statut, résultat) et envoie un événement (ex. `TaskCompleted` avec le texte de réponse). Le **progress subscriber** (ou un composant dédié) pousse ce résultat au canal utilisateur (polling `GET /api/tasks/:id` ou WebSocket si ajouté).
@@ -146,6 +146,12 @@ Quand une tâche est longue :
 - **Mises à jour** : option « chips » dans le chat (ex. Task #1234 running 35 %) ; flux complet dans le Task Center (onglet Tâches).
 
 Voir [36_ui_architecture.md](36_ui_architecture.md) pour les onglets Chat et Tâches.
+
+### 5.4 Types d'agents et prompt [Role]
+
+Types d'agents reconnus : **conversation** (chat général), **code** (génération de code), **search** (recherche d'information), **schedule** (création de tâche récurrente dans l'app, flux dédié), **financial** (budget, coûts, rapports), **documentalist** (réponses basées sur la base RAG / documents utilisateur), **project_manager** (suivi de projet, jalons, planning), **technical_writer** (rédaction technique, doc, procédures), **research** (recherche approfondie, synthèse multi-sources), **security_audit** (revue sécurité code/config), **creative** (rédaction créative, copywriting).
+
+Chaque type spécialisé (tous sauf **schedule**) reçoit un **prompt système [Role]** en anglais injecté en tête du contexte LLM pour guider son comportement. L'outil `delegate_to_agent` accepte les types : search, code, conversation, financial, documentalist, project_manager, technical_writer, research, security_audit, creative (un seul niveau de délégation).
 
 ---
 
