@@ -1829,7 +1829,10 @@ async fn execute_tool_call(
             let interface = args.get(0).map(String::as_str).unwrap_or("");
             let device_id = args.get(1).map(String::as_str).unwrap_or("");
             let action = args.get(2).map(String::as_str).unwrap_or("");
-            let params_json = args.get(3..).map(|a| serde_json::json!(a.join(" ")));
+            let params_json = args
+                .get(3..)
+                .filter(|slice| !slice.is_empty())
+                .map(|a| serde_json::json!(a));
             if interface.is_empty() || device_id.is_empty() || action.is_empty() {
                 return (false, "[device_invoke] usage: device_invoke <interface> <device_id> <action> [params...]".to_string());
             }
