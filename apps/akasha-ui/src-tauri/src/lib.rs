@@ -907,6 +907,49 @@ async fn delete_user_rag_document(id: String, port: Option<u16>) -> Result<(), S
     Ok(())
 }
 
+/// Device bridge: get oldest pending device request (for UI to fulfill camera, mic, etc.).
+#[tauri::command]
+async fn get_device_pending(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/device/pending", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Device bridge: send result of device action (e.g. image or audio base64 from UI).
+#[tauri::command]
+async fn post_device_result(
+    request_id: String,
+    success: bool,
+    data: Option<String>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/device/result", daemon_base_url(port));
+    let client = http_client();
+    let body = serde_json::json!({
+        "request_id": request_id,
+        "success": success,
+        "data": data,
+    });
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -956,7 +999,9 @@ pub fn run() {
             get_router_routes,
             set_router_route,
             get_embedded_status,
-            embedded_reload
+            embedded_reload,
+            get_device_pending,
+            post_device_result
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

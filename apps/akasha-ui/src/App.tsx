@@ -153,6 +153,13 @@ function App() {
   const [pendingHumanInput, setPendingHumanInput] = useState<Record<string, { question: string; context: string; choices?: string[] }>>({});
   /** Task id for which the human-input modal is open (null = closed). */
   const [humanInputModalTaskId, setHumanInputModalTaskId] = useState<string | null>(null);
+  /** Device bridge: pending request from agent (camera, mic, etc.) for UI to fulfill. */
+  const [devicePendingRequest, setDevicePendingRequest] = useState<{
+    request_id: string;
+    interface: string;
+    action: string;
+    params: unknown;
+  } | null>(null);
   const [humanInputFreeText, setHumanInputFreeText] = useState("");
   /** Reply text for the inline ask_user form in the chat (when modal is not used). */
   const [inlineHumanReplyText, setInlineHumanReplyText] = useState("");
@@ -366,6 +373,33 @@ function App() {
     const id = setInterval(fetchPendingHumanInput, 25000);
     return () => clearInterval(id);
   }, [fetchPendingHumanInput]);
+
+  // Device bridge: poll for pending device requests (camera, mic, etc.) when daemon is healthy.
+  const fetchDevicePending = useCallback(async () => {
+    if (!health?.ok || devicePendingRequest != null) return;
+    try {
+      const data = await invoke<{ pending?: boolean; request_id?: string; interface?: string; action?: string; params?: unknown }>(
+        "get_device_pending",
+        { port: DAEMON_PORT }
+      );
+      if (data?.request_id && data?.interface != null && data?.action != null) {
+        setDevicePendingRequest({
+          request_id: data.request_id,
+          interface: data.interface,
+          action: data.action,
+          params: data.params ?? {},
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [health?.ok, devicePendingRequest]);
+
+  useEffect(() => {
+    fetchDevicePending();
+    const id = setInterval(fetchDevicePending, 2500);
+    return () => clearInterval(id);
+  }, [fetchDevicePending]);
 
   // Load today's conversation history on mount (short-term = current day, so it survives UI restart).
   useEffect(() => {
@@ -1566,6 +1600,118 @@ function App() {
                 </div>
               )}
               <button type="button" className="human-input-close" onClick={() => setHumanInputModalTaskId(null)} aria-label={t("common.close")}>
+                ×
+              </button>
+            </div>
+          </div>
+        )}
+        {/* Device bridge: agent requested device access (camera, mic, etc.) */}
+        {devicePendingRequest && (
+          <div className="human-input-overlay" role="dialog" aria-labelledby="device-request-title" aria-modal="true">
+            <div className="human-input-modal">
+              <h2 id="device-request-title">Accès appareil</h2>
+              <p className="human-input-question">
+                L’agent souhaite utiliser : <strong>{devicePendingRequest.interface}</strong> — <strong>{devicePendingRequest.action}</strong>
+              </p>
+              <div className="human-input-choices">
+                <button
+                  type="button"
+                  className="human-input-choice-btn"
+                  onClick={async () => {
+                    const { request_id, interface: iface, action: act } = devicePendingRequest;
+                    try {
+                      if (iface === "local_media" && (act === "capture" || act === "camera_capture")) {
+                        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                        const video = document.createElement("video");
+                        video.srcObject = stream;
+                        await new Promise<void>((resolve, reject) => {
+                          video.onloadedmetadata = () => {
+                            video.play().then(() => resolve()).catch(reject);
+                          };
+                          video.onerror = () => reject(new Error("Video load failed"));
+                        });
+                        const canvas = document.createElement("canvas");
+                        canvas.width = video.videoWidth;
+                        canvas.height = video.videoHeight;
+                        const ctx = canvas.getContext("2d");
+                        if (ctx) ctx.drawImage(video, 0, 0);
+                        stream.getTracks().forEach((t) => t.stop());
+                        const data = canvas.toDataURL("image/png").split(",")[1] ?? "";
+                        await invoke("post_device_result", { requestId: request_id, success: true, data, port: DAEMON_PORT });
+                      } else if (iface === "local_media" && (act === "record" || act === "microphone_record")) {
+                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        const recorder = new MediaRecorder(stream);
+                        const chunks: Blob[] = [];
+                        recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+                        recorder.start();
+                        await new Promise<void>((resolve) => {
+                          setTimeout(() => {
+                            recorder.stop();
+                            resolve();
+                          }, 3000);
+                        });
+                        stream.getTracks().forEach((t) => t.stop());
+                        const blob = new Blob(chunks, { type: "audio/webm" });
+                        const reader = new FileReader();
+                        const data = await new Promise<string>((resolve, reject) => {
+                          reader.onload = () => {
+                            const result = reader.result as string;
+                            resolve(result.includes(",") ? result.split(",")[1] ?? "" : "");
+                          };
+                          reader.onerror = reject;
+                          reader.readAsDataURL(blob);
+                        });
+                        await invoke("post_device_result", { requestId: request_id, success: true, data, port: DAEMON_PORT });
+                      } else {
+                        await invoke("post_device_result", { requestId: request_id, success: false, data: null, port: DAEMON_PORT });
+                      }
+                    } catch (e) {
+                      console.error(e);
+                      await invoke("post_device_result", { requestId: request_id, success: false, data: null, port: DAEMON_PORT });
+                    }
+                    setDevicePendingRequest(null);
+                  }}
+                >
+                  Autoriser
+                </button>
+                <button
+                  type="button"
+                  className="human-input-choice-btn"
+                  onClick={async () => {
+                    try {
+                      await invoke("post_device_result", {
+                        requestId: devicePendingRequest.request_id,
+                        success: false,
+                        data: null,
+                        port: DAEMON_PORT,
+                      });
+                    } catch (e) {
+                      console.error(e);
+                    }
+                    setDevicePendingRequest(null);
+                  }}
+                >
+                  Refuser
+                </button>
+              </div>
+              <button
+                type="button"
+                className="human-input-close"
+                onClick={async () => {
+                  try {
+                    await invoke("post_device_result", {
+                      requestId: devicePendingRequest.request_id,
+                      success: false,
+                      data: null,
+                      port: DAEMON_PORT,
+                    });
+                  } catch (e) {
+                    console.error(e);
+                  }
+                  setDevicePendingRequest(null);
+                }}
+                aria-label={t("common.close")}
+              >
                 ×
               </button>
             </div>
