@@ -2060,7 +2060,7 @@ pub(crate) async fn run_message_via_llm(
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
     let assigned_agent = store
-        .get(&task_id)
+        .get(task_id)
         .ok()
         .flatten()
         .map(|t| t.assigned_agent.clone())
@@ -2195,8 +2195,8 @@ pub(crate) async fn run_message_via_llm(
         // Project context (Option A): when the message suggests a project, retrieve project-related memories (stored with source project:<name>) and inject as [Projet en cours]
         if message_suggests_project(&message) {
             let query = "projet état livrables objectif étapes fait reste à faire";
-            let client = client.clone();
-            let project_results = tokio::task::spawn_blocking(move || client.search(query.to_string(), 5))
+            let client_for_project = long_term_client.as_ref().unwrap().clone();
+            let project_results = tokio::task::spawn_blocking(move || client_for_project.search(query.to_string(), 5))
                 .await
                 .ok()
                 .unwrap_or_default();
