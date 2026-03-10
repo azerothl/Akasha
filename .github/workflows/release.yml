@@ -1,5 +1,6 @@
 # Build release binaries for Akasha (CLI + daemon + TUI) and publish to GitHub Releases.
-# Trigger: push a tag like v0.1.0 or v1.0.0 (e.g. git tag v0.1.0 && git push origin v0.1.0).
+# Trigger: push a tag like v0.1.0 or v1.0.0 (e.g. git tag v0.1.0 && git push origin v0.1.0),
+# or run manually from the Actions tab (workflow_dispatch) with a version input.
 # Users can then download the zip for their OS from the Releases page (no compilation needed).
 
 name: Release
@@ -8,6 +9,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v0.2.0). Used when running manually; must match an existing tag or the release will be created from the current branch.'
+        required: true
+        type: string
 
 jobs:
   build:
@@ -178,9 +185,9 @@ jobs:
       - name: Create archives and release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
         run: |
           set -e
-          VERSION=${GITHUB_REF#refs/tags/}
           mkdir -p release
 
           for dir in artifacts/akasha-*; do
@@ -225,7 +232,7 @@ jobs:
       - name: Trigger Akasha_app deployment via repository_dispatch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
           REPO_OWNER: azerothl
           REPO_APP: Akasha_app
           TOKEN: ${{ secrets.AKASHA_APP_DISPATCH_TOKEN }}
