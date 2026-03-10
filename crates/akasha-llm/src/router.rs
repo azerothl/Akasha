@@ -9,6 +9,53 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::{info, Instrument};
 
+fn is_custom_route(config: &TaskTypeConfig) -> bool {
+    config
+        .primary
+        .as_ref()
+        .map(|p| {
+            p.provider != "akasha_embedded" && p.provider != "akasha_core"
+        })
+        .unwrap_or(false)
+}
+
+/// Agent type -> (primary task_type, fallback task_types for routing when primary has no custom route).
+fn agent_task_type_and_fallbacks(agent: &str) -> (&'static str, &'static [&'static str]) {
+    match agent {
+        "financial" => ("financial", &["data_analysis", "conversation"][..]),
+        "documentalist" => ("documentalist", &["conversation"][..]),
+        "project_manager" => ("project_manager", &["conversation"][..]),
+        "technical_writer" => ("technical_writer", &["creative_writing", "conversation"][..]),
+        "research" => ("research", &["scientific_analysis", "conversation"][..]),
+        "security_audit" => (
+            "security_audit",
+            &["code_generation", "system_diagnostic", "conversation"][..],
+        ),
+        "creative" => ("creative", &["creative_writing", "conversation"][..]),
+        "code" => ("code_generation", &["conversation"][..]),
+        "search" => ("conversation", &[]),
+        "conversation" => ("conversation", &[]),
+        _ => ("conversation", &[]),
+    }
+}
+
+fn resolve_task_type_for_agent_impl(assigned_agent: &str, config: &RoutingConfig) -> String {
+    let (primary, fallbacks) = agent_task_type_and_fallbacks(assigned_agent);
+    if let Some(route) = config.get_route(primary) {
+        if is_custom_route(route) {
+            return primary.to_string();
+        }
+    }
+    for &fallback in fallbacks {
+        if let Some(route) = config.get_route(fallback) {
+            if is_custom_route(route) {
+                return fallback.to_string();
+            }
+        }
+    }
+    primary.to_string()
+}
+
 pub struct LLMRouter {
     config: Arc<RwLock<RoutingConfig>>,
     fallback: FallbackEngine,
@@ -73,6 +120,13 @@ impl LLMRouter {
     /// Routes by category (primary + fallback) for GET /api/router/routes and CLI/TUI.
     pub fn routes_by_category(&self) -> HashMap<String, TaskTypeConfig> {
         self.config.read().unwrap_or_else(|e| e.into_inner()).task_types.clone()
+    }
+
+    /// Resolve which task_type to use for routing given an assigned_agent. If the agent's task_type
+    /// has no custom route, tries similar task_types in order until one has a custom route.
+    pub fn resolve_task_type_for_agent(&self, assigned_agent: &str) -> String {
+        let config = self.config.read().unwrap_or_else(|e| e.into_inner());
+        resolve_task_type_for_agent_impl(assigned_agent, &config)
     }
 
     /// Base URL of the Ollama provider from config (if set).
