@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "gen-icon-ico": "node scripts/gen-icon-ico.mjs"
+    "gen-icons": "node scripts/gen-icon-ico.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
+    "@ctjs/png2icons": "^3.0.3",
     "@types/node": "^20.0.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
