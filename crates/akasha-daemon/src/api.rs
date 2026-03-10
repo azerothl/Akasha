@@ -334,7 +334,11 @@ pub async fn run_delegation_handler(
             }
         }
         let child_id = Uuid::new_v4();
-        let agent_type = if ["search", "code", "conversation"].contains(&req.agent_type.as_str()) {
+        const WORKER_AGENT_TYPES: &[&str] = &[
+            "search", "code", "conversation", "financial", "documentalist", "project_manager",
+            "technical_writer", "research", "security_audit", "creative",
+        ];
+        let agent_type = if WORKER_AGENT_TYPES.contains(&req.agent_type.as_str()) {
             req.agent_type.clone()
         } else {
             "conversation".to_string()
@@ -558,7 +562,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("image", "image <path|url> [prompt] — analyse d'image par modèle vision (non implémenté, prévu phase 3)"),
     ("pdf", "pdf <path|url> — extraire le texte d'un PDF (non implémenté, prévu phase 3)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
-    ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (ex. search pour recherche web). agent_type: search | code | conversation. Un seul niveau de délégation autorisé."),
+    ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (ex. search pour recherche web). agent_type: search | code | conversation | financial | documentalist | project_manager | technical_writer | research | security_audit | creative. Un seul niveau de délégation autorisé."),
     ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
     ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
     ("device_discover", "device_discover [interface] — lister les appareils accessibles (optionnel: local_media, system, network, usb). Filtre par politique allowed_device_interfaces / blocked_device_interfaces."),
@@ -1074,6 +1078,7 @@ Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça m
 commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Mémoire/Doc/Activité), \
 commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, /skills reload, etc.). \
 Pour installer un CLI en global (ex. « installe le CLI bankr », « npm install -g @bankr/cli »), répondre par TOOL: run_command npm install -g <package> (ne pas générer de script à faire exécuter par l'utilisateur). Pour utiliser une clé du vault dans une commande : TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (le système injecte la valeur du vault). \
+
 Skills (capacités supplémentaires) : l'utilisateur peut en ajouter sans modifier le code. Quand l'utilisateur demande d'installer un skill depuis une URL (ex. « installe le skill bankr depuis … »), tu DOIS répondre par TOOL: install_skill <url>. Pour désinstaller un skill : TOOL: uninstall_skill <nom> (ex. TOOL: uninstall_skill bankr). Quand l'utilisateur te demande d'effectuer une action avec un skill (ex. « vérifie mon wallet bankr », « lance bankr whoami »), tu DOIS répondre UNIQUEMENT par une ligne TOOL: <nom_du_skill> <arguments> (ex. TOOL: bankr whoami) pour que le système exécute la commande ; ne dis pas à l'utilisateur de lancer la commande lui-même. Sinon, l'utilisateur peut placer les fichiers dans le dossier skills et exécuter /skills reload. \
 La documentation complète est disponible dans l'onglet Doc de l'interface. \
 Réponds en français sauf si l'utilisateur utilise une autre langue. \
@@ -1081,6 +1086,22 @@ Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis
 Pour les questions sur des informations que tu n'as pas (météo, prévisions, actualités, horaires, etc.), tu dois utiliser l'outil web_search pour chercher toi-même puis répondre avec les résultats. Ne propose pas à l'utilisateur d'aller sur un site sans avoir d'abord utilisé web_search si tu as accès à cet outil. Si web_search renvoie une erreur (ex. non activé), tu peux alors suggérer des sites et indiquer comment activer la recherche web (tools_policy.yaml, web_search_enabled, BRAVE_API_KEY). \
 Tu as accès à l'outil write_file : tu DOIS l'utiliser dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier (ex. « enregistre le code dans … », « sauvegarde dans ce dossier », « write to file »). Réponds UNIQUEMENT par une ligne TOOL: write_file <chemin_complet> puis le contenu du fichier sur les lignes suivantes. Ne dis JAMAIS « je ne peux pas écrire sur le disque » ou « copie-colle le code toi-même » — si le chemin est refusé par la politique, l'outil renverra une erreur et tu expliqueras alors comment ajouter le préfixe dans tools_policy.yaml (allowed_write_paths). Les chemins peuvent être Windows (C:\\Users\\...) ou Unix. \
 Règle importante : dès que tu dois demander à l'utilisateur un choix, une confirmation ou une information (options à choisir, chemin, identifiants, etc.) puis enchaîner dans la même tâche, tu DOIS utiliser l'outil ask_user (TOOL: ask_user puis JSON avec question/context/choices). Ne pose pas la question en texte libre, sinon la réponse ouvrira une nouvelle tâche et tu ne pourras pas continuer. Pour un accès à un service externe (GitHub, API, etc.), ne réponds pas « je ne peux pas » ; utilise ask_user pour demander le token ou explique comment configurer. Si l'utilisateur a déjà confirmé (ex. « clé dans le vault », « c'est configuré »), n'envoie pas une deuxième fois ask_user ; enchaîne. Ne invente pas de commandes (ex. /status repo:... n'existe pas) ; les commandes sont dans /help.\n\n";
+
+/// Returns an English [Role] system prompt for the given agent type, or None for conversation/unknown.
+fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
+    match agent_type {
+        "code" => Some("You are the code generation agent. Produce correct, readable code. Prefer run_command or write_file when the user asks to create or run code. Do not invent APIs; use read_file when needed to match existing code."),
+        "search" => Some("You are the search agent. Use web_search to find external information (weather, news, facts). Synthesize results and cite sources. Do not claim information you have not retrieved via web_search when it is available."),
+        "financial" => Some("You are the financial specialist. Help with budgets, cost analysis, financial reports, numeric reasoning. Be precise with figures and units. Do not invent data; state what is missing if needed."),
+        "documentalist" => Some("You are the documentalist. Answer from the user's document base (RAG). Prioritize [Documents utilisateur] and [Mémoire à long terme]. Use memory_search when relevant. Quote or summarize from excerpts; if insufficient, say so and suggest adding documents."),
+        "project_manager" => Some("You are the project manager. Help with project tracking, milestones, task breakdown, planning. Refer to schedules and recurring tasks when relevant. Propose clear next steps and deliverables."),
+        "technical_writer" => Some("You are the technical writing agent. Produce clear technical documentation, procedures, tutorials. Use a structured style (headings, steps, code blocks when relevant). Prefer clarity and precision. Use write_file when the user asks to save documentation."),
+        "research" => Some("You are the research agent. Perform in-depth research using web_search, memory_search, and the document base. Synthesize multiple sources; cite or summarize clearly. Do not invent facts."),
+        "security_audit" => Some("You are the security audit agent. Review code, config, or practices for security. Be methodical; highlight risks and suggest mitigations. Do not claim certainty where you lack context; recommend human review for critical decisions."),
+        "creative" => Some("You are the creative / copywriting agent. Produce marketing copy, creative content, and audience-adapted text. Match tone and format to the requested channel and goal."),
+        _ => None,
+    }
+}
 
 /// If AKASHA_TOOLS_JOURNAL_PATH is set, append a line for write tool invocations (Phase 4 modification journal).
 async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: &str) {
@@ -2038,6 +2059,12 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
+    let assigned_agent = store
+        .get(&task_id)
+        .ok()
+        .flatten()
+        .map(|t| t.assigned_agent.clone())
+        .unwrap_or_else(|| "conversation".to_string());
 
     let tools_executor_snapshot = match &tools_executor {
         Some(r) => Some((*r.read().await).clone()),
@@ -2131,6 +2158,11 @@ pub(crate) async fn run_message_via_llm(
     // Build prompt with short-term + long-term memory (spec 06)
     let mut context_prefix = String::new();
     context_prefix.push_str(APP_CONTEXT);
+    if let Some(role_prompt) = agent_role_system_prompt(&assigned_agent) {
+        context_prefix.push_str("[Role]\n");
+        context_prefix.push_str(role_prompt);
+        context_prefix.push_str("\n\n");
+    }
 
     // Agent profile: name, personality, rules, can/cannot (persisted in data_dir/agent_profile.json)
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
@@ -2298,11 +2330,12 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
         }
+        let preferred_task_type = Some(llm_router.resolve_task_type_for_agent(&assigned_agent));
         let request = CompletionRequest {
             prompt: format!("{}{}", current_prompt, tool_instruction),
             max_tokens: Some(max_tokens),
             temperature: Some(0.7),
-            preferred_task_type: None,
+            preferred_task_type,
             image_data_urls: if tool_loop_history.is_empty() {
                 image_data_urls.clone()
             } else {
