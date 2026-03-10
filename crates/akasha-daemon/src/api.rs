@@ -4262,6 +4262,15 @@ async fn put_schedule(store_path: &Path, id: Uuid, body: Option<Vec<u8>>) -> Str
     if let Some(v) = json.get("interval_seconds").and_then(|v| v.as_u64()) {
         s.interval_seconds = Some(v);
     }
+    if let Some(v) = json.get("channel_context") {
+        if v.is_null() {
+            s.channel_context = None;
+        } else if let Some(s_val) = v.as_str() {
+            s.channel_context = Some(s_val.to_string());
+        } else {
+            return json_response("400 Bad Request", r#"{"error":"invalid_field_type","field":"channel_context"}"#);
+        }
+    }
     if store.update_schedule(&s).is_err() {
         return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
     }
@@ -4342,6 +4351,7 @@ async fn get_calendar_events(store_path: &Path, path: &str) -> String {
                     "run_id": r.id.to_string(),
                     "planned_for": r.planned_for.to_rfc3339(),
                     "label": label,
+                    "schedule_id": r.schedule_id.map(|u| u.to_string()),
                 }));
             }
         }

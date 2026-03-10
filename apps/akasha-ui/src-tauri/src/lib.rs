@@ -749,6 +749,29 @@ async fn create_schedule(
     Ok(json)
 }
 
+/// Update schedule: PUT /api/schedules/:id (e.g. channel_context / prompt).
+#[tauri::command]
+async fn put_schedule(
+    schedule_id: String,
+    port: Option<u16>,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/schedules/{}", daemon_base_url(port), schedule_id);
+    let client = http_client();
+    let resp = client
+        .put(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// Delete schedule: DELETE /api/schedules/:id.
 #[tauri::command]
 async fn delete_schedule(schedule_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -903,6 +926,7 @@ pub fn run() {
             get_schedules,
             get_schedule_by_id,
             create_schedule,
+            put_schedule,
             delete_schedule,
             get_calendar_events,
             get_task_runs,
