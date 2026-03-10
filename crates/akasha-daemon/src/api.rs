@@ -4262,8 +4262,14 @@ async fn put_schedule(store_path: &Path, id: Uuid, body: Option<Vec<u8>>) -> Str
     if let Some(v) = json.get("interval_seconds").and_then(|v| v.as_u64()) {
         s.interval_seconds = Some(v);
     }
-    if json.get("channel_context").is_some() {
-        s.channel_context = json.get("channel_context").and_then(|v| v.as_str()).map(String::from);
+    if let Some(v) = json.get("channel_context") {
+        if v.is_null() {
+            s.channel_context = None;
+        } else if let Some(s_val) = v.as_str() {
+            s.channel_context = Some(s_val.to_string());
+        } else {
+            return json_response("400 Bad Request", r#"{"error":"invalid_field_type","field":"channel_context"}"#);
+        }
     }
     if store.update_schedule(&s).is_err() {
         return json_response("500 Internal Server Error", r#"{"error":"store"}"#);

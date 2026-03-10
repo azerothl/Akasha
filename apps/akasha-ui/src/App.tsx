@@ -223,6 +223,38 @@ function App() {
       return { representative: sorted[0], count: sorted.length };
     });
   };
+  // Precompute deduped event groups per slot to avoid per-cell recomputation during render.
+  const calendarGridDedupedBySlot = useMemo(() => {
+    const getParentKey = (ev: CalendarGridEvent) => ev.schedule_id ?? `task_${ev.task_id}`;
+    const dedupe = (evs: CalendarGridEvent[]) => {
+      const byParent = new Map<string, CalendarGridEvent[]>();
+      evs.forEach((ev) => {
+        const key = getParentKey(ev);
+        if (!byParent.has(key)) byParent.set(key, []);
+        byParent.get(key)!.push(ev);
+      });
+      return Array.from(byParent.entries()).map(([, arr]) => {
+        const sorted = [...arr].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+        return { representative: sorted[0], count: sorted.length };
+      });
+    };
+    const byHourSlot = new Map<string, CalendarGridEvent[]>();
+    const byDateSlot = new Map<string, CalendarGridEvent[]>();
+    calendarGridEvents.forEach((ev) => {
+      const d = new Date(ev.at);
+      const dateKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const hourSlot = `${dateKey}-${d.getHours()}`;
+      if (!byHourSlot.has(hourSlot)) byHourSlot.set(hourSlot, []);
+      byHourSlot.get(hourSlot)!.push(ev);
+      if (!byDateSlot.has(dateKey)) byDateSlot.set(dateKey, []);
+      byDateSlot.get(dateKey)!.push(ev);
+    });
+    const byHour = new Map<string, { representative: CalendarGridEvent; count: number }[]>();
+    byHourSlot.forEach((evs, key) => byHour.set(key, dedupe(evs)));
+    const byDate = new Map<string, { representative: CalendarGridEvent; count: number }[]>();
+    byDateSlot.forEach((evs, key) => byDate.set(key, dedupe(evs)));
+    return { byHour, byDate };
+  }, [calendarGridEvents]);
   const [memoryShortTerm, setMemoryShortTerm] = useState<Array<{ role: string; content: string }>>([]);
   const [memoryLongTerm, setMemoryLongTerm] = useState<Array<{ id?: string; content: string; created_at: string; source: string }>>([]);
   const [memoryLongTermAvailable, setMemoryLongTermAvailable] = useState(false);
@@ -2166,6 +2198,8 @@ function App() {
                         const h = date.getHours();
                         byHour[h].push(ev);
                       });
+                      const gd = calendarGridDate;
+                      const todayKey = `${gd.getFullYear()}-${String(gd.getMonth() + 1).padStart(2, "0")}-${String(gd.getDate()).padStart(2, "0")}`;
                       return (
                         <table className="calendar-grid-table calendar-grid-day" role="grid" aria-label="Calendrier jour">
                           <thead>
@@ -2182,8 +2216,8 @@ function App() {
                                   <div className="calendar-cell-content">
                                     <div className="calendar-cell-inner">
                                       <ul className="calendar-grid-slot-events" role="list">
-                                        {calendarDedupeByParent(byHour[h]).slice(0, 2).map(({ representative: e, count }, i) => (
-                                          <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} onClick={() => setCalendarSelectedTaskId(e.task_id)}>
+                                        {(calendarGridDedupedBySlot.byHour.get(`${todayKey}-${h}`) ?? []).slice(0, 2).map(({ representative: e, count }, i) => (
+                                          <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} role="button" tabIndex={0} onClick={() => setCalendarSelectedTaskId(e.task_id)} onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); setCalendarSelectedTaskId(e.task_id); } }}>
                                             <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
                                             <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
                                           </li>
@@ -2249,8 +2283,8 @@ function App() {
                                         <div className="calendar-cell-content">
                                           <div className="calendar-cell-inner">
                                             <ul className="calendar-grid-slot-events" role="list">
-                                              {calendarDedupeByParent(cellEvents).slice(0, 2).map(({ representative: e, count }, i) => (
-                                                <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} onClick={() => setCalendarSelectedTaskId(e.task_id)}>
+                                              {(calendarGridDedupedBySlot.byHour.get(`${key}-${hour}`) ?? []).slice(0, 2).map(({ representative: e, count }, i) => (
+                                                <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} role="button" tabIndex={0} onClick={() => setCalendarSelectedTaskId(e.task_id)} onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); setCalendarSelectedTaskId(e.task_id); } }}>
                                                   <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
                                                   <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
                                                 </li>
@@ -2321,8 +2355,8 @@ function App() {
                                         <span className="calendar-grid-day-num">{new Date(key + "T12:00:00").getDate()}</span>
                                         <div className="calendar-cell-inner">
                                           <ul className="calendar-grid-slot-events" role="list">
-                                            {calendarDedupeByParent(cellEvents).slice(0, 2).map(({ representative: e, count }, i) => (
-                                              <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} onClick={() => setCalendarSelectedTaskId(e.task_id)}>
+                                            {(calendarGridDedupedBySlot.byDate.get(key) ?? []).slice(0, 2).map(({ representative: e, count }, i) => (
+                                              <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} role="button" tabIndex={0} onClick={() => setCalendarSelectedTaskId(e.task_id)} onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); setCalendarSelectedTaskId(e.task_id); } }}>
                                                 <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
                                                 <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
                                               </li>
