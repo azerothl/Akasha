@@ -179,6 +179,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -e
           VERSION=${GITHUB_REF#refs/tags/}
           mkdir -p release
 
@@ -194,7 +195,12 @@ jobs:
             (cd "$dir" && zip -r "../../release/${name}.zip" .)
           done
 
+          shopt -s nullglob
           RELEASE_FILES=(release/*.zip)
+          if [ ${#RELEASE_FILES[@]} -eq 0 ]; then
+            echo "::error::No zip files produced in release/. Check artifact downloads."
+            exit 1
+          fi
 
           git fetch --tags
           PREV_TAG=$(git tag -l 'v*' --sort=-v:refname | sed -n '2p')
@@ -213,6 +219,9 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Trigger Akasha_app deployment via repository_dispatch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
