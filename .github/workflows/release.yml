@@ -143,13 +143,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
-      - name: Ensure Tauri icon exists
-        run: |
-          node scripts/gen-ico.js
-
       - name: Install npm dependencies
         working-directory: apps/akasha-ui
         run: npm ci
+
+      - name: Ensure Tauri icon exists
+        run: |
+          node scripts/gen-ico.js
 
       - name: Build Tauri app
         working-directory: apps/akasha-ui
