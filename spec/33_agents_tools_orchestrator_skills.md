@@ -66,6 +66,10 @@ Liste exposée dans le code (`AVAILABLE_TOOLS`) et via **GET /api/tools** (JSON 
 | `session_status` | `session_status <task_id>` | Statut d'une tâche. |
 | `message` | `message send <channel> <text>` | Envoyer un message (webhook). |
 | `browser`, `image`, `pdf` | (stubs) | Prévu phase 3. |
+| `device_discover` | `device_discover [interface]` | Lister les appareils accessibles (local_media, system, network, usb, etc.). Filtre par `allowed_device_interfaces` / `blocked_device_interfaces`. |
+| `device_invoke` | `device_invoke <interface> <device_id> <action> [params...]` | Exécuter une action sur un appareil. Pour `local_media` (caméra, micro, audio), nécessite un client UI (device bridge). |
+
+**Device bridge et accès appareils** : l’agent peut interagir avec **tout appareil accessible** (périphériques réseau, USB, interfaces locales). Modèle générique : `device_discover` liste les appareils (optionnellement par interface) ; `device_invoke` envoie une action à un appareil. Les interfaces (ex. `local_media`, `system`, `network`, `usb`) sont extensibles. Pour les appareils qui nécessitent consentement ou capture côté utilisateur (caméra, micro, lecture audio), le daemon enregistre une requête dans le **device bridge** ; l’UI (Tauri) interroge `GET /api/device/pending`, exécute l’action (getUserMedia, etc.) et envoie le résultat via `POST /api/device/result`. Politique : `allowed_device_interfaces` (liste ou `["*"]` pour tout) et `blocked_device_interfaces` (prioritaire), même logique que `allowed_commands` / `blocked_commands`.
 
 Politique : `tool_profiles`, `default_profile` ; détection de boucle (3 répétitions) ; journal des modifications si `AKASHA_TOOLS_JOURNAL_PATH`. Pour web_fetch : `allowed_web_domains` peut contenir `"*"` pour autoriser tous les domaines ; `blocked_web_domains` liste les domaines (et sous-domaines) interdits, prioritaire sur l'autorisation.
 
