@@ -47,6 +47,13 @@ pub struct ToolsPolicy {
     /// Optional: tools that require explicit user approval before execution (e.g. write_file, run_command, run_in_container).
     #[serde(default)]
     pub require_approval: Vec<String>,
+    /// Optional: device interfaces allowed for device_discover / device_invoke (e.g. local_media, system, network, usb).
+    /// Use ["*"] to allow all interfaces (subject to blocked_device_interfaces).
+    #[serde(default)]
+    pub allowed_device_interfaces: Vec<String>,
+    /// Optional: device interfaces blocked; takes precedence over allowed_device_interfaces.
+    #[serde(default)]
+    pub blocked_device_interfaces: Vec<String>,
 }
 
 impl ToolsPolicy {
@@ -150,10 +157,15 @@ impl ToolsPolicy {
 
     /// If default_profile is set, returns whether the tool is in the profile or in allowed_commands (skills/CLIs). Otherwise true.
     /// ask_user and install_skill are always allowed.
+    /// device_discover and device_invoke are allowed when at least one device interface is allowed (allowed_device_interfaces non-empty or "*").
     /// Tools in allowed_commands (e.g. skill names like "bankr") are allowed so TOOL: bankr <args> can be executed as run_command.
     pub fn can_use_tool(&self, tool_name: &str) -> bool {
         if tool_name == "ask_user" || tool_name == "install_skill" || tool_name == "uninstall_skill" {
             return true;
+        }
+        if tool_name == "device_discover" || tool_name == "device_invoke" {
+            return self.allowed_device_interfaces.iter().any(|a| a.trim().eq_ignore_ascii_case("*"))
+                || !self.allowed_device_interfaces.is_empty();
         }
         if self.can_run_command(tool_name) {
             return true;
@@ -173,6 +185,36 @@ impl ToolsPolicy {
         self.default_profile
             .as_ref()
             .and_then(|p| self.tool_profiles.get(p).cloned())
+    }
+
+    /// Check if a device interface is allowed for device_discover / device_invoke.
+    /// Order: (1) block if interface in blocked_device_interfaces; (2) allow if allowed_device_interfaces contains "*"; (3) allow if interface in allowed_device_interfaces.
+    /// If allowed_device_interfaces is empty, no device access (deny all).
+    pub fn can_use_device_interface(&self, interface: &str) -> bool {
+        let name = interface.trim().to_lowercase();
+        if name.is_empty() {
+            return false;
+        }
+        if self
+            .blocked_device_interfaces
+            .iter()
+            .any(|b| b.trim().to_lowercase() == name)
+        {
+            return false;
+        }
+        if self
+            .allowed_device_interfaces
+            .iter()
+            .any(|a| a.trim().eq_ignore_ascii_case("*"))
+        {
+            return true;
+        }
+        if self.allowed_device_interfaces.is_empty() {
+            return false;
+        }
+        self.allowed_device_interfaces
+            .iter()
+            .any(|a| a.trim().to_lowercase() == name)
     }
 
     /// Hosts allowed for install_skill. If None or empty, returns default GitHub hosts. If list contains "*", any host is allowed (caller must check).

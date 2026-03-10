@@ -561,6 +561,8 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (ex. search pour recherche web). agent_type: search | code | conversation. Un seul niveau de délégation autorisé."),
     ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
     ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
+    ("device_discover", "device_discover [interface] — lister les appareils accessibles (optionnel: local_media, system, network, usb). Filtre par politique allowed_device_interfaces / blocked_device_interfaces."),
+    ("device_invoke", "device_invoke <interface> <device_id> <action> [params...] — exécuter une action sur un appareil (ex. device_invoke local_media camera capture). Nécessite un client UI pour local_media (caméra, micro, audio)."),
 ];
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -1178,6 +1180,7 @@ async fn execute_tool_call(
     store_path: Option<&std::path::Path>,
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     message_webhook_url: Option<&str>,
+    device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
 ) -> (bool, String) {
     use std::path::Path;
     if !executor.policy.can_use_tool(tool_name) {
@@ -1755,6 +1758,85 @@ async fn execute_tool_call(
                 Err(e) => (false, format!("[run_in_container] error: {}", e)),
             }
         }
+        "device_discover" => {
+            let interface = args.get(0).map(String::as_str).unwrap_or("").trim();
+            let interfaces_to_list: Vec<String> = if interface.is_empty() {
+                let allowed = &executor.policy.allowed_device_interfaces;
+                if allowed.iter().any(|a| a.trim().eq_ignore_ascii_case("*")) {
+                    vec!["local_media".into(), "system".into()]
+                } else {
+                    allowed.clone()
+                }
+            } else {
+                if !executor.policy.can_use_device_interface(interface) {
+                    return (false, format!("[device_discover] interface '{}' not allowed by policy (allowed_device_interfaces / blocked_device_interfaces)", interface));
+                }
+                vec![interface.to_string()]
+            };
+            let mut devices: Vec<serde_json::Value> = Vec::new();
+            for iface in &interfaces_to_list {
+                match iface.as_str() {
+                    "local_media" => {
+                        devices.push(serde_json::json!({ "interface": "local_media", "id": "camera", "name": "Camera" }));
+                        devices.push(serde_json::json!({ "interface": "local_media", "id": "microphone", "name": "Microphone" }));
+                        devices.push(serde_json::json!({ "interface": "local_media", "id": "speaker", "name": "Speaker" }));
+                    }
+                    "system" => {
+                        devices.push(serde_json::json!({ "interface": "system", "id": "printer", "name": "System printers" }));
+                    }
+                    _ => {
+                        devices.push(serde_json::json!({ "interface": iface, "id": "default", "name": format!("{} (discovery stub)", iface) }));
+                    }
+                }
+            }
+            let body = serde_json::json!({ "devices": devices });
+            (true, format!("[device_discover] {} device(s): {}", devices.len(), body.to_string()))
+        }
+        "device_invoke" => {
+            let interface = args.get(0).map(String::as_str).unwrap_or("");
+            let device_id = args.get(1).map(String::as_str).unwrap_or("");
+            let action = args.get(2).map(String::as_str).unwrap_or("");
+            let params_json = args.get(3..).map(|a| serde_json::json!(a.join(" ")));
+            if interface.is_empty() || device_id.is_empty() || action.is_empty() {
+                return (false, "[device_invoke] usage: device_invoke <interface> <device_id> <action> [params...]".to_string());
+            }
+            if !executor.policy.can_use_device_interface(interface) {
+                return (false, format!("[device_invoke] interface '{}' not allowed by policy", interface));
+            }
+            let params = params_json.unwrap_or(serde_json::json!({}));
+            if interface == "local_media" {
+                let bridge = match device_bridge {
+                    Some(b) => b,
+                    None => return (false, "[device_invoke] device bridge not available (no UI client for local_media)".to_string()),
+                };
+                let (_request_id, rx) = bridge
+                    .submit_request(interface.to_string(), action.to_string(), params)
+                    .await;
+                const DEVICE_TIMEOUT_SECS: u64 = 60;
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(DEVICE_TIMEOUT_SECS),
+                    rx,
+                )
+                .await
+                {
+                    Ok(Ok(result)) => {
+                        let msg = if result.success {
+                            let data_preview = result.data.as_deref().map(|d| if d.len() > 200 { format!("{}...", &d[..200]) } else { d.to_string() }).unwrap_or_else(|| "ok".to_string());
+                            format!("[device_invoke local_media {}] success — {}", action, data_preview)
+                        } else {
+                            format!("[device_invoke local_media {}] failed or refused", action)
+                        };
+                        (result.success, msg)
+                    }
+                    Ok(Err(_)) => (false, "[device_invoke] channel closed without result".to_string()),
+                    Err(_) => (false, format!("[device_invoke] timeout after {}s (no UI client responded)", DEVICE_TIMEOUT_SECS)),
+                }
+            } else if interface == "system" {
+                (false, "[device_invoke] system interface (e.g. print) not yet implemented".to_string())
+            } else {
+                (false, format!("[device_invoke] interface '{}' handler not yet implemented", interface))
+            }
+        }
         _ => {
             if executor.policy.can_run_command(tool_name) {
                 match executor.run_command(tool_name, args, None, None).await {
@@ -1933,6 +2015,7 @@ pub(crate) async fn run_message_via_llm(
     task_completion_registry: Option<TaskCompletionRegistry>,
     agent_profile_cache: Option<AgentProfileCache>,
     task_usage_store: Option<std::sync::Arc<TaskUsageStore>>,
+    device_bridge: Option<std::sync::Arc<crate::device_bridge::DeviceBridge>>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -2532,6 +2615,7 @@ pub(crate) async fn run_message_via_llm(
                             Some(store_path.as_path()),
                             conv_tx.clone(),
                             message_webhook_url.as_deref(),
+                            device_bridge.as_ref(),
                         )
                         .await
                     } else {
@@ -2558,6 +2642,7 @@ pub(crate) async fn run_message_via_llm(
                         Some(store_path.as_path()),
                         conv_tx.clone(),
                         message_webhook_url.as_deref(),
+                        device_bridge.as_ref(),
                     )
                     .await
                 };
@@ -2870,6 +2955,7 @@ pub async fn handle_api(
     agent_profile_cache: &AgentProfileCache,
     update_cache: &UpdateCheckCache,
     task_usage_store: &TaskUsageStore,
+    device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
@@ -2909,6 +2995,48 @@ pub async fn handle_api(
             "error": status.error,
         });
         return json_response("200 OK", &body.to_string());
+    }
+
+    // GET /api/device/pending — oldest pending device request (for UI to fulfill: camera, mic, etc.)
+    if method == "GET" && path == "/api/device/pending" {
+        if let Some(bridge) = device_bridge {
+            match bridge.get_pending().await {
+                Some((request_id, interface, action, params)) => {
+                    let body = serde_json::json!({
+                        "request_id": request_id,
+                        "interface": interface,
+                        "action": action,
+                        "params": params,
+                    });
+                    return json_response("200 OK", &body.to_string());
+                }
+                None => {
+                    return json_response("200 OK", r#"{"pending":false}"#);
+                }
+            }
+        } else {
+            return json_response("200 OK", r#"{"pending":false}"#);
+        }
+    }
+
+    // POST /api/device/result — UI sends result of device action (e.g. image base64, audio base64)
+    if method == "POST" && path == "/api/device/result" {
+        if let Some(bridge) = device_bridge {
+            let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+            let request_id = body_json.as_ref().and_then(|j| j.get("request_id")).and_then(|v| v.as_str());
+            let success = body_json.as_ref().and_then(|j| j.get("success")).and_then(|v| v.as_bool()).unwrap_or(false);
+            let data = body_json.as_ref().and_then(|j| j.get("data")).and_then(|v| v.as_str()).map(String::from);
+            let request_id = match request_id.filter(|s| !s.is_empty()) {
+                Some(id) => id,
+                None => return json_response("400 Bad Request", r#"{"error":"request_id_required"}"#),
+            };
+            let result = crate::device_bridge::DeviceResult { success, data };
+            let fulfilled = bridge.fulfill(request_id, result).await;
+            let body = serde_json::json!({ "ok": fulfilled });
+            return json_response("200 OK", &body.to_string());
+        } else {
+            return json_response("501 Not Implemented", r#"{"error":"device_bridge_unavailable"}"#);
+        }
     }
 
     // GET /api/agent-profile — read agent profile (name, personality, rules, can_do, cannot_do)

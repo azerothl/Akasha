@@ -5,6 +5,7 @@ pub mod agents;
 pub mod api;
 pub mod channels;
 pub mod daemon;
+pub mod device_bridge;
 pub mod health;
 pub mod memory;
 pub mod memory_actor;
