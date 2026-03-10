@@ -180,7 +180,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          mkdir -p release release/tauri
+          mkdir -p release
 
           for dir in artifacts/akasha-*; do
             [ -d "$dir" ] || continue
@@ -190,13 +190,11 @@ jobs:
 
           for dir in artifacts/akasha-ui-*; do
             [ -d "$dir" ] || continue
-            cp -r "$dir"/* release/tauri/ 2>/dev/null || true
+            name=$(basename "$dir")
+            (cd "$dir" && zip -r "../../release/${name}.zip" .)
           done
 
           RELEASE_FILES=(release/*.zip)
-          if [ -d release/tauri ] && [ -n "$(ls -A release/tauri 2>/dev/null)" ]; then
-            while IFS= read -r -d '' f; do RELEASE_FILES+=("$f"); done < <(find release/tauri -type f -print0)
-          fi
 
           git fetch --tags
           PREV_TAG=$(git tag -l 'v*' --sort=-v:refname | sed -n '2p')
