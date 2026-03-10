@@ -190,13 +190,39 @@ function App() {
     channel_context?: string | null;
   } | null>(null);
   const [scheduleDetailError, setScheduleDetailError] = useState<string | null>(null);
+  const [scheduleEditPrompt, setScheduleEditPrompt] = useState("");
+  const [schedulePromptSaving, setSchedulePromptSaving] = useState(false);
   const [_calendarRunsCollapsed, _setCalendarRunsCollapsed] = useState(false);
   type CalendarGridView = "day" | "week" | "month";
   const [calendarGridView, setCalendarGridView] = useState<CalendarGridView>("week");
-  const [calendarGridEvents, setCalendarGridEvents] = useState<Array<{ at: string; task_id: string; type: string; status: string; label?: string }>>([]);
+  type CalendarGridEvent = { at: string; task_id: string; type: string; status: string; label?: string; schedule_id?: string | null };
+  const [calendarGridEvents, setCalendarGridEvents] = useState<CalendarGridEvent[]>([]);
   const [calendarGridDate, setCalendarGridDate] = useState(() => new Date());
+  const [calendarCellDetail, setCalendarCellDetail] = useState<{ slotKey: string; slotLabel: string; events: CalendarGridEvent[] } | null>(null);
   type CalendarSubTab = "grid" | "recent" | "schedules";
   const [calendarSubTab, setCalendarSubTab] = useState<CalendarSubTab>("grid");
+  const calendarEventLabel = (ev: { label?: string; task_id: string }) => (ev.label && ev.label.trim()) ? ev.label : `Tâche …${ev.task_id.slice(-8)}`;
+  const calendarGetParentKey = (ev: CalendarGridEvent) => ev.schedule_id ?? `task_${ev.task_id}`;
+  const calendarGetEventStatusClass = (status: string) => {
+    const s = (status ?? "").toLowerCase();
+    if (s === "completed") return "calendar-event--completed";
+    if (s === "running") return "calendar-event--running";
+    if (s === "queued" || s === "skipped") return "calendar-event--upcoming";
+    if (s === "failed" || s === "cancelled") return "calendar-event--failed";
+    return "calendar-event--upcoming";
+  };
+  const calendarDedupeByParent = (list: CalendarGridEvent[]): { representative: CalendarGridEvent; count: number }[] => {
+    const byParent = new Map<string, CalendarGridEvent[]>();
+    list.forEach((ev) => {
+      const key = calendarGetParentKey(ev);
+      if (!byParent.has(key)) byParent.set(key, []);
+      byParent.get(key)!.push(ev);
+    });
+    return Array.from(byParent.entries()).map(([, arr]) => {
+      const sorted = [...arr].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+      return { representative: sorted[0], count: sorted.length };
+    });
+  };
   const [memoryShortTerm, setMemoryShortTerm] = useState<Array<{ role: string; content: string }>>([]);
   const [memoryLongTerm, setMemoryLongTerm] = useState<Array<{ id?: string; content: string; created_at: string; source: string }>>([]);
   const [memoryLongTermAvailable, setMemoryLongTermAvailable] = useState(false);
@@ -539,7 +565,7 @@ function App() {
       to = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59);
     }
     try {
-      const data = await invoke<{ events?: Array<{ at: string; task_id: string; type: string; status: string; label?: string }> }>("get_calendar_events", {
+      const data = await invoke<{ events?: Array<{ at: string; task_id: string; type: string; status: string; label?: string; schedule_id?: string | null }> }>("get_calendar_events", {
         port: DAEMON_PORT,
         from: from.toISOString(),
         to: to.toISOString(),
@@ -711,6 +737,15 @@ function App() {
   }, [calendarSelectedTaskId]);
 
   useEffect(() => {
+    if (!calendarCellDetail) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setCalendarCellDetail(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [calendarCellDetail]);
+
+  useEffect(() => {
     if (!calendarSelectedScheduleId) {
       setScheduleDetail(null);
       setScheduleDetailError(null);
@@ -745,6 +780,10 @@ function App() {
     })();
     return () => { cancelled = true; };
   }, [calendarSelectedScheduleId]);
+
+  useEffect(() => {
+    setScheduleEditPrompt(scheduleDetail?.channel_context ?? "");
+  }, [scheduleDetail]);
 
   useEffect(() => {
     if (!calendarSelectedScheduleId) return;
@@ -2116,8 +2155,9 @@ function App() {
                 <div className="calendar-grid-wrap">
                   {(() => {
                     const events = calendarGridEvents;
-                    const eventLabel = (ev: { label?: string; task_id: string }) =>
-                      (ev.label && ev.label.trim()) ? ev.label : `Tâche …${ev.task_id.slice(-8)}`;
+                    const openCellDetail = (slotLabel: string, slotKey: string, cellEvents: CalendarGridEvent[]) => {
+                      setCalendarCellDetail({ slotKey, slotLabel, events: cellEvents });
+                    };
                     if (calendarGridView === "day") {
                       const byHour: Record<number, typeof events> = {};
                       for (let h = 0; h < 24; h++) byHour[h] = [];
@@ -2138,15 +2178,17 @@ function App() {
                             {Array.from({ length: 24 }, (_, h) => (
                               <tr key={h} className="calendar-grid-row">
                                 <td className="calendar-grid-cell-time">{h}h00</td>
-                                <td className="calendar-grid-cell-events">
-                                  <ul className="calendar-grid-slot-events" role="list">
-                                    {byHour[h].map((e, i) => (
-                                      <li key={i} className="calendar-event-block" title={`${e.type} — ${e.status}`}>
-                                        <span className="calendar-event-label">{eventLabel(e)}</span>
+                                <td className="calendar-grid-cell-events" onClick={() => openCellDetail(`${h}h00`, `day-${h}`, byHour[h])} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && openCellDetail(`${h}h00`, `day-${h}`, byHour[h])}>
+                                  <div className="calendar-cell-inner">
+                                    <ul className="calendar-grid-slot-events" role="list">
+                                    {calendarDedupeByParent(byHour[h]).map(({ representative: e, count }, i) => (
+                                      <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} onClick={(ev) => { ev.stopPropagation(); setCalendarSelectedTaskId(e.task_id); }}>
+                                        <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
                                         <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
                                       </li>
                                     ))}
                                   </ul>
+                                  </div>
                                 </td>
                               </tr>
                             ))}
@@ -2164,12 +2206,13 @@ function App() {
                       for (let i = 0; i < 7; i++) {
                         const date = new Date(monday);
                         date.setDate(monday.getDate() + i);
-                        const key = date.toISOString().slice(0, 10);
+                        const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
                         byDay[key] = [];
                         dayKeys.push(key);
                       }
                       events.forEach((ev) => {
-                        const key = new Date(ev.at).toISOString().slice(0, 10);
+                        const d = new Date(ev.at);
+                        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
                         if (byDay[key]) byDay[key].push(ev);
                       });
                       const weekDayNames = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"];
@@ -2195,41 +2238,51 @@ function App() {
                             {Array.from({ length: 24 }, (_, hour) => (
                               <tr key={hour} className="calendar-grid-row">
                                 <td className="calendar-grid-cell-hour">{hour}h</td>
-                                {dayKeys.map((key) => (
-                                  <td key={key} className="calendar-grid-cell-day">
-                                    <ul className="calendar-grid-slot-events" role="list">
-                                      {(byDay[key] ?? []).filter((e) => new Date(e.at).getHours() === hour).map((e, i) => (
-                                        <li key={i} className="calendar-event-block" title={`${e.type} — ${e.status}`}>
-                                          <span className="calendar-event-label">{eventLabel(e)}</span>
-                                          <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  </td>
-                                ))}
+                                {dayKeys.map((key) => {
+                                    const cellEvents = (byDay[key] ?? []).filter((e) => new Date(e.at).getHours() === hour);
+                                    const slotLabel = `${key} ${hour}h`;
+                                    return (
+                                      <td key={key} className="calendar-grid-cell-day" onClick={() => openCellDetail(slotLabel, `${key}-${hour}`, cellEvents)} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && openCellDetail(slotLabel, `${key}-${hour}`, cellEvents)}>
+                                        <div className="calendar-cell-inner">
+                                          <ul className="calendar-grid-slot-events" role="list">
+                                          {calendarDedupeByParent(cellEvents).map(({ representative: e, count }, i) => (
+                                            <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} onClick={(ev) => { ev.stopPropagation(); setCalendarSelectedTaskId(e.task_id); }}>
+                                              <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
+                                              <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
+                                            </li>
+                                          ))}
+                                        </ul>
+                                        </div>
+                                      </td>
+                                    );
+                                  })}
                               </tr>
                             ))}
                           </tbody>
                         </table>
                       );
                     }
-                    const byDay: Record<string, typeof events> = {};
+                    const byDay: Record<string, CalendarGridEvent[]> = {};
                     events.forEach((ev) => {
-                      const key = new Date(ev.at).toISOString().slice(0, 10);
+                      const d = new Date(ev.at);
+                      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
                       if (!byDay[key]) byDay[key] = [];
                       byDay[key].push(ev);
                     });
                     const d = calendarGridDate;
                     const firstDay = new Date(d.getFullYear(), d.getMonth(), 1);
                     const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-                    const startWeekday = firstDay.getDay() === 0 ? 6 : firstDay.getDay() - 1;
+                    // Lun=0 … Dim=6 (ISO weekday: getDay() 0=Sun → 6, 1=Mon → 0, …)
+                    const startWeekday = (firstDay.getDay() + 6) % 7;
                     const daysInMonth = lastDay.getDate();
                     const weeks: string[][] = [];
                     let week: string[] = [];
                     for (let i = 0; i < startWeekday; i++) week.push("");
                     for (let day = 1; day <= daysInMonth; day++) {
                       const date = new Date(d.getFullYear(), d.getMonth(), day);
-                      week.push(date.toISOString().slice(0, 10));
+                      const y = date.getFullYear(), m = date.getMonth(), dom = date.getDate();
+                      const key = `${y}-${String(m + 1).padStart(2, "0")}-${String(dom).padStart(2, "0")}`;
+                      week.push(key);
                       if (week.length === 7) {
                         weeks.push(week);
                         week = [];
@@ -2252,23 +2305,29 @@ function App() {
                         <tbody>
                           {weeks.map((weekRow, wi) => (
                             <tr key={wi} className="calendar-grid-row">
-                              {weekRow.map((key, di) => (
-                                <td key={`${wi}-${di}`} className="calendar-grid-cell-month">
-                                  {key ? (
-                                    <>
-                                      <span className="calendar-grid-day-num">{new Date(key + "T12:00:00").getDate()}</span>
-                                      <ul className="calendar-grid-slot-events" role="list">
-                                        {(byDay[key] ?? []).map((e, i) => (
-                                          <li key={i} className="calendar-event-block" title={`${e.type} — ${e.status}`}>
-                                            <span className="calendar-event-label">{eventLabel(e)}</span>
-                                            <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
-                                          </li>
-                                        ))}
-                                      </ul>
-                                    </>
-                                  ) : null}
-                                </td>
-                              ))}
+                              {weekRow.map((key, di) => {
+                                const cellEvents = key ? (byDay[key] ?? []) : [];
+                                const slotLabel = key ? new Date(key + "T12:00:00").toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" }) : "";
+                                return (
+                                  <td key={`${wi}-${di}`} className="calendar-grid-cell-month" onClick={key ? () => openCellDetail(slotLabel, key, cellEvents) : undefined} role={key ? "button" : undefined} tabIndex={key ? 0 : undefined} onKeyDown={key ? (e) => e.key === "Enter" && openCellDetail(slotLabel, key, cellEvents) : undefined}>
+                                    {key ? (
+                                      <>
+                                        <span className="calendar-grid-day-num">{new Date(key + "T12:00:00").getDate()}</span>
+                                        <div className="calendar-cell-inner">
+                                          <ul className="calendar-grid-slot-events" role="list">
+                                            {calendarDedupeByParent(cellEvents).map(({ representative: e, count }, i) => (
+                                              <li key={i} className={`calendar-event-block ${calendarGetEventStatusClass(e.status)}`} title={`${e.type} — ${e.status}`} onClick={(ev) => { ev.stopPropagation(); setCalendarSelectedTaskId(e.task_id); }}>
+                                                <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
+                                                <span className="calendar-event-time">{new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
+                                              </li>
+                                            ))}
+                                          </ul>
+                                        </div>
+                                      </>
+                                    ) : null}
+                                  </td>
+                                );
+                              })}
                             </tr>
                           ))}
                         </tbody>
@@ -2276,6 +2335,29 @@ function App() {
                     );
                   })()}
                 </div>
+                {calendarCellDetail && (
+                  <div className="calendar-detail-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="calendar-cell-detail-title" onClick={() => setCalendarCellDetail(null)}>
+                    <div className="calendar-detail-modal calendar-cell-detail-modal" onClick={(e) => e.stopPropagation()}>
+                      <div className="calendar-detail-modal-header">
+                        <h2 id="calendar-cell-detail-title">Tâches — {calendarCellDetail.slotLabel}</h2>
+                        <button type="button" className="calendar-detail-modal-close" onClick={() => setCalendarCellDetail(null)} aria-label="Fermer">×</button>
+                      </div>
+                      <div className="calendar-detail-modal-body">
+                        <ul className="calendar-cell-detail-list" style={{ listStyle: "none", margin: 0, padding: 0 }}>
+                          {calendarDedupeByParent(calendarCellDetail.events).map(({ representative: e, count }, i) => (
+                            <li key={i} style={{ marginBottom: "0.5rem" }}>
+                              <button type="button" className={`calendar-event-block calendar-cell-detail-item ${calendarGetEventStatusClass(e.status)}`} style={{ width: "100%", textAlign: "left", cursor: "pointer" }} onClick={() => { setCalendarCellDetail(null); setCalendarSelectedTaskId(e.task_id); }}>
+                                <span className="calendar-event-label">{calendarEventLabel(e)}{count > 1 ? ` (${count})` : ""}</span>
+                                <span className="calendar-event-time">{new Date(e.at).toLocaleString("fr-FR", { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" })} — {e.status}</span>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                        {calendarCellDetail.events.length === 0 && <p className="muted">Aucune tâche pour ce créneau.</p>}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </>
             )}
             {!calendarLoading && calendarSubTab === "recent" && (
@@ -2522,18 +2604,38 @@ function App() {
                             {scheduleDetail.timezone && (
                               <p><strong>Fuseau:</strong> {scheduleDetail.timezone}</p>
                             )}
-                            {(scheduleDetail.channel_context ?? scheduleDetail.description) ? (
-                              <div className="task-detail-reply">
-                                <strong>{t("calendar.channel_context")}</strong>
-                                <div className="task-detail-reply-content markdown-rendered">
-                                  <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
-                                    {scheduleDetail.channel_context ?? scheduleDetail.description}
-                                  </LazyMarkdownContent></Suspense>
-                                </div>
-                              </div>
-                            ) : (
-                              <p className="muted">{t("calendar.no_channel")}</p>
-                            )}
+                            <div className="schedule-prompt-edit">
+                              <label htmlFor="schedule-prompt-input"><strong>Prompt (message envoyé à chaque exécution)</strong></label>
+                              <textarea
+                                id="schedule-prompt-input"
+                                className="schedule-prompt-textarea"
+                                rows={4}
+                                value={scheduleEditPrompt}
+                                onChange={(e) => setScheduleEditPrompt(e.target.value)}
+                                placeholder="Ex: Fais un rapport de statut du dépôt GitHub…"
+                              />
+                              <button
+                                type="button"
+                                className="refresh-btn schedule-prompt-save"
+                                disabled={schedulePromptSaving}
+                                onClick={async () => {
+                                  if (!calendarSelectedScheduleId) return;
+                                  setSchedulePromptSaving(true);
+                                  try {
+                                    await invoke("put_schedule", {
+                                      scheduleId: calendarSelectedScheduleId,
+                                      port: DAEMON_PORT,
+                                      body: { channel_context: scheduleEditPrompt || null },
+                                    });
+                                    setScheduleDetail((prev) => prev ? { ...prev, channel_context: scheduleEditPrompt || null } : null);
+                                  } finally {
+                                    setSchedulePromptSaving(false);
+                                  }
+                                }}
+                              >
+                                {schedulePromptSaving ? "Enregistrement…" : "Enregistrer le prompt"}
+                              </button>
+                            </div>
                             {scheduleDetail.rrule && (
                               <p className="schedule-rrule"><strong>Règle:</strong> <code>{scheduleDetail.rrule}</code></p>
                             )}

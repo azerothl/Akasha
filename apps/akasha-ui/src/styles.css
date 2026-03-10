@@ -1743,6 +1743,10 @@ body {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.8125rem;
+  table-layout: fixed;
+}
+.calendar-grid-table tbody tr {
+  height: 0;
 }
 .calendar-grid-table th,
 .calendar-grid-table td {
@@ -1759,9 +1763,73 @@ body {
 .calendar-grid-table.calendar-grid-day .calendar-grid-col-time { width: 4rem; }
 .calendar-grid-table.calendar-grid-week .calendar-grid-col-hour { width: 3rem; }
 .calendar-grid-table.calendar-grid-week .calendar-grid-col-day { min-width: 4rem; text-align: center; }
-.calendar-grid-day-num { font-size: 1rem; color: var(--akasha-text); }
+.calendar-grid-day-num { font-size: 1rem; color: var(--akasha-text); flex-shrink: 0; }
 .calendar-grid-table.calendar-grid-month .calendar-grid-col-weekday { text-align: center; font-size: 0.75rem; }
-.calendar-grid-table.calendar-grid-month .calendar-grid-cell-month { min-width: 2.5rem; min-height: 4rem; }
+.calendar-grid-table.calendar-grid-month .calendar-grid-cell-month {
+  min-width: 2.5rem;
+  height: 5.5rem;
+  max-height: 5.5rem;
+  overflow: hidden;
+  vertical-align: top;
+  box-sizing: border-box;
+}
+.calendar-grid-table.calendar-grid-month .calendar-grid-cell-month .calendar-cell-inner {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.calendar-grid-table.calendar-grid-month .calendar-grid-cell-month .calendar-cell-inner .calendar-grid-slot-events {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.calendar-grid-table.calendar-grid-week .calendar-grid-cell-day {
+  height: 4rem;
+  max-height: 4rem;
+  overflow: hidden;
+  vertical-align: top;
+  box-sizing: border-box;
+}
+.calendar-grid-table.calendar-grid-week .calendar-grid-cell-day .calendar-cell-inner {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.calendar-grid-table.calendar-grid-week .calendar-grid-cell-day .calendar-cell-inner .calendar-grid-slot-events {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.calendar-grid-table.calendar-grid-day .calendar-grid-cell-events {
+  height: 4rem;
+  max-height: 4rem;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+.calendar-grid-table.calendar-grid-day .calendar-grid-cell-events .calendar-cell-inner {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.calendar-grid-table.calendar-grid-day .calendar-grid-cell-events .calendar-cell-inner .calendar-grid-slot-events {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.calendar-grid-cell-month[role="button"],
+.calendar-grid-cell-day[role="button"],
+.calendar-grid-cell-events[role="button"] {
+  cursor: pointer;
+}
 .calendar-event-block {
   display: block;
   padding: 0.2rem 0.4rem;
@@ -1771,6 +1839,10 @@ body {
   margin-bottom: 0.2rem;
   font-size: 0.75rem;
 }
+.calendar-event-block.calendar-event--completed { border-left-color: #22c55e; background: color-mix(in srgb, #22c55e 8%, var(--akasha-bg-surface)); }
+.calendar-event-block.calendar-event--running { border-left-color: #3b82f6; background: color-mix(in srgb, #3b82f6 8%, var(--akasha-bg-surface)); }
+.calendar-event-block.calendar-event--upcoming { border-left-color: var(--akasha-text-dim); }
+.calendar-event-block.calendar-event--failed { border-left-color: #ef4444; background: color-mix(in srgb, #ef4444 10%, var(--akasha-bg-surface)); }
 .calendar-event-label { display: block; color: var(--akasha-text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .calendar-event-time { display: block; color: var(--akasha-text-muted); font-size: 0.7rem; margin-top: 0.1rem; }
 
@@ -2085,6 +2157,30 @@ body {
 
 .calendar-detail-modal-body .task-detail-reply {
   margin-top: 1rem;
+}
+
+.schedule-prompt-edit {
+  margin-top: 1rem;
+}
+.schedule-prompt-edit label {
+  display: block;
+  margin-bottom: 0.35rem;
+}
+.schedule-prompt-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.5rem 0.75rem;
+  font-family: inherit;
+  font-size: 0.875rem;
+  background: var(--akasha-bg-surface);
+  border: 1px solid var(--akasha-border);
+  border-radius: 6px;
+  color: var(--akasha-text);
+  resize: vertical;
+  min-height: 4rem;
+}
+.schedule-prompt-save {
+  margin-top: 0.5rem;
 }
 
 .calendar-detail-modal-body .muted {
