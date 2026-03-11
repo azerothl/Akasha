@@ -334,7 +334,11 @@ pub async fn run_delegation_handler(
             }
         }
         let child_id = Uuid::new_v4();
-        let agent_type = if ["search", "code", "conversation"].contains(&req.agent_type.as_str()) {
+        const WORKER_AGENT_TYPES: &[&str] = &[
+            "search", "code", "conversation", "financial", "documentalist", "project_manager",
+            "technical_writer", "research", "security_audit", "creative",
+        ];
+        let agent_type = if WORKER_AGENT_TYPES.contains(&req.agent_type.as_str()) {
             req.agent_type.clone()
         } else {
             "conversation".to_string()
@@ -558,9 +562,11 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("image", "image <path|url> [prompt] — analyse d'image par modèle vision (non implémenté, prévu phase 3)"),
     ("pdf", "pdf <path|url> — extraire le texte d'un PDF (non implémenté, prévu phase 3)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
-    ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (ex. search pour recherche web). agent_type: search | code | conversation. Un seul niveau de délégation autorisé."),
+    ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (ex. search pour recherche web). agent_type: search | code | conversation | financial | documentalist | project_manager | technical_writer | research | security_audit | creative. Un seul niveau de délégation autorisé."),
     ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
     ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
+    ("device_discover", "device_discover [interface] — lister les appareils accessibles (optionnel: local_media, system, network, usb). Filtre par politique allowed_device_interfaces / blocked_device_interfaces."),
+    ("device_invoke", "device_invoke <interface> <device_id> <action> [params] — exécuter une action sur un appareil. local_media: caméra, micro (capture, record). synthetic_input: clavier/souris — device_id keyboard|mouse, action shortcut|key|type|mouse_move|mouse_click|mouse_double_click|mouse_scroll|mouse_drag, params JSON (ex. {\"keys\":[\"Control\",\"Shift\",\"S\"]} pour shortcut). Nécessite client UI."),
 ];
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -599,6 +605,18 @@ fn message_suggests_external_info(message: &str) -> bool {
         "horaires", "trafic", "prix", "cours ", "bourse", "news", "nouvelle", "semaine à",
         "aujourd'hui", "demain", "connaître la", "connaitre la", "quelle est la météo",
         "quel temps", "prévision", "prevision",
+    ];
+    keywords.iter().any(|k| m.contains(k))
+}
+
+/// True if the user message suggests a long-running project (novel, comic, code project) or continuing one.
+fn message_suggests_project(message: &str) -> bool {
+    let m = message.to_lowercase();
+    let keywords = [
+        "roman", "bd", "bande dessinée", "bande dessinee", "comic", "novel",
+        "projet de code", "code project", "écris un", "ecris un", "écris le", "ecris le",
+        "chapitre", "chapter", "continue", "la suite", "and the rest", "poursuis", "reprends",
+        "crée un projet", "cree un projet", "create a project", "set up a project",
     ];
     keywords.iter().any(|k| m.contains(k))
 }
@@ -1055,18 +1073,48 @@ const WRITE_FILE_REMINDER: &str = "\n[Rappel: l'utilisateur demande d'enregistre
 const WEB_SEARCH_REMINDER: &str = "\n[Rappel: l'utilisateur demande des informations externes (météo, actualités, etc.). Tu DOIS utiliser TOOL: web_search <requête> pour chercher toi-même puis répondre avec les résultats. Ne propose pas d'aller sur un site sans avoir d'abord utilisé web_search.]\n\n";
 
 /// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
-const APP_CONTEXT: &str = "[Contexte Akasha] Tu es l'assistant intégré à Akasha. Akasha est l'application dans laquelle tu tournes actuellement. \
-Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : \
-commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Mémoire/Doc/Activité), \
-commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, /skills reload, etc.). \
-Pour installer un CLI en global (ex. « installe le CLI bankr », « npm install -g @bankr/cli »), répondre par TOOL: run_command npm install -g <package> (ne pas générer de script à faire exécuter par l'utilisateur). Pour utiliser une clé du vault dans une commande : TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (le système injecte la valeur du vault). \
-Skills (capacités supplémentaires) : l'utilisateur peut en ajouter sans modifier le code. Quand l'utilisateur demande d'installer un skill depuis une URL (ex. « installe le skill bankr depuis … »), tu DOIS répondre par TOOL: install_skill <url>. Pour désinstaller un skill : TOOL: uninstall_skill <nom> (ex. TOOL: uninstall_skill bankr). Quand l'utilisateur te demande d'effectuer une action avec un skill (ex. « vérifie mon wallet bankr », « lance bankr whoami »), tu DOIS répondre UNIQUEMENT par une ligne TOOL: <nom_du_skill> <arguments> (ex. TOOL: bankr whoami) pour que le système exécute la commande ; ne dis pas à l'utilisateur de lancer la commande lui-même. Sinon, l'utilisateur peut placer les fichiers dans le dossier skills et exécuter /skills reload. \
-La documentation complète est disponible dans l'onglet Doc de l'interface. \
-Réponds en français sauf si l'utilisateur utilise une autre langue. \
-Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »). \
-Pour les questions sur des informations que tu n'as pas (météo, prévisions, actualités, horaires, etc.), tu dois utiliser l'outil web_search pour chercher toi-même puis répondre avec les résultats. Ne propose pas à l'utilisateur d'aller sur un site sans avoir d'abord utilisé web_search si tu as accès à cet outil. Si web_search renvoie une erreur (ex. non activé), tu peux alors suggérer des sites et indiquer comment activer la recherche web (tools_policy.yaml, web_search_enabled, BRAVE_API_KEY). \
-Tu as accès à l'outil write_file : tu DOIS l'utiliser dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier (ex. « enregistre le code dans … », « sauvegarde dans ce dossier », « write to file »). Réponds UNIQUEMENT par une ligne TOOL: write_file <chemin_complet> puis le contenu du fichier sur les lignes suivantes. Ne dis JAMAIS « je ne peux pas écrire sur le disque » ou « copie-colle le code toi-même » — si le chemin est refusé par la politique, l'outil renverra une erreur et tu expliqueras alors comment ajouter le préfixe dans tools_policy.yaml (allowed_write_paths). Les chemins peuvent être Windows (C:\\Users\\...) ou Unix. \
-Règle importante : dès que tu dois demander à l'utilisateur un choix, une confirmation ou une information (options à choisir, chemin, identifiants, etc.) puis enchaîner dans la même tâche, tu DOIS utiliser l'outil ask_user (TOOL: ask_user puis JSON avec question/context/choices). Ne pose pas la question en texte libre, sinon la réponse ouvrira une nouvelle tâche et tu ne pourras pas continuer. Pour un accès à un service externe (GitHub, API, etc.), ne réponds pas « je ne peux pas » ; utilise ask_user pour demander le token ou explique comment configurer. Si l'utilisateur a déjà confirmé (ex. « clé dans le vault », « c'est configuré »), n'envoie pas une deuxième fois ask_user ; enchaîne. Ne invente pas de commandes (ex. /status repo:... n'existe pas) ; les commandes sont dans /help.\n\n";
+const APP_CONTEXT: &str = concat!(
+    "[Contexte Akasha] Tu es l'assistant intégré à Akasha. Akasha est l'application dans laquelle tu tournes actuellement. ",
+    "Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : ",
+    "commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Mémoire/Doc/Activité), ",
+    "commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, /skills reload, etc.). ",
+    "Pour installer un CLI en global (ex. « installe le CLI bankr », « npm install -g @bankr/cli »), répondre par TOOL: run_command npm install -g <package> (ne pas générer de script à faire exécuter par l'utilisateur). ",
+    "Pour utiliser une clé du vault dans une commande : TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (le système injecte la valeur du vault). ",
+    "Skills (capacités supplémentaires) : l'utilisateur peut en ajouter sans modifier le code. Quand l'utilisateur demande d'installer un skill depuis une URL (ex. « installe le skill bankr depuis … »), tu DOIS répondre par TOOL: install_skill <url>. ",
+    "Pour désinstaller un skill : TOOL: uninstall_skill <nom> (ex. TOOL: uninstall_skill bankr). ",
+    "Quand l'utilisateur te demande d'effectuer une action avec un skill (ex. « vérifie mon wallet bankr », « lance bankr whoami »), tu DOIS répondre UNIQUEMENT par une ligne TOOL: <nom_du_skill> <arguments> (ex. TOOL: bankr whoami) pour que le système exécute la commande ; ne dis pas à l'utilisateur de lancer la commande lui-même. ",
+    "Sinon, l'utilisateur peut placer les fichiers dans le dossier skills et exécuter /skills reload. ",
+    "La documentation complète est disponible dans l'onglet Doc de l'interface. ",
+    "Réponds en français sauf si l'utilisateur utilise une autre langue. ",
+    "Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »). ",
+    "Pour les questions sur des informations que tu n'as pas (météo, prévisions, actualités, horaires, etc.), tu dois utiliser l'outil web_search pour chercher toi-même puis répondre avec les résultats. ",
+    "Ne propose pas à l'utilisateur d'aller sur un site sans avoir d'abord utilisé web_search si tu as accès à cet outil. ",
+    "Si web_search renvoie une erreur (ex. non activé), tu peux alors suggérer des sites et indiquer comment activer la recherche web (tools_policy.yaml, web_search_enabled, BRAVE_API_KEY). ",
+    "Tu as accès à l'outil write_file : tu DOIS l'utiliser dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier (ex. « enregistre le code dans … », « sauvegarde dans ce dossier », « write to file »). ",
+    "Réponds UNIQUEMENT par une ligne TOOL: write_file <chemin_complet> puis le contenu du fichier sur les lignes suivantes. ",
+    "Ne dis JAMAIS « je ne peux pas écrire sur le disque » ou « copie-colle le code toi-même » — si le chemin est refusé par la politique, l'outil renverra une erreur et tu expliqueras alors comment ajouter le préfixe dans tools_policy.yaml (allowed_write_paths). Les chemins peuvent être Windows (C:\\Users\\...) ou Unix. ",
+    "Règle importante : dès que tu dois demander à l'utilisateur un choix, une confirmation ou une information (options à choisir, chemin, identifiants, etc.) puis enchaîner dans la même tâche, tu DOIS utiliser l'outil ask_user (TOOL: ask_user puis JSON avec question/context/choices). ",
+    "Ne pose pas la question en texte libre, sinon la réponse ouvrira une nouvelle tâche et tu ne pourras pas continuer. ",
+    "Pour un accès à un service externe (GitHub, API, etc.), ne réponds pas « je ne peux pas » ; utilise ask_user pour demander le token ou explique comment configurer. ",
+    "Si l'utilisateur a déjà confirmé (ex. « clé dans le vault », « c'est configuré »), n'envoie pas une deuxième fois ask_user ; enchaîne. ",
+    "Ne invente pas de commandes (ex. /status repo:... n'existe pas) ; les commandes sont dans /help.\n\n",
+);
+
+/// Returns an English [Role] system prompt for the given agent type, or None for conversation/unknown.
+fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
+    match agent_type {
+        "code" => Some("You are the code generation agent. Produce correct, readable code. Prefer run_command or write_file when the user asks to create or run code. Do not invent APIs; use read_file when needed to match existing code."),
+        "search" => Some("You are the search agent. Use web_search to find external information (weather, news, facts). Synthesize results and cite sources. Do not claim information you have not retrieved via web_search when it is available."),
+        "financial" => Some("You are the financial specialist. Help with budgets, cost analysis, financial reports, numeric reasoning. Be precise with figures and units. Do not invent data; state what is missing if needed."),
+        "documentalist" => Some("You are the documentalist. Answer from the user's document base (RAG). Prioritize [Documents utilisateur] and [Mémoire à long terme]. Use memory_search when relevant. Quote or summarize from excerpts; if insufficient, say so and suggest adding documents."),
+        "project_manager" => Some("You are the project manager. Help with project tracking, milestones, task breakdown, planning. Refer to schedules and recurring tasks when relevant. Propose clear next steps and deliverables."),
+        "technical_writer" => Some("You are the technical writing agent. Produce clear technical documentation, procedures, tutorials. Use a structured style (headings, steps, code blocks when relevant). Prefer clarity and precision. Use write_file when the user asks to save documentation."),
+        "research" => Some("You are the research agent. Perform in-depth research using web_search, memory_search, and the document base. Synthesize multiple sources; cite or summarize clearly. Do not invent facts."),
+        "security_audit" => Some("You are the security audit agent. Review code, config, or practices for security. Be methodical; highlight risks and suggest mitigations. Do not claim certainty where you lack context; recommend human review for critical decisions."),
+        "creative" => Some("You are the creative / copywriting agent. Produce marketing copy, creative content, and audience-adapted text. Match tone and format to the requested channel and goal."),
+        _ => None,
+    }
+}
 
 /// If AKASHA_TOOLS_JOURNAL_PATH is set, append a line for write tool invocations (Phase 4 modification journal).
 async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: &str) {
@@ -1167,6 +1215,22 @@ fn parse_run_command_args(args: &[String]) -> (Vec<(String, String)>, String, Ve
     (vault_specs, command, cmd_args)
 }
 
+/// Parse `device_invoke` params from the tail of the args list (args[3..]).
+/// - No extra args → `{}`
+/// - Single arg that is valid JSON → that JSON value
+/// - Single arg that is not valid JSON → `{}`
+/// - Multiple args → JSON array of strings
+fn parse_device_invoke_params(args: &[String]) -> serde_json::Value {
+    if args.len() <= 3 {
+        serde_json::json!({})
+    } else if args.len() == 4 {
+        serde_json::from_str::<serde_json::Value>(&args[3])
+            .unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!(args[3..].to_vec())
+    }
+}
+
 /// Execute one tool call via ToolExecutor. Returns `(success, display_string)` for structured events.
 async fn execute_tool_call(
     executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
@@ -1178,6 +1242,7 @@ async fn execute_tool_call(
     store_path: Option<&std::path::Path>,
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     message_webhook_url: Option<&str>,
+    device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
 ) -> (bool, String) {
     use std::path::Path;
     if !executor.policy.can_use_tool(tool_name) {
@@ -1755,6 +1820,128 @@ async fn execute_tool_call(
                 Err(e) => (false, format!("[run_in_container] error: {}", e)),
             }
         }
+        "device_discover" => {
+            let interface = args.get(0).map(String::as_str).unwrap_or("").trim();
+            let interfaces_to_list: Vec<String> = if interface.is_empty() {
+                let allowed = &executor.policy.allowed_device_interfaces;
+                let base: Vec<String> = if allowed.iter().any(|a| a.trim().eq_ignore_ascii_case("*")) {
+                    vec!["local_media".to_string(), "system".to_string(), "synthetic_input".to_string()]
+                } else {
+                    allowed.clone()
+                };
+                // Always apply policy filter (respects blocked_device_interfaces)
+                base.into_iter()
+                    .filter(|iface| executor.policy.can_use_device_interface(iface))
+                    .collect()
+            } else {
+                if !executor.policy.can_use_device_interface(interface) {
+                    return (false, format!("[device_discover] interface '{}' not allowed by policy (allowed_device_interfaces / blocked_device_interfaces)", interface));
+                }
+                vec![interface.to_string()]
+            };
+            let mut devices: Vec<serde_json::Value> = Vec::new();
+            for iface in &interfaces_to_list {
+                match iface.as_str() {
+                    "local_media" => {
+                        devices.push(serde_json::json!({ "interface": "local_media", "id": "camera", "name": "Camera" }));
+                        devices.push(serde_json::json!({ "interface": "local_media", "id": "microphone", "name": "Microphone" }));
+                        devices.push(serde_json::json!({ "interface": "local_media", "id": "speaker", "name": "Speaker" }));
+                    }
+                    "system" => {
+                        devices.push(serde_json::json!({ "interface": "system", "id": "printer", "name": "System printers" }));
+                    }
+                    "synthetic_input" => {
+                        devices.push(serde_json::json!({ "interface": "synthetic_input", "id": "keyboard", "name": "Keyboard (shortcuts, type)" }));
+                        devices.push(serde_json::json!({ "interface": "synthetic_input", "id": "mouse", "name": "Mouse (move, click, scroll, drag)" }));
+                    }
+                    _ => {
+                        devices.push(serde_json::json!({ "interface": iface, "id": "default", "name": format!("{} (discovery stub)", iface) }));
+                    }
+                }
+            }
+            let body = serde_json::json!({ "devices": devices });
+            (true, format!("[device_discover] {} device(s): {}", devices.len(), body.to_string()))
+        }
+        "device_invoke" => {
+            let interface = args.get(0).map(String::as_str).unwrap_or("");
+            let device_id = args.get(1).map(String::as_str).unwrap_or("");
+            let action = args.get(2).map(String::as_str).unwrap_or("");
+            if interface.is_empty() || device_id.is_empty() || action.is_empty() {
+                return (false, "[device_invoke] usage: device_invoke <interface> <device_id> <action> [params...]".to_string());
+            }
+            if !executor.policy.can_use_device_interface(interface) {
+                return (false, format!("[device_invoke] interface '{}' not allowed by policy", interface));
+            }
+            // Params:
+            // - if a single 4th arg is valid JSON, use it; else {}
+            // - if multiple params are provided, pass them as a JSON array of strings
+            let params = parse_device_invoke_params(args);
+            if interface == "local_media" {
+                let bridge = match device_bridge {
+                    Some(b) => b,
+                    None => return (false, "[device_invoke] device bridge not available (no UI client for local_media)".to_string()),
+                };
+                let (request_id, rx) = bridge
+                    .submit_request(interface.to_string(), device_id.to_string(), action.to_string(), params)
+                    .await;
+                const DEVICE_TIMEOUT_SECS: u64 = 60;
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(DEVICE_TIMEOUT_SECS),
+                    rx,
+                )
+                .await
+                {
+                    Ok(Ok(result)) => {
+                        let msg = if result.success {
+                            let data_preview = result.data.as_deref().map(|d| if d.len() > 200 { format!("{}...", &d[..200]) } else { d.to_string() }).unwrap_or_else(|| "ok".to_string());
+                            format!("[device_invoke local_media {}] success — {}", action, data_preview)
+                        } else {
+                            format!("[device_invoke local_media {}] failed or refused", action)
+                        };
+                        (result.success, msg)
+                    }
+                    Ok(Err(_)) => (false, "[device_invoke] channel closed without result".to_string()),
+                    Err(_) => {
+                        bridge.cancel(&request_id).await;
+                        (false, format!("[device_invoke] timeout after {}s (no UI client responded)", DEVICE_TIMEOUT_SECS))
+                    }
+                }
+            } else if interface == "synthetic_input" {
+                let bridge = match device_bridge {
+                    Some(b) => b,
+                    None => return (false, "[device_invoke] device bridge not available (no UI client for synthetic_input)".to_string()),
+                };
+                let (request_id, rx) = bridge
+                    .submit_request(interface.to_string(), device_id.to_string(), action.to_string(), params)
+                    .await;
+                const DEVICE_TIMEOUT_SECS: u64 = 60;
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(DEVICE_TIMEOUT_SECS),
+                    rx,
+                )
+                .await
+                {
+                    Ok(Ok(result)) => {
+                        let msg = if result.success {
+                            let data_preview = result.data.as_deref().map(|d| if d.len() > 200 { format!("{}...", &d[..200]) } else { d.to_string() }).unwrap_or_else(|| "ok".to_string());
+                            format!("[device_invoke synthetic_input {}] success — {}", action, data_preview)
+                        } else {
+                            format!("[device_invoke synthetic_input {}] failed or refused", action)
+                        };
+                        (result.success, msg)
+                    }
+                    Ok(Err(_)) => (false, "[device_invoke] channel closed without result".to_string()),
+                    Err(_) => {
+                        bridge.cancel(&request_id).await;
+                        (false, format!("[device_invoke] timeout after {}s (no UI client responded)", DEVICE_TIMEOUT_SECS))
+                    }
+                }
+            } else if interface == "system" {
+                (false, "[device_invoke] system interface (e.g. print) not yet implemented".to_string())
+            } else {
+                (false, format!("[device_invoke] interface '{}' handler not yet implemented", interface))
+            }
+        }
         _ => {
             if executor.policy.can_run_command(tool_name) {
                 match executor.run_command(tool_name, args, None, None).await {
@@ -1933,6 +2120,7 @@ pub(crate) async fn run_message_via_llm(
     task_completion_registry: Option<TaskCompletionRegistry>,
     agent_profile_cache: Option<AgentProfileCache>,
     task_usage_store: Option<std::sync::Arc<TaskUsageStore>>,
+    device_bridge: Option<std::sync::Arc<crate::device_bridge::DeviceBridge>>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -1943,6 +2131,12 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
+    let assigned_agent = store
+        .get(task_id)
+        .ok()
+        .flatten()
+        .map(|t| t.assigned_agent.clone())
+        .unwrap_or_else(|| "conversation".to_string());
 
     let tools_executor_snapshot = match &tools_executor {
         Some(r) => Some((*r.read().await).clone()),
@@ -2022,6 +2216,7 @@ pub(crate) async fn run_message_via_llm(
              INSTALL SKILL RULE: When the user asks to install a skill from a URL (e.g. \"install the bankr skill from https://github.com/BankrBot/skills/tree/main/bankr\"), you MUST reply ONLY with TOOL: install_skill <url>. Do not give manual steps; perform the installation yourself.\n\
              UNINSTALL SKILL RULE: When the user asks to uninstall or remove a skill (e.g. \"désinstalle bankr\", \"remove the bankr skill\"), you MUST reply ONLY with TOOL: uninstall_skill <name> (e.g. TOOL: uninstall_skill bankr).\n\
              SKILL USE RULE: When the user asks you to perform an action using a skill (e.g. \"vérifie mon wallet bankr\", \"check my balance with bankr\", \"run bankr whoami\"), you MUST reply ONLY with a single line: TOOL: <skill_name> <args> (e.g. TOOL: bankr whoami). The system will execute the command and return the result. Do NOT tell the user to run the command themselves or to \"use TOOL: bankr whoami\"; you must output that line yourself so the tool is executed.\n\
+             PROJECT RULE: For requests that imply a substantial deliverable (novel, comic/BD, code project, series of chapters or files), never claim completion after one response if the full scope is not delivered. State clearly what was done, what remains to do, and that you will continue on the user's next message (or via a sub-task). Do not say \"C'est terminé\" or \"Voilà, c'est fait\" until all requested deliverables are done. If the user says \"continue\", \"la suite\", or \"and the rest\", resume the project in progress (use memory_search for project context if available) and continue without saying \"terminé\" until the full scope is delivered. For project-like work, use memory_store to save project state (objective, steps done, deliverables) after each significant progress, with source project:<name> so context is reloaded on the next message.\n\
              {}\
              If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
@@ -2035,6 +2230,11 @@ pub(crate) async fn run_message_via_llm(
     // Build prompt with short-term + long-term memory (spec 06)
     let mut context_prefix = String::new();
     context_prefix.push_str(APP_CONTEXT);
+    if let Some(role_prompt) = agent_role_system_prompt(&assigned_agent) {
+        context_prefix.push_str("[Role]\n");
+        context_prefix.push_str(role_prompt);
+        context_prefix.push_str("\n\n");
+    }
 
     // Agent profile: name, personality, rules, can/cannot (persisted in data_dir/agent_profile.json)
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
@@ -2063,6 +2263,24 @@ pub(crate) async fn run_message_via_llm(
                 context_prefix.push_str("\n");
             }
             context_prefix.push_str("\n");
+        }
+        // Project context (Option A): when the message suggests a project, retrieve project-related memories (stored with source project:<name>) and inject as [Projet en cours]
+        if message_suggests_project(&message) {
+            let query = "projet état livrables objectif étapes fait reste à faire";
+            let client_for_project = long_term_client.as_ref().unwrap().clone();
+            let project_results = tokio::task::spawn_blocking(move || client_for_project.search(query.to_string(), 5))
+                .await
+                .ok()
+                .unwrap_or_default();
+            if !project_results.is_empty() {
+                context_prefix.push_str("[Projet en cours — utilise ce contexte pour reprendre ou poursuivre le projet]\n");
+                for (_, content) in &project_results {
+                    context_prefix.push_str("- ");
+                    context_prefix.push_str(&content.replace('\n', " "));
+                    context_prefix.push_str("\n");
+                }
+                context_prefix.push_str("\n");
+            }
         }
     }
 
@@ -2184,11 +2402,12 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
         }
+        let preferred_task_type = Some(llm_router.resolve_task_type_for_agent(&assigned_agent));
         let request = CompletionRequest {
             prompt: format!("{}{}", current_prompt, tool_instruction),
             max_tokens: Some(max_tokens),
             temperature: Some(0.7),
-            preferred_task_type: None,
+            preferred_task_type,
             image_data_urls: if tool_loop_history.is_empty() {
                 image_data_urls.clone()
             } else {
@@ -2532,6 +2751,7 @@ pub(crate) async fn run_message_via_llm(
                             Some(store_path.as_path()),
                             conv_tx.clone(),
                             message_webhook_url.as_deref(),
+                            device_bridge.as_ref(),
                         )
                         .await
                     } else {
@@ -2558,6 +2778,7 @@ pub(crate) async fn run_message_via_llm(
                         Some(store_path.as_path()),
                         conv_tx.clone(),
                         message_webhook_url.as_deref(),
+                        device_bridge.as_ref(),
                     )
                     .await
                 };
@@ -2870,6 +3091,7 @@ pub async fn handle_api(
     agent_profile_cache: &AgentProfileCache,
     update_cache: &UpdateCheckCache,
     task_usage_store: &TaskUsageStore,
+    device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
@@ -2911,6 +3133,49 @@ pub async fn handle_api(
         return json_response("200 OK", &body.to_string());
     }
 
+    // GET /api/device/pending — oldest pending device request (for UI to fulfill: camera, mic, etc.)
+    if method == "GET" && path == "/api/device/pending" {
+        if let Some(bridge) = device_bridge {
+            match bridge.get_pending().await {
+                Some((request_id, interface, device_id, action, params)) => {
+                    let body = serde_json::json!({
+                        "request_id": request_id,
+                        "interface": interface,
+                        "device_id": device_id,
+                        "action": action,
+                        "params": params,
+                    });
+                    return json_response("200 OK", &body.to_string());
+                }
+                None => {
+                    return json_response("200 OK", r#"{"pending":false}"#);
+                }
+            }
+        } else {
+            return json_response("200 OK", r#"{"pending":false}"#);
+        }
+    }
+
+    // POST /api/device/result — UI sends result of device action (e.g. image base64, audio base64)
+    if method == "POST" && path == "/api/device/result" {
+        if let Some(bridge) = device_bridge {
+            let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+            let request_id = body_json.as_ref().and_then(|j| j.get("request_id")).and_then(|v| v.as_str());
+            let success = body_json.as_ref().and_then(|j| j.get("success")).and_then(|v| v.as_bool()).unwrap_or(false);
+            let data = body_json.as_ref().and_then(|j| j.get("data")).and_then(|v| v.as_str()).map(String::from);
+            let request_id = match request_id.filter(|s| !s.is_empty()) {
+                Some(id) => id,
+                None => return json_response("400 Bad Request", r#"{"error":"request_id_required"}"#),
+            };
+            let result = crate::device_bridge::DeviceResult { success, data };
+            let fulfilled = bridge.fulfill(request_id, result).await;
+            let body = serde_json::json!({ "ok": fulfilled });
+            return json_response("200 OK", &body.to_string());
+        } else {
+            return json_response("501 Not Implemented", r#"{"error":"device_bridge_unavailable"}"#);
+        }
+    }
+
     // GET /api/agent-profile — read agent profile (name, personality, rules, can_do, cannot_do)
     if method == "GET" && path == "/api/agent-profile" {
         let profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
@@ -2945,6 +3210,10 @@ pub async fn handle_api(
                     profile.cannot_do = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
                 }
             }
+        }
+        // Persist default name if none or empty so the agent always has an identity on disk
+        if profile.name.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+            profile.name = Some(AgentProfile::DEFAULT_NAME.to_string());
         }
         match profile.save(data_dir) {
             Ok(()) => {
@@ -4525,5 +4794,37 @@ mod tests {
     #[test]
     fn parse_content_length_empty_returns_none() {
         assert!(parse_content_length(&[]).is_none());
+    }
+
+    // --- parse_device_invoke_params ---
+
+    fn s(v: &str) -> String { v.to_string() }
+
+    #[test]
+    fn device_invoke_params_no_extra_args_returns_empty_object() {
+        let args: Vec<String> = vec![s("local_media"), s("camera"), s("capture")];
+        let p = parse_device_invoke_params(&args);
+        assert_eq!(p, serde_json::json!({}));
+    }
+
+    #[test]
+    fn device_invoke_params_single_valid_json_arg() {
+        let args = vec![s("synthetic_input"), s("keyboard"), s("shortcut"), s(r#"{"keys":["Control","C"]}"#)];
+        let p = parse_device_invoke_params(&args);
+        assert_eq!(p, serde_json::json!({"keys": ["Control", "C"]}));
+    }
+
+    #[test]
+    fn device_invoke_params_single_invalid_json_falls_back_to_empty_object() {
+        let args = vec![s("local_media"), s("microphone"), s("record"), s("not-json")];
+        let p = parse_device_invoke_params(&args);
+        assert_eq!(p, serde_json::json!({}));
+    }
+
+    #[test]
+    fn device_invoke_params_multiple_args_become_json_array() {
+        let args = vec![s("synthetic_input"), s("keyboard"), s("type"), s("hello"), s("world")];
+        let p = parse_device_invoke_params(&args);
+        assert_eq!(p, serde_json::json!(["hello", "world"]));
     }
 }

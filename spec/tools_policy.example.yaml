@@ -2,16 +2,22 @@
 # Fichier absent ou vide = tout refusé. Pour autoriser lecture/écriture de fichiers, ajoutez
 # des préfixes de chemins (répertoires ou fichiers) sous allowed_read_paths / allowed_write_paths.
 # L'agent peut alors utiliser read_file / write_file pour les chemins sous ces préfixes.
+#
+# Projets longs (roman, BD, projet de code) : pour isoler le projet du reste du système, créez
+# un répertoire dédié par projet et listez-le SEUL ici. N'utilisez pas "." ou un répertoire parent
+# large si vous voulez limiter l'accès aux fichiers du projet. Voir spec/projects_long_running.md.
 
 allowed_read_paths:
   - "."                    # répertoire de travail du daemon (ex. répertoire du projet)
   # - "C:\\Users\\Vous\\projet"   # Windows : décommenter et adapter
   # - "/home/user/projet"          # Linux/macOS : décommenter et adapter
+  # - "C:\\Users\\Vous\\akasha_projects\\mon_roman"   # Exemple : projet long dédié (roman, BD, code)
 
 allowed_write_paths:
   - "."                    # idem : autoriser l'écriture dans le répertoire courant
   # - "C:\\Users\\VOTRE_UTILISATEUR\\AppData\\Local\\akasha"   # Windows : ex. pour enregistrer des jeux/code dans akasha\games
   # Ajoutez ici les répertoires où l'agent peut écrire des fichiers (génération de code, etc.)
+  # Pour un projet long isolé : un seul répertoire dédié (ex. ~/akasha_projects/mon_roman)
 
 allowed_commands:
   - "cargo"
@@ -50,7 +56,23 @@ command_timeout_secs: 60
 # Exemple (GitHub + GitLab + votre domaine) : allowed_skill_install_hosts: ["github.com", "raw.githubusercontent.com", "gitlab.com", "mon-entreprise.com"]
 # Pour autoriser toute URL HTTPS : allowed_skill_install_hosts: ["*"]
 
+# Optionnel : interfaces appareil autorisées pour device_discover / device_invoke (caméra, micro, imprimantes, etc.).
+# Utiliser ["*"] pour autoriser toutes les interfaces (sous réserve de blocked_device_interfaces).
+# allowed_device_interfaces: []
+# Exemple : tout autoriser sauf USB
+# allowed_device_interfaces: ["*"]
+# blocked_device_interfaces: [usb]
+# Exemple : uniquement média local et imprimantes
+# allowed_device_interfaces: [local_media, system]
+# blocked_device_interfaces: []
+# Exemple : média local + entrées synthétiques (clavier/souris pour raccourcis, jeux, dessin)
+# allowed_device_interfaces: [local_media, synthetic_input]
+# synthetic_input permet à l'agent d'envoyer raccourcis clavier (ex. screenshot), clics/déplacements souris (jeux, logiciels de dessin). Recommandé : require_approval avec device_invoke.
+
+# Optionnel : interfaces appareil interdites (prioritaire sur allowed_device_interfaces).
+# blocked_device_interfaces: []
+
 # Optionnel : outils pour lesquels une confirmation utilisateur est requise avant exécution (human-in-the-loop).
 # Quand un outil est dans cette liste, le daemon affiche un résumé d'intention (ex. « Écrire dans le fichier X », « Exécuter la commande Y »)
 # et n'exécute qu'après approbation explicite (bouton Approuver / Refuser dans l'UI).
-# require_approval: [write_file, run_command, run_in_container, apply_patch, edit_file]
+# require_approval: [write_file, run_command, run_in_container, apply_patch, edit_file, device_invoke]

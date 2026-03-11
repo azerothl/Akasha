@@ -47,6 +47,13 @@ pub struct ToolsPolicy {
     /// Optional: tools that require explicit user approval before execution (e.g. write_file, run_command, run_in_container).
     #[serde(default)]
     pub require_approval: Vec<String>,
+    /// Optional: device interfaces allowed for device_discover / device_invoke (e.g. local_media, system, network, usb).
+    /// Use ["*"] to allow all interfaces (subject to blocked_device_interfaces).
+    #[serde(default)]
+    pub allowed_device_interfaces: Vec<String>,
+    /// Optional: device interfaces blocked; takes precedence over allowed_device_interfaces.
+    #[serde(default)]
+    pub blocked_device_interfaces: Vec<String>,
 }
 
 impl ToolsPolicy {
@@ -150,10 +157,28 @@ impl ToolsPolicy {
 
     /// If default_profile is set, returns whether the tool is in the profile or in allowed_commands (skills/CLIs). Otherwise true.
     /// ask_user and install_skill are always allowed.
+    /// device_discover and device_invoke require at least one allowed device interface AND are subject to profile gating when a profile is active.
     /// Tools in allowed_commands (e.g. skill names like "bankr") are allowed so TOOL: bankr <args> can be executed as run_command.
     pub fn can_use_tool(&self, tool_name: &str) -> bool {
         if tool_name == "ask_user" || tool_name == "install_skill" || tool_name == "uninstall_skill" {
             return true;
+        }
+        if tool_name == "device_discover" || tool_name == "device_invoke" {
+            // At least one device interface must be allowed.
+            let interfaces_allowed = self.allowed_device_interfaces.iter().any(|a| a.trim().eq_ignore_ascii_case("*"))
+                || !self.allowed_device_interfaces.is_empty();
+            if !interfaces_allowed {
+                return false;
+            }
+            // Also subject to profile gating when a default_profile is active.
+            return match &self.default_profile {
+                Some(profile) => self
+                    .tool_profiles
+                    .get(profile)
+                    .map(|list| list.iter().any(|t| t == tool_name))
+                    .unwrap_or(false),
+                None => true,
+            };
         }
         if self.can_run_command(tool_name) {
             return true;
@@ -173,6 +198,36 @@ impl ToolsPolicy {
         self.default_profile
             .as_ref()
             .and_then(|p| self.tool_profiles.get(p).cloned())
+    }
+
+    /// Check if a device interface is allowed for device_discover / device_invoke.
+    /// Order: (1) block if interface in blocked_device_interfaces; (2) allow if allowed_device_interfaces contains "*"; (3) allow if interface in allowed_device_interfaces.
+    /// If allowed_device_interfaces is empty, no device access (deny all).
+    pub fn can_use_device_interface(&self, interface: &str) -> bool {
+        let name = interface.trim().to_lowercase();
+        if name.is_empty() {
+            return false;
+        }
+        if self
+            .blocked_device_interfaces
+            .iter()
+            .any(|b| b.trim().to_lowercase() == name)
+        {
+            return false;
+        }
+        if self
+            .allowed_device_interfaces
+            .iter()
+            .any(|a| a.trim().eq_ignore_ascii_case("*"))
+        {
+            return true;
+        }
+        if self.allowed_device_interfaces.is_empty() {
+            return false;
+        }
+        self.allowed_device_interfaces
+            .iter()
+            .any(|a| a.trim().to_lowercase() == name)
     }
 
     /// Hosts allowed for install_skill. If None or empty, returns default GitHub hosts. If list contains "*", any host is allowed (caller must check).
@@ -220,5 +275,129 @@ impl ToolsPolicy {
             let d = d.trim().to_lowercase();
             host == d || host.ends_with(&format!(".{}", d))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn policy_with_interfaces(allowed: Vec<&str>, blocked: Vec<&str>) -> ToolsPolicy {
+        ToolsPolicy {
+            allowed_device_interfaces: allowed.into_iter().map(|s| s.to_string()).collect(),
+            blocked_device_interfaces: blocked.into_iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    // --- can_use_device_interface ---
+
+    #[test]
+    fn device_interface_allow_wildcard() {
+        let p = policy_with_interfaces(vec!["*"], vec![]);
+        assert!(p.can_use_device_interface("local_media"));
+        assert!(p.can_use_device_interface("synthetic_input"));
+    }
+
+    #[test]
+    fn device_interface_deny_all_when_empty() {
+        let p = policy_with_interfaces(vec![], vec![]);
+        assert!(!p.can_use_device_interface("local_media"));
+    }
+
+    #[test]
+    fn device_interface_allow_explicit() {
+        let p = policy_with_interfaces(vec!["local_media"], vec![]);
+        assert!(p.can_use_device_interface("local_media"));
+        assert!(!p.can_use_device_interface("synthetic_input"));
+    }
+
+    #[test]
+    fn device_interface_blocked_overrides_wildcard() {
+        let p = policy_with_interfaces(vec!["*"], vec!["synthetic_input"]);
+        assert!(p.can_use_device_interface("local_media"));
+        assert!(!p.can_use_device_interface("synthetic_input"));
+    }
+
+    #[test]
+    fn device_interface_blocked_overrides_explicit_allow() {
+        let p = policy_with_interfaces(vec!["local_media", "synthetic_input"], vec!["synthetic_input"]);
+        assert!(p.can_use_device_interface("local_media"));
+        assert!(!p.can_use_device_interface("synthetic_input"));
+    }
+
+    #[test]
+    fn device_interface_case_insensitive() {
+        let p = policy_with_interfaces(vec!["Local_Media"], vec![]);
+        assert!(p.can_use_device_interface("local_media"));
+        assert!(p.can_use_device_interface("LOCAL_MEDIA"));
+    }
+
+    // --- can_use_tool for device tools ---
+
+    #[test]
+    fn device_tool_denied_when_no_interfaces() {
+        let p = policy_with_interfaces(vec![], vec![]);
+        assert!(!p.can_use_tool("device_discover"));
+        assert!(!p.can_use_tool("device_invoke"));
+    }
+
+    #[test]
+    fn device_tool_allowed_with_wildcard_no_profile() {
+        let p = policy_with_interfaces(vec!["*"], vec![]);
+        assert!(p.can_use_tool("device_discover"));
+        assert!(p.can_use_tool("device_invoke"));
+    }
+
+    #[test]
+    fn device_tool_blocked_by_profile_even_with_interfaces() {
+        let mut profiles = HashMap::new();
+        profiles.insert("safe".to_string(), vec!["read_file".to_string()]);
+        let p = ToolsPolicy {
+            allowed_device_interfaces: vec!["*".to_string()],
+            blocked_device_interfaces: vec![],
+            default_profile: Some("safe".to_string()),
+            tool_profiles: profiles,
+            ..Default::default()
+        };
+        assert!(!p.can_use_tool("device_discover"));
+        assert!(!p.can_use_tool("device_invoke"));
+    }
+
+    #[test]
+    fn device_tool_allowed_when_in_profile_and_interfaces_set() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "device".to_string(),
+            vec!["device_discover".to_string(), "device_invoke".to_string()],
+        );
+        let p = ToolsPolicy {
+            allowed_device_interfaces: vec!["local_media".to_string()],
+            blocked_device_interfaces: vec![],
+            default_profile: Some("device".to_string()),
+            tool_profiles: profiles,
+            ..Default::default()
+        };
+        assert!(p.can_use_tool("device_discover"));
+        assert!(p.can_use_tool("device_invoke"));
+    }
+
+    #[test]
+    fn device_tool_blocked_when_in_profile_but_no_interfaces() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "device".to_string(),
+            vec!["device_discover".to_string(), "device_invoke".to_string()],
+        );
+        let p = ToolsPolicy {
+            allowed_device_interfaces: vec![],
+            blocked_device_interfaces: vec![],
+            default_profile: Some("device".to_string()),
+            tool_profiles: profiles,
+            ..Default::default()
+        };
+        assert!(!p.can_use_tool("device_discover"));
+        assert!(!p.can_use_tool("device_invoke"));
     }
 }

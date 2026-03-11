@@ -993,12 +993,7 @@ fn parse_key(s: &str) -> Option<Key> {
         "right" | "rightarrow" => Some(Key::RightArrow),
         "up" | "uparrow" => Some(Key::UpArrow),
         "down" | "downarrow" => Some(Key::DownArrow),
-        "printscreen" | "print_scr" => {
-            #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
-            return Some(Key::PrintScr);
-            #[cfg(target_os = "macos")]
-            return None; // PrintScr not available on macOS in enigo
-        }
+        "printscreen" | "print_scr" => Some(Key::PrintScr),
         "f1" => Some(Key::F1),
         "f2" => Some(Key::F2),
         "f3" => Some(Key::F3),
@@ -1203,7 +1198,12 @@ pub fn run() {
             get_router_routes,
             set_router_route,
             get_embedded_status,
-            embedded_reload
+            embedded_reload,
+            get_device_pending,
+            post_device_result,
+            execute_synthetic_input,
+            get_agent_profile,
+            post_agent_profile
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

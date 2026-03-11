@@ -346,6 +346,7 @@ impl Daemon {
             let events = new_events_cache();
             let agent_profile_cache = new_agent_profile_cache();
             let update_check_cache = new_update_check_cache();
+            let device_bridge = std::sync::Arc::new(crate::device_bridge::DeviceBridge::new());
             let process_registry = new_process_registry();
             let human_input_store = new_human_input_store();
             let task_usage_store = std::sync::Arc::new(crate::api::TaskUsageStore::new());
@@ -455,6 +456,7 @@ impl Daemon {
             // Conversation worker: receives (task_id, message, session_id) from orchestrator, runs LLM with memory + optional tools, pushes progress/completion.
             let spec_dir = self.spec_dir.clone();
             let tools_policy_path = tools_policy_path.clone();
+            let device_bridge_for_worker = device_bridge.clone();
             tokio::spawn({
                 let bus = bus.clone();
                 let llm_router = llm_router.clone();
@@ -471,6 +473,7 @@ impl Daemon {
                 let task_completion = task_completion.clone();
                 let agent_profile_cache = agent_profile_cache.clone();
                 let task_usage_store = task_usage_store.clone();
+                let device_bridge = device_bridge_for_worker.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
                         // Phase 4: skip if task was cancelled (e.g. via POST /api/tasks/:id/cancel) before worker started.
@@ -510,6 +513,7 @@ impl Daemon {
                             Some(task_completion.clone()),
                             Some(agent_profile_cache.clone()),
                             Some(task_usage_store.clone()),
+                            Some(device_bridge.clone()),
                         )
                         .instrument(span)
                         .await;
@@ -686,6 +690,7 @@ impl Daemon {
                 let user_rag_store = user_rag_store.clone();
                 let agent_profile_cache = agent_profile_cache.clone();
                 let task_usage_store = task_usage_store.clone();
+                let device_bridge = device_bridge.clone();
                 // Body reading is done inside the spawned task so slow/large uploads
                                 // don't block the accept loop from handling other connections or signals.
                                 let update_check_cache_clone = update_check_cache.clone();
@@ -741,6 +746,7 @@ impl Daemon {
                                         &agent_profile_cache,
                                         &update_check_cache_clone,
                                         task_usage_store.as_ref(),
+                                        Some(&device_bridge),
                                     )
                                     .await;
                                     let _ = stream.write_all(response.as_bytes()).await;

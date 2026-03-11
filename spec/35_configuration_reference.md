@@ -103,7 +103,54 @@ Voir [tools_policy.example.yaml](tools_policy.example.yaml).
 - **Autoriser des commandes** : `allowed_commands: ["cargo", "npm", "node", "git"]`. Utiliser `["*"]` pour autoriser toutes les commandes (sous réserve de `blocked_commands`). Pour les skills qui s’exécutent via une CLI (ex. bankr), ajouter le nom de l’exécutable : `allowed_commands: ["bankr"]` afin que l’agent puisse exécuter `TOOL: bankr whoami`. Lors de l'installation d'un skill, les commandes requises sont ajoutées automatiquement et la politique est rechargée à chaud (pas de redémarrage).
 - **Clé du vault dans une commande** : l’agent peut injecter une clé du vault comme variable d’environnement pour `run_command` en préfixant les arguments : `TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami` (le daemon résout la clé `bankr_api_key` depuis le vault et lance la commande avec `BANKR_API_KEY` définie).
 - **Restreindre l’écriture** : n’ajouter que des répertoires précis dans `allowed_write_paths`.
+- **Projets longs (roman, BD, projet de code)** : pour que le projet n'impacte pas le reste du système, créer un **répertoire dédié** par projet (ex. `~/akasha_projects/mon_roman`, `~/projets/code/ma_app`) et l'ajouter seul dans `allowed_read_paths` et `allowed_write_paths`. Ne pas autoriser `"."` ou un répertoire parent large si l'on veut isoler. Voir [projects_long_running.md](projects_long_running.md).
 - **Initiative recherche web (météo, actualités)** : pour que l'agent utilise spontanément `web_search` pour répondre aux demandes d'information externes (météo, prévisions, actualités, horaires, etc.) au lieu de suggérer des sites à l'utilisateur, définir `web_search_enabled: true` et configurer une clé Brave (variable d'environnement `BRAVE_API_KEY` ou vault `brave_api_key`). Sans cela, l'agent pourra au mieux suggérer des sites ou expliquer comment activer la recherche web.
+
+---
+
+## 2b. agent_profile.json
+
+**Emplacement** : `data_dir/agent_profile.json`.  
+**Format** : JSON.  
+**Utilisé par** : daemon (contexte injecté en tête du prompt LLM), CLI (`akasha init` pour les templates), UI (Paramètres → Profil de l'agent).
+
+Définit l’**identité et la personnalité** de l’agent : nom, ton, règles et contraintes. Ce bloc est formaté par `format_for_prompt()` et injecté en tête du contexte à chaque tour de conversation, afin que l’agent adopte ce profil de façon stable.
+
+### Structure et types
+
+| Clé          | Type            | Obligatoire | Description                                                                 |
+| ------------ | --------------- | ----------- | --------------------------------------------------------------------------- |
+| `name`       | string          | Non         | Nom de l’agent (ex. « Akasha », « Assistant »). Si vide ou absent, « Akasha » est utilisé dans le prompt et, à la sauvegarde (POST ou init), persisté par défaut. |
+| `personality`| string          | Non         | Description du ton et de la personnalité (ex. « Concis et technique », « Bienveillant et pédagogique »). Renforcé dans le prompt par une phrase du type « Tu adoptes ce ton et cette personnalité à chaque réponse. » |
+| `rules`      | liste de strings | Non         | Règles à respecter (une par ligne).                                        |
+| `can_do`     | liste de strings | Non         | Comportements autorisés.                                                    |
+| `cannot_do`   | liste de strings | Non         | Comportements interdits.                                                    |
+
+### Limites (UI)
+
+L'interface web applique des limites : **name** 128 caractères, **personality** 2 000, **rules** 30 entrées max (500 car. par règle), **can_do** / **cannot_do** 30 entrées max (300 car. par entrée). Compteurs affichés dans chaque champ.
+
+### Lien avec le prompt
+
+Le daemon charge le profil au démarrage (et après chaque POST `/api/agent-profile`). À chaque tour, il produit un bloc `[Profil et consignes de l'agent]` avec : identité (nom toujours présent, avec formulation du type « Tu es « X ». C’est ton nom. Tu te souviens de ton nom… »), personnalité, règles, can_do, cannot_do. Ce bloc est injecté en tête du contexte système avant la mémoire et le RAG.
+
+### Édition
+
+- **CLI** : `akasha init` propose des templates de personnalité (Neutre, Bienveillant, Concis/technique, Créatif, Strict/sécurisé) et écrit `agent_profile.json`.
+- **UI** : Paramètres → section « Profil de l’agent » : champs Nom, Personnalité, Règles, Autorisé, Interdit ; sélecteur de template de personnalité (5 templates) ; bouton Enregistrer (POST `/api/agent-profile`). Paramètres organisés en 4 onglets : Affichage, Système, Agent, Data.
+- **Manuel** : éditer `data_dir/agent_profile.json` puis redémarrer le daemon (ou envoyer POST pour invalider le cache).
+
+### Exemple
+
+```json
+{
+  "name": "Akasha",
+  "personality": "Concis et technique. Réponses courtes, précises. Pas de longues introductions.",
+  "rules": ["Privilégier le concret : commandes, extraits de code.", "Éviter les longues introductions."],
+  "can_do": [],
+  "cannot_do": []
+}
+```
 
 ---
 
