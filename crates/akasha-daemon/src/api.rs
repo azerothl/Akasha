@@ -3176,12 +3176,15 @@ pub async fn handle_api(
         }
     }
 
-    // GET /api/agent-profile — read agent profile (name, personality, rules, can_do, cannot_do)
+    // GET /api/agent-profile — read agent profile (name, personality, role, gender, avatar, rules, can_do, cannot_do)
     if method == "GET" && path == "/api/agent-profile" {
         let profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         let body_json = serde_json::json!({
             "name": profile.name,
             "personality": profile.personality,
+            "role": profile.role,
+            "gender": profile.gender,
+            "avatar": profile.avatar,
             "rules": profile.rules,
             "can_do": profile.can_do,
             "cannot_do": profile.cannot_do
@@ -3189,7 +3192,7 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
-    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, rules?, can_do?, cannot_do? }
+    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, role?, gender?, avatar?, rules?, can_do?, cannot_do? }
     if method == "POST" && path == "/api/agent-profile" {
         let mut profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         if let Some(body) = body.as_deref() {
@@ -3199,6 +3202,15 @@ pub async fn handle_api(
                 }
                 if let Some(s) = v.get("personality").and_then(|x| x.as_str()) {
                     profile.personality = Some(s.to_string());
+                }
+                if v.get("role").is_some() {
+                    profile.role = v.get("role").and_then(|x| x.as_str()).map(String::from);
+                }
+                if v.get("gender").is_some() {
+                    profile.gender = v.get("gender").and_then(|x| x.as_str()).map(String::from);
+                }
+                if v.get("avatar").is_some() {
+                    profile.avatar = v.get("avatar").and_then(|x| x.as_str()).map(String::from);
                 }
                 if let Some(arr) = v.get("rules").and_then(|x| x.as_array()) {
                     profile.rules = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();

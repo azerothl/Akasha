@@ -30,6 +30,7 @@ type AgentProfileSubTab = "identity" | "personality" | "rules" | "can_do" | "can
 
 const AGENT_PROFILE_LIMITS = {
   name: 128,
+  role: 128,
   personality: 2000,
   ruleLength: 500,
   ruleCount: 30,
@@ -39,12 +40,15 @@ const AGENT_PROFILE_LIMITS = {
   cannotDoCount: 30,
 } as const;
 
-const AGENT_PROFILE_TEMPLATES: Array<{ label: string; name: string; personality: string; rules: string[]; can_do: string[]; cannot_do: string[] }> = [
-  { label: "Neutre / polyvalent — ton professionnel, adapté à tous les usages", name: "Akasha", personality: "Ton neutre et professionnel. Réponds de façon claire et adaptée au contexte, sans surcharge. Adapte-toi à la demande (technique, rédaction, conseil). Pas de préambule superflu du type « Bien sûr ! » ou « Avec plaisir » — va à l'essentiel.", rules: [], can_do: [], cannot_do: [] },
-  { label: "Bienveillant / coach — encourageant, pédagogique, à l'écoute", name: "Akasha", personality: "Bienveillant et encourageant. Explique avec pédagogie, reformule pour vérifier que l'utilisateur a compris. Valorise les progrès et propose des étapes claires. Reste à l'écoute, ne juge pas. Propose des pistes plutôt que d'imposer une seule solution.", rules: ["Rester à l'écoute et ne pas juger.", "Proposer des pistes plutôt que d'imposer une seule solution."], can_do: [], cannot_do: [] },
-  { label: "Concis / technique — réponses courtes et précises, orienté dev et sysadmin", name: "Akasha", personality: "Concis et technique. Réponses courtes et précises, orientées développement et administration système. Va à l'essentiel : commandes, extraits de code, chemins. Pas de longues introductions ni de formules de politesse superflues.", rules: ["Privilégier le concret : commandes, extraits de code, chemins.", "Éviter les longues introductions."], can_do: [], cannot_do: [] },
-  { label: "Créatif / rédacteur — ton libre, créatif, pour rédaction et idées", name: "Akasha", personality: "Créatif et ouvert. Aide à structurer des idées, à rédiger, à brainstormer. Propose plusieurs formulations ou angles. Accepte les demandes un peu inhabituelles. Ose suggérer des variantes et des pistes inattendues.", rules: [], can_do: ["Proposer des reformulations et variantes.", "Suggérer des angles ou idées complémentaires."], cannot_do: [] },
-  { label: "Strict / sécurisé — règles strictes, pas d'exécution de code sans confirmation", name: "Akasha", personality: "Précis et prudent. Explique clairement les risques avant toute action. Ne propose jamais d'exécuter du code ou des commandes sans confirmation explicite. Toujours : quoi, pourquoi, puis comment. En cas de doute sur la sécurité, avertir et proposer une alternative plus sûre.", rules: ["Ne jamais exécuter de code ou commande sans confirmation explicite de l'utilisateur.", "Toujours expliquer le « quoi » et le « pourquoi » avant le « comment ».", "En cas de doute sur la sécurité, avertir et proposer une alternative plus sûre."], can_do: ["Expliquer et détailler les étapes.", "Proposer des commandes ou scripts à copier-coller après confirmation."], cannot_do: ["Exécuter du code ou des commandes sans confirmation.", "Modifier des fichiers sensibles sans demande claire."] },
+const AGENT_PROFILE_TEMPLATES: Array<{ label: string; name: string; role?: string; personality: string; rules: string[]; can_do: string[]; cannot_do: string[] }> = [
+  { label: "Neutral / versatile — professional, adaptable", name: "Akasha", role: "neutral professional assistant", personality: "You are a neutral, professional assistant. Clear, adaptable tone. Adapt to the request (technical, writing, advice). No superfluous preambles — get to the point.", rules: [], can_do: [], cannot_do: [] },
+  { label: "Kind / coach — encouraging, pedagogical", name: "Akasha", role: "kind encouraging assistant", personality: "You are a kind, encouraging assistant (coach style). Explain with pedagogy, rephrase to check understanding. Value progress and suggest clear steps. Stay attentive, non-judgmental. Suggest options rather than imposing one solution.", rules: ["Stay attentive and non-judgmental.", "Suggest options rather than imposing a single solution."], can_do: [], cannot_do: [] },
+  { label: "Concise / technical — short, precise, dev & sysadmin", name: "Akasha", role: "concise technical assistant", personality: "You are a concise, technical assistant. Short, precise answers focused on development and system administration. Get to the point: commands, code snippets, paths. No long intros or unnecessary politeness.", rules: ["Prioritize concrete output: commands, code snippets, paths.", "Avoid long introductions."], can_do: [], cannot_do: [] },
+  { label: "Creative / writer — free, creative, for writing and ideas", name: "Akasha", role: "creative open-minded assistant", personality: "You are a creative, open-minded assistant. Help structure ideas, write, brainstorm. Offer multiple phrasings or angles. Accept slightly unusual requests. Suggest variants and unexpected directions.", rules: [], can_do: ["Propose rephrasing and variants.", "Suggest complementary angles or ideas."], cannot_do: [] },
+  { label: "Strict / security-aware — no code run without confirmation", name: "Akasha", role: "careful security-aware assistant", personality: "You are a careful, security-aware assistant. Explain risks clearly before any action. Never suggest running code or commands without explicit confirmation. Always: what, why, then how. When in doubt about security, warn and suggest a safer alternative.", rules: ["Never run code or commands without explicit user confirmation.", "Always explain « what » and « why » before « how ».", "When in doubt about security, warn and suggest a safer alternative."], can_do: ["Explain and detail steps.", "Propose commands or scripts to copy-paste after confirmation."], cannot_do: ["Run code or commands without confirmation.", "Modify sensitive files without a clear request."] },
+  { label: "Joyful & fun — upbeat, light humor", name: "Akasha", role: "joyful fun assistant", personality: "You are a joyful, fun assistant. Upbeat, light humor, emojis when appropriate. Keep responses helpful but entertaining.", rules: [], can_do: [], cannot_do: [] },
+  { label: "Friendly advisor — warm, good counsel", name: "Akasha", role: "friendly advisor", personality: "You are a friendly advisor. Warm, good counsel, supportive. Give clear advice while staying approachable.", rules: [], can_do: [], cannot_do: [] },
+  { label: "Geek & nerdy — tech-loving, precise", name: "Akasha", role: "geeky nerdy assistant", personality: "You are a geeky, nerdy assistant. Love tech, references, and precise details. Helpful and enthusiastic about technical topics.", rules: [], can_do: [], cannot_do: [] },
 ];
 
 /** Format duration in seconds as "X min Y s" or "Y s". */
@@ -300,13 +304,26 @@ function App() {
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
   const userRagFileInputRef = useRef<HTMLInputElement>(null);
-  /** Agent profile (name, personality, rules, can_do, cannot_do) for Settings panel. */
-  const [agentProfile, setAgentProfile] = useState<{ name: string; personality: string; rules: string[]; can_do: string[]; cannot_do: string[] }>({
+  const agentAvatarFileInputRef = useRef<HTMLInputElement>(null);
+  const userAvatarFileInputRef = useRef<HTMLInputElement>(null);
+  /** Agent profile (name, role, gender, avatar, personality, rules, can_do, cannot_do) for Settings panel. */
+  const [agentProfile, setAgentProfile] = useState<{ name: string; role: string; gender: string; avatar: string; personality: string; rules: string[]; can_do: string[]; cannot_do: string[] }>({
     name: "",
+    role: "",
+    gender: "",
+    avatar: "",
     personality: "",
     rules: [],
     can_do: [],
     cannot_do: [],
+  });
+  /** User avatar (data URL) for chat display. Stored in localStorage. */
+  const [userAvatar, setUserAvatar] = useState<string>(() => {
+    try {
+      return localStorage.getItem("akasha_user_avatar") ?? "";
+    } catch {
+      return "";
+    }
   });
   const [agentProfileLoading, setAgentProfileLoading] = useState(false);
   const [agentProfileSaving, setAgentProfileSaving] = useState(false);
@@ -814,13 +831,16 @@ function App() {
     setAgentProfileLoading(true);
     setAgentProfileError(null);
     try {
-      const data = await invoke<{ name?: string | null; personality?: string | null; rules?: string[]; can_do?: string[]; cannot_do?: string[] }>(
+      const data = await invoke<{ name?: string | null; personality?: string | null; role?: string | null; gender?: string | null; avatar?: string | null; rules?: string[]; can_do?: string[]; cannot_do?: string[] }>(
         "get_agent_profile",
         { port: DAEMON_PORT }
       );
       setAgentProfile({
         name: data?.name ?? "",
         personality: data?.personality ?? "",
+        role: data?.role ?? "",
+        gender: data?.gender ?? "",
+        avatar: data?.avatar ?? "",
         rules: Array.isArray(data?.rules) ? data.rules : [],
         can_do: Array.isArray(data?.can_do) ? data.can_do : [],
         cannot_do: Array.isArray(data?.cannot_do) ? data.cannot_do : [],
@@ -1882,9 +1902,12 @@ function App() {
                         key={i}
                         className={`message ${m.role} ${m.error ? "error" : ""} ${askUserData ? "message-ask-user" : ""}`}
                       >
-                        <span className="role" aria-hidden>
-                          {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : "Akasha"}
-                        </span>
+                        <div className="message-head">
+                          {m.role === "user" ? (userAvatar ? <img src={userAvatar} alt="" className="message-avatar message-avatar-user" /> : null) : m.role === "assistant" ? (agentProfile.avatar ? <img src={agentProfile.avatar} alt="" className="message-avatar message-avatar-assistant" /> : null) : null}
+                          <span className="role" aria-hidden>
+                            {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : (agentProfile.name || "Akasha")}
+                          </span>
+                        </div>
                         {m.role === "system" ? (
                           <div className="text system-text" style={{ whiteSpace: "pre-wrap" }}>
                             {m.text}
@@ -3144,6 +3167,38 @@ function App() {
                   <option value="en">English</option>
                 </select>
               </dd>
+              <dt>{t("settings.user_avatar")}</dt>
+              <dd>
+                <input
+                  ref={userAvatarFileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="sr-only"
+                  aria-hidden
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    const MAX_AVATAR_BYTES = 200 * 1024;
+                    if (file.size > MAX_AVATAR_BYTES) return;
+                    try {
+                      const { content_base64, mime_type } = await readFileAsBase64(file);
+                      const dataUrl = `data:${mime_type};base64,${content_base64}`;
+                      setUserAvatar(dataUrl);
+                      localStorage.setItem("akasha_user_avatar", dataUrl);
+                    } catch {
+                      // ignore
+                    }
+                    e.target.value = "";
+                  }}
+                />
+                <div className="settings-avatar-row">
+                  {userAvatar ? <img src={userAvatar} alt="" className="settings-avatar-preview" /> : null}
+                  <div>
+                    <button type="button" className="btn-secondary" onClick={() => userAvatarFileInputRef.current?.click()}>{t("settings.user_avatar_choose")}</button>
+                    {userAvatar ? <button type="button" className="btn-secondary" onClick={() => { setUserAvatar(""); try { localStorage.removeItem("akasha_user_avatar"); } catch {} }}>{t("settings.user_avatar_remove")}</button> : null}
+                  </div>
+                </div>
+              </dd>
             </dl>
               </div>
             )}
@@ -3163,7 +3218,7 @@ function App() {
                 {agentProfileError && <p className="error-inline" role="alert">{agentProfileError}</p>}
                 <div className="settings-agent-template-row">
                   <label htmlFor="agent-profile-template">{t("settings.agent_profile_apply_template")}</label>
-                  <select id="agent-profile-template" className="settings-theme-select" value="" onChange={(e) => { const idx = e.target.value ? parseInt(e.target.value, 10) : -1; e.target.value = ""; if (idx >= 0 && idx < AGENT_PROFILE_TEMPLATES.length) { const tpl = AGENT_PROFILE_TEMPLATES[idx]; setAgentProfile({ name: tpl.name, personality: tpl.personality, rules: [...tpl.rules], can_do: [...tpl.can_do], cannot_do: [...tpl.cannot_do] }); } }}>
+                  <select id="agent-profile-template" className="settings-theme-select" value="" onChange={(e) => { const idx = e.target.value ? parseInt(e.target.value, 10) : -1; e.target.value = ""; if (idx >= 0 && idx < AGENT_PROFILE_TEMPLATES.length) { const tpl = AGENT_PROFILE_TEMPLATES[idx]; setAgentProfile((p) => ({ ...p, name: tpl.name, role: tpl.role ?? "", personality: tpl.personality, rules: [...tpl.rules], can_do: [...tpl.can_do], cannot_do: [...tpl.cannot_do] })); } }}>
                     <option value="">—</option>
                     {AGENT_PROFILE_TEMPLATES.map((tpl, i) => (<option key={i} value={i}>{tpl.label}</option>))}
                   </select>
@@ -3178,13 +3233,59 @@ function App() {
                     </div>
                     <div className="settings-agent-tab-content">
                       {agentProfileSubTab === "identity" && (
-                        <dl className="settings-list">
-                          <dt>{t("settings.agent_profile_name")}</dt>
-                          <dd>
-                            <input type="text" aria-label={t("settings.agent_profile_name")} className="settings-input" maxLength={AGENT_PROFILE_LIMITS.name} value={agentProfile.name} onChange={(e) => setAgentProfile((p) => ({ ...p, name: e.target.value.slice(0, AGENT_PROFILE_LIMITS.name) }))} placeholder="Akasha" />
-                            <span className="settings-char-count">{agentProfile.name.length} / {AGENT_PROFILE_LIMITS.name}</span>
-                          </dd>
-                        </dl>
+                        <>
+                          <dl className="settings-list">
+                            <dt>{t("settings.agent_profile_name")}</dt>
+                            <dd>
+                              <input type="text" aria-label={t("settings.agent_profile_name")} className="settings-input" maxLength={AGENT_PROFILE_LIMITS.name} value={agentProfile.name} onChange={(e) => setAgentProfile((p) => ({ ...p, name: e.target.value.slice(0, AGENT_PROFILE_LIMITS.name) }))} placeholder="Akasha" />
+                              <span className="settings-char-count">{agentProfile.name.length} / {AGENT_PROFILE_LIMITS.name}</span>
+                            </dd>
+                            <dt>{t("settings.agent_profile_role")}</dt>
+                            <dd>
+                              <input type="text" aria-label={t("settings.agent_profile_role")} className="settings-input" maxLength={AGENT_PROFILE_LIMITS.role} value={agentProfile.role} onChange={(e) => setAgentProfile((p) => ({ ...p, role: e.target.value.slice(0, AGENT_PROFILE_LIMITS.role) }))} placeholder="e.g. joyful assistant, clever assistant" />
+                              <span className="settings-char-count">{agentProfile.role.length} / {AGENT_PROFILE_LIMITS.role}</span>
+                            </dd>
+                            <dt>{t("settings.agent_profile_gender")}</dt>
+                            <dd>
+                              <select aria-label={t("settings.agent_profile_gender")} className="settings-theme-select" value={agentProfile.gender} onChange={(e) => setAgentProfile((p) => ({ ...p, gender: e.target.value }))}>
+                                <option value="">—</option>
+                                <option value="male">{t("settings.gender_male")}</option>
+                                <option value="female">{t("settings.gender_female")}</option>
+                                <option value="neutral">{t("settings.gender_neutral")}</option>
+                              </select>
+                            </dd>
+                            <dt>{t("settings.agent_profile_avatar")}</dt>
+                            <dd>
+                              <input
+                                ref={agentAvatarFileInputRef}
+                                type="file"
+                                accept="image/*"
+                                className="sr-only"
+                                aria-hidden
+                                onChange={async (e) => {
+                                  const file = e.target.files?.[0];
+                                  if (!file) return;
+                                  const MAX_AVATAR_BYTES = 200 * 1024;
+                                  if (file.size > MAX_AVATAR_BYTES) { setAgentProfileError(`Image trop grande (max ${MAX_AVATAR_BYTES / 1024} Ko).`); e.target.value = ""; return; }
+                                  try {
+                                    const { content_base64, mime_type } = await readFileAsBase64(file);
+                                    const dataUrl = `data:${mime_type};base64,${content_base64}`;
+                                    setAgentProfile((p) => ({ ...p, avatar: dataUrl }));
+                                    setAgentProfileError(null);
+                                  } catch (err) { setAgentProfileError(String(err)); }
+                                  e.target.value = "";
+                                }}
+                              />
+                              <div className="settings-avatar-row">
+                                {agentProfile.avatar ? <img src={agentProfile.avatar} alt="" className="settings-avatar-preview" /> : null}
+                                <div>
+                                  <button type="button" className="btn-secondary" onClick={() => agentAvatarFileInputRef.current?.click()}>{t("settings.agent_profile_avatar_choose")}</button>
+                                  {agentProfile.avatar ? <button type="button" className="btn-secondary" onClick={() => setAgentProfile((p) => ({ ...p, avatar: "" }))}>{t("settings.agent_profile_avatar_remove")}</button> : null}
+                                </div>
+                              </div>
+                            </dd>
+                          </dl>
+                        </>
                       )}
                       {agentProfileSubTab === "personality" && (
                         <dl className="settings-list">
@@ -3373,7 +3474,7 @@ function App() {
                         </div>
                       )}
                     </div>
-                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
+                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role) || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
                   </>
                 )}
               </div>
