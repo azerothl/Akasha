@@ -5,7 +5,18 @@ import remarkGfm from "remark-gfm";
 export default function MarkdownContent({ children = "", className }: { children?: string; className?: string }) {
   return (
     <div className={className ?? "markdown-rendered"}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ href, children: linkChildren, ...props }) => (
+            <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+              {linkChildren}
+            </a>
+          ),
+        }}
+      >
+        {children}
+      </ReactMarkdown>
     </div>
   );
 }

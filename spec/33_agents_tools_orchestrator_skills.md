@@ -66,6 +66,10 @@ Liste exposée dans le code (`AVAILABLE_TOOLS`) et via **GET /api/tools** (JSON 
 | `session_status` | `session_status <task_id>` | Statut d'une tâche. |
 | `message` | `message send <channel> <text>` | Envoyer un message (webhook). |
 | `browser`, `image`, `pdf` | (stubs) | Prévu phase 3. |
+| `device_discover` | `device_discover [interface]` | Lister les appareils accessibles (local_media, system, synthetic_input, network, usb, etc.). synthetic_input retourne keyboard, mouse. Filtre par `allowed_device_interfaces` / `blocked_device_interfaces`. |
+| `device_invoke` | `device_invoke <interface> <device_id> <action> [params]` | Exécuter une action sur un appareil. `local_media` : caméra, micro (capture, record). `synthetic_input` : clavier/souris — device_id keyboard\|mouse, action shortcut\|key\|type\|mouse_move\|mouse_click\|mouse_double_click\|mouse_scroll\|mouse_drag, params JSON (ex. {\"keys\":[\"Control\",\"Shift\",\"S\"]} pour raccourci). Nécessite client UI. |
+
+**Device bridge et accès appareils** : l’agent peut interagir avec **tout appareil accessible** (périphériques réseau, USB, interfaces locales). Modèle générique : `device_discover` liste les appareils (optionnellement par interface) ; `device_invoke` envoie une action à un appareil. Les interfaces (ex. `local_media`, `system`, `synthetic_input`, `network`, `usb`) sont extensibles. Pour les appareils qui nécessitent consentement ou capture côté utilisateur (caméra, micro, lecture audio), le daemon enregistre une requête dans le **device bridge** ; l’UI (Tauri) interroge `GET /api/device/pending`, exécute l’action (getUserMedia, etc.) et envoie le résultat via `POST /api/device/result`. L’interface **synthetic_input** permet à l’agent d’utiliser clavier et souris (raccourcis OS, saisie, clics, déplacements, scroll, drag) : l’UI exécute les actions via enigo et renvoie le résultat. Exemples : screenshot (raccourci selon OS : Win+Shift+S, Cmd+Shift+4), jeu (mouse_click), dessin (mouse_move, mouse_click, mouse_drag), saisie (type). Recommandation : inclure `device_invoke` dans `require_approval` pour valider chaque action. Politique : `allowed_device_interfaces` (liste ou `["*"]` pour tout) et `blocked_device_interfaces` (prioritaire), même logique que `allowed_commands` / `blocked_commands`.
 
 Politique : `tool_profiles`, `default_profile` ; détection de boucle (3 répétitions) ; journal des modifications si `AKASHA_TOOLS_JOURNAL_PATH`. Pour web_fetch : `allowed_web_domains` peut contenir `"*"` pour autoriser tous les domaines ; `blocked_web_domains` liste les domaines (et sous-domaines) interdits, prioritaire sur l'autorisation.
 
@@ -76,6 +80,8 @@ Politique : `tool_profiles`, `default_profile` ; détection de boucle (3 répét
 Activation : placer un fichier **tools_policy.yaml** dans le data_dir (voir `spec/tools_policy.example.yaml`) avec `allowed_read_paths`, `allowed_write_paths`, `allowed_commands`. Sans politique chargée, aucun outil n’est exécuté (conversation sans boucle d’outils).
 
 ---
+
+**Projets longs** : pour des livrables substantiels (roman, BD, projet de code), contexte, isolation des fichiers et règles pour ne pas signaler « terminé » prématurément sont décrits dans [projects_long_running.md](projects_long_running.md).
 
 ## 3. Exécution en conteneur (agent de code)
 
@@ -121,7 +127,7 @@ Tout le chemin « délégation → agent → sous-agents → résultat » est **
 - **Entrée** : `POST /api/message` (ou équivalent canal) crée toujours une **tâche racine** et envoie son `task_id` à l’orchestrateur (via une file, ex. `orchestrator_tx`).
 - **Réponse immédiate** : le handler API renvoie tout de suite `{ "ack": true, "task_id": "...", "message": "Je prends en compte votre demande." }` (sans attendre la fin du traitement).
 - **Traitement asynchrone** : un worker (orchestrateur) consomme la file des `task_id`, pour chaque tâche :
-  - Décompose la demande via un appel LLM (agent_type|message) ; le type d’agent (conversation, code, search, schedule) est entièrement déterminé par le LLM, sans fallback par mots-clés.
+  - Décompose la demande via un appel LLM (agent_type|message) ; le type d’agent (conversation, code, search, schedule, financial, documentalist, project_manager, technical_writer, research, security_audit, creative) est entièrement déterminé par le LLM, sans fallback par mots-clés.
   - Délègue à l’agent (nouvelle sous-tâche ou envoi sur une file dédiée à l’agent).
   - Les agents (et sous-agents) s’exécutent dans des tâches asynchrones (tokio::spawn ou équivalent).
 - **Remontée du résultat** : quand l’agent final a terminé, il met à jour la tâche racine (statut, résultat) et envoie un événement (ex. `TaskCompleted` avec le texte de réponse). Le **progress subscriber** (ou un composant dédié) pousse ce résultat au canal utilisateur (polling `GET /api/tasks/:id` ou WebSocket si ajouté).
@@ -140,6 +146,12 @@ Quand une tâche est longue :
 - **Mises à jour** : option « chips » dans le chat (ex. Task #1234 running 35 %) ; flux complet dans le Task Center (onglet Tâches).
 
 Voir [36_ui_architecture.md](36_ui_architecture.md) pour les onglets Chat et Tâches.
+
+### 5.4 Types d'agents et prompt [Role]
+
+Types d'agents reconnus : **conversation** (chat général), **code** (génération de code), **search** (recherche d'information), **schedule** (création de tâche récurrente dans l'app, flux dédié), **financial** (budget, coûts, rapports), **documentalist** (réponses basées sur la base RAG / documents utilisateur), **project_manager** (suivi de projet, jalons, planning), **technical_writer** (rédaction technique, doc, procédures), **research** (recherche approfondie, synthèse multi-sources), **security_audit** (revue sécurité code/config), **creative** (rédaction créative, copywriting).
+
+Chaque type spécialisé (tous sauf **schedule**) reçoit un **prompt système [Role]** en anglais injecté en tête du contexte LLM pour guider son comportement. L'outil `delegate_to_agent` accepte les types : search, code, conversation, financial, documentalist, project_manager, technical_writer, research, security_audit, creative (un seul niveau de délégation).
 
 ---
 

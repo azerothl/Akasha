@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
+
 const DAEMON_PORT: u16 = 3876;
 const TASK_POLL_INTERVAL_MS: u64 = 1500;
 const TASK_POLL_TIMEOUT_SECS: u64 = 600;
@@ -907,6 +909,241 @@ async fn delete_user_rag_document(id: String, port: Option<u16>) -> Result<(), S
     Ok(())
 }
 
+/// Device bridge: get oldest pending device request (for UI to fulfill camera, mic, etc.).
+#[tauri::command]
+async fn get_device_pending(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/device/pending", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Device bridge: send result of device action (e.g. image or audio base64 from UI).
+#[tauri::command]
+async fn post_device_result(
+    request_id: String,
+    success: bool,
+    data: Option<String>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/device/result", daemon_base_url(port));
+    let client = http_client();
+    let body = serde_json::json!({
+        "request_id": request_id,
+        "success": success,
+        "data": data,
+    });
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Agent profile: GET /api/agent-profile (name, personality, rules, can_do, cannot_do).
+#[tauri::command]
+async fn get_agent_profile(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/agent-profile", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Parse a key name string to enigo Key (e.g. "Control" -> Key::Control, "a" -> Key::Unicode('a')).
+fn parse_key(s: &str) -> Option<Key> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let lower = s.to_lowercase();
+    match lower.as_str() {
+        "control" | "ctrl" => Some(Key::Control),
+        "shift" => Some(Key::Shift),
+        "alt" => Some(Key::Alt),
+        "meta" | "command" | "cmd" => Some(Key::Meta),
+        "super" | "windows" | "win" => Some(Key::Meta),
+        "space" => Some(Key::Space),
+        "return" | "enter" => Some(Key::Return),
+        "tab" => Some(Key::Tab),
+        "escape" | "esc" => Some(Key::Escape),
+        "backspace" => Some(Key::Backspace),
+        "delete" => Some(Key::Delete),
+        "home" => Some(Key::Home),
+        "end" => Some(Key::End),
+        "pageup" | "page_up" => Some(Key::PageUp),
+        "pagedown" | "page_down" => Some(Key::PageDown),
+        "left" | "leftarrow" => Some(Key::LeftArrow),
+        "right" | "rightarrow" => Some(Key::RightArrow),
+        "up" | "uparrow" => Some(Key::UpArrow),
+        "down" | "downarrow" => Some(Key::DownArrow),
+        "printscreen" | "print_scr" => Some(Key::PrintScr),
+        "f1" => Some(Key::F1),
+        "f2" => Some(Key::F2),
+        "f3" => Some(Key::F3),
+        "f4" => Some(Key::F4),
+        "f5" => Some(Key::F5),
+        "f6" => Some(Key::F6),
+        "f7" => Some(Key::F7),
+        "f8" => Some(Key::F8),
+        "f9" => Some(Key::F9),
+        "f10" => Some(Key::F10),
+        "f11" => Some(Key::F11),
+        "f12" => Some(Key::F12),
+        // Only map to Unicode when the input is exactly one Unicode scalar.
+        _ if s.chars().count() == 1 => Some(Key::Unicode(s.chars().next().unwrap())),
+        _ => None,
+    }
+}
+
+/// Execute a synthetic input action (keyboard/mouse) via enigo. Used when UI fulfills device_invoke synthetic_input.
+#[tauri::command]
+fn execute_synthetic_input(action: String, params: serde_json::Value) -> Result<bool, String> {
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+    let action = action.to_lowercase();
+    let params = params.as_object().ok_or("params must be an object")?;
+
+    match action.as_str() {
+        "shortcut" => {
+            let keys = params
+                .get("keys")
+                .and_then(|v| v.as_array())
+                .ok_or("shortcut requires params.keys array")?;
+            let keys: Vec<Key> = keys
+                .iter()
+                .filter_map(|v| v.as_str().and_then(parse_key))
+                .collect();
+            if keys.is_empty() {
+                return Err("shortcut: no valid keys".to_string());
+            }
+            // Modifiers first (press), then main key (click), then modifiers (release)
+            let (modifiers, main): (Vec<&Key>, Vec<&Key>) = keys.iter().partition(|k| {
+                matches!(k, Key::Control | Key::Shift | Key::Alt | Key::Meta)
+            });
+            for k in &modifiers {
+                enigo.key(**k, Direction::Press).map_err(|e| e.to_string())?;
+            }
+            for k in &main {
+                enigo.key(**k, Direction::Click).map_err(|e| e.to_string())?;
+            }
+            for k in modifiers.iter().rev() {
+                enigo.key(**k, Direction::Release).map_err(|e| e.to_string())?;
+            }
+            Ok(true)
+        }
+        "key" => {
+            let key_str = params.get("key").and_then(|v| v.as_str()).ok_or("key requires params.key")?;
+            let key = parse_key(key_str).ok_or_else(|| format!("unknown key: {}", key_str))?;
+            enigo.key(key, Direction::Click).map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        "type" => {
+            let text = params.get("text").and_then(|v| v.as_str()).ok_or("type requires params.text")?;
+            enigo.text(text).map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        "mouse_move" => {
+            let x = params.get("x").and_then(|v| v.as_i64()).ok_or("mouse_move requires params.x")? as i32;
+            let y = params.get("y").and_then(|v| v.as_i64()).ok_or("mouse_move requires params.y")? as i32;
+            enigo.move_mouse(x, y, Coordinate::Abs).map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        "mouse_click" | "mouse_double_click" => {
+            let button = params
+                .get("button")
+                .and_then(|v| v.as_str())
+                .map(|s| match s.to_lowercase().as_str() {
+                    "right" => Button::Right,
+                    "middle" => Button::Middle,
+                    _ => Button::Left,
+                })
+                .unwrap_or(Button::Left);
+            if let (Some(x), Some(y)) = (
+                params.get("x").and_then(|v| v.as_i64()),
+                params.get("y").and_then(|v| v.as_i64()),
+            ) {
+                enigo.move_mouse(x as i32, y as i32, Coordinate::Abs).map_err(|e| e.to_string())?;
+            }
+            enigo.button(button, Direction::Click).map_err(|e| e.to_string())?;
+            if action == "mouse_double_click" {
+                enigo.button(button, Direction::Click).map_err(|e| e.to_string())?;
+            }
+            Ok(true)
+        }
+        "mouse_scroll" => {
+            let delta_x = params.get("delta_x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let delta_y = params.get("delta_y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let clicks = params.get("clicks").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            if delta_x != 0 {
+                enigo.scroll(delta_x, Axis::Horizontal).map_err(|e| e.to_string())?;
+            }
+            if delta_y != 0 {
+                enigo.scroll(delta_y, Axis::Vertical).map_err(|e| e.to_string())?;
+            }
+            if clicks != 0 && delta_x == 0 && delta_y == 0 {
+                enigo.scroll(clicks, Axis::Vertical).map_err(|e| e.to_string())?;
+            }
+            Ok(true)
+        }
+        "mouse_drag" => {
+            let from_x = params.get("from_x").and_then(|v| v.as_i64()).ok_or("mouse_drag requires from_x")? as i32;
+            let from_y = params.get("from_y").and_then(|v| v.as_i64()).ok_or("mouse_drag requires from_y")? as i32;
+            let to_x = params.get("to_x").and_then(|v| v.as_i64()).ok_or("mouse_drag requires to_x")? as i32;
+            let to_y = params.get("to_y").and_then(|v| v.as_i64()).ok_or("mouse_drag requires to_y")? as i32;
+            let button = params
+                .get("button")
+                .and_then(|v| v.as_str())
+                .map(|s| match s.to_lowercase().as_str() {
+                    "right" => Button::Right,
+                    "middle" => Button::Middle,
+                    _ => Button::Left,
+                })
+                .unwrap_or(Button::Left);
+            enigo.move_mouse(from_x, from_y, Coordinate::Abs).map_err(|e| e.to_string())?;
+            enigo.button(button, Direction::Press).map_err(|e| e.to_string())?;
+            enigo.move_mouse(to_x, to_y, Coordinate::Abs).map_err(|e| e.to_string())?;
+            enigo.button(button, Direction::Release).map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        _ => Err(format!("unknown action: {}", action)),
+    }
+}
+
+/// Agent profile: POST /api/agent-profile (merge body: name?, personality?, rules?, can_do?, cannot_do?).
+#[tauri::command]
+async fn post_agent_profile(body: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/agent-profile", daemon_base_url(port));
+    let client = http_client();
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -956,7 +1193,12 @@ pub fn run() {
             get_router_routes,
             set_router_route,
             get_embedded_status,
-            embedded_reload
+            embedded_reload,
+            get_device_pending,
+            post_device_result,
+            execute_synthetic_input,
+            get_agent_profile,
+            post_agent_profile
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

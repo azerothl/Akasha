@@ -2,6 +2,8 @@
 
 Ce guide décrit les étapes pour faire tourner Akasha après un clone ou une installation.
 
+**Utilisateurs des binaires (releases)** : après avoir téléchargé et extrait l’archive (voir [distribution.md](distribution.md)), exécutez le script d’installation (`scripts/install.ps1` sous Windows, `scripts/install.sh` sous Linux/macOS) pour déployer les binaires, lancer l’init et enregistrer le daemon au démarrage. Puis `akasha start` (ou redémarrez la session pour le lancement automatique).
+
 ## 1. Prérequis
 
 - **Rust** 1.70+ (`rustup.rs`)

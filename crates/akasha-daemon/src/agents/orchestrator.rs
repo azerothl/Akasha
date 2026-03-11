@@ -22,7 +22,7 @@ async fn decompose_request(
 ) -> Vec<Subtask> {
     let prompt = format!(
         r#"You are a task decomposer. Output one line per subtask: agent_type|message. One line per distinct user action (e.g. one for generating a report, another for creating a file).
-Agent types: conversation (general chat), code (code gen), search (info search), schedule (create recurring task IN THE APP).
+Agent types: conversation (general chat), code (code gen), search (info search), schedule (create recurring task IN THE APP), financial (budget, costs, reports), documentalist (answer from user's document base / RAG), project_manager (project tracking, milestones, planning), technical_writer (technical docs, procedures, tutorials), research (deep research, multi-source synthesis), security_audit (security review of code/config), creative (copywriting, marketing content).
 - If the user asks to CREATE a recurring/scheduled task (e.g. "tâche récurrente", "rappel toutes les 2 heures", "crée un rappel"), output exactly ONE line: schedule|interval_seconds|name|message
   where interval_seconds is in seconds (3600=1h, 7200=2h, 86400=1 day), name is a short title, message is the reminder text shown when the task runs. Example: schedule|7200|Rappel Github|Rappel: regarder l'avancement du projet sur GitHub
 - If the user asks for several distinct deliverables or actions (e.g. "make a report and then create a file", "do X then do Y"), output one line per deliverable/action. Example: first line for the report, second line for creating the file.
@@ -57,7 +57,11 @@ User request:
                 }
                 if let Some((agent_type, sub_message)) = line.split_once('|') {
                     let agent_type = agent_type.trim().to_lowercase();
-                    let agent_type = if agent_type == "code" || agent_type == "search" || agent_type == "schedule" {
+                    const RECOGNIZED: &[&str] = &[
+                        "code", "search", "schedule", "financial", "documentalist", "project_manager",
+                        "technical_writer", "research", "security_audit", "creative",
+                    ];
+                    let agent_type = if RECOGNIZED.contains(&agent_type.as_str()) {
                         agent_type
                     } else {
                         "conversation".to_string()

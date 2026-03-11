@@ -69,6 +69,8 @@ Analyse la requête utilisateur et détermine le type de tâche.
 
 **Routage forcé (`preferred_task_type`)** : la `CompletionRequest` peut contenir un champ optionnel `preferred_task_type` (ex. `"system"`). Lorsqu’il est renseigné, le routeur **ne classe pas** le prompt et utilise directement cette catégorie. Utilisé pour l’extraction de faits mémoire et la décomposition (orchestrateur), qui doivent toujours passer par la route dédiée « system » (voir spec 06 — mémoire long terme, modèle système Akasha).
 
+**Résolution par type d'agent (fallback vers rôle proche)** : lorsqu'une tâche a un `assigned_agent` (ex. `financial`, `documentalist`), le daemon appelle `resolve_task_type_for_agent(assigned_agent)` pour obtenir le `task_type` de routage. Si ce type n'a pas de route « custom » (primary différent de `akasha_embedded` et `akasha_core`), le routeur essaie les task_types « proches » dans l'ordre (ex. `financial` → `data_analysis`, puis `conversation`) et utilise le premier qui a une route custom. Sinon, le task_type de l'agent est conservé (route par défaut interne). Ainsi, un agent sans modèle dédié peut utiliser le modèle d'un agent au rôle proche configuré dans `llm_router.yaml`. Voir [33_agents_tools_orchestrator_skills.md](33_agents_tools_orchestrator_skills.md) § 5.4 pour la liste des types d'agents.
+
 ### 2. Routing Config Manager
 
 Gère la configuration du routing pour chaque type de tâche.

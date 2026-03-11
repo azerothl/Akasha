@@ -8,9 +8,9 @@ const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => (
 const DAEMON_PORT = 3876;
 const THEME_STORAGE_KEY = "akasha_theme";
 
-export type ThemeId = "dark" | "dark_nord" | "light" | "light_latte";
+export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_latte";
 
-const THEME_IDS: ThemeId[] = ["dark", "dark_nord", "light", "light_latte"];
+const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "light_latte"];
 
 function loadSavedTheme(): ThemeId {
   try {
@@ -19,10 +19,32 @@ function loadSavedTheme(): ThemeId {
   } catch {
     /* ignore */
   }
-  return "dark";
+  return "dark_akasha";
 }
 
 type Tab = "chat" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
+
+type SettingsSection = "display" | "system" | "agent" | "data";
+type AgentProfileSubTab = "identity" | "personality" | "rules" | "can_do" | "cannot_do";
+
+const AGENT_PROFILE_LIMITS = {
+  name: 128,
+  personality: 2000,
+  ruleLength: 500,
+  ruleCount: 30,
+  canDoLength: 300,
+  canDoCount: 30,
+  cannotDoLength: 300,
+  cannotDoCount: 30,
+} as const;
+
+const AGENT_PROFILE_TEMPLATES: Array<{ label: string; name: string; personality: string; rules: string[]; can_do: string[]; cannot_do: string[] }> = [
+  { label: "Neutre / polyvalent — ton professionnel, adapté à tous les usages", name: "Akasha", personality: "Ton neutre et professionnel. Réponds de façon claire et adaptée au contexte, sans surcharge. Adapte-toi à la demande (technique, rédaction, conseil). Pas de préambule superflu du type « Bien sûr ! » ou « Avec plaisir » — va à l'essentiel.", rules: [], can_do: [], cannot_do: [] },
+  { label: "Bienveillant / coach — encourageant, pédagogique, à l'écoute", name: "Akasha", personality: "Bienveillant et encourageant. Explique avec pédagogie, reformule pour vérifier que l'utilisateur a compris. Valorise les progrès et propose des étapes claires. Reste à l'écoute, ne juge pas. Propose des pistes plutôt que d'imposer une seule solution.", rules: ["Rester à l'écoute et ne pas juger.", "Proposer des pistes plutôt que d'imposer une seule solution."], can_do: [], cannot_do: [] },
+  { label: "Concis / technique — réponses courtes et précises, orienté dev et sysadmin", name: "Akasha", personality: "Concis et technique. Réponses courtes et précises, orientées développement et administration système. Va à l'essentiel : commandes, extraits de code, chemins. Pas de longues introductions ni de formules de politesse superflues.", rules: ["Privilégier le concret : commandes, extraits de code, chemins.", "Éviter les longues introductions."], can_do: [], cannot_do: [] },
+  { label: "Créatif / rédacteur — ton libre, créatif, pour rédaction et idées", name: "Akasha", personality: "Créatif et ouvert. Aide à structurer des idées, à rédiger, à brainstormer. Propose plusieurs formulations ou angles. Accepte les demandes un peu inhabituelles. Ose suggérer des variantes et des pistes inattendues.", rules: [], can_do: ["Proposer des reformulations et variantes.", "Suggérer des angles ou idées complémentaires."], cannot_do: [] },
+  { label: "Strict / sécurisé — règles strictes, pas d'exécution de code sans confirmation", name: "Akasha", personality: "Précis et prudent. Explique clairement les risques avant toute action. Ne propose jamais d'exécuter du code ou des commandes sans confirmation explicite. Toujours : quoi, pourquoi, puis comment. En cas de doute sur la sécurité, avertir et proposer une alternative plus sûre.", rules: ["Ne jamais exécuter de code ou commande sans confirmation explicite de l'utilisateur.", "Toujours expliquer le « quoi » et le « pourquoi » avant le « comment ».", "En cas de doute sur la sécurité, avertir et proposer une alternative plus sûre."], can_do: ["Expliquer et détailler les étapes.", "Proposer des commandes ou scripts à copier-coller après confirmation."], cannot_do: ["Exécuter du code ou des commandes sans confirmation.", "Modifier des fichiers sensibles sans demande claire."] },
+];
 
 /** Format duration in seconds as "X min Y s" or "Y s". */
 function formatDurationSec(sec: number): string {
@@ -114,6 +136,7 @@ function App() {
     [t]
   );
   const [tab, setTab] = useState<Tab>("chat");
+  const [rightSidebarOpen, setRightSidebarOpen] = useState(false);
   const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
   const [showOnboarding, setShowOnboarding] = useState(() => {
     try {
@@ -153,6 +176,14 @@ function App() {
   const [pendingHumanInput, setPendingHumanInput] = useState<Record<string, { question: string; context: string; choices?: string[] }>>({});
   /** Task id for which the human-input modal is open (null = closed). */
   const [humanInputModalTaskId, setHumanInputModalTaskId] = useState<string | null>(null);
+  /** Device bridge: pending request from agent (camera, mic, etc.) for UI to fulfill. */
+  const [devicePendingRequest, setDevicePendingRequest] = useState<{
+    request_id: string;
+    interface: string;
+    device_id: string;
+    action: string;
+    params: unknown;
+  } | null>(null);
   const [humanInputFreeText, setHumanInputFreeText] = useState("");
   /** Reply text for the inline ask_user form in the chat (when modal is not used). */
   const [inlineHumanReplyText, setInlineHumanReplyText] = useState("");
@@ -268,6 +299,22 @@ function App() {
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
   const userRagFileInputRef = useRef<HTMLInputElement>(null);
+  /** Agent profile (name, personality, rules, can_do, cannot_do) for Settings panel. */
+  const [agentProfile, setAgentProfile] = useState<{ name: string; personality: string; rules: string[]; can_do: string[]; cannot_do: string[] }>({
+    name: "",
+    personality: "",
+    rules: [],
+    can_do: [],
+    cannot_do: [],
+  });
+  const [agentProfileLoading, setAgentProfileLoading] = useState(false);
+  const [agentProfileSaving, setAgentProfileSaving] = useState(false);
+  const [agentProfileError, setAgentProfileError] = useState<string | null>(null);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("display");
+  const [agentProfileSubTab, setAgentProfileSubTab] = useState<AgentProfileSubTab>("identity");
+  const [rulesDraft, setRulesDraft] = useState("");
+  const [canDoDraft, setCanDoDraft] = useState("");
+  const [cannotDoDraft, setCannotDoDraft] = useState("");
   /** Attachments for the next message: images (vision) and documents (text appended to message). */
   const [attachments, setAttachments] = useState<Array<{ id: string; name: string; typ: "image" | "document"; content_base64: string; mime_type: string }>>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -366,6 +413,34 @@ function App() {
     const id = setInterval(fetchPendingHumanInput, 25000);
     return () => clearInterval(id);
   }, [fetchPendingHumanInput]);
+
+  // Device bridge: poll for pending device requests (camera, mic, etc.) when daemon is healthy.
+  const fetchDevicePending = useCallback(async () => {
+    if (!health?.ok || devicePendingRequest != null) return;
+    try {
+      const data = await invoke<{ pending?: boolean; request_id?: string; interface?: string; device_id?: string; action?: string; params?: unknown }>(
+        "get_device_pending",
+        { port: DAEMON_PORT }
+      );
+      if (data?.request_id && data?.interface != null && data?.action != null) {
+        setDevicePendingRequest({
+          request_id: data.request_id,
+          interface: data.interface,
+          device_id: data.device_id ?? "",
+          action: data.action,
+          params: data.params ?? {},
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [health?.ok, devicePendingRequest]);
+
+  useEffect(() => {
+    fetchDevicePending();
+    const id = setInterval(fetchDevicePending, 2500);
+    return () => clearInterval(id);
+  }, [fetchDevicePending]);
 
   // Load today's conversation history on mount (short-term = current day, so it survives UI restart).
   useEffect(() => {
@@ -723,6 +798,28 @@ function App() {
     }
   }, []);
 
+  const fetchAgentProfile = useCallback(async () => {
+    setAgentProfileLoading(true);
+    setAgentProfileError(null);
+    try {
+      const data = await invoke<{ name?: string | null; personality?: string | null; rules?: string[]; can_do?: string[]; cannot_do?: string[] }>(
+        "get_agent_profile",
+        { port: DAEMON_PORT }
+      );
+      setAgentProfile({
+        name: data?.name ?? "",
+        personality: data?.personality ?? "",
+        rules: Array.isArray(data?.rules) ? data.rules : [],
+        can_do: Array.isArray(data?.can_do) ? data.can_do : [],
+        cannot_do: Array.isArray(data?.cannot_do) ? data.cannot_do : [],
+      });
+    } catch (e) {
+      setAgentProfileError(String(e));
+    } finally {
+      setAgentProfileLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (tab !== "settings") return;
     const cached = getCached<Array<{ id: string; name: string; mime_type: string; added_at: string }>>("userRag");
@@ -734,6 +831,10 @@ function App() {
     }
     fetchUserRagDocuments();
   }, [tab, fetchUserRagDocuments]);
+
+  useEffect(() => {
+    if (tab === "settings") fetchAgentProfile();
+  }, [tab, fetchAgentProfile]);
 
   useEffect(() => {
     if (!calendarSelectedTaskId) {
@@ -1347,134 +1448,154 @@ function App() {
           </div>
         </div>
       )}
-      <header className="header">
-        <h1 className="logo">Akasha</h1>
-        <p className="tagline">Local-first AI assistant · 1–7 : onglets</p>
-        <div className="daemon-status" role="status" aria-live="polite">
-          <span
-            className={`status-dot ${health?.ok ? "connected" : "disconnected"}`}
-            aria-hidden
-          />
-          {health?.ok ? (
-            <span>Daemon connecté (port {health.port ?? DAEMON_PORT})</span>
-          ) : (
-            <span>Daemon déconnecté — lancez <code>akasha start</code></span>
-          )}
-        </div>
-        {Object.keys(pendingHumanInput).length > 0 && (
-          <div ref={pendingNotifRef} className="header-pending-actions" role="region" aria-label={t("pending_actions.region_label")}>
+      <div className="app-body">
+        <aside className="sidebar-left" aria-label="Navigation principale">
+          <div className="sidebar-left-top">
+            <h1 className="logo">Akasha</h1>
+            <p className="tagline">Local-first AI assistant</p>
+          </div>
+          <nav className="tabs sidebar-nav" role="tablist" aria-label="Sections">
             <button
-              type="button"
-              className="header-pending-actions-trigger"
-              onClick={() => setPendingNotifOpen((o) => !o)}
-              aria-expanded={pendingNotifOpen}
-              aria-haspopup="true"
-              title={t("pending_actions.title")}
+              role="tab"
+              aria-selected={tab === "chat"}
+              aria-controls="panel-chat"
+              id="tab-chat"
+              className={tab === "chat" ? "active" : ""}
+              onClick={() => setTab("chat")}
             >
-              <span className="header-pending-actions-icon" aria-hidden>⚠</span>
-              <span className="header-pending-actions-badge">{Object.keys(pendingHumanInput).length}</span>
-              <span className="header-pending-actions-label">{t("pending_actions.action_required")}</span>
+              {t("tabs.chat")}
             </button>
-            {pendingNotifOpen && (
-              <div className="header-pending-actions-dropdown" role="menu">
-                <p className="header-pending-actions-dropdown-title">{t("pending_actions.agents")}</p>
-                {Object.entries(pendingHumanInput).map(([taskId, p]) => (
-                  <div key={taskId} className="header-pending-actions-item">
-                    <p className="header-pending-actions-item-question" title={p.question}>
-                      {p.question.slice(0, 80)}{p.question.length > 80 ? "…" : ""}
-                    </p>
-                    <p className="header-pending-actions-item-task">Tâche #{taskId.slice(-8)}</p>
-                    <button
-                      type="button"
-                      className="header-pending-actions-item-btn"
-                      onClick={() => {
-                        setHumanInputModalTaskId(taskId);
-                        setHumanInputFreeText("");
-                        setPendingNotifOpen(false);
-                      }}
-                    >
-                      {t("human_input.reply")}
-                    </button>
+            <button
+              role="tab"
+              aria-selected={tab === "router"}
+              aria-controls="panel-router"
+              id="tab-router"
+              className={tab === "router" ? "active" : ""}
+              onClick={() => setTab("router")}
+            >
+              {t("tabs.router")}
+            </button>
+            <button
+              role="tab"
+              aria-selected={tab === "docs"}
+              aria-controls="panel-docs"
+              id="tab-docs"
+              className={tab === "docs" ? "active" : ""}
+              onClick={() => setTab("docs")}
+            >
+              {t("tabs.docs")}
+            </button>
+            <button
+              role="tab"
+              aria-selected={tab === "tasks"}
+              aria-controls="panel-tasks"
+              id="tab-tasks"
+              className={tab === "tasks" ? "active" : ""}
+              onClick={() => setTab("tasks")}
+            >
+              {t("tabs.tasks")}
+            </button>
+            <button
+              role="tab"
+              aria-selected={tab === "calendar"}
+              aria-controls="panel-calendar"
+              id="tab-calendar"
+              className={tab === "calendar" ? "active" : ""}
+              onClick={() => setTab("calendar")}
+            >
+              {t("tabs.calendar")}
+            </button>
+            <button
+              role="tab"
+              aria-selected={tab === "memory"}
+              aria-controls="panel-memory"
+              id="tab-memory"
+              className={tab === "memory" ? "active" : ""}
+              onClick={() => setTab("memory")}
+            >
+              {t("tabs.memory")}
+            </button>
+            <button
+              role="tab"
+              aria-selected={tab === "settings"}
+              aria-controls="panel-settings"
+              id="tab-settings"
+              className={tab === "settings" ? "active" : ""}
+              onClick={() => setTab("settings")}
+            >
+              {t("tabs.settings")}
+            </button>
+          </nav>
+          <div className="sidebar-left-bottom">
+            <div className="daemon-status" role="status" aria-live="polite">
+              <span
+                className={`status-dot ${health?.ok ? "connected" : "disconnected"}`}
+                aria-hidden
+              />
+              {health?.ok ? (
+                <span>{t("sidebar.daemon_connected")} {health.port ?? DAEMON_PORT})</span>
+              ) : (
+                <span>{t("sidebar.daemon_disconnected")} <code>akasha start</code></span>
+              )}
+            </div>
+            {Object.keys(pendingHumanInput).length > 0 && (
+              <div ref={pendingNotifRef} className="header-pending-actions" role="region" aria-label={t("pending_actions.region_label")}>
+                <button
+                  type="button"
+                  className="header-pending-actions-trigger"
+                  onClick={() => setPendingNotifOpen((o) => !o)}
+                  aria-expanded={pendingNotifOpen}
+                  aria-haspopup="true"
+                  title={t("pending_actions.title")}
+                >
+                  <span className="header-pending-actions-icon" aria-hidden>⚠</span>
+                  <span className="header-pending-actions-badge">{Object.keys(pendingHumanInput).length}</span>
+                  <span className="header-pending-actions-label">{t("pending_actions.action_required")}</span>
+                </button>
+                {pendingNotifOpen && (
+                  <div className="header-pending-actions-dropdown" role="menu">
+                    <p className="header-pending-actions-dropdown-title">{t("pending_actions.agents")}</p>
+                    {Object.entries(pendingHumanInput).map(([taskId, p]) => (
+                      <div key={taskId} className="header-pending-actions-item">
+                        <p className="header-pending-actions-item-question" title={p.question}>
+                          {p.question.slice(0, 80)}{p.question.length > 80 ? "…" : ""}
+                        </p>
+                        <p className="header-pending-actions-item-task">Tâche #{taskId.slice(-8)}</p>
+                        <button
+                          type="button"
+                          className="header-pending-actions-item-btn"
+                          onClick={() => {
+                            setHumanInputModalTaskId(taskId);
+                            setHumanInputFreeText("");
+                            setPendingNotifOpen(false);
+                          }}
+                        >
+                          {t("human_input.reply")}
+                        </button>
+                      </div>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
             )}
           </div>
-        )}
-        <nav className="tabs" role="tablist" aria-label="Sections">
-          <button
-            role="tab"
-            aria-selected={tab === "chat"}
-            aria-controls="panel-chat"
-            id="tab-chat"
-            className={tab === "chat" ? "active" : ""}
-            onClick={() => setTab("chat")}
-          >
-{t("tabs.chat")}
-            </button>
-            <button
-            role="tab"
-            aria-selected={tab === "router"}
-            aria-controls="panel-router"
-            id="tab-router"
-            className={tab === "router" ? "active" : ""}
-            onClick={() => setTab("router")}
-          >
-{t("tabs.router")}
-            </button>
-            <button
-            role="tab"
-            aria-selected={tab === "docs"}
-            aria-controls="panel-docs"
-            id="tab-docs"
-            className={tab === "docs" ? "active" : ""}
-            onClick={() => setTab("docs")}
-          >
-            {t("tabs.docs")}
-          </button>
-          <button
-            role="tab"
-            aria-selected={tab === "tasks"}
-            aria-controls="panel-tasks"
-            id="tab-tasks"
-            className={tab === "tasks" ? "active" : ""}
-            onClick={() => setTab("tasks")}
-          >
-{t("tabs.tasks")}
-            </button>
-            <button
-            role="tab"
-            aria-selected={tab === "calendar"}
-            aria-controls="panel-calendar"
-            id="tab-calendar"
-            className={tab === "calendar" ? "active" : ""}
-            onClick={() => setTab("calendar")}
-          >
-{t("tabs.calendar")}
-            </button>
-            <button
-            role="tab"
-            aria-selected={tab === "memory"}
-            aria-controls="panel-memory"
-            id="tab-memory"
-            className={tab === "memory" ? "active" : ""}
-            onClick={() => setTab("memory")}
-          >
-{t("tabs.memory")}
-            </button>
-            <button
-            role="tab"
-            aria-selected={tab === "settings"}
-            aria-controls="panel-settings"
-            id="tab-settings"
-            className={tab === "settings" ? "active" : ""}
-            onClick={() => setTab("settings")}
-          >
-{t("tabs.settings")}
-            </button>
-        </nav>
-      </header>
+        </aside>
 
+        <div className="container-main">
+          <div className="container-main-inner">
+            <header className="view-header">
+              <h2 className="view-title">{t("tabs." + tab)}</h2>
+              <button
+                type="button"
+                className="sidebar-right-toggle"
+                onClick={() => setRightSidebarOpen((o) => !o)}
+                aria-expanded={rightSidebarOpen}
+                aria-label={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
+                title={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
+              >
+                {rightSidebarOpen ? "▐" : "▌"}
+              </button>
+            </header>
       <main className="main" id="main-content" tabIndex={-1}>
         {/* Onboarding: first steps modal (dismissible, "Ne plus afficher" stored in localStorage) */}
         {showOnboarding && (
@@ -1566,6 +1687,140 @@ function App() {
                 </div>
               )}
               <button type="button" className="human-input-close" onClick={() => setHumanInputModalTaskId(null)} aria-label={t("common.close")}>
+                ×
+              </button>
+            </div>
+          </div>
+        )}
+        {/* Device bridge: agent requested device access (camera, mic, etc.) */}
+        {devicePendingRequest && (
+          <div className="human-input-overlay" role="dialog" aria-labelledby="device-request-title" aria-modal="true">
+            <div className="human-input-modal">
+              <h2 id="device-request-title">{t("device_bridge.title")}</h2>
+              <p className="human-input-question">
+                {t("device_bridge.description")} <strong>{devicePendingRequest.interface}</strong> — <strong>{devicePendingRequest.action}</strong>
+              </p>
+              <div className="human-input-choices">
+                <button
+                  type="button"
+                  className="human-input-choice-btn"
+                  onClick={async () => {
+                    const { request_id, interface: iface, action: act, params: reqParams } = devicePendingRequest;
+                    try {
+                      if (iface === "synthetic_input") {
+                        try {
+                          const ok = await invoke<boolean>("execute_synthetic_input", {
+                            action: act,
+                            params: typeof reqParams === "object" && reqParams !== null ? reqParams : {},
+                          });
+                          await invoke("post_device_result", {
+                            request_id,
+                            success: ok,
+                            data: null,
+                            port: DAEMON_PORT,
+                          });
+                        } catch (err) {
+                          await invoke("post_device_result", {
+                            request_id,
+                            success: false,
+                            data: err instanceof Error ? err.message : String(err),
+                            port: DAEMON_PORT,
+                          });
+                        }
+                      } else if (iface === "local_media" && (act === "capture" || act === "camera_capture")) {
+                        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                        const video = document.createElement("video");
+                        video.srcObject = stream;
+                        await new Promise<void>((resolve, reject) => {
+                          video.onloadedmetadata = () => {
+                            video.play().then(() => resolve()).catch(reject);
+                          };
+                          video.onerror = () => reject(new Error("Video load failed"));
+                        });
+                        const canvas = document.createElement("canvas");
+                        canvas.width = video.videoWidth;
+                        canvas.height = video.videoHeight;
+                        const ctx = canvas.getContext("2d");
+                        if (ctx) ctx.drawImage(video, 0, 0);
+                        stream.getTracks().forEach((t) => t.stop());
+                        const data = canvas.toDataURL("image/png").split(",")[1] ?? "";
+                        await invoke("post_device_result", { request_id, success: true, data, port: DAEMON_PORT });
+                      } else if (iface === "local_media" && (act === "record" || act === "microphone_record")) {
+                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        const recorder = new MediaRecorder(stream);
+                        const chunks: Blob[] = [];
+                        recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+                        recorder.start();
+                        await new Promise<void>((resolve) => {
+                          recorder.onstop = () => {
+                            resolve();
+                          };
+                          setTimeout(() => {
+                            recorder.stop();
+                          }, 3000);
+                        });
+                        stream.getTracks().forEach((t) => t.stop());
+                        const blob = new Blob(chunks, { type: "audio/webm" });
+                        const reader = new FileReader();
+                        const data = await new Promise<string>((resolve, reject) => {
+                          reader.onload = () => {
+                            const result = reader.result as string;
+                            resolve(result.includes(",") ? result.split(",")[1] ?? "" : "");
+                          };
+                          reader.onerror = reject;
+                          reader.readAsDataURL(blob);
+                        });
+                        await invoke("post_device_result", { request_id, success: true, data, port: DAEMON_PORT });
+                      } else {
+                        await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT });
+                      }
+                    } catch (e) {
+                      console.error(e);
+                      await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT });
+                    }
+                    setDevicePendingRequest(null);
+                  }}
+                >
+                  {t("device_bridge.allow")}
+                </button>
+                <button
+                  type="button"
+                  className="human-input-choice-btn"
+                  onClick={async () => {
+                    try {
+                      await invoke("post_device_result", {
+                        request_id: devicePendingRequest.request_id,
+                        success: false,
+                        data: null,
+                        port: DAEMON_PORT,
+                      });
+                    } catch (e) {
+                      console.error(e);
+                    }
+                    setDevicePendingRequest(null);
+                  }}
+                >
+                  {t("device_bridge.deny")}
+                </button>
+              </div>
+              <button
+                type="button"
+                className="human-input-close"
+                onClick={async () => {
+                  try {
+                    await invoke("post_device_result", {
+                      request_id: devicePendingRequest.request_id,
+                      success: false,
+                      data: null,
+                      port: DAEMON_PORT,
+                    });
+                  } catch (e) {
+                    console.error(e);
+                  }
+                  setDevicePendingRequest(null);
+                }}
+                aria-label={t("common.close")}
+              >
                 ×
               </button>
             </div>
@@ -2830,7 +3085,17 @@ function App() {
             aria-labelledby="tab-settings"
             className="panel settings-panel"
           >
-            <h2 className="panel-title">{t("settings.title")}</h2>
+            <div className="settings-panel-header">
+              <h2 className="panel-title settings-panel-title">{t("settings.title")}</h2>
+              <nav className="settings-tabs" role="tablist" aria-label={t("settings.sections_label")}>
+                <button role="tab" aria-selected={settingsSection === "display"} className={settingsSection === "display" ? "active" : ""} onClick={() => setSettingsSection("display")}>{t("settings.section_display")}</button>
+                <button role="tab" aria-selected={settingsSection === "system"} className={settingsSection === "system" ? "active" : ""} onClick={() => setSettingsSection("system")}>{t("settings.section_system")}</button>
+                <button role="tab" aria-selected={settingsSection === "agent"} className={settingsSection === "agent" ? "active" : ""} onClick={() => setSettingsSection("agent")}>{t("settings.section_agent")}</button>
+                <button role="tab" aria-selected={settingsSection === "data"} className={settingsSection === "data" ? "active" : ""} onClick={() => setSettingsSection("data")}>{t("settings.section_data")}</button>
+              </nav>
+            </div>
+            {settingsSection === "display" && (
+              <div className="settings-section-content">
             <dl className="settings-list">
               <dt>{t("settings.theme")}</dt>
               <dd>
@@ -2848,10 +3113,6 @@ function App() {
                 </select>
                 <span className="settings-theme-hint">{t("settings.theme_saved")}</span>
               </dd>
-              <dt>{t("settings.daemon_port")}</dt>
-              <dd>
-                <code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})
-              </dd>
               <dt>{t("settings.language")}</dt>
               <dd>
                 <select
@@ -2864,14 +3125,244 @@ function App() {
                   <option value="en">English</option>
                 </select>
               </dd>
-              <dt>{t("settings.data_dir")}</dt>
-              <dd>
-                <code>%LOCALAPPDATA%\akasha</code> (Windows) ou{" "}
-                <code>~/.local/share/akasha</code> (Linux/macOS)
-              </dd>
             </dl>
-            <h3 className="settings-subtitle">{t("settings.user_rag_title")}</h3>
-            <p className="settings-doc muted">
+              </div>
+            )}
+            {settingsSection === "system" && (
+              <div className="settings-section-content">
+                <dl className="settings-list">
+                  <dt>{t("settings.daemon_port")}</dt>
+                  <dd><code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})</dd>
+                  <dt>{t("settings.data_dir")}</dt>
+                  <dd><code>%LOCALAPPDATA%\akasha</code> (Windows) ou <code>~/.local/share/akasha</code> (Linux/macOS)</dd>
+                </dl>
+              </div>
+            )}
+            {settingsSection === "agent" && (
+              <div className="settings-section-content">
+                <p className="settings-doc muted">{t("settings.agent_profile_desc")}</p>
+                {agentProfileError && <p className="error-inline" role="alert">{agentProfileError}</p>}
+                <div className="settings-agent-template-row">
+                  <label htmlFor="agent-profile-template">{t("settings.agent_profile_apply_template")}</label>
+                  <select id="agent-profile-template" className="settings-theme-select" value="" onChange={(e) => { const idx = e.target.value ? parseInt(e.target.value, 10) : -1; e.target.value = ""; if (idx >= 0 && idx < AGENT_PROFILE_TEMPLATES.length) { const tpl = AGENT_PROFILE_TEMPLATES[idx]; setAgentProfile({ name: tpl.name, personality: tpl.personality, rules: [...tpl.rules], can_do: [...tpl.can_do], cannot_do: [...tpl.cannot_do] }); } }}>
+                    <option value="">—</option>
+                    {AGENT_PROFILE_TEMPLATES.map((tpl, i) => (<option key={i} value={i}>{tpl.label}</option>))}
+                  </select>
+                </div>
+                {agentProfileLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
+                {!agentProfileLoading && (
+                  <>
+                    <div className="settings-agent-subtabs" role="tablist" aria-label={t("settings.agent_profile_title")}>
+                      {(["identity", "personality", "rules", "can_do", "cannot_do"] as const).map((st) => (
+                        <button key={st} role="tab" aria-selected={agentProfileSubTab === st} className={agentProfileSubTab === st ? "active" : ""} onClick={() => setAgentProfileSubTab(st)}>{t(`settings.agent_subtab_${st}`)}</button>
+                      ))}
+                    </div>
+                    <div className="settings-agent-tab-content">
+                      {agentProfileSubTab === "identity" && (
+                        <dl className="settings-list">
+                          <dt>{t("settings.agent_profile_name")}</dt>
+                          <dd>
+                            <input type="text" aria-label={t("settings.agent_profile_name")} className="settings-input" maxLength={AGENT_PROFILE_LIMITS.name} value={agentProfile.name} onChange={(e) => setAgentProfile((p) => ({ ...p, name: e.target.value.slice(0, AGENT_PROFILE_LIMITS.name) }))} placeholder="Akasha" />
+                            <span className="settings-char-count">{agentProfile.name.length} / {AGENT_PROFILE_LIMITS.name}</span>
+                          </dd>
+                        </dl>
+                      )}
+                      {agentProfileSubTab === "personality" && (
+                        <dl className="settings-list">
+                          <dt>{t("settings.agent_profile_personality")}</dt>
+                          <dd>
+                            <textarea aria-label={t("settings.agent_profile_personality")} className="settings-textarea" rows={8} maxLength={AGENT_PROFILE_LIMITS.personality} value={agentProfile.personality} onChange={(e) => setAgentProfile((p) => ({ ...p, personality: e.target.value.slice(0, AGENT_PROFILE_LIMITS.personality) }))} placeholder={t("settings.agent_profile_personality")} />
+                            <span className="settings-char-count">{agentProfile.personality.length} / {AGENT_PROFILE_LIMITS.personality}</span>
+                          </dd>
+                        </dl>
+                      )}
+                      {agentProfileSubTab === "rules" && (
+                        <div className="settings-list-two-cols">
+                          <div className="settings-list-add-col">
+                            <label className="settings-label" htmlFor="agent-rules-add">{t("settings.agent_profile_rules")}</label>
+                            <div className="settings-add-row">
+                              <input
+                                id="agent-rules-add"
+                                type="text"
+                                className="settings-input"
+                                maxLength={AGENT_PROFILE_LIMITS.ruleLength}
+                                value={rulesDraft}
+                                onChange={(e) => setRulesDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    const trimmed = rulesDraft.trim();
+                                    if (trimmed && agentProfile.rules.length < AGENT_PROFILE_LIMITS.ruleCount) {
+                                      setAgentProfile((p) => ({ ...p, rules: [...p.rules, trimmed.slice(0, AGENT_PROFILE_LIMITS.ruleLength)] }));
+                                      setRulesDraft("");
+                                    }
+                                  }
+                                }}
+                                placeholder={t("settings.agent_add_line_placeholder")}
+                                aria-label={t("settings.agent_profile_rules")}
+                              />
+                              <button
+                                type="button"
+                                className="btn-secondary settings-add-btn"
+                                disabled={!rulesDraft.trim() || agentProfile.rules.length >= AGENT_PROFILE_LIMITS.ruleCount}
+                                onClick={() => {
+                                  const trimmed = rulesDraft.trim();
+                                  if (trimmed && agentProfile.rules.length < AGENT_PROFILE_LIMITS.ruleCount) {
+                                    setAgentProfile((p) => ({ ...p, rules: [...p.rules, trimmed.slice(0, AGENT_PROFILE_LIMITS.ruleLength)] }));
+                                    setRulesDraft("");
+                                  }
+                                }}
+                              >
+                                {t("settings.agent_add_line")}
+                              </button>
+                            </div>
+                            <span className="settings-char-count">{agentProfile.rules.length} / {AGENT_PROFILE_LIMITS.ruleCount} {t("settings.lines")}</span>
+                          </div>
+                          <div className="settings-list-list-col">
+                            <p className="settings-list-col-title">{t("settings.agent_list_title")}</p>
+                            {agentProfile.rules.length === 0 ? (
+                              <p className="settings-list-empty">{t("settings.agent_list_empty")}</p>
+                            ) : (
+                              <ul className="settings-list-items" role="list">
+                                {agentProfile.rules.map((line, i) => (
+                                  <li key={i} className="settings-list-item">
+                                    <span className="settings-list-item-text">{line}</span>
+                                    <button type="button" className="settings-list-item-delete" onClick={() => setAgentProfile((p) => ({ ...p, rules: p.rules.filter((_, j) => j !== i) }))} aria-label={t("settings.agent_delete_line")}>×</button>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                      {agentProfileSubTab === "can_do" && (
+                        <div className="settings-list-two-cols">
+                          <div className="settings-list-add-col">
+                            <label className="settings-label" htmlFor="agent-can-do-add">{t("settings.agent_profile_can_do")}</label>
+                            <div className="settings-add-row">
+                              <input
+                                id="agent-can-do-add"
+                                type="text"
+                                className="settings-input"
+                                maxLength={AGENT_PROFILE_LIMITS.canDoLength}
+                                value={canDoDraft}
+                                onChange={(e) => setCanDoDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    const trimmed = canDoDraft.trim();
+                                    if (trimmed && agentProfile.can_do.length < AGENT_PROFILE_LIMITS.canDoCount) {
+                                      setAgentProfile((p) => ({ ...p, can_do: [...p.can_do, trimmed.slice(0, AGENT_PROFILE_LIMITS.canDoLength)] }));
+                                      setCanDoDraft("");
+                                    }
+                                  }
+                                }}
+                                placeholder={t("settings.agent_add_line_placeholder")}
+                                aria-label={t("settings.agent_profile_can_do")}
+                              />
+                              <button
+                                type="button"
+                                className="btn-secondary settings-add-btn"
+                                disabled={!canDoDraft.trim() || agentProfile.can_do.length >= AGENT_PROFILE_LIMITS.canDoCount}
+                                onClick={() => {
+                                  const trimmed = canDoDraft.trim();
+                                  if (trimmed && agentProfile.can_do.length < AGENT_PROFILE_LIMITS.canDoCount) {
+                                    setAgentProfile((p) => ({ ...p, can_do: [...p.can_do, trimmed.slice(0, AGENT_PROFILE_LIMITS.canDoLength)] }));
+                                    setCanDoDraft("");
+                                  }
+                                }}
+                              >
+                                {t("settings.agent_add_line")}
+                              </button>
+                            </div>
+                            <span className="settings-char-count">{agentProfile.can_do.length} / {AGENT_PROFILE_LIMITS.canDoCount} {t("settings.lines")}</span>
+                          </div>
+                          <div className="settings-list-list-col">
+                            <p className="settings-list-col-title">{t("settings.agent_list_title")}</p>
+                            {agentProfile.can_do.length === 0 ? (
+                              <p className="settings-list-empty">{t("settings.agent_list_empty")}</p>
+                            ) : (
+                              <ul className="settings-list-items" role="list">
+                                {agentProfile.can_do.map((line, i) => (
+                                  <li key={i} className="settings-list-item">
+                                    <span className="settings-list-item-text">{line}</span>
+                                    <button type="button" className="settings-list-item-delete" onClick={() => setAgentProfile((p) => ({ ...p, can_do: p.can_do.filter((_, j) => j !== i) }))} aria-label={t("settings.agent_delete_line")}>×</button>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                      {agentProfileSubTab === "cannot_do" && (
+                        <div className="settings-list-two-cols">
+                          <div className="settings-list-add-col">
+                            <label className="settings-label" htmlFor="agent-cannot-do-add">{t("settings.agent_profile_cannot_do")}</label>
+                            <div className="settings-add-row">
+                              <input
+                                id="agent-cannot-do-add"
+                                type="text"
+                                className="settings-input"
+                                maxLength={AGENT_PROFILE_LIMITS.cannotDoLength}
+                                value={cannotDoDraft}
+                                onChange={(e) => setCannotDoDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    const trimmed = cannotDoDraft.trim();
+                                    if (trimmed && agentProfile.cannot_do.length < AGENT_PROFILE_LIMITS.cannotDoCount) {
+                                      setAgentProfile((p) => ({ ...p, cannot_do: [...p.cannot_do, trimmed.slice(0, AGENT_PROFILE_LIMITS.cannotDoLength)] }));
+                                      setCannotDoDraft("");
+                                    }
+                                  }
+                                }}
+                                placeholder={t("settings.agent_add_line_placeholder")}
+                                aria-label={t("settings.agent_profile_cannot_do")}
+                              />
+                              <button
+                                type="button"
+                                className="btn-secondary settings-add-btn"
+                                disabled={!cannotDoDraft.trim() || agentProfile.cannot_do.length >= AGENT_PROFILE_LIMITS.cannotDoCount}
+                                onClick={() => {
+                                  const trimmed = cannotDoDraft.trim();
+                                  if (trimmed && agentProfile.cannot_do.length < AGENT_PROFILE_LIMITS.cannotDoCount) {
+                                    setAgentProfile((p) => ({ ...p, cannot_do: [...p.cannot_do, trimmed.slice(0, AGENT_PROFILE_LIMITS.cannotDoLength)] }));
+                                    setCannotDoDraft("");
+                                  }
+                                }}
+                              >
+                                {t("settings.agent_add_line")}
+                              </button>
+                            </div>
+                            <span className="settings-char-count">{agentProfile.cannot_do.length} / {AGENT_PROFILE_LIMITS.cannotDoCount} {t("settings.lines")}</span>
+                          </div>
+                          <div className="settings-list-list-col">
+                            <p className="settings-list-col-title">{t("settings.agent_list_title")}</p>
+                            {agentProfile.cannot_do.length === 0 ? (
+                              <p className="settings-list-empty">{t("settings.agent_list_empty")}</p>
+                            ) : (
+                              <ul className="settings-list-items" role="list">
+                                {agentProfile.cannot_do.map((line, i) => (
+                                  <li key={i} className="settings-list-item">
+                                    <span className="settings-list-item-text">{line}</span>
+                                    <button type="button" className="settings-list-item-delete" onClick={() => setAgentProfile((p) => ({ ...p, cannot_do: p.cannot_do.filter((_, j) => j !== i) }))} aria-label={t("settings.agent_delete_line")}>×</button>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
+                  </>
+                )}
+              </div>
+            )}
+            {settingsSection === "data" && (
+              <div className="settings-section-content">
+                <h3 className="settings-subtitle">{t("settings.user_rag_title")}</h3>
+                <p className="settings-doc muted">
               {t("settings.user_rag_desc")}
             </p>
             {userRagError && (
@@ -2938,11 +3429,70 @@ function App() {
                 ))}
               </ul>
             )}
-            <p className="settings-doc">
-              {t("settings.config_note")} </p>
+            <p className="settings-doc">{t("settings.config_note")}</p>
+              </div>
+            )}
           </section>
         )}
       </main>
+          </div>
+        </div>
+
+        {rightSidebarOpen && (
+          <aside className="sidebar-right" aria-label={t("sidebar.tasks_panel")}>
+            <div className="sidebar-right-header">
+              <h3 className="sidebar-right-title">{t("tabs.tasks")}</h3>
+              <button
+                type="button"
+                className="sidebar-right-close"
+                onClick={() => setRightSidebarOpen(false)}
+                aria-label={t("sidebar.hide_tasks")}
+              >
+                ×
+              </button>
+            </div>
+            <div className="sidebar-right-content">
+              <button
+                type="button"
+                className="refresh-btn sidebar-right-refresh"
+                onClick={fetchTasksList}
+                disabled={tasksLoading}
+              >
+                {t("sidebar.refresh_tasks")}
+              </button>
+              {tasksLoading && (
+                <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>
+              )}
+              {!tasksLoading && tasksList.length === 0 && (
+                <p className="empty-state">{t("tasks.empty")}</p>
+              )}
+              {!tasksLoading && tasksList.length > 0 && (
+                <ul className="sidebar-right-task-list" role="list">
+                  {tasksList.map((task, i) => (
+                    <li
+                      key={task.id}
+                      className={i === tasksSelected ? "selected" : ""}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => { setTasksSelected(i); setTab("tasks"); }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setTasksSelected(i);
+                          setTab("tasks");
+                        }
+                      }}
+                    >
+                      <span className="task-id">#{task.id.slice(-8)}</span>
+                      <span className="task-status">{task.status}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </aside>
+        )}
+      </div>
     </div>
   );
 }

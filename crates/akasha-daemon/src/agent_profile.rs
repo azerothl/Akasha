@@ -79,17 +79,20 @@ impl AgentProfile {
         }
     }
 
+    /// Default agent name when none is set (so the agent always has an identity in the prompt).
+    pub const DEFAULT_NAME: &'static str = "Akasha";
+
     /// Build the context block to inject into the LLM prompt.
+    /// The name is always present (default "Akasha" if unset) so the agent always has an identity and "remembers" it.
     pub fn format_for_prompt(&self) -> String {
-        if self.is_empty() {
-            return String::new();
-        }
+        let name = self.name.as_deref().unwrap_or(Self::DEFAULT_NAME);
         let mut out = String::from("[Profil et consignes de l'agent]\n");
-        if let Some(ref name) = self.name {
-            out.push_str(&format!("- Tu t'appelles « {} ».\n", name));
-        }
+        out.push_str(&format!(
+            "- Tu es « {} ». C'est ton nom. Tu te souviens de ton nom et tu peux te présenter ainsi quand c'est pertinent.\n",
+            name
+        ));
         if let Some(ref p) = self.personality {
-            out.push_str(&format!("- Personnalité / ton : {}.\n", p));
+            out.push_str(&format!("- Personnalité / ton : {}. Tu adoptes ce ton et cette personnalité à chaque réponse.\n", p));
         }
         if !self.rules.is_empty() {
             out.push_str("- Règles à respecter :\n");
