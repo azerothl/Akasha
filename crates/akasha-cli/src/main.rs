@@ -500,7 +500,7 @@ fn akasha_data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("AKASHA_DATA_DIR") {
         return PathBuf::from(dir);
     }
-    dirs::data_local_dir()
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("akasha")
 }
@@ -516,7 +516,7 @@ fn cmd_paths() -> anyhow::Result<()> {
         println!("  AKASHA_DATA_DIR (env)  : {}", dir);
     } else {
         println!(
-            "  AKASHA_DATA_DIR (env)  : (non défini — utilisation de dirs::data_local_dir()/akasha)"
+            "  AKASHA_DATA_DIR (env)  : (non défini — utilisation du répertoire home/akasha)"
         );
     }
     println!("  Répertoire de données  : {}", data_dir.display());

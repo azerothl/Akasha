@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| std::path::PathBuf::from("spec"));
 
     let data_dir = std::env::var("AKASHA_DATA_DIR").unwrap_or_else(|_| {
-        dirs::data_local_dir()
+        dirs::home_dir()
             .map(|p| p.join("akasha").display().to_string())
             .unwrap_or_else(|| ".akasha".into())
     });

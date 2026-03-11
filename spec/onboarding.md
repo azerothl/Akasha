@@ -33,7 +33,7 @@ Le wizard vous demande :
 - **Connecteurs** : tokens Telegram, Slack, Discord (stockés dans le vault).
 - **Activation** : quels connecteurs activer (génère `connectors.env` dans le data_dir).
 
-Fichiers créés dans le data_dir (ex. `%LOCALAPPDATA%\akasha`) :
+Fichiers créés dans le data_dir (ex. `~/akasha` ou `%USERPROFILE%\akasha`) :
 - `llm_router.yaml` — configuration routeur LLM (par défaut : akasha_embedded/default pour tous les types de tâche). Si Ollama est joignable, les infos de chaque modèle (contexte max, num_ctx, family, etc.) sont récupérées et enregistrées dans la section `model_options`.
 - `connectors.env` — variables pour activer Telegram/Slack/Discord ; chargé automatiquement par `akasha start`.
 - `tools_policy.yaml` — créé par `akasha init` (ou par `akasha doctor --fix` si absent). Politique des outils machine (lecture/écriture de fichiers, commandes) ; éditez `allowed_read_paths` et `allowed_write_paths` pour autoriser les chemins utilisés par les agents.

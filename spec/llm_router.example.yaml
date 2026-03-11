@@ -1,6 +1,6 @@
 # Exemple de configuration du LLM Router (Phase 6).
 # Copier vers : data_dir/llm_router.yaml
-# (sous Windows : %LOCALAPPDATA%\akasha\llm_router.yaml)
+# (sous Windows : %USERPROFILE%\akasha\llm_router.yaml)
 
 version: "1.0"
 

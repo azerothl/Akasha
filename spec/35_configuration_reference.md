@@ -221,7 +221,7 @@ AKASHA_TELEGRAM_ENABLED=1
 
 ## 5. cluster.yaml (optionnel)
 
-**Emplacement** : `data_dir/cluster.yaml` (ex. `%LOCALAPPDATA%\akasha\cluster.yaml` sous Windows).  
+**Emplacement** : `data_dir/cluster.yaml` (ex. `%USERPROFILE%\akasha\cluster.yaml` sous Windows).  
 **Format** : YAML.  
 **Utilisé par** : mode cluster (NATS, mTLS). Les variables d’environnement `NATS_URL`, `AKASHA_NODE_ID`, `AKASHA_NATS_TLS_CA`, etc. peuvent surcharger ce fichier.
 
@@ -290,7 +290,7 @@ Voir [spec/skills/read_file_skill.yaml](skills/read_file_skill.yaml).
 
 ## Chemins et ordre de recherche
 
-- **data_dir** : par défaut `~/.local/share/akasha` (Linux/macOS) ou `%LOCALAPPDATA%\akasha` (Windows), sauf si `AKASHA_DATA_DIR` est défini. Affiché par `akasha paths`.
+- **data_dir** : par défaut `~/akasha` (Linux/macOS) ou `%USERPROFILE%\akasha` (Windows), sauf si `AKASHA_DATA_DIR` est défini. Affiché par `akasha paths`.
 - **llm_router.yaml** : recherché dans `data_dir` puis à la racine du projet.
 - **tools_policy.yaml**, **akasha.env**, **connectors.env**, **cluster.yaml** : dans `data_dir` uniquement.
 

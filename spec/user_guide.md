@@ -122,7 +122,7 @@ En premier lancement, l’UI peut proposer un guide court (premier objectif) ; o
 5. **Démarrer** : `akasha start` ou `akasha start --foreground`
 6. **Vérifier** : `akasha doctor` puis `akasha doctor --advice`
 
-Fichiers créés dans le data_dir (ex. `%LOCALAPPDATA%\akasha` sous Windows) :
+Fichiers créés dans le data_dir (ex. `%USERPROFILE%\akasha` (Windows) ou `~/akasha` (Linux/macOS)) :
 - `llm_router.yaml` — configuration du routeur LLM (et `model_options` si Ollama est joignable lors de l'init)
 - `connectors.env` — activation Telegram / Slack / Discord
 - `akasha.env` — variables persistantes (optionnel, géré par `akasha config env`)
@@ -141,7 +141,7 @@ Fichiers créés dans le data_dir (ex. `%LOCALAPPDATA%\akasha` sous Windows) :
 | `AKASHA_MAX_CONCURRENT_DELEGATIONS` | Nombre max de délégations (sous-tâches) traitées en parallèle ; au-delà, « système surchargé » | 15 |
 | `AKASHA_MAX_COST_PER_SESSION_USD` | Plafond de coût LLM (USD) par session ; au-delà, la tâche s'arrête avec « Budget dépassé » | — |
 | `AKASHA_MAX_TOKENS_PER_SESSION` | Plafond de tokens par session ; au-delà, la tâche s'arrête avec « Quota dépassé » | — |
-| `AKASHA_DATA_DIR` | Répertoire de données (vault, plugins, llm_router.yaml, etc.) | %LOCALAPPDATA%\akasha (Windows) / ~/.local/share/akasha (Linux/macOS) |
+| `AKASHA_DATA_DIR` | Répertoire de données (vault, plugins, llm_router.yaml, etc.) | %USERPROFILE%\akasha (Windows) / ~/akasha (Linux/macOS) |
 | `AKASHA_SLACK_ENABLED` | `1` pour activer l'adaptateur Slack | — |
 | `AKASHA_DISCORD_ENABLED` | `1` pour activer le bot Discord | — |
 | `AKASHA_TELEGRAM_ENABLED` | `1` pour activer le bot Telegram | — |
@@ -181,13 +181,13 @@ Pour les **formats, types de données et exemples** de chaque fichier, voir [35_
 | Type | Emplacement | Remarque |
 |------|-------------|----------|
 | **Modèles d'embeddings** (mémoire long terme) | `data_dir/embedding_model/` | Utilisé par le daemon (fastembed). Sous-dossiers type `models--<org>--<nom>/`. |
-| **Modèles LLM embarqués** (Qwen, Baguettotron) | Cache Hugging Face | Par défaut : **`~/.cache/huggingface/hub`** (Linux/macOS) ou **`%USERPROFILE%\.cache\huggingface\hub`** (Windows). Rediriger avec **`HF_HOME`** (ex. `HF_HOME=%LOCALAPPDATA%\akasha\hf_cache`). |
+| **Modèles LLM embarqués** (Qwen, Baguettotron) | Cache Hugging Face | Par défaut : **`~/.cache/huggingface/hub`** (Linux/macOS) ou **`%USERPROFILE%\.cache\huggingface\hub`** (Windows). Rediriger avec **`HF_HOME`** (ex. `HF_HOME=%USERPROFILE%\akasha\hf_cache` (Windows) ou `~/akasha/hf_cache` (Linux/macOS)). |
 
-Le **data_dir** s'affiche avec `akasha paths` ; par défaut : `~/.local/share/akasha` (Linux/macOS) ou `%LOCALAPPDATA%\akasha` (Windows), sauf si `AKASHA_DATA_DIR` est défini.
+Le **data_dir** s'affiche avec `akasha paths` ; par défaut : `~/akasha` (Linux/macOS) ou `%USERPROFILE%\akasha` (Windows), sauf si `AKASHA_DATA_DIR` est défini.
 
 ### Windows
 
-Sous **Windows**, le data_dir par défaut est **`%LOCALAPPDATA%\akasha`** (souvent `C:\Users\<user>\AppData\Local\akasha`). Les chemins dans `tools_policy.yaml` (allowed_read_paths, allowed_write_paths) utilisent des barres obliques ou des backslashes selon le contexte ; le daemon normalise les chemins. Si le build par défaut du daemon échoue à lier les **embeddings** (mémoire long terme) à cause d’ONNX Runtime (ort_sys), compiler avec **`--no-default-features --features embedded,embeddings-tract`** pour utiliser tract-onnx (pur Rust) à la place de fastembed/ONNX. Les modèles LLM embarqués (Qwen, Baguettotron) utilisent le cache Hugging Face ; définir **`HF_HOME`** (ex. `%LOCALAPPDATA%\akasha\hf_cache`) pour garder le cache dans le data_dir si souhaité.
+Sous **Windows**, le data_dir par défaut est **`%USERPROFILE%\akasha`** (souvent `C:\Users\<user>\akasha`). Les chemins dans `tools_policy.yaml` (allowed_read_paths, allowed_write_paths) utilisent des barres obliques ou des backslashes selon le contexte ; le daemon normalise les chemins. Si le build par défaut du daemon échoue à lier les **embeddings** (mémoire long terme) à cause d’ONNX Runtime (ort_sys), compiler avec **`--no-default-features --features embedded,embeddings-tract`** pour utiliser tract-onnx (pur Rust) à la place de fastembed/ONNX. Les modèles LLM embarqués (Qwen, Baguettotron) utilisent le cache Hugging Face ; définir **`HF_HOME`** (ex. `%USERPROFILE%\akasha\hf_cache`) pour garder le cache dans le data_dir si souhaité.
 
 ### Mise à jour
 
