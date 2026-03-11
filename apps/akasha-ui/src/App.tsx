@@ -8,9 +8,9 @@ const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => (
 const DAEMON_PORT = 3876;
 const THEME_STORAGE_KEY = "akasha_theme";
 
-export type ThemeId = "dark" | "dark_nord" | "light" | "light_latte";
+export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_latte";
 
-const THEME_IDS: ThemeId[] = ["dark", "dark_nord", "light", "light_latte"];
+const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "light_latte"];
 
 function loadSavedTheme(): ThemeId {
   try {
@@ -19,7 +19,7 @@ function loadSavedTheme(): ThemeId {
   } catch {
     /* ignore */
   }
-  return "dark";
+  return "dark_akasha";
 }
 
 type Tab = "chat" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
@@ -136,6 +136,7 @@ function App() {
     [t]
   );
   const [tab, setTab] = useState<Tab>("chat");
+  const [rightSidebarOpen, setRightSidebarOpen] = useState(false);
   const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
   const [showOnboarding, setShowOnboarding] = useState(() => {
     try {
@@ -1444,134 +1445,154 @@ function App() {
           </div>
         </div>
       )}
-      <header className="header">
-        <h1 className="logo">Akasha</h1>
-        <p className="tagline">Local-first AI assistant · 1–7 : onglets</p>
-        <div className="daemon-status" role="status" aria-live="polite">
-          <span
-            className={`status-dot ${health?.ok ? "connected" : "disconnected"}`}
-            aria-hidden
-          />
-          {health?.ok ? (
-            <span>Daemon connecté (port {health.port ?? DAEMON_PORT})</span>
-          ) : (
-            <span>Daemon déconnecté — lancez <code>akasha start</code></span>
-          )}
-        </div>
-        {Object.keys(pendingHumanInput).length > 0 && (
-          <div ref={pendingNotifRef} className="header-pending-actions" role="region" aria-label={t("pending_actions.region_label")}>
+      <div className="app-body">
+        <aside className="sidebar-left" aria-label="Navigation principale">
+          <div className="sidebar-left-top">
+            <h1 className="logo">Akasha</h1>
+            <p className="tagline">Local-first AI assistant</p>
+          </div>
+          <nav className="tabs sidebar-nav" role="tablist" aria-label="Sections">
             <button
-              type="button"
-              className="header-pending-actions-trigger"
-              onClick={() => setPendingNotifOpen((o) => !o)}
-              aria-expanded={pendingNotifOpen}
-              aria-haspopup="true"
-              title={t("pending_actions.title")}
+              role="tab"
+              aria-selected={tab === "chat"}
+              aria-controls="panel-chat"
+              id="tab-chat"
+              className={tab === "chat" ? "active" : ""}
+              onClick={() => setTab("chat")}
             >
-              <span className="header-pending-actions-icon" aria-hidden>⚠</span>
-              <span className="header-pending-actions-badge">{Object.keys(pendingHumanInput).length}</span>
-              <span className="header-pending-actions-label">{t("pending_actions.action_required")}</span>
+              {t("tabs.chat")}
             </button>
-            {pendingNotifOpen && (
-              <div className="header-pending-actions-dropdown" role="menu">
-                <p className="header-pending-actions-dropdown-title">{t("pending_actions.agents")}</p>
-                {Object.entries(pendingHumanInput).map(([taskId, p]) => (
-                  <div key={taskId} className="header-pending-actions-item">
-                    <p className="header-pending-actions-item-question" title={p.question}>
-                      {p.question.slice(0, 80)}{p.question.length > 80 ? "…" : ""}
-                    </p>
-                    <p className="header-pending-actions-item-task">Tâche #{taskId.slice(-8)}</p>
-                    <button
-                      type="button"
-                      className="header-pending-actions-item-btn"
-                      onClick={() => {
-                        setHumanInputModalTaskId(taskId);
-                        setHumanInputFreeText("");
-                        setPendingNotifOpen(false);
-                      }}
-                    >
-                      {t("human_input.reply")}
-                    </button>
+            <button
+              role="tab"
+              aria-selected={tab === "router"}
+              aria-controls="panel-router"
+              id="tab-router"
+              className={tab === "router" ? "active" : ""}
+              onClick={() => setTab("router")}
+            >
+              {t("tabs.router")}
+            </button>
+            <button
+              role="tab"
+              aria-selected={tab === "docs"}
+              aria-controls="panel-docs"
+              id="tab-docs"
+              className={tab === "docs" ? "active" : ""}
+              onClick={() => setTab("docs")}
+            >
+              {t("tabs.docs")}
+            </button>
+            <button
+              role="tab"
+              aria-selected={tab === "tasks"}
+              aria-controls="panel-tasks"
+              id="tab-tasks"
+              className={tab === "tasks" ? "active" : ""}
+              onClick={() => setTab("tasks")}
+            >
+              {t("tabs.tasks")}
+            </button>
+            <button
+              role="tab"
+              aria-selected={tab === "calendar"}
+              aria-controls="panel-calendar"
+              id="tab-calendar"
+              className={tab === "calendar" ? "active" : ""}
+              onClick={() => setTab("calendar")}
+            >
+              {t("tabs.calendar")}
+            </button>
+            <button
+              role="tab"
+              aria-selected={tab === "memory"}
+              aria-controls="panel-memory"
+              id="tab-memory"
+              className={tab === "memory" ? "active" : ""}
+              onClick={() => setTab("memory")}
+            >
+              {t("tabs.memory")}
+            </button>
+            <button
+              role="tab"
+              aria-selected={tab === "settings"}
+              aria-controls="panel-settings"
+              id="tab-settings"
+              className={tab === "settings" ? "active" : ""}
+              onClick={() => setTab("settings")}
+            >
+              {t("tabs.settings")}
+            </button>
+          </nav>
+          <div className="sidebar-left-bottom">
+            <div className="daemon-status" role="status" aria-live="polite">
+              <span
+                className={`status-dot ${health?.ok ? "connected" : "disconnected"}`}
+                aria-hidden
+              />
+              {health?.ok ? (
+                <span>{t("sidebar.daemon_connected")} {health.port ?? DAEMON_PORT})</span>
+              ) : (
+                <span>{t("sidebar.daemon_disconnected")} <code>akasha start</code></span>
+              )}
+            </div>
+            {Object.keys(pendingHumanInput).length > 0 && (
+              <div ref={pendingNotifRef} className="header-pending-actions" role="region" aria-label={t("pending_actions.region_label")}>
+                <button
+                  type="button"
+                  className="header-pending-actions-trigger"
+                  onClick={() => setPendingNotifOpen((o) => !o)}
+                  aria-expanded={pendingNotifOpen}
+                  aria-haspopup="true"
+                  title={t("pending_actions.title")}
+                >
+                  <span className="header-pending-actions-icon" aria-hidden>⚠</span>
+                  <span className="header-pending-actions-badge">{Object.keys(pendingHumanInput).length}</span>
+                  <span className="header-pending-actions-label">{t("pending_actions.action_required")}</span>
+                </button>
+                {pendingNotifOpen && (
+                  <div className="header-pending-actions-dropdown" role="menu">
+                    <p className="header-pending-actions-dropdown-title">{t("pending_actions.agents")}</p>
+                    {Object.entries(pendingHumanInput).map(([taskId, p]) => (
+                      <div key={taskId} className="header-pending-actions-item">
+                        <p className="header-pending-actions-item-question" title={p.question}>
+                          {p.question.slice(0, 80)}{p.question.length > 80 ? "…" : ""}
+                        </p>
+                        <p className="header-pending-actions-item-task">Tâche #{taskId.slice(-8)}</p>
+                        <button
+                          type="button"
+                          className="header-pending-actions-item-btn"
+                          onClick={() => {
+                            setHumanInputModalTaskId(taskId);
+                            setHumanInputFreeText("");
+                            setPendingNotifOpen(false);
+                          }}
+                        >
+                          {t("human_input.reply")}
+                        </button>
+                      </div>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
             )}
           </div>
-        )}
-        <nav className="tabs" role="tablist" aria-label="Sections">
-          <button
-            role="tab"
-            aria-selected={tab === "chat"}
-            aria-controls="panel-chat"
-            id="tab-chat"
-            className={tab === "chat" ? "active" : ""}
-            onClick={() => setTab("chat")}
-          >
-{t("tabs.chat")}
-            </button>
-            <button
-            role="tab"
-            aria-selected={tab === "router"}
-            aria-controls="panel-router"
-            id="tab-router"
-            className={tab === "router" ? "active" : ""}
-            onClick={() => setTab("router")}
-          >
-{t("tabs.router")}
-            </button>
-            <button
-            role="tab"
-            aria-selected={tab === "docs"}
-            aria-controls="panel-docs"
-            id="tab-docs"
-            className={tab === "docs" ? "active" : ""}
-            onClick={() => setTab("docs")}
-          >
-            {t("tabs.docs")}
-          </button>
-          <button
-            role="tab"
-            aria-selected={tab === "tasks"}
-            aria-controls="panel-tasks"
-            id="tab-tasks"
-            className={tab === "tasks" ? "active" : ""}
-            onClick={() => setTab("tasks")}
-          >
-{t("tabs.tasks")}
-            </button>
-            <button
-            role="tab"
-            aria-selected={tab === "calendar"}
-            aria-controls="panel-calendar"
-            id="tab-calendar"
-            className={tab === "calendar" ? "active" : ""}
-            onClick={() => setTab("calendar")}
-          >
-{t("tabs.calendar")}
-            </button>
-            <button
-            role="tab"
-            aria-selected={tab === "memory"}
-            aria-controls="panel-memory"
-            id="tab-memory"
-            className={tab === "memory" ? "active" : ""}
-            onClick={() => setTab("memory")}
-          >
-{t("tabs.memory")}
-            </button>
-            <button
-            role="tab"
-            aria-selected={tab === "settings"}
-            aria-controls="panel-settings"
-            id="tab-settings"
-            className={tab === "settings" ? "active" : ""}
-            onClick={() => setTab("settings")}
-          >
-{t("tabs.settings")}
-            </button>
-        </nav>
-      </header>
+        </aside>
 
+        <div className="container-main">
+          <div className="container-main-inner">
+            <header className="view-header">
+              <h2 className="view-title">{t("tabs." + tab)}</h2>
+              <button
+                type="button"
+                className="sidebar-right-toggle"
+                onClick={() => setRightSidebarOpen((o) => !o)}
+                aria-expanded={rightSidebarOpen}
+                aria-label={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
+                title={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
+              >
+                {rightSidebarOpen ? "▐" : "▌"}
+              </button>
+            </header>
       <main className="main" id="main-content" tabIndex={-1}>
         {/* Onboarding: first steps modal (dismissible, "Ne plus afficher" stored in localStorage) */}
         {showOnboarding && (
@@ -3061,13 +3082,15 @@ function App() {
             aria-labelledby="tab-settings"
             className="panel settings-panel"
           >
-            <h2 className="panel-title">{t("settings.title")}</h2>
-            <nav className="settings-tabs" role="tablist" aria-label={t("settings.sections_label")}>
-              <button role="tab" aria-selected={settingsSection === "display"} className={settingsSection === "display" ? "active" : ""} onClick={() => setSettingsSection("display")}>{t("settings.section_display")}</button>
-              <button role="tab" aria-selected={settingsSection === "system"} className={settingsSection === "system" ? "active" : ""} onClick={() => setSettingsSection("system")}>{t("settings.section_system")}</button>
-              <button role="tab" aria-selected={settingsSection === "agent"} className={settingsSection === "agent" ? "active" : ""} onClick={() => setSettingsSection("agent")}>{t("settings.section_agent")}</button>
-              <button role="tab" aria-selected={settingsSection === "data"} className={settingsSection === "data" ? "active" : ""} onClick={() => setSettingsSection("data")}>{t("settings.section_data")}</button>
-            </nav>
+            <div className="settings-panel-header">
+              <h2 className="panel-title settings-panel-title">{t("settings.title")}</h2>
+              <nav className="settings-tabs" role="tablist" aria-label={t("settings.sections_label")}>
+                <button role="tab" aria-selected={settingsSection === "display"} className={settingsSection === "display" ? "active" : ""} onClick={() => setSettingsSection("display")}>{t("settings.section_display")}</button>
+                <button role="tab" aria-selected={settingsSection === "system"} className={settingsSection === "system" ? "active" : ""} onClick={() => setSettingsSection("system")}>{t("settings.section_system")}</button>
+                <button role="tab" aria-selected={settingsSection === "agent"} className={settingsSection === "agent" ? "active" : ""} onClick={() => setSettingsSection("agent")}>{t("settings.section_agent")}</button>
+                <button role="tab" aria-selected={settingsSection === "data"} className={settingsSection === "data" ? "active" : ""} onClick={() => setSettingsSection("data")}>{t("settings.section_data")}</button>
+              </nav>
+            </div>
             {settingsSection === "display" && (
               <div className="settings-section-content">
             <dl className="settings-list">
@@ -3259,6 +3282,64 @@ function App() {
           </section>
         )}
       </main>
+          </div>
+        </div>
+
+        {rightSidebarOpen && (
+          <aside className="sidebar-right" aria-label={t("sidebar.tasks_panel")}>
+            <div className="sidebar-right-header">
+              <h3 className="sidebar-right-title">{t("tabs.tasks")}</h3>
+              <button
+                type="button"
+                className="sidebar-right-close"
+                onClick={() => setRightSidebarOpen(false)}
+                aria-label={t("sidebar.hide_tasks")}
+              >
+                ×
+              </button>
+            </div>
+            <div className="sidebar-right-content">
+              <button
+                type="button"
+                className="refresh-btn sidebar-right-refresh"
+                onClick={fetchTasksList}
+                disabled={tasksLoading}
+              >
+                {t("sidebar.refresh_tasks")}
+              </button>
+              {tasksLoading && (
+                <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>
+              )}
+              {!tasksLoading && tasksList.length === 0 && (
+                <p className="empty-state">{t("tasks.empty")}</p>
+              )}
+              {!tasksLoading && tasksList.length > 0 && (
+                <ul className="sidebar-right-task-list" role="list">
+                  {tasksList.map((task, i) => (
+                    <li
+                      key={task.id}
+                      className={i === tasksSelected ? "selected" : ""}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => { setTasksSelected(i); setTab("tasks"); }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setTasksSelected(i);
+                          setTab("tasks");
+                        }
+                      }}
+                    >
+                      <span className="task-id">#{task.id.slice(-8)}</span>
+                      <span className="task-status">{task.status}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </aside>
+        )}
+      </div>
     </div>
   );
 }

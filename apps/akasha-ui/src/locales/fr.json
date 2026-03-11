@@ -7,7 +7,8 @@
   "tabs.calendar": "Calendrier",
   "tabs.memory": "Mémoire",
   "tabs.settings": "Paramètres",
-  "theme.dark": "Sombre (défaut)",
+  "theme.dark_akasha": "Sombre Akasha",
+  "theme.dark": "Sombre",
   "theme.dark_nord": "Sombre Nord",
   "theme.light": "Clair",
   "theme.light_latte": "Clair Latte",
@@ -148,5 +149,11 @@
   "onboarding.step1": "Envoyer un message : onglet Chat, saisir un message et envoyer. La tâche apparaît dans l'onglet Tâches avec sa progression.",
   "onboarding.step2": "Créer une récurrence : via l'API (schedules) ou un message du type « rappelle-moi chaque jour de … ».",
   "onboarding.step3": "Consulter l'onglet Tâches : voir l'état des tâches, les sous-tâches, et répondre aux questions en attente (bannière ou modal).",
-  "onboarding.dismiss": "Ne plus afficher"
+  "onboarding.dismiss": "Ne plus afficher",
+  "sidebar.daemon_connected": "Daemon connecté (port",
+  "sidebar.daemon_disconnected": "Daemon déconnecté — lancez",
+  "sidebar.tasks_panel": "Panneau Tâches",
+  "sidebar.show_tasks": "Afficher le panneau Tâches",
+  "sidebar.hide_tasks": "Masquer le panneau Tâches",
+  "sidebar.refresh_tasks": "Rafraîchir"
 }

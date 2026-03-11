@@ -7,7 +7,8 @@
   "tabs.calendar": "Calendar",
   "tabs.memory": "Memory",
   "tabs.settings": "Settings",
-  "theme.dark": "Dark (default)",
+  "theme.dark_akasha": "Dark Akasha",
+  "theme.dark": "Dark",
   "theme.dark_nord": "Dark Nord",
   "theme.light": "Light",
   "theme.light_latte": "Light Latte",
@@ -148,5 +149,11 @@
   "onboarding.step1": "Send a message: Chat tab, type a message and send. The task appears in the Tasks tab with its progress.",
   "onboarding.step2": "Create a recurrence: via the API (schedules) or a message like \"remind me every day to …\".",
   "onboarding.step3": "Check the Tasks tab: view task status, sub-tasks, and answer pending questions (banner or modal).",
-  "onboarding.dismiss": "Don't show again"
+  "onboarding.dismiss": "Don't show again",
+  "sidebar.daemon_connected": "Daemon connected (port",
+  "sidebar.daemon_disconnected": "Daemon disconnected — run",
+  "sidebar.tasks_panel": "Tasks panel",
+  "sidebar.show_tasks": "Show Tasks panel",
+  "sidebar.hide_tasks": "Hide Tasks panel",
+  "sidebar.refresh_tasks": "Refresh"
 }
