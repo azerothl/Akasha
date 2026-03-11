@@ -65,6 +65,9 @@ command_timeout_secs: 60
 # Exemple : uniquement média local et imprimantes
 # allowed_device_interfaces: [local_media, system]
 # blocked_device_interfaces: []
+# Exemple : média local + entrées synthétiques (clavier/souris pour raccourcis, jeux, dessin)
+# allowed_device_interfaces: [local_media, synthetic_input]
+# synthetic_input permet à l'agent d'envoyer raccourcis clavier (ex. screenshot), clics/déplacements souris (jeux, logiciels de dessin). Recommandé : require_approval avec device_invoke.
 
 # Optionnel : interfaces appareil interdites (prioritaire sur allowed_device_interfaces).
 # blocked_device_interfaces: []

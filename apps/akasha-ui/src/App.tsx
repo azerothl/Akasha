@@ -1657,9 +1657,29 @@ function App() {
                   type="button"
                   className="human-input-choice-btn"
                   onClick={async () => {
-                    const { request_id, interface: iface, action: act } = devicePendingRequest;
+                    const { request_id, interface: iface, action: act, params: reqParams } = devicePendingRequest;
                     try {
-                      if (iface === "local_media" && (act === "capture" || act === "camera_capture")) {
+                      if (iface === "synthetic_input") {
+                        try {
+                          const ok = await invoke<boolean>("execute_synthetic_input", {
+                            action: act,
+                            params: typeof reqParams === "object" && reqParams !== null ? reqParams : {},
+                          });
+                          await invoke("post_device_result", {
+                            request_id,
+                            success: ok,
+                            data: null,
+                            port: DAEMON_PORT,
+                          });
+                        } catch (err) {
+                          await invoke("post_device_result", {
+                            request_id,
+                            success: false,
+                            data: err instanceof Error ? err.message : String(err),
+                            port: DAEMON_PORT,
+                          });
+                        }
+                      } else if (iface === "local_media" && (act === "capture" || act === "camera_capture")) {
                         const stream = await navigator.mediaDevices.getUserMedia({ video: true });
                         const video = document.createElement("video");
                         video.srcObject = stream;

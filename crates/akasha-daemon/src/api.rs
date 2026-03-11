@@ -566,7 +566,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
     ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
     ("device_discover", "device_discover [interface] — lister les appareils accessibles (optionnel: local_media, system, network, usb). Filtre par politique allowed_device_interfaces / blocked_device_interfaces."),
-    ("device_invoke", "device_invoke <interface> <device_id> <action> [params...] — exécuter une action sur un appareil (ex. device_invoke local_media camera capture). Nécessite un client UI pour local_media (caméra, micro, audio)."),
+    ("device_invoke", "device_invoke <interface> <device_id> <action> [params] — exécuter une action sur un appareil. local_media: caméra, micro (capture, record). synthetic_input: clavier/souris — device_id keyboard|mouse, action shortcut|key|type|mouse_move|mouse_click|mouse_double_click|mouse_scroll|mouse_drag, params JSON (ex. {\"keys\":[\"Control\",\"Shift\",\"S\"]} pour shortcut). Nécessite client UI."),
 ];
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -1796,7 +1796,7 @@ async fn execute_tool_call(
             let interfaces_to_list: Vec<String> = if interface.is_empty() {
                 let allowed = &executor.policy.allowed_device_interfaces;
                 let base: Vec<String> = if allowed.iter().any(|a| a.trim().eq_ignore_ascii_case("*")) {
-                    vec!["local_media".to_string(), "system".to_string()]
+                    vec!["local_media".to_string(), "system".to_string(), "synthetic_input".to_string()]
                 } else {
                     allowed.clone()
                 };
@@ -1821,6 +1821,10 @@ async fn execute_tool_call(
                     "system" => {
                         devices.push(serde_json::json!({ "interface": "system", "id": "printer", "name": "System printers" }));
                     }
+                    "synthetic_input" => {
+                        devices.push(serde_json::json!({ "interface": "synthetic_input", "id": "keyboard", "name": "Keyboard (shortcuts, type)" }));
+                        devices.push(serde_json::json!({ "interface": "synthetic_input", "id": "mouse", "name": "Mouse (move, click, scroll, drag)" }));
+                    }
                     _ => {
                         devices.push(serde_json::json!({ "interface": iface, "id": "default", "name": format!("{} (discovery stub)", iface) }));
                     }
@@ -1843,7 +1847,11 @@ async fn execute_tool_call(
             if !executor.policy.can_use_device_interface(interface) {
                 return (false, format!("[device_invoke] interface '{}' not allowed by policy", interface));
             }
-            let params = params_json.unwrap_or(serde_json::json!({}));
+            // Params: if a single 4th arg is valid JSON, use it; else {}
+            let params = match args.get(3) {
+                Some(s) => serde_json::from_str(s).unwrap_or(serde_json::json!({})),
+                None => params_json.unwrap_or(serde_json::json!({})),
+            };
             if interface == "local_media" {
                 let bridge = match device_bridge {
                     Some(b) => b,
@@ -1865,6 +1873,36 @@ async fn execute_tool_call(
                             format!("[device_invoke local_media {}] success — {}", action, data_preview)
                         } else {
                             format!("[device_invoke local_media {}] failed or refused", action)
+                        };
+                        (result.success, msg)
+                    }
+                    Ok(Err(_)) => (false, "[device_invoke] channel closed without result".to_string()),
+                    Err(_) => {
+                        bridge.cancel(&request_id).await;
+                        (false, format!("[device_invoke] timeout after {}s (no UI client responded)", DEVICE_TIMEOUT_SECS))
+                    }
+                }
+            } else if interface == "synthetic_input" {
+                let bridge = match device_bridge {
+                    Some(b) => b,
+                    None => return (false, "[device_invoke] device bridge not available (no UI client for synthetic_input)".to_string()),
+                };
+                let (request_id, rx) = bridge
+                    .submit_request(interface.to_string(), device_id.to_string(), action.to_string(), params)
+                    .await;
+                const DEVICE_TIMEOUT_SECS: u64 = 60;
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(DEVICE_TIMEOUT_SECS),
+                    rx,
+                )
+                .await
+                {
+                    Ok(Ok(result)) => {
+                        let msg = if result.success {
+                            let data_preview = result.data.as_deref().map(|d| if d.len() > 200 { format!("{}...", &d[..200]) } else { d.to_string() }).unwrap_or_else(|| "ok".to_string());
+                            format!("[device_invoke synthetic_input {}] success — {}", action, data_preview)
+                        } else {
+                            format!("[device_invoke synthetic_input {}] failed or refused", action)
                         };
                         (result.success, msg)
                     }
