@@ -1952,6 +1952,84 @@ fn cmd_stop() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Parse an env file (KEY=value per line). Returns (key->value map, list of (line_number, line) for invalid lines).
+fn parse_env_file(content: &str) -> (std::collections::HashMap<String, String>, Vec<(usize, String)>) {
+    let mut map = std::collections::HashMap::new();
+    let mut errors = Vec::new();
+    for (i, line) in content.lines().enumerate() {
+        let line_no = i + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = trimmed.split_once('=') {
+            let key = k.trim();
+            if key.is_empty() {
+                errors.push((line_no, line.to_string()));
+            } else {
+                map.insert(key.to_string(), v.trim().to_string());
+            }
+        } else {
+            errors.push((line_no, line.to_string()));
+        }
+    }
+    (map, errors)
+}
+
+/// Fix an existing env file: report invalid lines, add missing recommended keys with default values.
+fn doctor_fix_env_file(
+    path: &Path,
+    name: &str,
+    recommended_keys: &[&str],
+    comment_for_defaults: &str,
+    fixes: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let (map, errors) = parse_env_file(&content);
+    for (line_no, line) in &errors {
+        fixes.push(format!(
+            "{} ligne {}: format invalide (attendu KEY=value ou ligne vide/commentaire #). Ligne: \"{}\"",
+            name, line_no, line.trim()
+        ));
+    }
+    let mut to_append: Vec<String> = Vec::new();
+    for key in recommended_keys {
+        if !map.contains_key(*key) {
+            let default = match *key {
+                "AKASHA_PORT" => "3876",
+                "AKASHA_LOG" => "info",
+                "AKASHA_TELEGRAM_ENABLED" | "AKASHA_SLACK_ENABLED" | "AKASHA_DISCORD_ENABLED" => "",
+                _ => "",
+            };
+            if default.is_empty() {
+                to_append.push(format!("# {}=1", key));
+            } else {
+                to_append.push(format!("{}={}", key, default));
+            }
+        }
+    }
+    if !to_append.is_empty() {
+        let mut out = content.trim_end().to_string();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        if !out.is_empty() && !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        out.push_str(&format!("# {}\n", comment_for_defaults));
+        out.push_str(&to_append.join("\n"));
+        out.push('\n');
+        std::fs::write(path, out)?;
+        let keys_added: Vec<&str> = recommended_keys
+            .iter()
+            .filter(|k| !map.contains_key(**k))
+            .copied()
+            .collect();
+        fixes.push(format!("{}: entrées recommandées ajoutées ({}).", name, keys_added.join(", ")));
+    }
+    Ok(())
+}
+
 /// Apply fixes for missing or minimal config when `akasha doctor --fix` is run.
 /// Returns a list of messages describing what was fixed.
 fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
@@ -1980,6 +2058,22 @@ fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
         );
         config.save_to_path(&llm_router_path)?;
         fixes.push(format!("Created llm_router.yaml with default task_types and providers.ollama.base_url = {}", ollama_url));
+    } else {
+        match akasha_llm::RoutingConfig::load_from_path(&llm_router_path) {
+            Ok(config) => {
+                if let Err(e) = config.save_to_path(&llm_router_path) {
+                    fixes.push(format!("llm_router.yaml: impossible d'écrire après mise à jour — {}. Vérifiez les permissions.", e));
+                } else {
+                    fixes.push("llm_router.yaml: entrées de schéma manquantes ajoutées.".to_string());
+                }
+            }
+            Err(e) => {
+                fixes.push(format!(
+                    "llm_router.yaml: fichier invalide — {}. Corrigez la syntaxe YAML et la structure (voir spec/35_configuration_reference.md et spec/llm_router.example.yaml).",
+                    e
+                ));
+            }
+        }
     }
 
     let tools_policy_path = data_dir.join("tools_policy.yaml");
@@ -2001,6 +2095,22 @@ command_timeout_secs: 60
             std::fs::write(&tools_policy_path, minimal)?;
             fixes.push("Created minimal tools_policy.yaml (no paths allowed by default; edit to add paths).".to_string());
         }
+    } else {
+        match akasha_tools::ToolsPolicy::load_from_path(&tools_policy_path) {
+            Ok(policy) => {
+                if let Err(e) = policy.save_to_path(&tools_policy_path) {
+                    fixes.push(format!("tools_policy.yaml: impossible d'écrire après mise à jour — {}. Vérifiez les permissions.", e));
+                } else {
+                    fixes.push("tools_policy.yaml: entrées de schéma manquantes ajoutées.".to_string());
+                }
+            }
+            Err(e) => {
+                fixes.push(format!(
+                    "tools_policy.yaml: fichier invalide — {}. Corrigez la syntaxe YAML (voir spec/tools_policy.example.yaml et spec/35_configuration_reference.md).",
+                    e
+                ));
+            }
+        }
     }
 
     let connectors_path = data_dir.join("connectors.env");
@@ -2010,6 +2120,25 @@ command_timeout_secs: 60
 "#;
         std::fs::write(&connectors_path, content)?;
         fixes.push("Created connectors.env (empty; set vars to 1 to enable Telegram/Slack/Discord).".to_string());
+    } else {
+        doctor_fix_env_file(
+            &connectors_path,
+            "connectors.env",
+            &["AKASHA_TELEGRAM_ENABLED", "AKASHA_SLACK_ENABLED", "AKASHA_DISCORD_ENABLED"],
+            "# Set to 1 to enable",
+            &mut fixes,
+        )?;
+    }
+
+    let akasha_env_path = data_dir.join("akasha.env");
+    if akasha_env_path.exists() {
+        doctor_fix_env_file(
+            &akasha_env_path,
+            "akasha.env",
+            &["AKASHA_PORT", "AKASHA_LOG"],
+            "# Variables principales (défauts: 3876, info)",
+            &mut fixes,
+        )?;
     }
 
     let agent_profile_path = data_dir.join("agent_profile.json");
