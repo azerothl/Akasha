@@ -79,7 +79,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env akasha start
+ExecStart=/usr/bin/env akasha start --foreground
 Restart=on-failure
 RestartSec=5
 
@@ -88,7 +88,7 @@ WantedBy=default.target
 EOF
     # Use full path if we know it
     if [[ -n "$INSTALL_DIR" ]]; then
-        sed -i "s|ExecStart=.*|ExecStart=$INSTALL_DIR/akasha start|" "$HOME/.config/systemd/user/akasha-daemon.service"
+        sed -i "s|ExecStart=.*|ExecStart=$INSTALL_DIR/akasha start --foreground|" "$HOME/.config/systemd/user/akasha-daemon.service"
     fi
     systemctl --user daemon-reload
     systemctl --user enable akasha-daemon.service
@@ -108,6 +108,7 @@ elif [[ "$(uname -s)" == "Darwin" ]]; then
   <array>
     <string>$AKASHA_PATH</string>
     <string>start</string>
+    <string>--foreground</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

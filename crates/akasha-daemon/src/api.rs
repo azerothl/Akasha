@@ -1215,6 +1215,22 @@ fn parse_run_command_args(args: &[String]) -> (Vec<(String, String)>, String, Ve
     (vault_specs, command, cmd_args)
 }
 
+/// Parse `device_invoke` params from the tail of the args list (args[3..]).
+/// - No extra args → `{}`
+/// - Single arg that is valid JSON → that JSON value
+/// - Single arg that is not valid JSON → `{}`
+/// - Multiple args → JSON array of strings
+fn parse_device_invoke_params(args: &[String]) -> serde_json::Value {
+    if args.len() <= 3 {
+        serde_json::json!({})
+    } else if args.len() == 4 {
+        serde_json::from_str::<serde_json::Value>(&args[3])
+            .unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!(args[3..].to_vec())
+    }
+}
+
 /// Execute one tool call via ToolExecutor. Returns `(success, display_string)` for structured events.
 async fn execute_tool_call(
     executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
@@ -1859,16 +1875,7 @@ async fn execute_tool_call(
             // Params:
             // - if a single 4th arg is valid JSON, use it; else {}
             // - if multiple params are provided, pass them as a JSON array of strings
-            let params = if args.len() <= 3 {
-                serde_json::json!({})
-            } else if args.len() == 4 {
-                // Single params argument: try to parse as JSON, fall back to {}
-                serde_json::from_str::<serde_json::Value>(&args[3])
-                    .unwrap_or_else(|_| serde_json::json!({}))
-            } else {
-                // Multiple params: pass the remaining args as a JSON array
-                serde_json::json!(args[3..].to_vec())
-            };
+            let params = parse_device_invoke_params(args);
             if interface == "local_media" {
                 let bridge = match device_bridge {
                     Some(b) => b,
@@ -4787,5 +4794,37 @@ mod tests {
     #[test]
     fn parse_content_length_empty_returns_none() {
         assert!(parse_content_length(&[]).is_none());
+    }
+
+    // --- parse_device_invoke_params ---
+
+    fn s(v: &str) -> String { v.to_string() }
+
+    #[test]
+    fn device_invoke_params_no_extra_args_returns_empty_object() {
+        let args: Vec<String> = vec![s("local_media"), s("camera"), s("capture")];
+        let p = parse_device_invoke_params(&args);
+        assert_eq!(p, serde_json::json!({}));
+    }
+
+    #[test]
+    fn device_invoke_params_single_valid_json_arg() {
+        let args = vec![s("synthetic_input"), s("keyboard"), s("shortcut"), s(r#"{"keys":["Control","C"]}"#)];
+        let p = parse_device_invoke_params(&args);
+        assert_eq!(p, serde_json::json!({"keys": ["Control", "C"]}));
+    }
+
+    #[test]
+    fn device_invoke_params_single_invalid_json_falls_back_to_empty_object() {
+        let args = vec![s("local_media"), s("microphone"), s("record"), s("not-json")];
+        let p = parse_device_invoke_params(&args);
+        assert_eq!(p, serde_json::json!({}));
+    }
+
+    #[test]
+    fn device_invoke_params_multiple_args_become_json_array() {
+        let args = vec![s("synthetic_input"), s("keyboard"), s("type"), s("hello"), s("world")];
+        let p = parse_device_invoke_params(&args);
+        assert_eq!(p, serde_json::json!(["hello", "world"]));
     }
 }
