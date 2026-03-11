@@ -993,7 +993,11 @@ fn parse_key(s: &str) -> Option<Key> {
         "right" | "rightarrow" => Some(Key::RightArrow),
         "up" | "uparrow" => Some(Key::UpArrow),
         "down" | "downarrow" => Some(Key::DownArrow),
+        // enigo doesn't expose PrintScr on macOS; don't reference it there.
+        #[cfg(not(target_os = "macos"))]
         "printscreen" | "print_scr" => Some(Key::PrintScr),
+        #[cfg(target_os = "macos")]
+        "printscreen" | "print_scr" => None,
         "f1" => Some(Key::F1),
         "f2" => Some(Key::F2),
         "f3" => Some(Key::F3),
