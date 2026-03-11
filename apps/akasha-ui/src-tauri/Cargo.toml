@@ -21,3 +21,4 @@ tokio = { version = "1", features = ["full"] }
 url = "2"
 urlencoding = "2"
 enigo = "0.6"
+base64 = "0.22"

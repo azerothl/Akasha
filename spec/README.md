@@ -98,6 +98,7 @@ Voir aussi les documents listés en [§1](#1-vision-et-périmètre) (scope, FR, 
 |----------|-------------|
 | [36_ui_architecture.md](36_ui_architecture.md) | Architecture UI : onglets Chat, Tâches (Task Center), Calendrier ; transport temps réel (WS/SSE, NATS). |
 | [37_scheduler_design.md](37_scheduler_design.md) | Scheduler : standalone (tick, persistance, dedup), cluster (leader, workers, event log). |
+| [38_interfaces.md](38_interfaces.md) | **Gestion des interfaces** : TUI vs desktop (Tauri), lancement, onglets, raccourcis, paramètres d’affichage ; **interfaces matérielles du poste client** (clavier, affichage, souris/tactile, accessibilité, prérequis terminal). |
 
 ---
 
@@ -106,6 +107,7 @@ Voir aussi les documents listés en [§1](#1-vision-et-périmètre) (scope, FR, 
 | Document | Description |
 |----------|-------------|
 | [user_guide.md](user_guide.md) | **Guide utilisateur complet** : commandes CLI, config, interfaces (TUI, Web), commandes slash, canaux, build. Servi par le daemon via `GET /api/docs` et affiché dans l’onglet Doc des interfaces. |
+| [38_interfaces.md](38_interfaces.md) | Gestion des interfaces (TUI, Tauri) et interfaces matérielles du poste client (clavier, affichage, souris, accessibilité, terminal). |
 | [onboarding.md](onboarding.md) | Premier lancement pas à pas : build, init, vault, Ollama, daemon, doctor, canaux, evals. |
 | [distribution.md](distribution.md) | **Distribution** : binaires + docs/user_guide.md dans le zip, créer une release, option Tauri desktop. |
 | [../docs/user_guide_final.md](../docs/user_guide_final.md) | **Guide utilisateur final** (binaires uniquement, sans référence au code). Livré dans le zip sous docs/user_guide.md. |
@@ -155,6 +157,7 @@ Ces fichiers sont conservés pour référence mais pointent vers la version à j
 |--------|----------|
 | Comprendre le projet en une page | [00_vision.md](00_vision.md) |
 | Utiliser Akasha (commandes, config, UI) | [user_guide.md](user_guide.md) |
+| Interfaces (TUI, Tauri) et poste client (clavier, affichage, accessibilité) | [38_interfaces.md](38_interfaces.md) |
 | Formats et types des fichiers de config | [35_configuration_reference.md](35_configuration_reference.md) |
 | Premier lancement | [onboarding.md](onboarding.md) |
 | Architecture LLM (router, fallback) | [32_llm_router_architecture.md](32_llm_router_architecture.md) |

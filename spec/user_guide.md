@@ -111,6 +111,8 @@ En premier lancement, l’UI peut proposer un guide court (premier objectif) ; o
 |----------|-------------|
 | `akasha tui` | Lance l'interface terminal (TUI) : Chat + métriques routeur + Documentation |
 
+Pour une description détaillée de la gestion des interfaces (TUI, desktop Tauri, onglets, raccourcis) et des **interfaces matérielles du poste client** (clavier, affichage, souris, accessibilité, prérequis terminal), voir [38_interfaces.md](38_interfaces.md).
+
 ---
 
 ## 4. Guide d'onboarding (résumé)

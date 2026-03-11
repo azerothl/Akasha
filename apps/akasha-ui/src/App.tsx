@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { preprocessMessagePaths } from "./preprocessMessagePaths";
 import { getCached, setCached } from "./useTabCache";
 import { useI18n } from "./useI18n";
 
@@ -493,6 +494,17 @@ function App() {
   useEffect(() => {
     if (tab === "chat") chatInputRef.current?.focus();
   }, [tab]);
+
+  // Restore focus on chat input when loading finishes (task completed, failed, or slash command done)
+  const prevLoadingRef = useRef(loading);
+  useEffect(() => {
+    if (prevLoadingRef.current === true && loading === false && tab === "chat") {
+      requestAnimationFrame(() => {
+        chatInputRef.current?.focus();
+      });
+    }
+    prevLoadingRef.current = loading;
+  }, [loading, tab]);
 
   // Close pending-actions dropdown when clicking outside
   useEffect(() => {
@@ -1259,6 +1271,10 @@ function App() {
     e.target.value = "";
   };
 
+  const handlePathClick = useCallback((path: string, openFolder?: boolean) => {
+    invoke(openFolder ? "open_path_in_explorer" : "open_path", { path }).catch(() => {});
+  }, []);
+
   const handleSend = async () => {
     const hasContent = message.trim() || attachments.length > 0;
     if (!hasContent || loading) return;
@@ -1370,6 +1386,7 @@ function App() {
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 const finalMsg = status?.progress?.slice(-1)[0]?.message ?? "Terminé.";
                 setMessages((prev) => [...prev, { role: "assistant", text: finalMsg }]);
+                requestAnimationFrame(() => chatInputRef.current?.focus());
                 return;
               }
               if (status?.status === "failed") {
@@ -1379,6 +1396,7 @@ function App() {
                 humanInputAutoOpenedRef.current.delete(taskId);
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 setMessages((prev) => [...prev, { role: "assistant", text: "Tâche en échec.", error: true }]);
+                requestAnimationFrame(() => chatInputRef.current?.focus());
                 return;
               }
             } catch {
@@ -1396,6 +1414,7 @@ function App() {
             return next;
           });
           setMessages((prev) => [...prev, { role: "assistant", text: "Délai dépassé. Consultez Tâches." }]);
+          requestAnimationFrame(() => chatInputRef.current?.focus());
         };
         pollUntilDone();
       }
@@ -1893,8 +1912,8 @@ function App() {
                           </div>
                         ) : (
                           <div className="text markdown-rendered">
-                            <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
-                              {m.text}
+                            <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent onPathClick={handlePathClick}>
+                              {preprocessMessagePaths(m.text)}
                             </LazyMarkdownContent></Suspense>
                           </div>
                         )}

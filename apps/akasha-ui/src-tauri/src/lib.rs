@@ -420,6 +420,80 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Open a local file or directory with the default application (or file manager for directory).
+/// Only allows absolute local paths; path is canonicalized and must exist.
+#[tauri::command]
+fn open_path(path: String) -> Result<(), String> {
+    let path = path.trim().trim_matches('"');
+    if path.is_empty() {
+        return Err("Path is empty".to_string());
+    }
+    let p = std::path::Path::new(path);
+    let canonical = p.canonicalize().map_err(|e| format!("Invalid path: {}", e))?;
+    if !canonical.is_absolute() {
+        return Err("Only absolute paths are allowed".to_string());
+    }
+    let path_str = canonical.to_string_lossy();
+    let _ = match std::env::consts::OS {
+        "windows" => std::process::Command::new("cmd").args(["/c", "start", "", path_str.as_ref()]).status(),
+        "macos" => std::process::Command::new("open").arg(path_str.as_ref()).status(),
+        _ => std::process::Command::new("xdg-open").arg(path_str.as_ref()).status(),
+    };
+    Ok(())
+}
+
+/// Read a local image file and return a data URL (data:image/xxx;base64,...). Only allows image extensions.
+#[tauri::command]
+fn read_file_as_data_url(path: String) -> Result<String, String> {
+    let path = path.trim().trim_matches('"');
+    if path.is_empty() {
+        return Err("Path is empty".to_string());
+    }
+    let p = std::path::Path::new(path);
+    let canonical = p.canonicalize().map_err(|e| format!("Invalid path: {}", e))?;
+    if !canonical.is_absolute() {
+        return Err("Only absolute paths are allowed".to_string());
+    }
+    let ext = canonical.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let mime = match ext.to_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => return Err("Only image files (png, jpg, gif, webp) are allowed".to_string()),
+    };
+    let bytes = std::fs::read(&canonical).map_err(|e| e.to_string())?;
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+    Ok(format!("data:{};base64,{}", mime, b64))
+}
+
+/// Open the parent directory of the given path in the file manager (reveal in folder).
+/// If the path is a directory, opens that directory. Only allows absolute local paths.
+#[tauri::command]
+fn open_path_in_explorer(path: String) -> Result<(), String> {
+    let path = path.trim().trim_matches('"');
+    if path.is_empty() {
+        return Err("Path is empty".to_string());
+    }
+    let p = std::path::Path::new(path);
+    let canonical = p.canonicalize().map_err(|e| format!("Invalid path: {}", e))?;
+    if !canonical.is_absolute() {
+        return Err("Only absolute paths are allowed".to_string());
+    }
+    let dir = if canonical.is_dir() {
+        canonical.clone()
+    } else {
+        canonical.parent().map(|x| x.to_path_buf()).unwrap_or(canonical)
+    };
+    let path_str = dir.to_string_lossy();
+    let _ = match std::env::consts::OS {
+        "windows" => std::process::Command::new("explorer").arg(path_str.as_ref()).status(),
+        "macos" => std::process::Command::new("open").arg(path_str.as_ref()).status(),
+        _ => std::process::Command::new("xdg-open").arg(path_str.as_ref()).status(),
+    };
+    Ok(())
+}
+
 /// Open URL in default browser. Only allows https URLs for known update/release hosts.
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
@@ -1194,6 +1268,9 @@ pub fn run() {
             get_update_status,
             get_app_version,
             open_url,
+            open_path,
+            open_path_in_explorer,
+            read_file_as_data_url,
             get_advice,
             get_plugins,
             reload_plugins,

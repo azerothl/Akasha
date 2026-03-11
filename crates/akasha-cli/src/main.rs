@@ -107,6 +107,53 @@ enum ConfigSub {
         #[command(subcommand)]
         sub: ConfigEnvSub,
     },
+    /// Configure LLM providers (Ollama URL, OpenAI/OpenRouter API keys) without full init
+    Provider {
+        #[command(subcommand)]
+        sub: ConfigProviderSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigProviderSub {
+    /// List providers defined in llm_router.yaml (names and main fields)
+    List,
+    /// Set or update Ollama base URL (and optionally default model for a category)
+    SetOllama {
+        /// Ollama base URL (e.g. http://localhost:11434)
+        #[arg(long)]
+        url: Option<String>,
+        /// Optional: set as primary for this task type (e.g. conversation)
+        #[arg(long)]
+        category: Option<String>,
+        /// Optional: model name when setting category (e.g. llama3.2)
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Add or update OpenAI provider; stores API key in vault, updates llm_router.yaml
+    AddOpenai {
+        /// API key (sk-...). If omitted, prompted on stdin.
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Optional: set as primary for this task type
+        #[arg(long)]
+        category: Option<String>,
+        /// Optional: model name when setting category (e.g. gpt-4o-mini)
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Add or update OpenRouter provider; stores API key in vault, updates llm_router.yaml
+    AddOpenrouter {
+        /// API key. If omitted, prompted on stdin.
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Optional: set as primary for this task type
+        #[arg(long)]
+        category: Option<String>,
+        /// Optional: model name when setting category (e.g. openai/gpt-4o-mini)
+        #[arg(long)]
+        model: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1118,6 +1165,137 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                 }
             }
         }
+        ConfigSub::Provider { sub: provider_sub } => {
+            let path = llm_router_path();
+            if !path.exists() {
+                anyhow::bail!(
+                    "llm_router.yaml not found. Run 'akasha init' first or create {}",
+                    path.display()
+                );
+            }
+            let mut config = akasha_llm::RoutingConfig::load_from_path(&path)
+                .map_err(|e| anyhow::anyhow!("Load llm_router.yaml: {}", e))?;
+            let vault = akasha_vault::open_vault(&data_dir).map_err(|e| anyhow::anyhow!("Vault: {}", e))?;
+
+            match provider_sub {
+                ConfigProviderSub::List => {
+                    if config.providers.is_empty() {
+                        println!("No providers in llm_router.yaml.");
+                        return Ok(());
+                    }
+                    let mut names: Vec<_> = config.providers.keys().collect();
+                    names.sort();
+                    println!("Providers in llm_router.yaml:");
+                    for name in names {
+                        let p = config.providers.get(name).unwrap();
+                        let url = p.base_url.as_deref().unwrap_or("(not set)");
+                        let key_ref = p.api_key_ref.as_deref().unwrap_or("(none)");
+                        println!("  {}: base_url={}, api_key_ref={}", name, url, key_ref);
+                    }
+                }
+                ConfigProviderSub::SetOllama { url, category, model } => {
+                    let url = url
+                        .or_else(|| config.providers.get("ollama").and_then(|p| p.base_url.clone()))
+                        .unwrap_or_else(|| init_prompt("Ollama URL [http://localhost:11434]:\n> "));
+                    let url = if url.trim().is_empty() {
+                        "http://localhost:11434".to_string()
+                    } else {
+                        url.trim().to_string()
+                    };
+                    config.providers.insert(
+                        "ollama".to_string(),
+                        akasha_llm::config::ProviderConfig {
+                            api_key_ref: None,
+                            base_url: Some(url.clone()),
+                            organization: None,
+                            version: None,
+                            always_available: None,
+                            site_url: None,
+                            app_title: None,
+                        },
+                    );
+                    if let (Some(cat), Some(modl)) = (category, model) {
+                        let entry = akasha_llm::config::RouteEntry {
+                            provider: "ollama".into(),
+                            model: modl.trim().to_string(),
+                            config: None,
+                        };
+                        config.set_primary_route(&cat, entry);
+                        println!("Ollama URL set to {}; {} primary set to ollama / {}", url, cat, modl);
+                    } else {
+                        println!("Ollama base_url set to {}", url);
+                    }
+                }
+                ConfigProviderSub::AddOpenai { api_key, category, model } => {
+                    let key = api_key
+                        .or_else(|| Some(init_prompt("OpenAI API key (sk-...):\n> ")))
+                        .unwrap_or_default();
+                    let key = key.trim();
+                    if !key.is_empty() {
+                        let _ = vault.set("openai_api_key", key);
+                        println!("Vault: openai_api_key stored.");
+                    }
+                    config.providers.insert(
+                        "openai".to_string(),
+                        akasha_llm::config::ProviderConfig {
+                            api_key_ref: Some("vault://openai_api_key".to_string()),
+                            base_url: None,
+                            organization: None,
+                            version: None,
+                            always_available: None,
+                            site_url: None,
+                            app_title: None,
+                        },
+                    );
+                    if let (Some(cat), Some(modl)) = (category, model) {
+                        let entry = akasha_llm::config::RouteEntry {
+                            provider: "openai".into(),
+                            model: modl.trim().to_string(),
+                            config: None,
+                        };
+                        config.set_primary_route(&cat, entry);
+                        println!("OpenAI provider added; {} primary set to openai / {}", cat, modl);
+                    } else {
+                        println!("OpenAI provider added (api_key_ref: vault://openai_api_key). Use 'akasha config models set <category> openai <model>' to set primary.");
+                    }
+                }
+                ConfigProviderSub::AddOpenrouter { api_key, category, model } => {
+                    let key = api_key
+                        .or_else(|| Some(init_prompt("OpenRouter API key:\n> ")))
+                        .unwrap_or_default();
+                    let key = key.trim();
+                    if !key.is_empty() {
+                        let _ = vault.set("openrouter_api_key", key);
+                        println!("Vault: openrouter_api_key stored.");
+                    }
+                    config.providers.insert(
+                        "openrouter".to_string(),
+                        akasha_llm::config::ProviderConfig {
+                            api_key_ref: Some("vault://openrouter_api_key".to_string()),
+                            base_url: None,
+                            organization: None,
+                            version: None,
+                            always_available: None,
+                            site_url: None,
+                            app_title: None,
+                        },
+                    );
+                    if let (Some(cat), Some(modl)) = (category, model) {
+                        let entry = akasha_llm::config::RouteEntry {
+                            provider: "openrouter".into(),
+                            model: modl.trim().to_string(),
+                            config: None,
+                        };
+                        config.set_primary_route(&cat, entry);
+                        println!("OpenRouter provider added; {} primary set to openrouter / {}", cat, modl);
+                    } else {
+                        println!("OpenRouter provider added (api_key_ref: vault://openrouter_api_key). Use 'akasha config models set <category> openrouter <model>' to set primary.");
+                    }
+                }
+            }
+            config.save_to_path(&path)?;
+            println!("Config written to {}", path.display());
+        }
     }
     Ok(())
 }
@@ -1126,6 +1304,62 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
     let data_dir = akasha_data_dir();
     std::fs::create_dir_all(&data_dir)?;
     let data_dir_str = data_dir.display().to_string();
+
+    let llm_router_path = data_dir.join("llm_router.yaml");
+    let existing_config = llm_router_path.exists();
+
+    if existing_config && use_defaults {
+        println!("=== Akasha — Init ===\n");
+        println!("Répertoire de données : {}", data_dir_str);
+        println!("\nUne configuration existe déjà. Utilisez sans --defaults pour vérifier ou réparer.\n");
+        return Ok(());
+    }
+
+    if existing_config && !use_defaults {
+        println!("=== Akasha — Init ===\n");
+        println!("Répertoire de données : {}", data_dir_str);
+        println!("\nUn répertoire de configuration existe déjà.");
+        println!("  1) Vérifier / réparer la configuration (fichiers manquants, structure)");
+        println!("  2) Réinitialiser (refaire le wizard complet)");
+        println!("  3) Quitter");
+        let choice = init_prompt("Choix [1] :\n> ");
+        let choice = choice.trim();
+        if choice == "3" || choice.eq_ignore_ascii_case("q") {
+            println!("Au revoir.");
+            return Ok(());
+        }
+        if choice == "2" {
+            println!("\nRéinitialisation — suite du wizard.\n");
+            // fall through to full init (will overwrite)
+        } else {
+            // 1 or empty: verify/repair
+            let checks = run_config_checks(&data_dir);
+            println!("\n--- Vérification de la configuration ---");
+            let mut has_fail = false;
+            for (_, ok, msg) in &checks {
+                println!("  {}", msg);
+                if !ok {
+                    has_fail = true;
+                }
+            }
+            if has_fail {
+                let apply = init_prompt("\nCréer les fichiers manquants (comme doctor --fix) ? [O/n] :\n> ");
+                if apply.trim().is_empty() || apply.eq_ignore_ascii_case("o") || apply.eq_ignore_ascii_case("y") {
+                    let fixes = run_doctor_fixes(&data_dir)?;
+                    if !fixes.is_empty() {
+                        println!("\nFichiers créés ou réparés :");
+                        for f in &fixes {
+                            println!("  {}", f);
+                        }
+                    }
+                }
+            } else {
+                println!("\nTous les fichiers sont présents et conformes.");
+            }
+            println!("\nPour démarrer : akasha start");
+            return Ok(());
+        }
+    }
 
     println!("=== Akasha — Premier lancement ===\n");
     println!("Répertoire de données : {}\n", data_dir_str);
@@ -1778,6 +2012,15 @@ command_timeout_secs: 60
         fixes.push("Created connectors.env (empty; set vars to 1 to enable Telegram/Slack/Discord).".to_string());
     }
 
+    let agent_profile_path = data_dir.join("agent_profile.json");
+    if !agent_profile_path.exists() {
+        let templates = agent_profile_templates();
+        let profile = &templates[0].1;
+        let json = serde_json::to_string_pretty(profile).unwrap_or_else(|_| "{}".to_string());
+        std::fs::write(&agent_profile_path, json)?;
+        fixes.push("Created agent_profile.json (default template).".to_string());
+    }
+
     Ok(fixes)
 }
 
@@ -1828,6 +2071,23 @@ fn run_config_checks(data_dir: &Path) -> Vec<(String, bool, String)> {
         (false, "akasha.env: file missing (optional)".to_string())
     };
     out.push(("akasha_env".to_string(), ok, msg));
+
+    // agent_profile.json (existence + valid JSON)
+    let p = data_dir.join("agent_profile.json");
+    let (ok, msg) = if !p.exists() {
+        (false, "agent_profile.json: file missing".to_string())
+    } else {
+        match std::fs::read_to_string(&p) {
+            Ok(s) => {
+                match serde_json::from_str::<serde_json::Value>(&s) {
+                    Ok(_) => (true, "agent_profile.json: OK".to_string()),
+                    Err(e) => (false, format!("agent_profile.json: invalid — {}", e)),
+                }
+            }
+            Err(e) => (false, format!("agent_profile.json: unreadable — {}", e)),
+        }
+    };
+    out.push(("agent_profile_json".to_string(), ok, msg));
 
     out
 }
