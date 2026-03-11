@@ -1418,6 +1418,81 @@ body {
 }
 
 /* Settings panel */
+.settings-tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--akasha-border);
+  padding-bottom: 0.5rem;
+}
+.settings-tabs button {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.875rem;
+  background: transparent;
+  color: var(--akasha-text-muted);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.settings-tabs button:hover {
+  color: var(--akasha-text);
+  background: var(--akasha-bg-surface);
+}
+.settings-tabs button.active {
+  color: var(--akasha-accent);
+  font-weight: 600;
+  background: var(--akasha-bg-surface);
+}
+.settings-section-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.settings-agent-template-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.settings-agent-template-row label {
+  font-size: 0.875rem;
+  color: var(--akasha-text-muted);
+  white-space: nowrap;
+}
+.settings-agent-subtabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+.settings-agent-subtabs button {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.875rem;
+  background: transparent;
+  color: var(--akasha-text-muted);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.settings-agent-subtabs button:hover {
+  color: var(--akasha-text);
+  background: var(--akasha-bg-surface);
+}
+.settings-agent-subtabs button.active {
+  color: var(--akasha-accent);
+  font-weight: 600;
+  background: var(--akasha-bg-surface);
+}
+.settings-agent-tab-content {
+  margin-bottom: 1rem;
+}
+.settings-char-count {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--akasha-text-dim);
+  margin-top: 0.25rem;
+}
+
 .settings-list {
   margin: 0 0 1rem;
 }

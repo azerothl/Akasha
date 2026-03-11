@@ -233,7 +233,7 @@ npm install
 npm run tauri dev
 ```
 
-L'UI se connecte au daemon sur le port 3876 (configurable via `AKASHA_PORT`). **Onglets** : Chat, Routeur (métriques), Documentation, Tâches, Calendrier, Mémoire, Paramètres.
+L'UI se connecte au daemon sur le port 3876 (configurable via `AKASHA_PORT`). **Onglets** : Chat, Routeur (métriques), Documentation, Tâches, Calendrier, Mémoire, Paramètres. **Paramètres** : quatre sections (Affichage, Système, Agent, Data). Dans Agent : sous-onglets pour le profil (Identité, Personnalité, Règles, Autorisé, Interdit), sélecteur de template de personnalité (Neutre, Bienveillant, Concis/technique, Créatif, Strict/sécurisé), limites de caractères affichées.
 
 **Pièces jointes (interface web uniquement)** : dans le Chat, le bouton « Joindre » permet d’ajouter des images ou des documents (texte, PDF). Les images sont envoyées au modèle (vision) ; les documents texte et PDF sont extraits et inclus dans le message pour l’agent. Utile pour « analyse ce document » ou pour fournir un fichier sans le copier-coller.
 

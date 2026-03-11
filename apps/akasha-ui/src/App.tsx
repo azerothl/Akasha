@@ -24,6 +24,28 @@ function loadSavedTheme(): ThemeId {
 
 type Tab = "chat" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
 
+type SettingsSection = "display" | "system" | "agent" | "data";
+type AgentProfileSubTab = "identity" | "personality" | "rules" | "can_do" | "cannot_do";
+
+const AGENT_PROFILE_LIMITS = {
+  name: 128,
+  personality: 2000,
+  ruleLength: 500,
+  ruleCount: 30,
+  canDoLength: 300,
+  canDoCount: 30,
+  cannotDoLength: 300,
+  cannotDoCount: 30,
+} as const;
+
+const AGENT_PROFILE_TEMPLATES: Array<{ label: string; name: string; personality: string; rules: string[]; can_do: string[]; cannot_do: string[] }> = [
+  { label: "Neutre / polyvalent — ton professionnel, adapté à tous les usages", name: "Akasha", personality: "Ton neutre et professionnel. Réponds de façon claire et adaptée au contexte, sans surcharge. Adapte-toi à la demande (technique, rédaction, conseil). Pas de préambule superflu du type « Bien sûr ! » ou « Avec plaisir » — va à l'essentiel.", rules: [], can_do: [], cannot_do: [] },
+  { label: "Bienveillant / coach — encourageant, pédagogique, à l'écoute", name: "Akasha", personality: "Bienveillant et encourageant. Explique avec pédagogie, reformule pour vérifier que l'utilisateur a compris. Valorise les progrès et propose des étapes claires. Reste à l'écoute, ne juge pas. Propose des pistes plutôt que d'imposer une seule solution.", rules: ["Rester à l'écoute et ne pas juger.", "Proposer des pistes plutôt que d'imposer une seule solution."], can_do: [], cannot_do: [] },
+  { label: "Concis / technique — réponses courtes et précises, orienté dev et sysadmin", name: "Akasha", personality: "Concis et technique. Réponses courtes et précises, orientées développement et administration système. Va à l'essentiel : commandes, extraits de code, chemins. Pas de longues introductions ni de formules de politesse superflues.", rules: ["Privilégier le concret : commandes, extraits de code, chemins.", "Éviter les longues introductions."], can_do: [], cannot_do: [] },
+  { label: "Créatif / rédacteur — ton libre, créatif, pour rédaction et idées", name: "Akasha", personality: "Créatif et ouvert. Aide à structurer des idées, à rédiger, à brainstormer. Propose plusieurs formulations ou angles. Accepte les demandes un peu inhabituelles. Ose suggérer des variantes et des pistes inattendues.", rules: [], can_do: ["Proposer des reformulations et variantes.", "Suggérer des angles ou idées complémentaires."], cannot_do: [] },
+  { label: "Strict / sécurisé — règles strictes, pas d'exécution de code sans confirmation", name: "Akasha", personality: "Précis et prudent. Explique clairement les risques avant toute action. Ne propose jamais d'exécuter du code ou des commandes sans confirmation explicite. Toujours : quoi, pourquoi, puis comment. En cas de doute sur la sécurité, avertir et proposer une alternative plus sûre.", rules: ["Ne jamais exécuter de code ou commande sans confirmation explicite de l'utilisateur.", "Toujours expliquer le « quoi » et le « pourquoi » avant le « comment ».", "En cas de doute sur la sécurité, avertir et proposer une alternative plus sûre."], can_do: ["Expliquer et détailler les étapes.", "Proposer des commandes ou scripts à copier-coller après confirmation."], cannot_do: ["Exécuter du code ou des commandes sans confirmation.", "Modifier des fichiers sensibles sans demande claire."] },
+];
+
 /** Format duration in seconds as "X min Y s" or "Y s". */
 function formatDurationSec(sec: number): string {
   const total = Math.round(sec);
@@ -287,6 +309,8 @@ function App() {
   const [agentProfileLoading, setAgentProfileLoading] = useState(false);
   const [agentProfileSaving, setAgentProfileSaving] = useState(false);
   const [agentProfileError, setAgentProfileError] = useState<string | null>(null);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("display");
+  const [agentProfileSubTab, setAgentProfileSubTab] = useState<AgentProfileSubTab>("identity");
   /** Attachments for the next message: images (vision) and documents (text appended to message). */
   const [attachments, setAttachments] = useState<Array<{ id: string; name: string; typ: "image" | "document"; content_base64: string; mime_type: string }>>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -3038,6 +3062,14 @@ function App() {
             className="panel settings-panel"
           >
             <h2 className="panel-title">{t("settings.title")}</h2>
+            <nav className="settings-tabs" role="tablist" aria-label={t("settings.sections_label")}>
+              <button role="tab" aria-selected={settingsSection === "display"} className={settingsSection === "display" ? "active" : ""} onClick={() => setSettingsSection("display")}>{t("settings.section_display")}</button>
+              <button role="tab" aria-selected={settingsSection === "system"} className={settingsSection === "system" ? "active" : ""} onClick={() => setSettingsSection("system")}>{t("settings.section_system")}</button>
+              <button role="tab" aria-selected={settingsSection === "agent"} className={settingsSection === "agent" ? "active" : ""} onClick={() => setSettingsSection("agent")}>{t("settings.section_agent")}</button>
+              <button role="tab" aria-selected={settingsSection === "data"} className={settingsSection === "data" ? "active" : ""} onClick={() => setSettingsSection("data")}>{t("settings.section_data")}</button>
+            </nav>
+            {settingsSection === "display" && (
+              <div className="settings-section-content">
             <dl className="settings-list">
               <dt>{t("settings.theme")}</dt>
               <dd>
@@ -3055,10 +3087,6 @@ function App() {
                 </select>
                 <span className="settings-theme-hint">{t("settings.theme_saved")}</span>
               </dd>
-              <dt>{t("settings.daemon_port")}</dt>
-              <dd>
-                <code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})
-              </dd>
               <dt>{t("settings.language")}</dt>
               <dd>
                 <select
@@ -3071,110 +3099,94 @@ function App() {
                   <option value="en">English</option>
                 </select>
               </dd>
-              <dt>{t("settings.data_dir")}</dt>
-              <dd>
-                <code>%LOCALAPPDATA%\akasha</code> (Windows) ou{" "}
-                <code>~/.local/share/akasha</code> (Linux/macOS)
-              </dd>
             </dl>
-            <h3 className="settings-subtitle">{t("settings.agent_profile_title")}</h3>
-            <p className="settings-doc muted">
-              {t("settings.agent_profile_desc")}
-            </p>
-            {agentProfileError && (
-              <p className="error-inline" role="alert">{agentProfileError}</p>
-            )}
-            {agentProfileLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
-            {!agentProfileLoading && (
-              <div className="settings-agent-profile">
-                <dl className="settings-list">
-                  <dt>{t("settings.agent_profile_name")}</dt>
-                  <dd>
-                    <input
-                      type="text"
-                      aria-label={t("settings.agent_profile_name")}
-                      className="settings-input"
-                      value={agentProfile.name}
-                      onChange={(e) => setAgentProfile((p) => ({ ...p, name: e.target.value }))}
-                      placeholder="Akasha"
-                    />
-                  </dd>
-                  <dt>{t("settings.agent_profile_personality")}</dt>
-                  <dd>
-                    <textarea
-                      aria-label={t("settings.agent_profile_personality")}
-                      className="settings-textarea"
-                      rows={4}
-                      value={agentProfile.personality}
-                      onChange={(e) => setAgentProfile((p) => ({ ...p, personality: e.target.value }))}
-                      placeholder={t("settings.agent_profile_personality")}
-                    />
-                  </dd>
-                  <dt>{t("settings.agent_profile_rules")}</dt>
-                  <dd>
-                    <textarea
-                      aria-label={t("settings.agent_profile_rules")}
-                      className="settings-textarea"
-                      rows={3}
-                      value={agentProfile.rules.join("\n")}
-                      onChange={(e) => setAgentProfile((p) => ({ ...p, rules: e.target.value.split("\n").map((s) => s.trim()).filter(Boolean) }))}
-                      placeholder={t("settings.agent_profile_rules")}
-                    />
-                  </dd>
-                  <dt>{t("settings.agent_profile_can_do")}</dt>
-                  <dd>
-                    <textarea
-                      aria-label={t("settings.agent_profile_can_do")}
-                      className="settings-textarea"
-                      rows={2}
-                      value={agentProfile.can_do.join("\n")}
-                      onChange={(e) => setAgentProfile((p) => ({ ...p, can_do: e.target.value.split("\n").map((s) => s.trim()).filter(Boolean) }))}
-                      placeholder={t("settings.agent_profile_can_do")}
-                    />
-                  </dd>
-                  <dt>{t("settings.agent_profile_cannot_do")}</dt>
-                  <dd>
-                    <textarea
-                      aria-label={t("settings.agent_profile_cannot_do")}
-                      className="settings-textarea"
-                      rows={2}
-                      value={agentProfile.cannot_do.join("\n")}
-                      onChange={(e) => setAgentProfile((p) => ({ ...p, cannot_do: e.target.value.split("\n").map((s) => s.trim()).filter(Boolean) }))}
-                      placeholder={t("settings.agent_profile_cannot_do")}
-                    />
-                  </dd>
-                </dl>
-                <button
-                  type="button"
-                  className="refresh-btn"
-                  disabled={agentProfileSaving}
-                  onClick={async () => {
-                    setAgentProfileSaving(true);
-                    setAgentProfileError(null);
-                    try {
-                      await invoke("post_agent_profile", {
-                        body: {
-                          name: agentProfile.name.trim() || undefined,
-                          personality: agentProfile.personality.trim() || undefined,
-                          rules: agentProfile.rules,
-                          can_do: agentProfile.can_do,
-                          cannot_do: agentProfile.cannot_do,
-                        },
-                        port: DAEMON_PORT,
-                      });
-                    } catch (err) {
-                      setAgentProfileError(String(err));
-                    } finally {
-                      setAgentProfileSaving(false);
-                    }
-                  }}
-                >
-                  {agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}
-                </button>
               </div>
             )}
-            <h3 className="settings-subtitle">{t("settings.user_rag_title")}</h3>
-            <p className="settings-doc muted">
+            {settingsSection === "system" && (
+              <div className="settings-section-content">
+                <dl className="settings-list">
+                  <dt>{t("settings.daemon_port")}</dt>
+                  <dd><code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})</dd>
+                  <dt>{t("settings.data_dir")}</dt>
+                  <dd><code>%LOCALAPPDATA%\akasha</code> (Windows) ou <code>~/.local/share/akasha</code> (Linux/macOS)</dd>
+                </dl>
+              </div>
+            )}
+            {settingsSection === "agent" && (
+              <div className="settings-section-content">
+                <p className="settings-doc muted">{t("settings.agent_profile_desc")}</p>
+                {agentProfileError && <p className="error-inline" role="alert">{agentProfileError}</p>}
+                <div className="settings-agent-template-row">
+                  <label htmlFor="agent-profile-template">{t("settings.agent_profile_apply_template")}</label>
+                  <select id="agent-profile-template" className="settings-theme-select" value="" onChange={(e) => { const idx = e.target.value ? parseInt(e.target.value, 10) : -1; e.target.value = ""; if (idx >= 0 && idx < AGENT_PROFILE_TEMPLATES.length) { const tpl = AGENT_PROFILE_TEMPLATES[idx]; setAgentProfile({ name: tpl.name, personality: tpl.personality, rules: [...tpl.rules], can_do: [...tpl.can_do], cannot_do: [...tpl.cannot_do] }); } }}>
+                    <option value="">—</option>
+                    {AGENT_PROFILE_TEMPLATES.map((tpl, i) => (<option key={i} value={i}>{tpl.label}</option>))}
+                  </select>
+                </div>
+                {agentProfileLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
+                {!agentProfileLoading && (
+                  <>
+                    <div className="settings-agent-subtabs" role="tablist" aria-label={t("settings.agent_profile_title")}>
+                      {(["identity", "personality", "rules", "can_do", "cannot_do"] as const).map((st) => (
+                        <button key={st} role="tab" aria-selected={agentProfileSubTab === st} className={agentProfileSubTab === st ? "active" : ""} onClick={() => setAgentProfileSubTab(st)}>{t(`settings.agent_subtab_${st}`)}</button>
+                      ))}
+                    </div>
+                    <div className="settings-agent-tab-content">
+                      {agentProfileSubTab === "identity" && (
+                        <dl className="settings-list">
+                          <dt>{t("settings.agent_profile_name")}</dt>
+                          <dd>
+                            <input type="text" aria-label={t("settings.agent_profile_name")} className="settings-input" maxLength={AGENT_PROFILE_LIMITS.name} value={agentProfile.name} onChange={(e) => setAgentProfile((p) => ({ ...p, name: e.target.value.slice(0, AGENT_PROFILE_LIMITS.name) }))} placeholder="Akasha" />
+                            <span className="settings-char-count">{agentProfile.name.length} / {AGENT_PROFILE_LIMITS.name}</span>
+                          </dd>
+                        </dl>
+                      )}
+                      {agentProfileSubTab === "personality" && (
+                        <dl className="settings-list">
+                          <dt>{t("settings.agent_profile_personality")}</dt>
+                          <dd>
+                            <textarea aria-label={t("settings.agent_profile_personality")} className="settings-textarea" rows={8} maxLength={AGENT_PROFILE_LIMITS.personality} value={agentProfile.personality} onChange={(e) => setAgentProfile((p) => ({ ...p, personality: e.target.value.slice(0, AGENT_PROFILE_LIMITS.personality) }))} placeholder={t("settings.agent_profile_personality")} />
+                            <span className="settings-char-count">{agentProfile.personality.length} / {AGENT_PROFILE_LIMITS.personality}</span>
+                          </dd>
+                        </dl>
+                      )}
+                      {agentProfileSubTab === "rules" && (
+                        <dl className="settings-list">
+                          <dt>{t("settings.agent_profile_rules")}</dt>
+                          <dd>
+                            <textarea aria-label={t("settings.agent_profile_rules")} className="settings-textarea" rows={8} value={agentProfile.rules.join("\n")} onChange={(e) => { const lines = e.target.value.split("\n").map((s) => s.trim()).filter(Boolean); const limited = lines.slice(0, AGENT_PROFILE_LIMITS.ruleCount).map((line) => line.slice(0, AGENT_PROFILE_LIMITS.ruleLength)); setAgentProfile((p) => ({ ...p, rules: limited })); }} placeholder={t("settings.agent_profile_rules")} />
+                            <span className="settings-char-count">{agentProfile.rules.length} / {AGENT_PROFILE_LIMITS.ruleCount} {t("settings.lines")}</span>
+                          </dd>
+                        </dl>
+                      )}
+                      {agentProfileSubTab === "can_do" && (
+                        <dl className="settings-list">
+                          <dt>{t("settings.agent_profile_can_do")}</dt>
+                          <dd>
+                            <textarea aria-label={t("settings.agent_profile_can_do")} className="settings-textarea" rows={8} value={agentProfile.can_do.join("\n")} onChange={(e) => { const lines = e.target.value.split("\n").map((s) => s.trim()).filter(Boolean); const limited = lines.slice(0, AGENT_PROFILE_LIMITS.canDoCount).map((line) => line.slice(0, AGENT_PROFILE_LIMITS.canDoLength)); setAgentProfile((p) => ({ ...p, can_do: limited })); }} placeholder={t("settings.agent_profile_can_do")} />
+                            <span className="settings-char-count">{agentProfile.can_do.length} / {AGENT_PROFILE_LIMITS.canDoCount} {t("settings.lines")}</span>
+                          </dd>
+                        </dl>
+                      )}
+                      {agentProfileSubTab === "cannot_do" && (
+                        <dl className="settings-list">
+                          <dt>{t("settings.agent_profile_cannot_do")}</dt>
+                          <dd>
+                            <textarea aria-label={t("settings.agent_profile_cannot_do")} className="settings-textarea" rows={8} value={agentProfile.cannot_do.join("\n")} onChange={(e) => { const lines = e.target.value.split("\n").map((s) => s.trim()).filter(Boolean); const limited = lines.slice(0, AGENT_PROFILE_LIMITS.cannotDoCount).map((line) => line.slice(0, AGENT_PROFILE_LIMITS.cannotDoLength)); setAgentProfile((p) => ({ ...p, cannot_do: limited })); }} placeholder={t("settings.agent_profile_cannot_do")} />
+                            <span className="settings-char-count">{agentProfile.cannot_do.length} / {AGENT_PROFILE_LIMITS.cannotDoCount} {t("settings.lines")}</span>
+                          </dd>
+                        </dl>
+                      )}
+                    </div>
+                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
+                  </>
+                )}
+              </div>
+            )}
+            {settingsSection === "data" && (
+              <div className="settings-section-content">
+                <h3 className="settings-subtitle">{t("settings.user_rag_title")}</h3>
+                <p className="settings-doc muted">
               {t("settings.user_rag_desc")}
             </p>
             {userRagError && (
@@ -3241,8 +3253,9 @@ function App() {
                 ))}
               </ul>
             )}
-            <p className="settings-doc">
-              {t("settings.config_note")} </p>
+            <p className="settings-doc">{t("settings.config_note")}</p>
+              </div>
+            )}
           </section>
         )}
       </main>

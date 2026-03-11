@@ -126,6 +126,10 @@ Définit l’**identité et la personnalité** de l’agent : nom, ton, règles 
 | `can_do`     | liste de strings | Non         | Comportements autorisés.                                                    |
 | `cannot_do`   | liste de strings | Non         | Comportements interdits.                                                    |
 
+### Limites (UI)
+
+L'interface web applique des limites : **name** 128 caractères, **personality** 2 000, **rules** 30 entrées max (500 car. par règle), **can_do** / **cannot_do** 30 entrées max (300 car. par entrée). Compteurs affichés dans chaque champ.
+
 ### Lien avec le prompt
 
 Le daemon charge le profil au démarrage (et après chaque POST `/api/agent-profile`). À chaque tour, il produit un bloc `[Profil et consignes de l'agent]` avec : identité (nom toujours présent, avec formulation du type « Tu es « X ». C’est ton nom. Tu te souviens de ton nom… »), personnalité, règles, can_do, cannot_do. Ce bloc est injecté en tête du contexte système avant la mémoire et le RAG.
@@ -133,7 +137,7 @@ Le daemon charge le profil au démarrage (et après chaque POST `/api/agent-prof
 ### Édition
 
 - **CLI** : `akasha init` propose des templates de personnalité (Neutre, Bienveillant, Concis/technique, Créatif, Strict/sécurisé) et écrit `agent_profile.json`.
-- **UI** : Paramètres → section « Profil de l’agent » : champs Nom, Personnalité, Règles, Autorisé, Interdit ; bouton Enregistrer (POST `/api/agent-profile`).
+- **UI** : Paramètres → section « Profil de l’agent » : champs Nom, Personnalité, Règles, Autorisé, Interdit ; sélecteur de template de personnalité (5 templates) ; bouton Enregistrer (POST `/api/agent-profile`). Paramètres organisés en 4 onglets : Affichage, Système, Agent, Data.
 - **Manuel** : éditer `data_dir/agent_profile.json` puis redémarrer le daemon (ou envoyer POST pour invalider le cache).
 
 ### Exemple
