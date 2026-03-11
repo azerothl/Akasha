@@ -1850,20 +1850,24 @@ async fn execute_tool_call(
             let interface = args.get(0).map(String::as_str).unwrap_or("");
             let device_id = args.get(1).map(String::as_str).unwrap_or("");
             let action = args.get(2).map(String::as_str).unwrap_or("");
-            let params_json = args
-                .get(3..)
-                .filter(|slice| !slice.is_empty())
-                .map(|a| serde_json::json!(a));
             if interface.is_empty() || device_id.is_empty() || action.is_empty() {
                 return (false, "[device_invoke] usage: device_invoke <interface> <device_id> <action> [params...]".to_string());
             }
             if !executor.policy.can_use_device_interface(interface) {
                 return (false, format!("[device_invoke] interface '{}' not allowed by policy", interface));
             }
-            // Params: if a single 4th arg is valid JSON, use it; else {}
-            let params = match args.get(3) {
-                Some(s) => serde_json::from_str(s).unwrap_or(serde_json::json!({})),
-                None => params_json.unwrap_or(serde_json::json!({})),
+            // Params:
+            // - if a single 4th arg is valid JSON, use it; else {}
+            // - if multiple params are provided, pass them as a JSON array of strings
+            let params = if args.len() <= 3 {
+                serde_json::json!({})
+            } else if args.len() == 4 {
+                // Single params argument: try to parse as JSON, fall back to {}
+                serde_json::from_str::<serde_json::Value>(&args[3])
+                    .unwrap_or_else(|_| serde_json::json!({}))
+            } else {
+                // Multiple params: pass the remaining args as a JSON array
+                serde_json::json!(args[3..].to_vec())
             };
             if interface == "local_media" {
                 let bridge = match device_bridge {
