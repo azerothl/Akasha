@@ -1779,6 +1779,108 @@ pre,
   margin-top: 0.25rem;
 }
 
+/* Two-column form for rules / can_do / cannot_do: add input left, list right */
+.settings-list-two-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+  align-items: start;
+  max-width: 56rem;
+}
+@media (max-width: 640px) {
+  .settings-list-two-cols {
+    grid-template-columns: 1fr;
+  }
+}
+.settings-list-add-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.settings-label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--akasha-text);
+  margin: 0;
+}
+.settings-add-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.settings-add-row .settings-input {
+  flex: 1;
+  min-width: 0;
+}
+.settings-add-btn {
+  flex-shrink: 0;
+}
+.settings-list-list-col {
+  background: var(--akasha-bg-surface);
+  border: 1px solid var(--akasha-border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  min-height: 6rem;
+  max-height: 20rem;
+  overflow-y: auto;
+}
+.settings-list-col-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--akasha-text-muted);
+}
+.settings-list-empty {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--akasha-text-dim);
+  font-style: italic;
+}
+.settings-list-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.settings-list-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--akasha-border);
+  font-size: 0.875rem;
+}
+.settings-list-item:last-child {
+  border-bottom: none;
+}
+.settings-list-item-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-list-item-delete {
+  flex-shrink: 0;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--akasha-text-muted);
+  border: 1px solid var(--akasha-border);
+  border-radius: 4px;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.settings-list-item-delete:hover {
+  color: var(--akasha-error);
+  border-color: var(--akasha-error);
+  background: color-mix(in srgb, var(--akasha-error) 15%, transparent);
+}
+
 .settings-list {
   margin: 0 0 1rem;
 }

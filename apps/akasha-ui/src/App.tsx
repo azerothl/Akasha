@@ -312,6 +312,9 @@ function App() {
   const [agentProfileError, setAgentProfileError] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("display");
   const [agentProfileSubTab, setAgentProfileSubTab] = useState<AgentProfileSubTab>("identity");
+  const [rulesDraft, setRulesDraft] = useState("");
+  const [canDoDraft, setCanDoDraft] = useState("");
+  const [cannotDoDraft, setCannotDoDraft] = useState("");
   /** Attachments for the next message: images (vision) and documents (text appended to message). */
   const [attachments, setAttachments] = useState<Array<{ id: string; name: string; typ: "image" | "document"; content_base64: string; mime_type: string }>>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -3174,31 +3177,181 @@ function App() {
                         </dl>
                       )}
                       {agentProfileSubTab === "rules" && (
-                        <dl className="settings-list">
-                          <dt>{t("settings.agent_profile_rules")}</dt>
-                          <dd>
-                            <textarea aria-label={t("settings.agent_profile_rules")} className="settings-textarea" rows={8} value={agentProfile.rules.join("\n")} onChange={(e) => { const lines = e.target.value.split("\n").map((s) => s.trim()).filter(Boolean); const limited = lines.slice(0, AGENT_PROFILE_LIMITS.ruleCount).map((line) => line.slice(0, AGENT_PROFILE_LIMITS.ruleLength)); setAgentProfile((p) => ({ ...p, rules: limited })); }} placeholder={t("settings.agent_profile_rules")} />
+                        <div className="settings-list-two-cols">
+                          <div className="settings-list-add-col">
+                            <label className="settings-label" htmlFor="agent-rules-add">{t("settings.agent_profile_rules")}</label>
+                            <div className="settings-add-row">
+                              <input
+                                id="agent-rules-add"
+                                type="text"
+                                className="settings-input"
+                                maxLength={AGENT_PROFILE_LIMITS.ruleLength}
+                                value={rulesDraft}
+                                onChange={(e) => setRulesDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    const trimmed = rulesDraft.trim();
+                                    if (trimmed && agentProfile.rules.length < AGENT_PROFILE_LIMITS.ruleCount) {
+                                      setAgentProfile((p) => ({ ...p, rules: [...p.rules, trimmed.slice(0, AGENT_PROFILE_LIMITS.ruleLength)] }));
+                                      setRulesDraft("");
+                                    }
+                                  }
+                                }}
+                                placeholder={t("settings.agent_add_line_placeholder")}
+                                aria-label={t("settings.agent_profile_rules")}
+                              />
+                              <button
+                                type="button"
+                                className="btn-secondary settings-add-btn"
+                                disabled={!rulesDraft.trim() || agentProfile.rules.length >= AGENT_PROFILE_LIMITS.ruleCount}
+                                onClick={() => {
+                                  const trimmed = rulesDraft.trim();
+                                  if (trimmed && agentProfile.rules.length < AGENT_PROFILE_LIMITS.ruleCount) {
+                                    setAgentProfile((p) => ({ ...p, rules: [...p.rules, trimmed.slice(0, AGENT_PROFILE_LIMITS.ruleLength)] }));
+                                    setRulesDraft("");
+                                  }
+                                }}
+                              >
+                                {t("settings.agent_add_line")}
+                              </button>
+                            </div>
                             <span className="settings-char-count">{agentProfile.rules.length} / {AGENT_PROFILE_LIMITS.ruleCount} {t("settings.lines")}</span>
-                          </dd>
-                        </dl>
+                          </div>
+                          <div className="settings-list-list-col">
+                            <p className="settings-list-col-title">{t("settings.agent_list_title")}</p>
+                            {agentProfile.rules.length === 0 ? (
+                              <p className="settings-list-empty">{t("settings.agent_list_empty")}</p>
+                            ) : (
+                              <ul className="settings-list-items" role="list">
+                                {agentProfile.rules.map((line, i) => (
+                                  <li key={i} className="settings-list-item">
+                                    <span className="settings-list-item-text">{line}</span>
+                                    <button type="button" className="settings-list-item-delete" onClick={() => setAgentProfile((p) => ({ ...p, rules: p.rules.filter((_, j) => j !== i) }))} aria-label={t("settings.agent_delete_line")}>×</button>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        </div>
                       )}
                       {agentProfileSubTab === "can_do" && (
-                        <dl className="settings-list">
-                          <dt>{t("settings.agent_profile_can_do")}</dt>
-                          <dd>
-                            <textarea aria-label={t("settings.agent_profile_can_do")} className="settings-textarea" rows={8} value={agentProfile.can_do.join("\n")} onChange={(e) => { const lines = e.target.value.split("\n").map((s) => s.trim()).filter(Boolean); const limited = lines.slice(0, AGENT_PROFILE_LIMITS.canDoCount).map((line) => line.slice(0, AGENT_PROFILE_LIMITS.canDoLength)); setAgentProfile((p) => ({ ...p, can_do: limited })); }} placeholder={t("settings.agent_profile_can_do")} />
+                        <div className="settings-list-two-cols">
+                          <div className="settings-list-add-col">
+                            <label className="settings-label" htmlFor="agent-can-do-add">{t("settings.agent_profile_can_do")}</label>
+                            <div className="settings-add-row">
+                              <input
+                                id="agent-can-do-add"
+                                type="text"
+                                className="settings-input"
+                                maxLength={AGENT_PROFILE_LIMITS.canDoLength}
+                                value={canDoDraft}
+                                onChange={(e) => setCanDoDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    const trimmed = canDoDraft.trim();
+                                    if (trimmed && agentProfile.can_do.length < AGENT_PROFILE_LIMITS.canDoCount) {
+                                      setAgentProfile((p) => ({ ...p, can_do: [...p.can_do, trimmed.slice(0, AGENT_PROFILE_LIMITS.canDoLength)] }));
+                                      setCanDoDraft("");
+                                    }
+                                  }
+                                }}
+                                placeholder={t("settings.agent_add_line_placeholder")}
+                                aria-label={t("settings.agent_profile_can_do")}
+                              />
+                              <button
+                                type="button"
+                                className="btn-secondary settings-add-btn"
+                                disabled={!canDoDraft.trim() || agentProfile.can_do.length >= AGENT_PROFILE_LIMITS.canDoCount}
+                                onClick={() => {
+                                  const trimmed = canDoDraft.trim();
+                                  if (trimmed && agentProfile.can_do.length < AGENT_PROFILE_LIMITS.canDoCount) {
+                                    setAgentProfile((p) => ({ ...p, can_do: [...p.can_do, trimmed.slice(0, AGENT_PROFILE_LIMITS.canDoLength)] }));
+                                    setCanDoDraft("");
+                                  }
+                                }}
+                              >
+                                {t("settings.agent_add_line")}
+                              </button>
+                            </div>
                             <span className="settings-char-count">{agentProfile.can_do.length} / {AGENT_PROFILE_LIMITS.canDoCount} {t("settings.lines")}</span>
-                          </dd>
-                        </dl>
+                          </div>
+                          <div className="settings-list-list-col">
+                            <p className="settings-list-col-title">{t("settings.agent_list_title")}</p>
+                            {agentProfile.can_do.length === 0 ? (
+                              <p className="settings-list-empty">{t("settings.agent_list_empty")}</p>
+                            ) : (
+                              <ul className="settings-list-items" role="list">
+                                {agentProfile.can_do.map((line, i) => (
+                                  <li key={i} className="settings-list-item">
+                                    <span className="settings-list-item-text">{line}</span>
+                                    <button type="button" className="settings-list-item-delete" onClick={() => setAgentProfile((p) => ({ ...p, can_do: p.can_do.filter((_, j) => j !== i) }))} aria-label={t("settings.agent_delete_line")}>×</button>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        </div>
                       )}
                       {agentProfileSubTab === "cannot_do" && (
-                        <dl className="settings-list">
-                          <dt>{t("settings.agent_profile_cannot_do")}</dt>
-                          <dd>
-                            <textarea aria-label={t("settings.agent_profile_cannot_do")} className="settings-textarea" rows={8} value={agentProfile.cannot_do.join("\n")} onChange={(e) => { const lines = e.target.value.split("\n").map((s) => s.trim()).filter(Boolean); const limited = lines.slice(0, AGENT_PROFILE_LIMITS.cannotDoCount).map((line) => line.slice(0, AGENT_PROFILE_LIMITS.cannotDoLength)); setAgentProfile((p) => ({ ...p, cannot_do: limited })); }} placeholder={t("settings.agent_profile_cannot_do")} />
+                        <div className="settings-list-two-cols">
+                          <div className="settings-list-add-col">
+                            <label className="settings-label" htmlFor="agent-cannot-do-add">{t("settings.agent_profile_cannot_do")}</label>
+                            <div className="settings-add-row">
+                              <input
+                                id="agent-cannot-do-add"
+                                type="text"
+                                className="settings-input"
+                                maxLength={AGENT_PROFILE_LIMITS.cannotDoLength}
+                                value={cannotDoDraft}
+                                onChange={(e) => setCannotDoDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    const trimmed = cannotDoDraft.trim();
+                                    if (trimmed && agentProfile.cannot_do.length < AGENT_PROFILE_LIMITS.cannotDoCount) {
+                                      setAgentProfile((p) => ({ ...p, cannot_do: [...p.cannot_do, trimmed.slice(0, AGENT_PROFILE_LIMITS.cannotDoLength)] }));
+                                      setCannotDoDraft("");
+                                    }
+                                  }
+                                }}
+                                placeholder={t("settings.agent_add_line_placeholder")}
+                                aria-label={t("settings.agent_profile_cannot_do")}
+                              />
+                              <button
+                                type="button"
+                                className="btn-secondary settings-add-btn"
+                                disabled={!cannotDoDraft.trim() || agentProfile.cannot_do.length >= AGENT_PROFILE_LIMITS.cannotDoCount}
+                                onClick={() => {
+                                  const trimmed = cannotDoDraft.trim();
+                                  if (trimmed && agentProfile.cannot_do.length < AGENT_PROFILE_LIMITS.cannotDoCount) {
+                                    setAgentProfile((p) => ({ ...p, cannot_do: [...p.cannot_do, trimmed.slice(0, AGENT_PROFILE_LIMITS.cannotDoLength)] }));
+                                    setCannotDoDraft("");
+                                  }
+                                }}
+                              >
+                                {t("settings.agent_add_line")}
+                              </button>
+                            </div>
                             <span className="settings-char-count">{agentProfile.cannot_do.length} / {AGENT_PROFILE_LIMITS.cannotDoCount} {t("settings.lines")}</span>
-                          </dd>
-                        </dl>
+                          </div>
+                          <div className="settings-list-list-col">
+                            <p className="settings-list-col-title">{t("settings.agent_list_title")}</p>
+                            {agentProfile.cannot_do.length === 0 ? (
+                              <p className="settings-list-empty">{t("settings.agent_list_empty")}</p>
+                            ) : (
+                              <ul className="settings-list-items" role="list">
+                                {agentProfile.cannot_do.map((line, i) => (
+                                  <li key={i} className="settings-list-item">
+                                    <span className="settings-list-item-text">{line}</span>
+                                    <button type="button" className="settings-list-item-delete" onClick={() => setAgentProfile((p) => ({ ...p, cannot_do: p.cannot_do.filter((_, j) => j !== i) }))} aria-label={t("settings.agent_delete_line")}>×</button>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        </div>
                       )}
                     </div>
                     <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
