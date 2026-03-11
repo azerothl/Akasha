@@ -1795,11 +1795,15 @@ async fn execute_tool_call(
             let interface = args.get(0).map(String::as_str).unwrap_or("").trim();
             let interfaces_to_list: Vec<String> = if interface.is_empty() {
                 let allowed = &executor.policy.allowed_device_interfaces;
-                if allowed.iter().any(|a| a.trim().eq_ignore_ascii_case("*")) {
-                    vec!["local_media".into(), "system".into()]
+                let base: Vec<String> = if allowed.iter().any(|a| a.trim().eq_ignore_ascii_case("*")) {
+                    vec!["local_media".to_string(), "system".to_string()]
                 } else {
                     allowed.clone()
-                }
+                };
+                // Always apply policy filter (respects blocked_device_interfaces)
+                base.into_iter()
+                    .filter(|iface| executor.policy.can_use_device_interface(iface))
+                    .collect()
             } else {
                 if !executor.policy.can_use_device_interface(interface) {
                     return (false, format!("[device_discover] interface '{}' not allowed by policy (allowed_device_interfaces / blocked_device_interfaces)", interface));
@@ -1845,8 +1849,8 @@ async fn execute_tool_call(
                     Some(b) => b,
                     None => return (false, "[device_invoke] device bridge not available (no UI client for local_media)".to_string()),
                 };
-                let (_request_id, rx) = bridge
-                    .submit_request(interface.to_string(), action.to_string(), params)
+                let (request_id, rx) = bridge
+                    .submit_request(interface.to_string(), device_id.to_string(), action.to_string(), params)
                     .await;
                 const DEVICE_TIMEOUT_SECS: u64 = 60;
                 match tokio::time::timeout(
@@ -1865,7 +1869,10 @@ async fn execute_tool_call(
                         (result.success, msg)
                     }
                     Ok(Err(_)) => (false, "[device_invoke] channel closed without result".to_string()),
-                    Err(_) => (false, format!("[device_invoke] timeout after {}s (no UI client responded)", DEVICE_TIMEOUT_SECS)),
+                    Err(_) => {
+                        bridge.cancel(&request_id).await;
+                        (false, format!("[device_invoke] timeout after {}s (no UI client responded)", DEVICE_TIMEOUT_SECS))
+                    }
                 }
             } else if interface == "system" {
                 (false, "[device_invoke] system interface (e.g. print) not yet implemented".to_string())
@@ -3068,10 +3075,11 @@ pub async fn handle_api(
     if method == "GET" && path == "/api/device/pending" {
         if let Some(bridge) = device_bridge {
             match bridge.get_pending().await {
-                Some((request_id, interface, action, params)) => {
+                Some((request_id, interface, device_id, action, params)) => {
                     let body = serde_json::json!({
                         "request_id": request_id,
                         "interface": interface,
+                        "device_id": device_id,
                         "action": action,
                         "params": params,
                     });
