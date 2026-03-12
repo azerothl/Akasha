@@ -145,6 +145,7 @@ impl Daemon {
         let resolved_ollama_url = ollama_url.clone();
         let openai_cfg = router_config.providers.get("openai").cloned();
         let openrouter_cfg = router_config.providers.get("openrouter").cloned();
+        let bitnet_url = router_config.providers.get("bitnet").and_then(|c| c.base_url.clone());
         let metrics_persistence: Option<Arc<dyn akasha_llm::MetricsPersistence>> = match MetricsStore::open(&db_path) {
             Ok(store) => {
                 info!("LLM metrics persistence enabled (akasha.db)");
@@ -213,6 +214,11 @@ impl Daemon {
                 app_title,
             )));
             info!("OpenRouter provider registered");
+        }
+        // BitNet (local llama-server / BitNet inference, OpenAI-compatible API)
+        llm_router.register_provider(Arc::new(akasha_llm::BitNetProvider::new(bitnet_url.clone())));
+        if bitnet_url.is_some() {
+            info!("BitNet provider registered (base_url from config)");
         }
         if std::env::var("AKASHA_DEGRADED_MODE").as_deref() == Ok("1") {
             llm_router.set_degraded_mode(true);

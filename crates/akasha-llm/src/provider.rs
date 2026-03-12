@@ -452,6 +452,150 @@ impl LLMProvider for OpenRouterProvider {
     }
 }
 
+// --- BitNet (local: llama-server / BitNet inference server, OpenAI-compatible API)
+pub struct BitNetProvider {
+    base_url: String,
+}
+
+impl BitNetProvider {
+    pub fn new(base_url: Option<String>) -> Self {
+        Self {
+            base_url: base_url
+                .unwrap_or_else(|| "http://127.0.0.1:8080".into())
+                .trim_end_matches('/')
+                .to_string(),
+        }
+    }
+
+    fn chat_completions_url(&self) -> String {
+        if self.base_url.ends_with("/v1") {
+            format!("{}/chat/completions", self.base_url)
+        } else {
+            format!("{}/v1/chat/completions", self.base_url)
+        }
+    }
+
+    async fn complete_async(
+        &self,
+        request: &CompletionRequest,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let client = reqwest::Client::new();
+        let url = self.chat_completions_url();
+        let messages = match &request.image_data_urls {
+            Some(urls) if !urls.is_empty() => {
+                let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
+                for u in urls {
+                    content.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": u }
+                    }));
+                }
+                serde_json::json!([{ "role": "user", "content": content }])
+            }
+            _ => serde_json::json!([{ "role": "user", "content": request.prompt }]),
+        };
+        let body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "max_tokens": request.max_tokens.unwrap_or(1024),
+            "temperature": request.temperature.unwrap_or(0.7),
+            "stream": false
+        });
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    ProviderError::Timeout
+                } else {
+                    ProviderError::Api(e.to_string())
+                }
+            })?;
+        if resp.status().as_u16() == 429 {
+            return Err(ProviderError::RateLimit);
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::Api(format!("{} {}", status, err_body)));
+        }
+        let json: serde_json::Value = resp.json().await.map_err(|e| ProviderError::Api(e.to_string()))?;
+        let text = json
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let usage = json.get("usage").map(|u| TokenUsage {
+            prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        });
+        let model_used = json.get("model").and_then(|v| v.as_str()).unwrap_or(model).to_string();
+        Ok(CompletionResponse {
+            text,
+            usage,
+            model_used,
+            cost_usd: None,
+        })
+    }
+}
+
+#[async_trait]
+impl LLMProvider for BitNetProvider {
+    fn name(&self) -> &str {
+        "bitnet"
+    }
+
+    fn is_available(&self) -> bool {
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        // Try GET on base URL or /v1/models; many llama.cpp servers respond to root or models
+        let models_url = format!("{}/v1/models", self.base_url);
+        let urls = [
+            self.base_url.as_str(),
+            models_url.as_str(),
+        ];
+        for u in &urls {
+            if client.get(*u).send().is_ok() {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_local(&self) -> bool {
+        true
+    }
+
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
+    async fn complete(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let model = model_override.unwrap_or("default");
+        self.complete_async(request, model, timeout).await
+    }
+}
+
 // --- Akasha Core (local model: embedded LLM when available, else placeholder)
 pub struct AkashaCoreProvider;
 
@@ -604,6 +748,7 @@ impl LLMProvider for AkashaEmbeddedProvider {
                 }
             }
         }
+        let _ = request;
         Err(ProviderError::Unavailable)
     }
 

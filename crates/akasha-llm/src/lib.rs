@@ -14,7 +14,7 @@ pub use discovery::{discover_all, discover_local, discover_network};
 pub use fallback::FallbackEngine;
 pub use metrics::{MetricsCollector, MetricsPersistence, ModelMetrics};
 pub use provider::{
-    AkashaCoreProvider, AkashaEmbeddedProvider, CompletionRequest, CompletionResponse, LLMProvider,
-    OllamaProvider, OpenAIProvider, OpenRouterProvider,
+    AkashaCoreProvider, AkashaEmbeddedProvider, BitNetProvider, CompletionRequest, CompletionResponse,
+    LLMProvider, OllamaProvider, OpenAIProvider, OpenRouterProvider,
 };
 pub use router::LLMRouter;

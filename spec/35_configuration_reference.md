@@ -21,7 +21,7 @@ Ce document décrit **tous les fichiers de configuration** utilisés par Akasha 
 | `global.enable_fallback`                    | booléen      | Non         | Activer le fallback entre providers (défaut : true).                                                                                                                            |
 | `global.default_timeout_secs`               | entier (u64) | Non         | Timeout par requête LLM en secondes (défaut : 300).                                                                                                                             |
 | `global.default_max_retries`                | entier (u32) | Non         | Nombre max de tentatives (défaut : 2).                                                                                                                                          |
-| `providers`                                 | objet        | Non         | Config par provider (clé = nom : `ollama`, `openai`, `openrouter`).                                                                                                             |
+| `providers`                                 | objet        | Non         | Config par provider (clé = nom : `ollama`, `openai`, `openrouter`, `bitnet`).                                                                                                    |
 | `providers.<nom>.base_url`                  | string       | Non         | URL de base (ex. `http://localhost:11434` pour Ollama).                                                                                                                         |
 | `providers.<nom>.api_key_ref`               | string       | Non         | Référence de la clé API : `vault://nom_cle` (résolution via vault en priorité), ou nom de clé sans préfixe (résolution via variable d'environnement, ex. `openrouter_api_key`). |
 | `providers.<nom>.organization`              | string       | Non         | Ex. OpenAI organization.                                                                                                                                                        |
@@ -42,7 +42,7 @@ Ce document décrit **tous les fichiers de configuration** utilisés par Akasha 
 | Clé                                | Type           | Obligatoire            | Description                                                                           |
 | ---------------------------------- | -------------- | ---------------------- | ------------------------------------------------------------------------------------- |
 | `primary`                          | objet          | Non                    | Route principale.                                                                     |
-| `primary.provider`                 | string         | Oui si primary présent | Nom du provider : `ollama`, `openai`, `openrouter`, `akasha_embedded`, `akasha_core`. |
+| `primary.provider`                 | string         | Oui si primary présent | Nom du provider : `ollama`, `openai`, `openrouter`, `bitnet`, `akasha_embedded`, `akasha_core`. |
 | `primary.model`                    | string         | Oui si primary présent | Nom du modèle (ex. `default`, `llama3.2`, `gpt-4`).                                   |
 | `primary.config`                   | objet          | Non                    | Options libres (max_tokens, temperature, etc.).                                       |
 | `fallback`                         | liste d’objets | Non                    | Liste de `{ provider, model, config? }` en cas d’échec du primary.                    |
@@ -61,6 +61,7 @@ Voir [llm_router.example.yaml](llm_router.example.yaml).
 
 - **Premier lancement** : `akasha init` ou `akasha doctor --fix` génère un fichier par défaut (akasha_embedded + akasha_core).
 - **Utiliser Ollama** : ajouter `providers.ollama.base_url` et `akasha config models set conversation ollama llama3.2`.
+- **Utiliser BitNet** (serveur local type llama-server / BitNet) : ajouter `providers.bitnet.base_url: "http://127.0.0.1:8080"` (optionnel, défaut 8080) et définir la route avec `provider: bitnet`, `model: default` (voir [36_bitnet_integration_study.md](36_bitnet_integration_study.md)).
 - **Utiliser OpenAI** : `providers.openai.api_key_ref: "vault://openai_api_key"` puis définir la route pour une catégorie.
 - **Modèle système (mémoire, décomposition)** : la catégorie `system` doit exister ; par défaut elle pointe vers `akasha_embedded` (voir [06_memory_model.md](06_memory_model.md)).
 - **OpenRouter / OpenAI en primary** : le daemon enregistre le provider OpenRouter (resp. OpenAI) dès qu’une clé API est disponible : variable d’environnement `OPENROUTER_API_KEY` (resp. `OPENAI_API_KEY`) ou vault `vault://openrouter_api_key` (resp. `vault://openai_api_key`). Il n’est pas obligatoire d’avoir une section `providers.openrouter` (resp. `providers.openai`) dans `llm_router.yaml` ; définir la route (ex. `task_types.conversation.primary: { provider: openrouter, model: "..." }`) via la TUI ou le fichier suffit une fois la clé définie.
