@@ -1,8 +1,12 @@
 //! Scheduler service: tick, create task_runs with dedup, push to orchestrator (spec 37_scheduler_design)
 
 use akasha_core::{EventEnvelope, EventType};
-use akasha_store::{Schedule, ScheduleStore, Task, TaskRun, TaskRunStatus, TaskStatus, TaskStore};
+use akasha_store::{
+    Schedule, ScheduleExceptionType, ScheduleStore, Task, TaskRun, TaskRunStatus, TaskStatus, TaskStore,
+};
 use chrono::{Duration, Utc};
+use rrule::{RRuleSet, Tz as RruleTz};
+use std::str::FromStr;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -57,11 +61,32 @@ async fn tick(
         let enabled = schedule_store.list_enabled_schedules()?;
         let mut pending = Vec::new();
         for schedule in enabled {
-            let Some(interval_secs) = schedule.interval_seconds else {
-                continue;
+            let slots = if schedule.rrule.trim().is_empty() {
+                let Some(interval_secs) = schedule.interval_seconds else {
+                    continue;
+                };
+                due_slots_interval(&schedule_store, &schedule, now, interval_secs)?
+            } else {
+                match due_slots_rrule(&schedule_store, &schedule, now) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(schedule_id = %schedule.id, error = %e, "Scheduler: RRULE parse failed, skipping schedule");
+                        continue;
+                    }
+                }
             };
-            let slots = due_slots(&schedule_store, &schedule, now, interval_secs)?;
-            for planned_for in slots.into_iter().take(MAX_CATCHUP) {
+            let exceptions = schedule_store.get_exceptions_for_schedule(schedule.id)?;
+            let tz_for_exceptions: RruleTz = chrono_tz::Tz::from_str(&schedule.timezone)
+                .map(RruleTz::from)
+                .unwrap_or(RruleTz::UTC);
+            for planned_for in slots
+                .into_iter()
+                .filter(|pf| {
+                    let d = pf.with_timezone(&tz_for_exceptions).date_naive();
+                    !exceptions.iter().any(|e| e.type_ == ScheduleExceptionType::Skip && e.date == d)
+                })
+                .take(MAX_CATCHUP)
+            {
                 let dedup_key = format!("{}:{}", schedule.id, planned_for.timestamp());
                 if schedule_store.dedup_key_exists(&dedup_key)? {
                     continue;
@@ -186,9 +211,53 @@ fn sync_terminal_task_run_statuses(
     Ok(())
 }
 
-/// Returns all due slots (<= now) for which no run has been created yet, starting from the
-/// slot after the last known run. Bounded implicitly by MAX_CATCHUP at the call site.
-fn due_slots(
+/// Returns due slots from RRULE (iCal): occurrences between last run (or start_at) and now.
+/// Bounded by MAX_CATCHUP at call site.
+fn due_slots_rrule(
+    schedule_store: &ScheduleStore,
+    schedule: &Schedule,
+    now: chrono::DateTime<Utc>,
+) -> anyhow::Result<Vec<chrono::DateTime<Utc>>> {
+    if let Some(end_at) = schedule.end_at {
+        if end_at < now {
+            return Ok(vec![]);
+        }
+    }
+    let runs = schedule_store.list_task_runs(Some(schedule.id), 1)?;
+    let last_planned = runs.into_iter().next().map(|r| r.planned_for);
+    let after = last_planned.unwrap_or_else(|| schedule.start_at - Duration::seconds(1));
+    let before = now + Duration::seconds(1);
+    let chrono_tz = chrono_tz::Tz::from_str(&schedule.timezone)
+        .map_err(|e| anyhow::anyhow!("invalid schedule timezone {}: {:?}", schedule.timezone, e))?;
+    let tz: RruleTz = RruleTz::from(chrono_tz);
+    let after_tz = after.with_timezone(&tz);
+    let before_tz = before.with_timezone(&tz);
+    let start_at_tz = schedule.start_at.with_timezone(&tz);
+    // Use UTC format (Z suffix) for UTC-equivalent timezones, TZID format for all others.
+    let tz_name = chrono_tz.name();
+    let is_utc_equiv = matches!(tz_name, "UTC" | "Etc/UTC" | "Etc/GMT" | "GMT");
+    let dtstart = if is_utc_equiv {
+        format!("DTSTART:{}Z", schedule.start_at.format("%Y%m%dT%H%M%S"))
+    } else {
+        format!("DTSTART;TZID={}:{}", tz_name, start_at_tz.format("%Y%m%dT%H%M%S"))
+    };
+    let rrule_set_str = format!("{}\nRRULE:{}", dtstart, schedule.rrule.trim());
+    let rrule_set: RRuleSet = rrule_set_str.parse().map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    let limit = (MAX_CATCHUP * 2).min(u16::MAX as usize) as u16;
+    let result = rrule_set.after(after_tz).before(before_tz).all(limit);
+    let slots: Vec<chrono::DateTime<Utc>> = result
+        .dates
+        .into_iter()
+        .map(|dt| dt.with_timezone(&Utc))
+        .filter(|dt| *dt <= now && (last_planned.is_none() || *dt > last_planned.unwrap()))
+        .filter(|dt| schedule.end_at.map(|e| *dt <= e).unwrap_or(true))
+        .take(MAX_CATCHUP)
+        .collect();
+    Ok(slots)
+}
+
+/// Returns all due slots (<= now) for interval-based schedules.
+fn due_slots_interval(
     schedule_store: &ScheduleStore,
     schedule: &Schedule,
     now: chrono::DateTime<Utc>,

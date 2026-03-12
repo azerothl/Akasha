@@ -60,4 +60,9 @@ if (-not $NoAutoStart) {
     Write-Host "Skipped auto-start. To start the daemon manually: & '$akashaExe' start"
 }
 
+# Start daemon once (background, so installer does not wait)
+Write-Host "Starting daemon once..."
+Start-Process -FilePath $akashaExe -ArgumentList "start" -WorkingDirectory $InstallDir -WindowStyle Hidden
+Write-Host "Daemon started."
+
 Write-Host "Installation complete."

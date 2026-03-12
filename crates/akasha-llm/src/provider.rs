@@ -452,6 +452,424 @@ impl LLMProvider for OpenRouterProvider {
     }
 }
 
+// --- Anthropic (cloud, Messages API)
+pub struct AnthropicProvider {
+    api_key: String,
+    base_url: String,
+}
+
+impl AnthropicProvider {
+    pub fn new(api_key: Option<String>, base_url: Option<String>) -> Self {
+        Self {
+            api_key: api_key.unwrap_or_default(),
+            base_url: base_url
+                .unwrap_or_else(|| "https://api.anthropic.com".into())
+                .trim_end_matches('/')
+                .to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for AnthropicProvider {
+    fn name(&self) -> &str {
+        "anthropic"
+    }
+    fn is_available(&self) -> bool {
+        !self.api_key.is_empty()
+    }
+    fn is_local(&self) -> bool {
+        false
+    }
+    async fn complete(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Auth("missing API key".into()));
+        }
+        let model = model_override.unwrap_or("claude-3-5-sonnet-20241022");
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1/messages", self.base_url);
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": request.max_tokens.unwrap_or(1024),
+            "messages": [{ "role": "user", "content": request.prompt }]
+        });
+        let resp = client
+            .post(&url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| if e.is_timeout() { ProviderError::Timeout } else { ProviderError::Api(e.to_string()) })?;
+        if resp.status().as_u16() == 429 {
+            return Err(ProviderError::RateLimit);
+        }
+        if resp.status().as_u16() == 401 {
+            return Err(ProviderError::Auth("invalid API key".into()));
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::Api(format!("{} {}", status, err_body)));
+        }
+        let json: serde_json::Value = resp.json().await.map_err(|e| ProviderError::Api(e.to_string()))?;
+        let text = json
+            .get("content")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+            .and_then(|b| b.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let usage = json.get("usage").map(|u| TokenUsage {
+            prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        });
+        Ok(CompletionResponse {
+            text,
+            usage,
+            model_used: model.to_string(),
+            cost_usd: None,
+        })
+    }
+}
+
+// --- Azure OpenAI (cloud, same shape as OpenAI but custom endpoint + api-key header)
+pub struct AzureOpenAIProvider {
+    api_key: String,
+    base_url: String,
+}
+
+impl AzureOpenAIProvider {
+    pub fn new(api_key: Option<String>, base_url: Option<String>) -> Self {
+        let base = base_url
+            .unwrap_or_else(|| "https://your-resource.openai.azure.com".into())
+            .trim_end_matches('/')
+            .to_string();
+        Self {
+            api_key: api_key.unwrap_or_default(),
+            base_url: base,
+        }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for AzureOpenAIProvider {
+    fn name(&self) -> &str {
+        "azure_openai"
+    }
+    fn is_available(&self) -> bool {
+        !self.api_key.is_empty() && !self.base_url.is_empty()
+    }
+    fn is_local(&self) -> bool {
+        false
+    }
+    async fn complete(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Auth("missing API key".into()));
+        }
+        let deployment = model_override.unwrap_or("gpt-4o-mini");
+        let client = reqwest::Client::new();
+        let url = format!(
+            "{}/openai/deployments/{}/chat/completions?api-version=2024-02-15-preview",
+            self.base_url.trim_end_matches('/'),
+            deployment
+        );
+        let messages = serde_json::json!([{ "role": "user", "content": request.prompt }]);
+        let body = serde_json::json!({
+            "messages": messages,
+            "max_tokens": request.max_tokens.unwrap_or(1024),
+            "temperature": request.temperature.unwrap_or(0.7)
+        });
+        let resp = client
+            .post(&url)
+            .header("api-key", &self.api_key)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| if e.is_timeout() { ProviderError::Timeout } else { ProviderError::Api(e.to_string()) })?;
+        if resp.status().as_u16() == 429 {
+            return Err(ProviderError::RateLimit);
+        }
+        if resp.status().as_u16() == 401 {
+            return Err(ProviderError::Auth("invalid API key".into()));
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::Api(format!("{} {}", status, err_body)));
+        }
+        let json: serde_json::Value = resp.json().await.map_err(|e| ProviderError::Api(e.to_string()))?;
+        let text = json
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let usage = json.get("usage").map(|u| TokenUsage {
+            prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        });
+        Ok(CompletionResponse {
+            text,
+            usage,
+            model_used: deployment.to_string(),
+            cost_usd: None,
+        })
+    }
+}
+
+// --- Google AI (Gemini, generativelanguage API)
+pub struct GoogleAIProvider {
+    api_key: String,
+    base_url: String,
+}
+
+impl GoogleAIProvider {
+    pub fn new(api_key: Option<String>, base_url: Option<String>) -> Self {
+        Self {
+            api_key: api_key.unwrap_or_default(),
+            base_url: base_url
+                .unwrap_or_else(|| "https://generativelanguage.googleapis.com".into())
+                .trim_end_matches('/')
+                .to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for GoogleAIProvider {
+    fn name(&self) -> &str {
+        "google"
+    }
+    fn is_available(&self) -> bool {
+        !self.api_key.is_empty()
+    }
+    fn is_local(&self) -> bool {
+        false
+    }
+    async fn complete(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Auth("missing API key".into()));
+        }
+        let model = model_override.unwrap_or("gemini-1.5-flash");
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1beta/models/{}:generateContent?key={}", self.base_url, model, self.api_key);
+        let body = serde_json::json!({
+            "contents": [{ "parts": [{ "text": request.prompt }] }],
+            "generationConfig": {
+                "maxOutputTokens": request.max_tokens.unwrap_or(1024),
+                "temperature": request.temperature.unwrap_or(0.7)
+            }
+        });
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| if e.is_timeout() { ProviderError::Timeout } else { ProviderError::Api(e.to_string()) })?;
+        if resp.status().as_u16() == 429 {
+            return Err(ProviderError::RateLimit);
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::Api(format!("{} {}", status, err_body)));
+        }
+        let json: serde_json::Value = resp.json().await.map_err(|e| ProviderError::Api(e.to_string()))?;
+        let text = json
+            .get("candidates")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+            .and_then(|c| c.get("content"))
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.as_array())
+            .and_then(|a| a.first())
+            .and_then(|p| p.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let usage = json.get("usageMetadata").map(|u| TokenUsage {
+            prompt_tokens: u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0),
+            completion_tokens: u.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0),
+        });
+        Ok(CompletionResponse {
+            text,
+            usage,
+            model_used: model.to_string(),
+            cost_usd: None,
+        })
+    }
+}
+
+// --- BitNet (local: llama-server / BitNet inference server, OpenAI-compatible API)
+pub struct BitNetProvider {
+    base_url: String,
+}
+
+impl BitNetProvider {
+    pub fn new(base_url: Option<String>) -> Self {
+        Self {
+            base_url: base_url
+                .unwrap_or_else(|| "http://127.0.0.1:8080".into())
+                .trim_end_matches('/')
+                .to_string(),
+        }
+    }
+
+    fn chat_completions_url(&self) -> String {
+        if self.base_url.ends_with("/v1") {
+            format!("{}/chat/completions", self.base_url)
+        } else {
+            format!("{}/v1/chat/completions", self.base_url)
+        }
+    }
+
+    async fn complete_async(
+        &self,
+        request: &CompletionRequest,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let client = reqwest::Client::new();
+        let url = self.chat_completions_url();
+        let messages = match &request.image_data_urls {
+            Some(urls) if !urls.is_empty() => {
+                let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
+                for u in urls {
+                    content.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": u }
+                    }));
+                }
+                serde_json::json!([{ "role": "user", "content": content }])
+            }
+            _ => serde_json::json!([{ "role": "user", "content": request.prompt }]),
+        };
+        let body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "max_tokens": request.max_tokens.unwrap_or(1024),
+            "temperature": request.temperature.unwrap_or(0.7),
+            "stream": false
+        });
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    ProviderError::Timeout
+                } else {
+                    ProviderError::Api(e.to_string())
+                }
+            })?;
+        if resp.status().as_u16() == 429 {
+            return Err(ProviderError::RateLimit);
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::Api(format!("{} {}", status, err_body)));
+        }
+        let json: serde_json::Value = resp.json().await.map_err(|e| ProviderError::Api(e.to_string()))?;
+        let text = json
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let usage = json.get("usage").map(|u| TokenUsage {
+            prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        });
+        let model_used = json.get("model").and_then(|v| v.as_str()).unwrap_or(model).to_string();
+        Ok(CompletionResponse {
+            text,
+            usage,
+            model_used,
+            cost_usd: None,
+        })
+    }
+}
+
+#[async_trait]
+impl LLMProvider for BitNetProvider {
+    fn name(&self) -> &str {
+        "bitnet"
+    }
+
+    fn is_available(&self) -> bool {
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        // Try GET on base URL or /v1/models; many llama.cpp servers respond to root or models
+        let models_url = format!("{}/v1/models", self.base_url);
+        let urls = [
+            self.base_url.as_str(),
+            models_url.as_str(),
+        ];
+        for u in &urls {
+            if client.get(*u).send().is_ok() {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_local(&self) -> bool {
+        true
+    }
+
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
+    async fn complete(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let model = model_override.unwrap_or("default");
+        self.complete_async(request, model, timeout).await
+    }
+}
+
 // --- Akasha Core (local model: embedded LLM when available, else placeholder)
 pub struct AkashaCoreProvider;
 
@@ -461,9 +879,10 @@ impl AkashaCoreProvider {
     }
 }
 
+/// Placeholder when no embedded model is available (spec 34: messages utiles, liens init/paths/doc).
 fn placeholder_response(prompt_len: usize) -> CompletionResponse {
     let reply = format!(
-        "[Akasha Core] Request received ({} chars). Local model placeholder. Configure Ollama or cloud providers for full completion.",
+        "Request received ({} chars). No local LLM available. For full replies: run Ollama (e.g. ollama run llama3) or add providers in llm_router.yaml. Setup: akasha init; paths: akasha paths; see Documentation tab for the guide.",
         prompt_len
     );
     let completion_tokens = reply.split_whitespace().count() as u64;
@@ -604,6 +1023,7 @@ impl LLMProvider for AkashaEmbeddedProvider {
                 }
             }
         }
+        let _ = request;
         Err(ProviderError::Unavailable)
     }
 

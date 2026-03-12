@@ -13,7 +13,6 @@ pub fn new_event_bus() -> (EventBus, broadcast::Receiver<EventEnvelope>) {
     (Arc::new(tx), rx)
 }
 
-#[allow(dead_code)]
 pub fn subscribe(bus: &EventBus) -> broadcast::Receiver<EventEnvelope> {
     bus.subscribe()
 }

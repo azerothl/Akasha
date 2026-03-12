@@ -34,7 +34,7 @@ fn akasha_data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("AKASHA_DATA_DIR") {
         return PathBuf::from(dir);
     }
-    dirs::data_local_dir()
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("akasha")
 }

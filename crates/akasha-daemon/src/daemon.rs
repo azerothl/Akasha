@@ -92,9 +92,26 @@ impl Daemon {
                 }
             }
         }
+        if std::env::var("AKASHA_TEAMS_ENABLED").as_deref() == Ok("1") {
+            if let Ok(v) = &vault {
+                if let (Ok(app_id), Ok(app_password)) = (v.get("teams_app_id"), v.get("teams_app_password")) {
+                    channel_config.teams_app_id = Some(app_id);
+                    channel_config.teams_app_password = Some(app_password);
+                    info!("Teams adapter enabled (Bot Framework webhook)");
+                }
+            }
+        }
 
-        // Phase 3: Trust store (plugin signing)
-        let _trust_store = akasha_core::TrustStore::load_from_dir(&self.data_dir.join("trust_store")).ok();
+        // Phase 3: Trust store (plugin signing); when keys present, only signed plugins are loaded
+        let trust_store_dir = self.data_dir.join("trust_store");
+        let trust_store = match akasha_core::TrustStore::load_from_dir(&trust_store_dir) {
+            Ok(store) if store.requires_signing() => Some(std::sync::Arc::new(store)),
+            Ok(_) => None,
+            Err(e) => {
+                warn!(path = %trust_store_dir.display(), error = %e, "Failed to load trust store; refusing startup to avoid unsigned plugin fail-open");
+                return Err(e.into());
+            }
+        };
 
         // Phase 5: Plugin registry + reputation
         let reputation = match crate::plugins::ReputationStore::open(&self.data_dir) {
@@ -105,7 +122,7 @@ impl Daemon {
             }
         };
         let plugins_dir = self.data_dir.join("plugins");
-        let plugin_registry = Arc::new(crate::plugins::PluginRegistry::new(plugins_dir, reputation));
+        let plugin_registry = Arc::new(crate::plugins::PluginRegistry::new(plugins_dir, reputation, trust_store));
         plugin_registry.load_all();
 
         // Phase 6: LLM Router (task classifier, providers, fallback, degraded mode)
@@ -145,6 +162,10 @@ impl Daemon {
         let resolved_ollama_url = ollama_url.clone();
         let openai_cfg = router_config.providers.get("openai").cloned();
         let openrouter_cfg = router_config.providers.get("openrouter").cloned();
+        let anthropic_cfg = router_config.providers.get("anthropic").cloned();
+        let azure_openai_cfg = router_config.providers.get("azure_openai").cloned();
+        let google_cfg = router_config.providers.get("google").cloned();
+        let bitnet_url = router_config.providers.get("bitnet").and_then(|c| c.base_url.clone());
         let metrics_persistence: Option<Arc<dyn akasha_llm::MetricsPersistence>> = match MetricsStore::open(&db_path) {
             Ok(store) => {
                 info!("LLM metrics persistence enabled (akasha.db)");
@@ -214,6 +235,38 @@ impl Daemon {
             )));
             info!("OpenRouter provider registered");
         }
+        // Anthropic (cloud)
+        let anthropic_key = anthropic_cfg
+            .as_ref()
+            .and_then(|c| resolve_api_key(c.api_key_ref.as_ref(), "ANTHROPIC_API_KEY"));
+        if let Some(k) = anthropic_key {
+            let base_url = anthropic_cfg.as_ref().and_then(|c| c.base_url.clone());
+            llm_router.register_provider(Arc::new(akasha_llm::AnthropicProvider::new(Some(k), base_url)));
+            info!("Anthropic provider registered");
+        }
+        // Azure OpenAI (cloud)
+        let azure_key = azure_openai_cfg
+            .as_ref()
+            .and_then(|c| resolve_api_key(c.api_key_ref.as_ref(), "AZURE_OPENAI_API_KEY"));
+        if let Some(k) = azure_key {
+            let base_url = azure_openai_cfg.as_ref().and_then(|c| c.base_url.clone());
+            llm_router.register_provider(Arc::new(akasha_llm::AzureOpenAIProvider::new(Some(k), base_url)));
+            info!("Azure OpenAI provider registered");
+        }
+        // Google AI (Gemini)
+        let google_key = google_cfg
+            .as_ref()
+            .and_then(|c| resolve_api_key(c.api_key_ref.as_ref(), "GOOGLE_AI_API_KEY"));
+        if let Some(k) = google_key {
+            let base_url = google_cfg.as_ref().and_then(|c| c.base_url.clone());
+            llm_router.register_provider(Arc::new(akasha_llm::GoogleAIProvider::new(Some(k), base_url)));
+            info!("Google AI provider registered");
+        }
+        // BitNet (local llama-server / BitNet inference, OpenAI-compatible API)
+        llm_router.register_provider(Arc::new(akasha_llm::BitNetProvider::new(bitnet_url.clone())));
+        if bitnet_url.is_some() {
+            info!("BitNet provider registered (base_url from config)");
+        }
         if std::env::var("AKASHA_DEGRADED_MODE").as_deref() == Ok("1") {
             llm_router.set_degraded_mode(true);
             info!("LLM Router: degraded mode (local providers only)");
@@ -260,6 +313,21 @@ impl Daemon {
                 }
             }
         }
+        let nats_client_opt: Option<async_nats::Client> = if cluster_enabled {
+            let config = akasha_cluster::ClusterConfig::load(&self.data_dir);
+            match akasha_cluster::connect_nats(&config).await {
+                Ok(c) => {
+                    info!("Cluster: NATS connected for replication");
+                    Some(c)
+                }
+                Err(e) => {
+                    warn!(error = %e, "Cluster: NATS connect failed, replication disabled");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let mut leader_rx_opt: Option<tokio::sync::mpsc::Receiver<bool>> = if cluster_enabled {
             let config = akasha_cluster::ClusterConfig::load(&self.data_dir);
             if config.tls_ca.is_some() || config.tls_client_cert.is_some() {
@@ -279,10 +347,9 @@ impl Daemon {
                 if let Ok(log) = ImmutableLog::open(&log_path) {
                     if log.verify().unwrap_or(false) {
                         if let Ok(entry) = log.append("daemon_started") {
-                            let config = akasha_cluster::ClusterConfig::load(&self.data_dir);
-                            if let Ok(client) = akasha_cluster::connect_nats(&config).await {
+                            if let Some(ref client) = nats_client_opt {
                                 let _ = akasha_cluster::publish_log_entry(
-                                    &client,
+                                    client,
                                     &entry.payload,
                                     entry.index,
                                 )
@@ -342,6 +409,15 @@ impl Daemon {
 
             // Phase 2: Event bus, agents, progress cache, events cache (Phase F). Memory (spec 06): short-term + long-term store, embedder (in-process).
             let (bus, _) = crate::agents::new_event_bus();
+            if let Some(ref nats) = nats_client_opt {
+                let nats_pub = nats.clone();
+                let bus_rep = bus.clone();
+                let db_rep = db_path.clone();
+                tokio::spawn(async move {
+                    crate::replication::run_replication_publisher(bus_rep, nats_pub, &db_rep).await;
+                });
+                crate::replication::spawn_replication_subscriber(nats.clone(), db_path.clone());
+            }
             let progress = new_progress_cache();
             let events = new_events_cache();
             let agent_profile_cache = new_agent_profile_cache();
@@ -690,11 +766,12 @@ impl Daemon {
                 let user_rag_store = user_rag_store.clone();
                 let agent_profile_cache = agent_profile_cache.clone();
                 let task_usage_store = task_usage_store.clone();
-                let device_bridge = device_bridge.clone();
-                // Body reading is done inside the spawned task so slow/large uploads
-                                // don't block the accept loop from handling other connections or signals.
-                                let update_check_cache_clone = update_check_cache.clone();
-                                tokio::spawn(async move {
+                                let device_bridge = device_bridge.clone();
+                                let bus_clone = bus.clone();
+                                // Body reading is done inside the spawned task so slow/large uploads
+                                                // don't block the accept loop from handling other connections or signals.
+                                                let update_check_cache_clone = update_check_cache.clone();
+                                                tokio::spawn(async move {
                                     const INITIAL_READ: usize = 65536;
                                     const MAX_BODY: usize = 10 * 1024 * 1024; // 10 MiB for POST body (e.g. documents in base64)
                                     let mut buf = vec![0u8; INITIAL_READ];
@@ -721,34 +798,50 @@ impl Daemon {
                                         _ => buf,
                                     };
                                     let (method, path, body, headers) = parse_request(&full_buf);
-                                    let response = handle_api(
-                                        &method,
-                                        &path,
-                                        body,
-                                        &headers,
-                                        &db_path,
-                                        &progress,
-                                        &events_clone,
-                                        &main_agent,
-                                        &channel_config,
-                                        &plugin_registry,
-                                        &llm_router,
-                                        &rag_pack,
-                                        ollama_url.as_deref(),
-                                        &spec_dir,
-                                        restart_tx,
-                                        tools_executor.as_ref(),
-                                        &skill_registry,
-                                        Some(short_term),
-                                        long_term_client,
-                                        Some(human_input_store),
-                                        &user_rag_store,
-                                        &agent_profile_cache,
-                                        &update_check_cache_clone,
-                                        task_usage_store.as_ref(),
-                                        Some(&device_bridge),
-                                    )
-                                    .await;
+                                    if method == "GET" && path == "/api/events" {
+                                        let _ = crate::api::stream_sse_events(&bus_clone, &mut stream).await;
+                                        return;
+                                    }
+                                    let response = if method == "OPTIONS" {
+                                        "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, PATCH, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n".to_string()
+                                    } else {
+                                        let mut resp = handle_api(
+                                            &method,
+                                            &path,
+                                            body,
+                                            &headers,
+                                            &db_path,
+                                            &progress,
+                                            &events_clone,
+                                            &main_agent,
+                                            &channel_config,
+                                            &plugin_registry,
+                                            &llm_router,
+                                            &rag_pack,
+                                            ollama_url.as_deref(),
+                                            &spec_dir,
+                                            restart_tx,
+                                            tools_executor.as_ref(),
+                                            &skill_registry,
+                                            Some(short_term),
+                                            long_term_client,
+                                            Some(human_input_store),
+                                            &user_rag_store,
+                                            &agent_profile_cache,
+                                            &update_check_cache_clone,
+                                            task_usage_store.as_ref(),
+                                            Some(&device_bridge),
+                                        )
+                                        .await;
+                                        if let Some(idx) = resp.find("\r\n") {
+                                            resp = format!(
+                                                "{}\r\nAccess-Control-Allow-Origin: *{}",
+                                                &resp[..idx],
+                                                &resp[idx..]
+                                            );
+                                        }
+                                        resp
+                                    };
                                     let _ = stream.write_all(response.as_bytes()).await;
                                     let _ = stream.shutdown().await;
                                 });

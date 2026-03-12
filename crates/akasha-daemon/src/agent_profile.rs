@@ -9,9 +9,18 @@ pub struct AgentProfile {
     /// Name given to the agent by the user (e.g. "Akasha", "Assistant").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Personality or tone description (e.g. "bienveillant et concis", "technique").
+    /// Personality or tone description, in English, including role (e.g. "You are a joyful assistant. Upbeat, light humor...").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub personality: Option<String>,
+    /// Explicit role label (e.g. "joyful assistant", "clever assistant"). Reinforced in the prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Gender for pronoun consistency: "male" | "female" | "neutral".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gender: Option<String>,
+    /// Avatar image as data URL or URL (displayed in UI; not used in prompt).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
     /// Rules the agent must follow (one per line).
     #[serde(default)]
     pub rules: Vec<String>,
@@ -29,6 +38,9 @@ impl AgentProfile {
     pub fn is_empty(&self) -> bool {
         self.name.is_none()
             && self.personality.is_none()
+            && self.role.is_none()
+            && self.gender.is_none()
+            && self.avatar.is_none()
             && self.rules.is_empty()
             && self.can_do.is_empty()
             && self.cannot_do.is_empty()
@@ -86,28 +98,47 @@ impl AgentProfile {
     /// The name is always present (default "Akasha" if unset) so the agent always has an identity and "remembers" it.
     pub fn format_for_prompt(&self) -> String {
         let name = self.name.as_deref().unwrap_or(Self::DEFAULT_NAME);
-        let mut out = String::from("[Profil et consignes de l'agent]\n");
+        let mut out = String::from("[Agent profile and instructions]\n");
         out.push_str(&format!(
-            "- Tu es « {} ». C'est ton nom. Tu te souviens de ton nom et tu peux te présenter ainsi quand c'est pertinent.\n",
+            "- You are « {} ». That is your name. You remember it and can introduce yourself when relevant.\n",
             name
         ));
+        if let Some(ref r) = self.role {
+            let r = r.trim();
+            if !r.is_empty() {
+                out.push_str(&format!("- Your role: {}.\n", r));
+            }
+        }
         if let Some(ref p) = self.personality {
-            out.push_str(&format!("- Personnalité / ton : {}. Tu adoptes ce ton et cette personnalité à chaque réponse.\n", p));
+            out.push_str(&format!("- Personality / tone: {}. Adopt this tone and personality in every response.\n", p));
+        }
+        if let Some(ref g) = self.gender {
+            let g = g.trim().to_lowercase();
+            if g == "male" || g == "female" || g == "neutral" {
+                let pronoun = if g == "male" {
+                    "he/him"
+                } else if g == "female" {
+                    "she/her"
+                } else {
+                    "they/them"
+                };
+                out.push_str(&format!("- When referring to yourself, use {}.\n", pronoun));
+            }
         }
         if !self.rules.is_empty() {
-            out.push_str("- Règles à respecter :\n");
+            out.push_str("- Rules to follow:\n");
             for r in &self.rules {
                 out.push_str(&format!("  • {}\n", r));
             }
         }
         if !self.can_do.is_empty() {
-            out.push_str("- Tu peux (autorisé) :\n");
+            out.push_str("- You can (allowed):\n");
             for c in &self.can_do {
                 out.push_str(&format!("  • {}\n", c));
             }
         }
         if !self.cannot_do.is_empty() {
-            out.push_str("- Tu ne dois pas :\n");
+            out.push_str("- You must not:\n");
             for c in &self.cannot_do {
                 out.push_str(&format!("  • {}\n", c));
             }

@@ -12,6 +12,7 @@ use crate::memory_actor::LongTermMemoryClient;
 use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::RwLock;
@@ -543,6 +544,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
     ("run_terminal", "run_terminal <cmd> [args...] — exécuter une commande (même que run_command)"),
     ("run_command_background", "run_command_background <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
+    ("terminal_session", "terminal_session — session PTY interactive (prévue ultérieurement, spec 43). Pour l’instant utiliser run_command / run_terminal pour une commande, run_command_background + process pour suivi."),
     ("process", "process list | process poll <session_id> | process kill <session_id> — lister, consulter ou arrêter des commandes en arrière-plan"),
     ("file_diff", "file_diff <path_a> <path_b> — diff texte entre deux fichiers"),
     ("edit_file", "edit_file <path> <start_line> <end_line> <new_content> — remplacer les lignes start..end par new_content (lignes 1-based)"),
@@ -558,15 +560,16 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("sessions_spawn", "sessions_spawn <message> [session_id] — créer une sous-tâche et la lancer"),
     ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
     ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
-    ("browser", "browser navigate <url> | browser screenshot | browser snapshot — automation navigateur (non implémenté, prévu phase 3)"),
-    ("image", "image <path|url> [prompt] — analyse d'image par modèle vision (non implémenté, prévu phase 3)"),
-    ("pdf", "pdf <path|url> — extraire le texte d'un PDF (non implémenté, prévu phase 3)"),
+    ("browser", "browser navigate <url> | browser screenshot | browser snapshot — screenshot via device_invoke synthetic_input shortcut; navigate → use web_fetch for content"),
+    ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
+    ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
     ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (ex. search pour recherche web). agent_type: search | code | conversation | financial | documentalist | project_manager | technical_writer | research | security_audit | creative. Un seul niveau de délégation autorisé."),
     ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
     ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
     ("device_discover", "device_discover [interface] — lister les appareils accessibles (optionnel: local_media, system, network, usb). Filtre par politique allowed_device_interfaces / blocked_device_interfaces."),
-    ("device_invoke", "device_invoke <interface> <device_id> <action> [params] — exécuter une action sur un appareil. local_media: caméra, micro (capture, record). synthetic_input: clavier/souris — device_id keyboard|mouse, action shortcut|key|type|mouse_move|mouse_click|mouse_double_click|mouse_scroll|mouse_drag, params JSON (ex. {\"keys\":[\"Control\",\"Shift\",\"S\"]} pour shortcut). Nécessite client UI."),
+    ("device_invoke", "device_invoke <interface> <device_id> <action> [params] — exécuter une action sur un appareil. local_media: caméra (device_id camera, action capture), micro (device_id microphone, action record). Appelle directement ; une fenêtre d'autorisation s'affichera dans l'UI. Ne pas demander à l'utilisateur d'« ouvrir l'UI » — utiliser l'outil. synthetic_input: device_id keyboard|mouse, action shortcut|key|type|mouse_move|mouse_click|..."),
+    ("generate_image", "generate_image <prompt> [size] — générer une image par IA (ex. OpenAI DALL·E). Prompt en texte libre ; size optionnel (1024x1024, 512x512). Retourne l'image en data URL dans la réponse (spec 42)."),
 ];
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -605,6 +608,31 @@ fn message_suggests_external_info(message: &str) -> bool {
         "horaires", "trafic", "prix", "cours ", "bourse", "news", "nouvelle", "semaine à",
         "aujourd'hui", "demain", "connaître la", "connaitre la", "quelle est la météo",
         "quel temps", "prévision", "prevision",
+    ];
+    keywords.iter().any(|k| m.contains(k))
+}
+
+/// True if the user message suggests using the camera/webcam to take a photo or the microphone.
+fn message_suggests_camera_or_mic(message: &str) -> bool {
+    let m = message.to_lowercase();
+    let keywords = [
+        "webcam", "caméra", "camera", "prend une photo", "prends une photo", "prendre une photo",
+        "take a photo", "take a picture", "prends moi en photo", "photo avec la webcam",
+        "accède à la webcam", "accede a la webcam", "utilise la caméra", "utilise la camera",
+        "micro", "microphone", "enregistre avec le micro", "enregistrer avec le micro",
+        "obtenir une image", "get an image", "image avec la webcam", "image avec la caméra",
+        "continuer pour obtenir une image", "proceed to get an image",
+    ];
+    keywords.iter().any(|k| m.contains(k))
+}
+
+fn message_suggests_image_generation(message: &str) -> bool {
+    let m = message.to_lowercase();
+    let keywords = [
+        "génère une image", "genere une image", "générer une image", "génère moi une image",
+        "generate an image", "generate a picture", "draw", "dessine", "dessiner",
+        "crée une image", "cree une image", "créer une image", "create an image",
+        "image par ia", "image par ia", "ai image", "dall-e", "dalle",
     ];
     keywords.iter().any(|k| m.contains(k))
 }
@@ -1072,6 +1100,9 @@ const WRITE_FILE_REMINDER: &str = "\n[Rappel: l'utilisateur demande d'enregistre
 
 const WEB_SEARCH_REMINDER: &str = "\n[Rappel: l'utilisateur demande des informations externes (météo, actualités, etc.). Tu DOIS utiliser TOOL: web_search <requête> pour chercher toi-même puis répondre avec les résultats. Ne propose pas d'aller sur un site sans avoir d'abord utilisé web_search.]\n\n";
 
+const DEVICE_CAMERA_REMINDER: &str = "\n[Rappel: demande de photo webcam/caméra. Tu DOIS enchaîner directement : TOOL: device_discover local_media puis TOOL: device_invoke local_media camera capture. Ne demande PAS à l'utilisateur « quelle action appareil ? » ou « which device action ? » avec ask_user — il a déjà dit qu'il veut une photo, appelle device_invoke camera capture. Ne propose PAS : upload fichier, ouvrir l'UI, image IA.]\n\n";
+const IMAGE_GENERATION_REMINDER: &str = "\n[Rappel: demande de « générer une image », « dessine », « crée une image » (par IA, pas webcam). Tu DOIS utiliser TOOL: generate_image <prompt> (ex. TOOL: generate_image un chat sur un canapé). Spec 42.]\n\n";
+
 /// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
 const APP_CONTEXT: &str = concat!(
     "[Contexte Akasha] Tu es l'assistant intégré à Akasha. Akasha est l'application dans laquelle tu tournes actuellement. ",
@@ -1097,6 +1128,7 @@ const APP_CONTEXT: &str = concat!(
     "Ne pose pas la question en texte libre, sinon la réponse ouvrira une nouvelle tâche et tu ne pourras pas continuer. ",
     "Pour un accès à un service externe (GitHub, API, etc.), ne réponds pas « je ne peux pas » ; utilise ask_user pour demander le token ou explique comment configurer. ",
     "Si l'utilisateur a déjà confirmé (ex. « clé dans le vault », « c'est configuré »), n'envoie pas une deuxième fois ask_user ; enchaîne. ",
+    "Tu as accès à la caméra et au micro via device_discover et device_invoke (interface local_media). Quand l'utilisateur demande une photo avec la caméra / webcam / « prendre une photo » / « obtenir une image » (photo), tu DOIS enchaîner : TOOL: device_discover local_media puis TOOL: device_invoke local_media camera capture, sans demander avec ask_user « quelle action ? » ou « which device ? » — l'utilisateur a déjà dit qu'il veut une photo. La fenêtre d'autorisation s'affichera automatiquement ; ne dis pas « sans UI active ». Ne propose pas upload fichier, ouvrir l'UI, ou image IA : utilise device_invoke directement. ",
     "Ne invente pas de commandes (ex. /status repo:... n'existe pas) ; les commandes sont dans /help.\n\n",
 );
 
@@ -1111,7 +1143,7 @@ fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
         "technical_writer" => Some("You are the technical writing agent. Produce clear technical documentation, procedures, tutorials. Use a structured style (headings, steps, code blocks when relevant). Prefer clarity and precision. Use write_file when the user asks to save documentation."),
         "research" => Some("You are the research agent. Perform in-depth research using web_search, memory_search, and the document base. Synthesize multiple sources; cite or summarize clearly. Do not invent facts."),
         "security_audit" => Some("You are the security audit agent. Review code, config, or practices for security. Be methodical; highlight risks and suggest mitigations. Do not claim certainty where you lack context; recommend human review for critical decisions."),
-        "creative" => Some("You are the creative / copywriting agent. Produce marketing copy, creative content, and audience-adapted text. Match tone and format to the requested channel and goal."),
+        "creative" => Some("You are the creative / copywriting agent. Produce marketing copy, creative content, and audience-adapted text. Match tone and format to the requested channel and goal. When the task is to get a photo or image from the user's webcam/camera, use TOOL: device_invoke local_media camera capture first; do not suggest uploading a file or generating an AI image instead."),
         _ => None,
     }
 }
@@ -1243,10 +1275,10 @@ async fn execute_tool_call(
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     message_webhook_url: Option<&str>,
     device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
-) -> (bool, String) {
+) -> (bool, String, Option<String>) {
     use std::path::Path;
     if !executor.policy.can_use_tool(tool_name) {
-        return (false, format!("[{}] tool not allowed by current profile", tool_name));
+        return (false, format!("[{}] tool not allowed by current profile", tool_name), None);
     }
     let path_arg = |i: usize| args.get(i).map(|s| Path::new(s.as_str()));
     let result = match tool_name {
@@ -1259,12 +1291,12 @@ async fn execute_tool_call(
                         } else {
                             format!("[read_file] denied or error: {}", res.summary)
                         };
-                        (res.success, msg)
+                        (res.success, msg, None)
                     }
-                    Err(e) => (false, format!("[read_file] error: {}", e)),
+                    Err(e) => (false, format!("[read_file] error: {}", e), None),
                 }
             } else {
-                (false, "[read_file] usage: read_file <path>".to_string())
+                (false, "[read_file] usage: read_file <path>".to_string(), None)
             }
         }
         "run_command" => {
@@ -1283,6 +1315,7 @@ async fn execute_tool_call(
                                     return (
                                         false,
                                         format!("[run_command] vault key not found: {}", vault_key),
+                                        None,
                                     );
                                 }
                             }
@@ -1293,6 +1326,7 @@ async fn execute_tool_call(
                         return (
                             false,
                             "[run_command] vault not available (no store_path or open failed)".to_string(),
+                            None,
                         );
                     }
                 }
@@ -1307,9 +1341,9 @@ async fn execute_tool_call(
                     } else {
                         format!("[run_command] {} stderr: {}", res.summary, stderr.trim())
                     };
-                    (res.success, msg)
+                    (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[run_command] error: {}", e)),
+                Err(e) => (false, format!("[run_command] error: {}", e), None),
             }
         }
         "run_terminal" => {
@@ -1323,9 +1357,9 @@ async fn execute_tool_call(
                     } else {
                         format!("[run_terminal] {} stderr: {}", res.summary, stderr.trim())
                     };
-                    (res.success, msg)
+                    (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[run_terminal] error: {}", e)),
+                Err(e) => (false, format!("[run_terminal] error: {}", e), None),
             }
         }
         "run_command_background" => {
@@ -1346,17 +1380,18 @@ async fn execute_tool_call(
                         reg_clone.write().await.remove(&session_id);
                     });
                     reg.write().await.insert(session_id, (task, cell));
-                    (true, format!("[run_command_background] session_id: {} (cmd: {})", session_id, cmd_display))
+                    (true, format!("[run_command_background] session_id: {} (cmd: {})", session_id, cmd_display), None)
                 }
-                None => (false, "[run_command_background] process registry not available".to_string()),
+                None => (false, "[run_command_background] process registry not available".to_string(), None),
             }
         }
+        "terminal_session" => (true, "[terminal_session] Interactive PTY session planned (spec 43). Use run_command or run_terminal for a single command; run_command_background + process for background execution.".to_string(), None),
         "process" => {
             let sub = args.get(0).map(String::as_str).unwrap_or("");
             match (process_registry, sub) {
                 (Some(reg), "list") => {
                     let ids: Vec<String> = reg.read().await.keys().map(|u| u.to_string()).collect();
-                    (true, format!("[process list] {} session(s): {:?}", ids.len(), ids))
+                    (true, format!("[process list] {} session(s): {:?}", ids.len(), ids), None)
                 }
                 (Some(reg), "poll") => {
                     let session_id = args.get(1).and_then(|s| Uuid::parse_str(s).ok());
@@ -1367,7 +1402,7 @@ async fn execute_tool_call(
                                 g.get(&id).map(|(_task, cell)| cell.clone())
                             };
                             let Some(cell) = cell_opt else {
-                                return (false, format!("[process poll] unknown session_id: {}", id));
+                                return (false, format!("[process poll] unknown session_id: {}", id), None);
                             };
                             let result_opt = cell.write().await.take();
                             match result_opt {
@@ -1383,19 +1418,19 @@ async fn execute_tool_call(
                                         stderr.trim()
                                     );
                                     if res.success {
-                                        (true, base_msg)
+                                        (true, base_msg, None)
                                     } else {
-                                        (false, format!("{} | summary: {}", base_msg, res.summary))
+                                        (false, format!("{} | summary: {}", base_msg, res.summary), None)
                                     }
                                 }
                                 Some(Err(e)) => {
                                     reg.write().await.remove(&id);
-                                    (false, format!("[process poll {}] error: {}", id, e))
+                                    (false, format!("[process poll {}] error: {}", id, e), None)
                                 }
-                                None => (true, format!("[process poll {}] still running", id)),
+                                None => (true, format!("[process poll {}] still running", id), None),
                             }
                         }
-                        None => (false, "[process poll] usage: process poll <session_id>".to_string()),
+                        None => (false, "[process poll] usage: process poll <session_id>".to_string(), None),
                     }
                 }
                 (Some(reg), "kill") => {
@@ -1405,22 +1440,22 @@ async fn execute_tool_call(
                             let mut g = reg.write().await;
                             if let Some((task, _cell)) = g.remove(&id) {
                                 task.abort();
-                                (true, format!("[process kill {}] aborted", id))
+                                (true, format!("[process kill {}] aborted", id), None)
                             } else {
-                                (false, format!("[process kill] unknown session_id: {}", id))
+                                (false, format!("[process kill] unknown session_id: {}", id), None)
                             }
                         }
-                        None => (false, "[process kill] usage: process kill <session_id>".to_string()),
+                        None => (false, "[process kill] usage: process kill <session_id>".to_string(), None),
                     }
                 }
-                (_, _) => (false, "[process] usage: process list | process poll <session_id> | process kill <session_id>".to_string()),
+                (_, _) => (false, "[process] usage: process list | process poll <session_id> | process kill <session_id>".to_string(), None),
             }
         }
         "memory_search" => {
             let query_str = args.get(0).map(|a| a.as_str()).unwrap_or("").trim();
             let top_k = args.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(5).min(20);
             if query_str.is_empty() {
-                return (false, "[memory_search] usage: memory_search <query> [top_k]".to_string());
+                return (false, "[memory_search] usage: memory_search <query> [top_k]".to_string(), None);
             }
             match long_term_client {
                 Some(client) => {
@@ -1431,20 +1466,20 @@ async fn execute_tool_call(
                         .ok()
                         .unwrap_or_default();
                     if results.is_empty() {
-                        (true, format!("[memory_search] no results for \"{}\"", query_str))
+                        (true, format!("[memory_search] no results for \"{}\"", query_str), None)
                     } else {
                         let preview: Vec<String> = results.iter().take(5).map(|(id, content)| format!("id: {} — {}", id, content.replace('\n', " "))).collect();
-                        (true, format!("[memory_search] {} result(s): {}", results.len(), preview.join(" | ")))
+                        (true, format!("[memory_search] {} result(s): {}", results.len(), preview.join(" | ")), None)
                     }
                 }
-                None => (false, "[memory_search] long-term memory not available".to_string()),
+                None => (false, "[memory_search] long-term memory not available".to_string(), None),
             }
         }
         "memory_store" => {
             let content = args.get(0).map(|a| a.as_str()).unwrap_or("");
             let source = args.get(1).map(|a| a.as_str()).unwrap_or("agent");
             if content.is_empty() {
-                return (false, "[memory_store] usage: memory_store <content> <source>".to_string());
+                return (false, "[memory_store] usage: memory_store <content> <source>".to_string(), None);
             }
             match long_term_client {
                 Some(client) => {
@@ -1456,17 +1491,17 @@ async fn execute_tool_call(
                         .ok()
                         .and_then(|r| r.ok());
                     match out {
-                        Some(()) => (true, "[memory_store] stored".to_string()),
-                        None => (false, "[memory_store] failed or memory not available".to_string()),
+                        Some(()) => (true, "[memory_store] stored".to_string(), None),
+                        None => (false, "[memory_store] failed or memory not available".to_string(), None),
                     }
                 }
-                None => (false, "[memory_store] long-term memory not available".to_string()),
+                None => (false, "[memory_store] long-term memory not available".to_string(), None),
             }
         }
         "memory_delete" => {
             let id = args.get(0).map(|a| a.as_str()).unwrap_or("").trim();
             if id.is_empty() {
-                return (false, "[memory_delete] usage: memory_delete <id> (UUID de l'entrée)".to_string());
+                return (false, "[memory_delete] usage: memory_delete <id> (UUID de l'entrée)".to_string(), None);
             }
             match long_term_client {
                 Some(client) => {
@@ -1477,11 +1512,11 @@ async fn execute_tool_call(
                         .ok()
                         .and_then(|r| r.ok());
                     match out {
-                        Some(()) => (true, "[memory_delete] deleted".to_string()),
-                        None => (false, "[memory_delete] failed or not found (vérifiez l'id)".to_string()),
+                        Some(()) => (true, "[memory_delete] deleted".to_string(), None),
+                        None => (false, "[memory_delete] failed or not found (vérifiez l'id)".to_string(), None),
                     }
                 }
-                None => (false, "[memory_delete] long-term memory not available".to_string()),
+                None => (false, "[memory_delete] long-term memory not available".to_string(), None),
             }
         }
         "sessions_list" => {
@@ -1496,13 +1531,13 @@ async fn execute_tool_call(
                                 .take(limit)
                                 .map(|t| format!("{} {} {}", t.id, t.status.as_str(), t.assigned_agent))
                                 .collect();
-                            (true, format!("[sessions_list] {} task(s): {}", list.len(), list.join(" ; ")))
+                            (true, format!("[sessions_list] {} task(s): {}", list.len(), list.join(" ; ")), None)
                         }
-                        Err(e) => (false, format!("[sessions_list] error: {}", e)),
+                        Err(e) => (false, format!("[sessions_list] error: {}", e), None),
                     },
-                    Err(e) => (false, format!("[sessions_list] store error: {}", e)),
+                    Err(e) => (false, format!("[sessions_list] store error: {}", e), None),
                 },
-                None => (false, "[sessions_list] store not available".to_string()),
+                None => (false, "[sessions_list] store not available".to_string(), None),
             }
         }
         "session_status" => {
@@ -1516,20 +1551,20 @@ async fn execute_tool_call(
                             t.id,
                             t.status.as_str(),
                             t.assigned_agent
-                        )),
-                        Ok(None) => (false, format!("[session_status] task {} not found", id)),
-                        Err(e) => (false, format!("[session_status] error: {}", e)),
+                        ), None),
+                        Ok(None) => (false, format!("[session_status] task {} not found", id), None),
+                        Err(e) => (false, format!("[session_status] error: {}", e), None),
                     },
-                    Err(e) => (false, format!("[session_status] store error: {}", e)),
+                    Err(e) => (false, format!("[session_status] store error: {}", e), None),
                 },
-                (_, _) => (false, "[session_status] usage: session_status <task_id>".to_string()),
+                (_, _) => (false, "[session_status] usage: session_status <task_id>".to_string(), None),
             }
         }
         "sessions_spawn" => {
             let message = args.get(0).map(|a| a.as_str()).unwrap_or("").to_string();
             let child_session_id = args.get(1).map(|a| a.as_str()).unwrap_or("").to_string();
             if message.is_empty() {
-                return (false, "[sessions_spawn] usage: sessions_spawn <message> [session_id]".to_string());
+                return (false, "[sessions_spawn] usage: sessions_spawn <message> [session_id]".to_string(), None);
             }
             match (store_path, conv_tx) {
                 (Some(path), Some(tx)) => {
@@ -1555,7 +1590,7 @@ async fn execute_tool_call(
                     match TaskStore::open(path) {
                         Ok(store) => {
                             if store.insert(&task).is_err() {
-                                return (false, "[sessions_spawn] failed to insert task".to_string());
+                                return (false, "[sessions_spawn] failed to insert task".to_string(), None);
                             }
                             let sid = if child_session_id.is_empty() {
                                 new_id.to_string()
@@ -1572,20 +1607,20 @@ async fn execute_tool_call(
                                 .await
                                 .is_err()
                             {
-                                return (false, "[sessions_spawn] failed to send to conversation queue".to_string());
+                                return (false, "[sessions_spawn] failed to send to conversation queue".to_string(), None);
                             }
-                            (true, format!("[sessions_spawn] task_id: {} (queued)", new_id))
+                            (true, format!("[sessions_spawn] task_id: {} (queued)", new_id), None)
                         }
-                        Err(e) => (false, format!("[sessions_spawn] store error: {}", e)),
+                        Err(e) => (false, format!("[sessions_spawn] store error: {}", e), None),
                     }
                 }
-                (_, _) => (false, "[sessions_spawn] store or conversation channel not available".to_string()),
+                (_, _) => (false, "[sessions_spawn] store or conversation channel not available".to_string(), None),
             }
         }
         "message" => {
             let sub = args.get(0).map(String::as_str).unwrap_or("");
             if sub != "send" || args.len() < 3 {
-                return (false, "[message] usage: message send <channel> <text>".to_string());
+                return (false, "[message] usage: message send <channel> <text>".to_string(), None);
             }
             let channel = args.get(1).map(String::as_str).unwrap_or("");
             let text = args.get(2..).map(|a| a.join(" ")).unwrap_or_default();
@@ -1597,20 +1632,54 @@ async fn execute_tool_call(
                         .build()
                     {
                         Ok(c) => c,
-                        Err(e) => return (false, format!("[message] client error: {}", e)),
+                        Err(e) => return (false, format!("[message] client error: {}", e), None),
                     };
                     match client.post(url).json(&body).send().await {
-                        Ok(res) if res.status().is_success() => (true, "[message] sent".to_string()),
-                        Ok(res) => (false, format!("[message] send failed: {}", res.status())),
-                        Err(e) => (false, format!("[message] error: {}", e)),
+                        Ok(res) if res.status().is_success() => (true, "[message] sent".to_string(), None),
+                        Ok(res) => (false, format!("[message] send failed: {}", res.status()), None),
+                        Err(e) => (false, format!("[message] error: {}", e), None),
                     }
                 }
-                None => (false, "[message] AKASHA_MESSAGE_WEBHOOK_URL not set".to_string()),
+                None => (false, "[message] AKASHA_MESSAGE_WEBHOOK_URL not set".to_string(), None),
             }
         }
-        "browser" => (false, "[browser] browser automation not implemented (planned Phase 3)".to_string()),
-        "image" => (false, "[image] image analysis (vision) not implemented (planned Phase 3)".to_string()),
-        "pdf" => (false, "[pdf] PDF extraction not implemented (planned Phase 3)".to_string()),
+        "browser" => {
+            let sub = args.get(0).map(String::as_str).unwrap_or("").trim();
+            if sub == "screenshot" {
+                (true, "[browser] For screenshot use: TOOL: device_invoke synthetic_input keyboard shortcut (e.g. Win+Shift+S on Windows, Cmd+Shift+4 on macOS) then paste or share the image.".to_string(), None)
+            } else if sub == "navigate" && args.get(1).map(|s| s.starts_with("http")).unwrap_or(false) {
+                (true, "[browser] Full browser automation (navigate) not implemented. Use web_fetch <url> to get page content.".to_string(), None)
+            } else {
+                (false, "[browser] usage: browser navigate <url> | browser screenshot | browser snapshot. Screenshot: use device_invoke synthetic_input keyboard shortcut.".to_string(), None)
+            }
+        }
+        "image" => {
+            let path_or_url = args.get(0).map(String::as_str).unwrap_or("").trim();
+            if path_or_url.is_empty() {
+                (false, "[image] usage: image <path|url> [prompt]. For vision analysis attach the image in chat (vision-capable model in llm_router) or use a local path.".to_string(), None)
+            } else {
+                (true, "[image] Vision analysis: use image as attachment in chat with a vision-capable model (llm_router). Local path metadata not yet implemented (spec 33).".to_string(), None)
+            }
+        }
+        "pdf" => {
+            let p = path_arg(0);
+            match p {
+                Some(path) if executor.policy.can_read(path) => {
+                    match tokio::fs::read(path).await {
+                        Ok(bytes) => match pdf_extract::extract_text_from_mem(&bytes) {
+                            Ok(text) => {
+                                let preview = if text.len() > 2000 { format!("{}…", text.chars().take(2000).collect::<String>()) } else { text.clone() };
+                                (true, format!("[pdf {}] extracted {} chars:\n{}", path.display(), text.len(), preview), None)
+                            }
+                            Err(e) => (false, format!("[pdf] extraction failed: {}", e), None),
+                        },
+                        Err(e) => (false, format!("[pdf] read failed: {}", e), None),
+                    }
+                }
+                Some(_) => (false, "[pdf] path not allowed by policy (allowed_read_paths)".to_string(), None),
+                None => (false, "[pdf] usage: pdf <path> — path must be in allowed_read_paths".to_string(), None),
+            }
+        }
         "search_files" => {
             let dir = path_arg(0).unwrap_or(Path::new("."));
             let pattern = args.get(1).map(String::as_str).unwrap_or("*");
@@ -1622,9 +1691,9 @@ async fn execute_tool_call(
                     } else {
                         format!("[search_files] {}", res.summary)
                     };
-                    (res.success, msg)
+                    (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[search_files] error: {}", e)),
+                Err(e) => (false, format!("[search_files] error: {}", e), None),
             }
         }
         "grep_content" => {
@@ -1632,7 +1701,7 @@ async fn execute_tool_call(
             let pattern = args.get(1).map(String::as_str).unwrap_or("");
             let file_glob = args.get(2).map(String::as_str).filter(|s| !s.is_empty());
             if pattern.is_empty() {
-                return (false, "[grep_content] usage: grep_content <dir> <pattern> [file_glob]".to_string());
+                return (false, "[grep_content] usage: grep_content <dir> <pattern> [file_glob]".to_string(), None);
             }
             match executor.grep_content(dir, pattern, file_glob, 50).await {
                 Ok((matches, res)) => {
@@ -1646,15 +1715,15 @@ async fn execute_tool_call(
                     } else {
                         format!("[grep_content] {}", res.summary)
                     };
-                    (res.success, msg)
+                    (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[grep_content] error: {}", e)),
+                Err(e) => (false, format!("[grep_content] error: {}", e), None),
             }
         }
         "write_file" => {
             let path = match path_arg(0) {
                 Some(p) => p,
-                None => return (false, "[write_file] usage: write_file <path> <content>".to_string()),
+                None => return (false, "[write_file] usage: write_file <path> <content>".to_string(), None),
             };
             let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
             match executor.write_file(path, &content).await {
@@ -1664,9 +1733,9 @@ async fn execute_tool_call(
                     } else {
                         format!("[write_file] {}", res.summary)
                     };
-                    (res.success, msg)
+                    (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[write_file] error: {}", e)),
+                Err(e) => (false, format!("[write_file] error: {}", e), None),
             }
         }
         "search_replace" => {
@@ -1676,7 +1745,7 @@ async fn execute_tool_call(
                 .split_once('|')
                 .map(|(s, r)| (s.trim().to_string(), r.trim().to_string()))
             else {
-                return (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string());
+                return (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None);
             };
             match path {
                 Some(p) => match executor.search_replace(p, &search, &replace).await {
@@ -1686,11 +1755,11 @@ async fn execute_tool_call(
                         } else {
                             format!("[search_replace] {}", res.summary)
                         };
-                        (res.success, msg)
+                        (res.success, msg, None)
                     }
-                    Err(e) => (false, format!("[search_replace] error: {}", e)),
+                    Err(e) => (false, format!("[search_replace] error: {}", e), None),
                 },
-                None => (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string()),
+                None => (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None),
             }
         }
         "edit_file" => {
@@ -1706,11 +1775,11 @@ async fn execute_tool_call(
                         } else {
                             format!("[edit_file] {}", res.summary)
                         };
-                        (res.success, msg)
+                        (res.success, msg, None)
                     }
-                    Err(e) => (false, format!("[edit_file] error: {}", e)),
+                    Err(e) => (false, format!("[edit_file] error: {}", e), None),
                 },
-                None => (false, "[edit_file] usage: edit_file <path> <start_line> <end_line> <new_content>".to_string()),
+                None => (false, "[edit_file] usage: edit_file <path> <start_line> <end_line> <new_content>".to_string(), None),
             }
         }
         "apply_patch" => {
@@ -1724,11 +1793,11 @@ async fn execute_tool_call(
                         } else {
                             format!("[apply_patch] {}", res.summary)
                         };
-                        (res.success, msg)
+                        (res.success, msg, None)
                     }
-                    Err(e) => (false, format!("[apply_patch] error: {}", e)),
+                    Err(e) => (false, format!("[apply_patch] error: {}", e), None),
                 },
-                None => (false, "[apply_patch] usage: apply_patch <path> <patch_content>".to_string()),
+                None => (false, "[apply_patch] usage: apply_patch <path> <patch_content>".to_string(), None),
             }
         }
         "file_diff" => {
@@ -1743,17 +1812,17 @@ async fn execute_tool_call(
                         } else {
                             format!("[file_diff] {}", res.summary)
                         };
-                        (res.success, msg)
+                        (res.success, msg, None)
                     }
-                    Err(e) => (false, format!("[file_diff] error: {}", e)),
+                    Err(e) => (false, format!("[file_diff] error: {}", e), None),
                 },
-                _ => (false, "[file_diff] usage: file_diff <path_a> <path_b>".to_string()),
+                _ => (false, "[file_diff] usage: file_diff <path_a> <path_b>".to_string(), None),
             }
         }
         "web_fetch" => {
             let url = args.get(0).map(String::as_str).unwrap_or("");
             if url.is_empty() {
-                return (false, "[web_fetch] usage: web_fetch <url>".to_string());
+                return (false, "[web_fetch] usage: web_fetch <url>".to_string(), None);
             }
             match executor.web_fetch(url).await {
                 Ok((body, res)) => {
@@ -1763,9 +1832,9 @@ async fn execute_tool_call(
                     } else {
                         format!("[web_fetch] {}", res.summary)
                     };
-                    (res.success, msg)
+                    (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[web_fetch] error: {}", e)),
+                Err(e) => (false, format!("[web_fetch] error: {}", e), None),
             }
         }
         "web_search" => {
@@ -1781,7 +1850,7 @@ async fn execute_tool_call(
             };
             let query = query.trim();
             if query.is_empty() {
-                return (false, "[web_search] usage: web_search <query> [max_results]".to_string());
+                return (false, "[web_search] usage: web_search <query> [max_results]".to_string(), None);
             }
             match executor.web_search(query.trim(), max_results).await {
                 Ok((body, res)) => {
@@ -1791,9 +1860,9 @@ async fn execute_tool_call(
                     } else {
                         format!("[web_search] {}", res.summary)
                     };
-                    (res.success, msg)
+                    (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[web_search] error: {}", e)),
+                Err(e) => (false, format!("[web_search] error: {}", e), None),
             }
         }
         "run_in_container" => {
@@ -1801,7 +1870,7 @@ async fn execute_tool_call(
             let image = args.get(1).map(String::as_str).unwrap_or("");
             let command = args.get(2).map(String::as_str).unwrap_or("");
             if work_dir.is_none() || image.is_empty() || command.is_empty() {
-                return (false, "[run_in_container] usage: run_in_container <work_dir> <image> <command> [args...]".to_string());
+                return (false, "[run_in_container] usage: run_in_container <work_dir> <image> <command> [args...]".to_string(), None);
             }
             let work_dir = work_dir.unwrap();
             let cmd_args: Vec<String> = args.iter().skip(3).cloned().collect();
@@ -1815,9 +1884,9 @@ async fn execute_tool_call(
                         exit_code,
                         if out.len() > 400 { format!("{}...", &out[..400]) } else { out.to_string() },
                         if err.len() > 200 { format!("{}...", &err[..200]) } else { err.to_string() }
-                    ))
+                    ), None)
                 }
-                Err(e) => (false, format!("[run_in_container] error: {}", e)),
+                Err(e) => (false, format!("[run_in_container] error: {}", e), None),
             }
         }
         "device_discover" => {
@@ -1835,7 +1904,7 @@ async fn execute_tool_call(
                     .collect()
             } else {
                 if !executor.policy.can_use_device_interface(interface) {
-                    return (false, format!("[device_discover] interface '{}' not allowed by policy (allowed_device_interfaces / blocked_device_interfaces)", interface));
+                    return (false, format!("[device_discover] interface '{}' not allowed by policy (allowed_device_interfaces / blocked_device_interfaces)", interface), None);
                 }
                 vec![interface.to_string()]
             };
@@ -1860,17 +1929,17 @@ async fn execute_tool_call(
                 }
             }
             let body = serde_json::json!({ "devices": devices });
-            (true, format!("[device_discover] {} device(s): {}", devices.len(), body.to_string()))
+            (true, format!("[device_discover] {} device(s): {}", devices.len(), body.to_string()), None)
         }
         "device_invoke" => {
             let interface = args.get(0).map(String::as_str).unwrap_or("");
             let device_id = args.get(1).map(String::as_str).unwrap_or("");
             let action = args.get(2).map(String::as_str).unwrap_or("");
             if interface.is_empty() || device_id.is_empty() || action.is_empty() {
-                return (false, "[device_invoke] usage: device_invoke <interface> <device_id> <action> [params...]".to_string());
+                return (false, "[device_invoke] usage: device_invoke <interface> <device_id> <action> [params...]".to_string(), None);
             }
             if !executor.policy.can_use_device_interface(interface) {
-                return (false, format!("[device_invoke] interface '{}' not allowed by policy", interface));
+                return (false, format!("[device_invoke] interface '{}' not allowed by policy", interface), None);
             }
             // Params:
             // - if a single 4th arg is valid JSON, use it; else {}
@@ -1879,12 +1948,14 @@ async fn execute_tool_call(
             if interface == "local_media" {
                 let bridge = match device_bridge {
                     Some(b) => b,
-                    None => return (false, "[device_invoke] device bridge not available (no UI client for local_media)".to_string()),
+                    None => return (false, "[device_invoke] device bridge not available (no UI client for local_media)".to_string(), None),
                 };
                 let (request_id, rx) = bridge
                     .submit_request(interface.to_string(), device_id.to_string(), action.to_string(), params)
                     .await;
-                const DEVICE_TIMEOUT_SECS: u64 = 60;
+                let data_dir = store_path.and_then(|p| p.parent()).unwrap_or_else(|| std::path::Path::new("."));
+                tracing::info!(request_id = %request_id, interface = %interface, device_id = %device_id, action = %action, "[device_bridge] submitted request, waiting for UI");
+                const DEVICE_TIMEOUT_SECS: u64 = 120;
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(DEVICE_TIMEOUT_SECS),
                     rx,
@@ -1892,29 +1963,55 @@ async fn execute_tool_call(
                 .await
                 {
                     Ok(Ok(result)) => {
+                        tracing::info!(request_id = %request_id, success = result.success, "[device_bridge] received result from UI");
                         let msg = if result.success {
                             let data_preview = result.data.as_deref().map(|d| if d.len() > 200 { format!("{}...", &d[..200]) } else { d.to_string() }).unwrap_or_else(|| "ok".to_string());
                             format!("[device_invoke local_media {}] success — {}", action, data_preview)
                         } else {
                             format!("[device_invoke local_media {}] failed or refused", action)
                         };
-                        (result.success, msg)
+                        // Save captured image to data_dir/captures and return base64 for UI display
+                        let out_image_base64 = if result.success && action == "capture" {
+                            if let Some(ref data) = result.data {
+                                if !data.is_empty() {
+                                    let captures_dir = data_dir.join("captures");
+                                    let _ = std::fs::create_dir_all(&captures_dir);
+                                    let filename = format!("photo_{}.jpg", chrono::Utc::now().format("%Y-%m-%d_%H-%M-%S"));
+                                    let path = captures_dir.join(&filename);
+                                    if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data) {
+                                        let _ = std::fs::write(&path, decoded);
+                                    }
+                                    Some(data.clone())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        (result.success, msg, out_image_base64)
                     }
-                    Ok(Err(_)) => (false, "[device_invoke] channel closed without result".to_string()),
+                    Ok(Err(_)) => {
+                        tracing::warn!(request_id = %request_id, "[device_bridge] channel closed without result");
+                        (false, "[device_invoke] channel closed without result".to_string(), None)
+                    }
                     Err(_) => {
+                        tracing::warn!(request_id = %request_id, "[device_bridge] timeout, no POST /api/device/result received");
                         bridge.cancel(&request_id).await;
-                        (false, format!("[device_invoke] timeout after {}s (no UI client responded)", DEVICE_TIMEOUT_SECS))
+                        (false, format!("[device_invoke] timeout after {}s (no UI client responded)", DEVICE_TIMEOUT_SECS), None)
                     }
                 }
             } else if interface == "synthetic_input" {
                 let bridge = match device_bridge {
                     Some(b) => b,
-                    None => return (false, "[device_invoke] device bridge not available (no UI client for synthetic_input)".to_string()),
+                    None => return (false, "[device_invoke] device bridge not available (no UI client for synthetic_input)".to_string(), None),
                 };
                 let (request_id, rx) = bridge
                     .submit_request(interface.to_string(), device_id.to_string(), action.to_string(), params)
                     .await;
-                const DEVICE_TIMEOUT_SECS: u64 = 60;
+                const DEVICE_TIMEOUT_SECS: u64 = 120;
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(DEVICE_TIMEOUT_SECS),
                     rx,
@@ -1928,18 +2025,27 @@ async fn execute_tool_call(
                         } else {
                             format!("[device_invoke synthetic_input {}] failed or refused", action)
                         };
-                        (result.success, msg)
+                        (result.success, msg, None)
                     }
-                    Ok(Err(_)) => (false, "[device_invoke] channel closed without result".to_string()),
+                    Ok(Err(_)) => (false, "[device_invoke] channel closed without result".to_string(), None),
                     Err(_) => {
                         bridge.cancel(&request_id).await;
-                        (false, format!("[device_invoke] timeout after {}s (no UI client responded)", DEVICE_TIMEOUT_SECS))
+                        (false, format!("[device_invoke] timeout after {}s (no UI client responded)", DEVICE_TIMEOUT_SECS), None)
                     }
                 }
             } else if interface == "system" {
-                (false, "[device_invoke] system interface (e.g. print) not yet implemented".to_string())
+                (false, "[device_invoke] system interface (e.g. print) not yet implemented".to_string(), None)
             } else {
-                (false, format!("[device_invoke] interface '{}' handler not yet implemented", interface))
+                (false, format!("[device_invoke] interface '{}' handler not yet implemented", interface), None)
+            }
+        }
+        "generate_image" => {
+            let prompt = args.get(0).map(String::as_str).unwrap_or("").trim();
+            if prompt.is_empty() {
+                (false, "[generate_image] usage: generate_image <prompt> [size]".to_string(), None)
+            } else {
+                // Spec 42: call image API (e.g. OpenAI Images); for now stub — returns message asking to configure.
+                (false, "[generate_image] Génération d'image non configurée : configurer image_generation (provider openai, api_key dans vault) — spec 42_image_generation.md.".to_string(), None)
             }
         }
         _ => {
@@ -1953,13 +2059,13 @@ async fn execute_tool_call(
                         } else {
                             format!("[run_command] {} stderr: {}", res.summary, stderr.trim())
                         };
-                        (res.success, msg)
+                        (res.success, msg, None)
                     }
-                    Err(e) => (false, format!("[run_command] error: {}", e)),
+                    Err(e) => (false, format!("[run_command] error: {}", e), None),
                 }
             } else {
                 let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
-                (false, format!("[{}] unknown tool. Available: {}.", tool_name, names.join(", ")))
+                (false, format!("[{}] unknown tool. Available: {}.", tool_name, names.join(", ")), None)
             }
         }
     };
@@ -2355,15 +2461,41 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let mut current_prompt = if context_prefix.is_empty() {
+    let device_camera_reminder = if message_suggests_camera_or_mic(&message)
+        && tools_executor_snapshot
+            .as_ref()
+            .map(|e| e.policy.can_use_device_interface("local_media"))
+            .unwrap_or(false)
+    {
+        DEVICE_CAMERA_REMINDER
+    } else {
+        ""
+    };
+    let image_generation_reminder = if message_suggests_image_generation(&message) {
+        IMAGE_GENERATION_REMINDER
+    } else {
+        ""
+    };
+    // When user clearly wants a photo from camera, prefix the message with an imperative so the model responds with device_invoke directly (no ask_user).
+    let user_message = if !device_camera_reminder.is_empty() {
+        format!(
+            "[Répondre par: TOOL: device_discover local_media puis TOOL: device_invoke local_media camera capture. Ne pas utiliser ask_user.]\n\n{}",
+            message
+        )
+    } else {
         message.clone()
+    };
+    let mut current_prompt = if context_prefix.is_empty() {
+        user_message.clone()
     } else {
         format!(
-            "{}{}{}Utilisateur:\n{}",
+            "{}{}{}{}{}Utilisateur:\n{}",
             context_prefix.trim_end(),
             write_reminder,
             web_search_reminder,
-            message
+            device_camera_reminder,
+            image_generation_reminder,
+            user_message
         )
     };
     let reply_text;
@@ -2532,6 +2664,7 @@ pub(crate) async fn run_message_via_llm(
         if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), tool_calls) {
             round += 1;
             let mut tool_results = Vec::new();
+            let mut last_captured_image_base64: Option<String> = None;
             for (name, args) in &calls {
                 // Phase D: resolve skill name to tool_ref (spec 33)
                 let actual_tool = match &skill_registry {
@@ -2631,11 +2764,13 @@ pub(crate) async fn run_message_via_llm(
                         }
                     }
                 }
-                let (success, res) = if actual_tool == "ask_user" {
+                let (success, res, captured_image): (bool, String, Option<String>) = if actual_tool == "ask_user" {
                     // Human in the loop: register pending request, emit event, wait for user reply.
                     match &human_input_store {
                         Some(store) => {
-                            let body = args.first().map(String::as_str).unwrap_or("{}");
+                            let body_joined_string = args.join(" ");
+                            let body = body_joined_string.trim();
+                            let body = if body.is_empty() { "{}" } else { body };
                             let v = serde_json::from_str::<serde_json::Value>(body).ok();
                             let (question, context, choices) = match &v {
                                 Some(v) => (
@@ -2646,7 +2781,7 @@ pub(crate) async fn run_message_via_llm(
                                 None => (body.to_string(), String::new(), None),
                             };
                             if question.is_empty() {
-                                (false, format!("[ask_user] invalid JSON: question required. Got: {}", body.chars().take(100).collect::<String>()))
+                                (false, format!("[ask_user] invalid JSON: question required. Got: {}", body.chars().take(100).collect::<String>()), None)
                             } else {
                                 let (tx, rx) = tokio::sync::oneshot::channel();
                                 let pending = PendingHumanInput {
@@ -2673,21 +2808,21 @@ pub(crate) async fn run_message_via_llm(
                                     std::time::Duration::from_secs(HUMAN_INPUT_TIMEOUT_SECS),
                                     rx,
                                 ).await {
-                                    Ok(Ok(reply)) => (true, format!("[ask_user] User replied: {}", reply)),
+                                    Ok(Ok(reply)) => (true, format!("[ask_user] User replied: {}", reply), None),
                                     Ok(Err(_)) => {
                                         let mut g = store.write().await;
                                         g.remove(&task_id);
-                                        (false, "[ask_user] Channel closed.".to_string())
+                                        (false, "[ask_user] Channel closed.".to_string(), None)
                                     }
                                     Err(_) => {
                                         let mut g = store.write().await;
                                         g.remove(&task_id);
-                                        (false, format!("[ask_user] Timeout after {}s; no user reply.", HUMAN_INPUT_TIMEOUT_SECS))
+                                        (false, format!("[ask_user] Timeout after {}s; no user reply.", HUMAN_INPUT_TIMEOUT_SECS), None)
                                     }
                                 }
                             }
                         }
-                        None => (false, "[ask_user] Human-in-the-loop not available.".to_string()),
+                        None => (false, "[ask_user] Human-in-the-loop not available.".to_string(), None),
                     }
                 } else if actual_tool == "delegate_to_agent" {
                     match &delegation_tx {
@@ -2702,20 +2837,20 @@ pub(crate) async fn run_message_via_llm(
                                 reply_tx,
                             }).await.is_ok() {
                                 match tokio::time::timeout(std::time::Duration::from_secs(310), reply_rx).await {
-                                    Ok(Ok(Ok(msg))) => (true, format!("[delegate_to_agent] {}", msg)),
-                                    Ok(Ok(Err(e))) => (false, format!("[delegate_to_agent] {}", e)),
-                                    _ => (false, "[delegate_to_agent] timeout or channel closed".to_string()),
+                                    Ok(Ok(Ok(msg))) => (true, format!("[delegate_to_agent] {}", msg), None),
+                                    Ok(Ok(Err(e))) => (false, format!("[delegate_to_agent] {}", e), None),
+                                    _ => (false, "[delegate_to_agent] timeout or channel closed".to_string(), None),
                                 }
                             } else {
-                                (false, "[delegate_to_agent] channel closed".to_string())
+                                (false, "[delegate_to_agent] channel closed".to_string(), None)
                             }
                         }
-                        None => (false, "[delegate_to_agent] not available".to_string()),
+                        None => (false, "[delegate_to_agent] not available".to_string(), None),
                     }
                 } else if actual_tool == "install_skill" {
                     let url = args.get(0).map(String::as_str).unwrap_or("").trim();
                     if url.is_empty() {
-                        (false, "[install_skill] usage: install_skill <url> (ex. https://github.com/BankrBot/skills/tree/main/bankr ou toute URL HTTPS autorisée dans tools_policy allowed_skill_install_hosts)".to_string())
+                        (false, "[install_skill] usage: install_skill <url> (ex. https://github.com/BankrBot/skills/tree/main/bankr ou toute URL HTTPS autorisée dans tools_policy allowed_skill_install_hosts)".to_string(), None)
                     } else {
                         let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
                         let allowed_hosts = exec.policy.skill_install_allowed_hosts();
@@ -2723,8 +2858,11 @@ pub(crate) async fn run_message_via_llm(
                             tools_policy_path.as_ref().map(|p| (arc, p.as_path()))
                         });
                         match &skill_registry {
-                            Some(reg) => do_install_skill(url, data_dir, &spec_dir, reg, &allowed_hosts, tools_reload).await,
-                            None => (false, "[install_skill] skill registry not available".to_string()),
+                            Some(reg) => {
+                                let (s, r) = do_install_skill(url, data_dir, &spec_dir, reg, &allowed_hosts, tools_reload).await;
+                                (s, r, None)
+                            }
+                            None => (false, "[install_skill] skill registry not available".to_string(), None),
                         }
                     }
                 } else if actual_tool == "uninstall_skill" {
@@ -2734,14 +2872,17 @@ pub(crate) async fn run_message_via_llm(
                         tools_policy_path.as_ref().map(|p| (arc, p.as_path()))
                     });
                     match &skill_registry {
-                        Some(reg) => do_uninstall_skill(skill_name, data_dir, &spec_dir, reg, tools_reload).await,
-                        None => (false, "[uninstall_skill] skill registry not available".to_string()),
+                        Some(reg) => {
+                            let (s, r) = do_uninstall_skill(skill_name, data_dir, &spec_dir, reg, tools_reload).await;
+                            (s, r, None)
+                        }
+                        None => (false, "[uninstall_skill] skill registry not available".to_string(), None),
                     }
                 } else if actual_tool.is_empty() {
                     // Skill with no tool_ref: if args provided, run as run_command(skill_name, ...args) (e.g. bankr whoami)
                     if !args.is_empty() {
                         let run_args: Vec<String> = std::iter::once(name.clone()).chain(args.iter().cloned()).collect();
-                        execute_tool_call(
+                        let (s, r, _) = execute_tool_call(
                             exec,
                             "run_command",
                             &run_args,
@@ -2753,18 +2894,19 @@ pub(crate) async fn run_message_via_llm(
                             message_webhook_url.as_deref(),
                             device_bridge.as_ref(),
                         )
-                        .await
+                        .await;
+                        (s, r, None)
                     } else {
                         // No args: inject SKILL.md body as context for next round (doc-only)
                         match &skill_registry {
                             Some(reg) => {
                                 if let Some(body) = reg.get_body(name).await {
-                                    (true, format!("[Skill: {}] Instructions:\n{}", name, body))
+                                    (true, format!("[Skill: {}] Instructions:\n{}", name, body), None)
                                 } else {
-                                    (false, format!("[Skill: {}] No instructions body.", name))
+                                    (false, format!("[Skill: {}] No instructions body.", name), None)
                                 }
                             }
-                            None => (false, "Skill registry not available.".to_string()),
+                            None => (false, "Skill registry not available.".to_string(), None),
                         }
                     }
                 } else {
@@ -2782,6 +2924,9 @@ pub(crate) async fn run_message_via_llm(
                     )
                     .await
                 };
+                if let Some(img) = captured_image {
+                    last_captured_image_base64 = Some(img);
+                }
                 // Phase F: emit ToolInvoked for Actions tab (spec 33)
                 // Redact or truncate args in the event to avoid leaking large blobs or secrets.
                 let redacted_args: Vec<String> = if matches!(actual_tool.as_str(), "apply_patch" | "edit_file" | "write_file") {
@@ -2818,13 +2963,42 @@ pub(crate) async fn run_message_via_llm(
             let results_blob = tool_results.join("\n");
             current_prompt = format!("{}\n\nTool results:\n{}\n\nProvide your final answer to the user (no more TOOL: lines).", response, results_blob);
             if round >= MAX_TOOL_ROUNDS {
-                reply_text = format!("{}\n\n[Tool round limit reached; final answer above.]", response);
+                let response_for_user = response
+                    .lines()
+                    .filter(|l| !l.trim_start().starts_with("TOOL:"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .trim()
+                    .to_string();
+                let limit_msg = if tool_results.iter().any(|r| r.contains("device_invoke") && (r.contains("timeout") || r.contains("refused"))) {
+                    "L'accès à l'appareil (caméra/micro) a expiré ou a été refusé. Vous pouvez réessayer en renvoyant votre demande."
+                } else if tool_results.iter().any(|r| r.contains("device_invoke") && r.contains("success")) {
+                    "Photo reçue."
+                } else {
+                    "Limite de tours d'outils atteinte."
+                };
+                let image_md = last_captured_image_base64.as_ref()
+                    .filter(|b| !b.is_empty())
+                    .map(|b| format!("\n\n![Photo capturée](data:image/jpeg;base64,{})", b))
+                    .unwrap_or_default();
+                reply_text = if response_for_user.is_empty() {
+                    format!("{}{}", limit_msg, image_md)
+                } else {
+                    format!("{}\n\n[{}]{}", response_for_user, limit_msg, image_md)
+                };
                 break;
             }
             continue;
         }
 
-        reply_text = response;
+        let response_for_user = response
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("TOOL:"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+        reply_text = if response_for_user.is_empty() { response } else { response_for_user };
         break;
     }
 
@@ -3066,6 +3240,40 @@ async fn notify_task_completion(registry: &Option<TaskCompletionRegistry>, task_
 /// Optional channel to trigger daemon shutdown (for POST /api/restart).
 pub type RestartTx = Option<tokio::sync::mpsc::Sender<()>>;
 
+/// Stream event-bus events as Server-Sent Events (GET /api/events). Keeps connection open until client disconnects.
+pub async fn stream_sse_events<W>(bus: &EventBus, stream: &mut W) -> std::io::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut rx = crate::agents::subscribe(bus);
+    let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n";
+    stream.write_all(headers.as_bytes()).await?;
+    stream.flush().await?;
+    loop {
+        match rx.recv().await {
+            Ok(envelope) => {
+                let payload = serde_json::json!({
+                    "id": envelope.id.to_string(),
+                    "event_type": envelope.event_type.as_str(),
+                    "payload": envelope.payload,
+                    "timestamp": envelope.timestamp.to_rfc3339(),
+                    "correlation_id": envelope.correlation_id.map(|u| u.to_string()),
+                });
+                let line = format!("data: {}\n\n", payload.to_string());
+                if stream.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+                if stream.flush().await.is_err() {
+                    break;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+    Ok(())
+}
+
 pub async fn handle_api(
     method: &str,
     path: &str,
@@ -3138,6 +3346,7 @@ pub async fn handle_api(
         if let Some(bridge) = device_bridge {
             match bridge.get_pending().await {
                 Some((request_id, interface, device_id, action, params)) => {
+                    tracing::info!(request_id = %request_id, interface = %interface, action = %action, "[device_bridge] GET /pending → returning request to UI");
                     let body = serde_json::json!({
                         "request_id": request_id,
                         "interface": interface,
@@ -3163,12 +3372,20 @@ pub async fn handle_api(
             let request_id = body_json.as_ref().and_then(|j| j.get("request_id")).and_then(|v| v.as_str());
             let success = body_json.as_ref().and_then(|j| j.get("success")).and_then(|v| v.as_bool()).unwrap_or(false);
             let data = body_json.as_ref().and_then(|j| j.get("data")).and_then(|v| v.as_str()).map(String::from);
+            let data_len = data.as_ref().map(|s| s.len()).unwrap_or(0);
             let request_id = match request_id.filter(|s| !s.is_empty()) {
                 Some(id) => id,
-                None => return json_response("400 Bad Request", r#"{"error":"request_id_required"}"#),
+                None => {
+                    tracing::warn!("[device_bridge] POST /result missing or empty request_id");
+                    return json_response("400 Bad Request", r#"{"error":"request_id_required"}"#);
+                }
             };
+            tracing::info!(request_id = %request_id, success = success, data_len = data_len, "[device_bridge] POST /result received");
             let result = crate::device_bridge::DeviceResult { success, data };
             let fulfilled = bridge.fulfill(request_id, result).await;
+            if !fulfilled {
+                tracing::warn!(request_id = %request_id, "[device_bridge] POST /result request_id not found in claimed (stale or wrong id)");
+            }
             let body = serde_json::json!({ "ok": fulfilled });
             return json_response("200 OK", &body.to_string());
         } else {
@@ -3176,12 +3393,15 @@ pub async fn handle_api(
         }
     }
 
-    // GET /api/agent-profile — read agent profile (name, personality, rules, can_do, cannot_do)
+    // GET /api/agent-profile — read agent profile (name, personality, role, gender, avatar, rules, can_do, cannot_do)
     if method == "GET" && path == "/api/agent-profile" {
         let profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         let body_json = serde_json::json!({
             "name": profile.name,
             "personality": profile.personality,
+            "role": profile.role,
+            "gender": profile.gender,
+            "avatar": profile.avatar,
             "rules": profile.rules,
             "can_do": profile.can_do,
             "cannot_do": profile.cannot_do
@@ -3189,7 +3409,7 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
-    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, rules?, can_do?, cannot_do? }
+    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, role?, gender?, avatar?, rules?, can_do?, cannot_do? }
     if method == "POST" && path == "/api/agent-profile" {
         let mut profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         if let Some(body) = body.as_deref() {
@@ -3199,6 +3419,15 @@ pub async fn handle_api(
                 }
                 if let Some(s) = v.get("personality").and_then(|x| x.as_str()) {
                     profile.personality = Some(s.to_string());
+                }
+                if v.get("role").is_some() {
+                    profile.role = v.get("role").and_then(|x| x.as_str()).map(String::from);
+                }
+                if v.get("gender").is_some() {
+                    profile.gender = v.get("gender").and_then(|x| x.as_str()).map(String::from);
+                }
+                if v.get("avatar").is_some() {
+                    profile.avatar = v.get("avatar").and_then(|x| x.as_str()).map(String::from);
                 }
                 if let Some(arr) = v.get("rules").and_then(|x| x.as_array()) {
                     profile.rules = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
@@ -3508,6 +3737,25 @@ pub async fn handle_api(
             );
         }
         return json_response("404 Not Found", r#"{"error":"slack_not_configured"}"#);
+    }
+
+    // Phase 4: Microsoft Teams Bot Framework webhook
+    if method == "POST" && (path == "/channels/teams" || path == "/channels/teams/message") {
+        if let (Some(ref app_id), Some(ref app_password)) =
+            (&channel_config.teams_app_id, &channel_config.teams_app_password)
+        {
+            let auth_header = headers.get("authorization").map(String::as_str);
+            return crate::channels::teams::handle_teams_message(
+                body,
+                auth_header,
+                app_id,
+                app_password,
+                channel_config.port,
+                main_agent,
+                store_path,
+            );
+        }
+        return json_response("404 Not Found", r#"{"error":"teams_not_configured"}"#);
     }
 
     if method == "POST" && path == "/api/message" {

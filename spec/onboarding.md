@@ -2,7 +2,7 @@
 
 Ce guide décrit les étapes pour faire tourner Akasha après un clone ou une installation.
 
-**Utilisateurs des binaires (releases)** : après avoir téléchargé et extrait l’archive (voir [distribution.md](distribution.md)), exécutez le script d’installation (`scripts/install.ps1` sous Windows, `scripts/install.sh` sous Linux/macOS) pour déployer les binaires, lancer l’init et enregistrer le daemon au démarrage. Puis `akasha start` (ou redémarrez la session pour le lancement automatique).
+**Utilisateurs des binaires (releases)** : après avoir téléchargé et extrait l’archive **full** (voir [distribution.md](distribution.md)), exécutez le script de setup (`scripts/setup.ps1` sous Windows, `scripts/setup.sh` sous Linux/macOS) : il propose d’installer l’application desktop et de démarrer le daemon au démarrage, puis déploie les binaires, lance l’init et démarre le daemon. Avec le zip CLI seul, utilisez `scripts/install.ps1` ou `scripts/install.sh` puis `akasha start` (ou redémarrez la session si démarrage auto activé).
 
 ## 1. Prérequis
 
@@ -33,7 +33,7 @@ Le wizard vous demande :
 - **Connecteurs** : tokens Telegram, Slack, Discord (stockés dans le vault).
 - **Activation** : quels connecteurs activer (génère `connectors.env` dans le data_dir).
 
-Fichiers créés dans le data_dir (ex. `%LOCALAPPDATA%\akasha`) :
+Fichiers créés dans le data_dir (ex. `~/akasha` ou `%USERPROFILE%\akasha`) :
 - `llm_router.yaml` — configuration routeur LLM (par défaut : akasha_embedded/default pour tous les types de tâche). Si Ollama est joignable, les infos de chaque modèle (contexte max, num_ctx, family, etc.) sont récupérées et enregistrées dans la section `model_options`.
 - `connectors.env` — variables pour activer Telegram/Slack/Discord ; chargé automatiquement par `akasha start`.
 - `tools_policy.yaml` — créé par `akasha init` (ou par `akasha doctor --fix` si absent). Politique des outils machine (lecture/écriture de fichiers, commandes) ; éditez `allowed_read_paths` et `allowed_write_paths` pour autoriser les chemins utilisés par les agents.

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { preprocessMessagePaths } from "./preprocessMessagePaths";
 import { getCached, setCached } from "./useTabCache";
 import { useI18n } from "./useI18n";
 
@@ -29,6 +30,7 @@ type AgentProfileSubTab = "identity" | "personality" | "rules" | "can_do" | "can
 
 const AGENT_PROFILE_LIMITS = {
   name: 128,
+  role: 128,
   personality: 2000,
   ruleLength: 500,
   ruleCount: 30,
@@ -38,12 +40,15 @@ const AGENT_PROFILE_LIMITS = {
   cannotDoCount: 30,
 } as const;
 
-const AGENT_PROFILE_TEMPLATES: Array<{ label: string; name: string; personality: string; rules: string[]; can_do: string[]; cannot_do: string[] }> = [
-  { label: "Neutre / polyvalent — ton professionnel, adapté à tous les usages", name: "Akasha", personality: "Ton neutre et professionnel. Réponds de façon claire et adaptée au contexte, sans surcharge. Adapte-toi à la demande (technique, rédaction, conseil). Pas de préambule superflu du type « Bien sûr ! » ou « Avec plaisir » — va à l'essentiel.", rules: [], can_do: [], cannot_do: [] },
-  { label: "Bienveillant / coach — encourageant, pédagogique, à l'écoute", name: "Akasha", personality: "Bienveillant et encourageant. Explique avec pédagogie, reformule pour vérifier que l'utilisateur a compris. Valorise les progrès et propose des étapes claires. Reste à l'écoute, ne juge pas. Propose des pistes plutôt que d'imposer une seule solution.", rules: ["Rester à l'écoute et ne pas juger.", "Proposer des pistes plutôt que d'imposer une seule solution."], can_do: [], cannot_do: [] },
-  { label: "Concis / technique — réponses courtes et précises, orienté dev et sysadmin", name: "Akasha", personality: "Concis et technique. Réponses courtes et précises, orientées développement et administration système. Va à l'essentiel : commandes, extraits de code, chemins. Pas de longues introductions ni de formules de politesse superflues.", rules: ["Privilégier le concret : commandes, extraits de code, chemins.", "Éviter les longues introductions."], can_do: [], cannot_do: [] },
-  { label: "Créatif / rédacteur — ton libre, créatif, pour rédaction et idées", name: "Akasha", personality: "Créatif et ouvert. Aide à structurer des idées, à rédiger, à brainstormer. Propose plusieurs formulations ou angles. Accepte les demandes un peu inhabituelles. Ose suggérer des variantes et des pistes inattendues.", rules: [], can_do: ["Proposer des reformulations et variantes.", "Suggérer des angles ou idées complémentaires."], cannot_do: [] },
-  { label: "Strict / sécurisé — règles strictes, pas d'exécution de code sans confirmation", name: "Akasha", personality: "Précis et prudent. Explique clairement les risques avant toute action. Ne propose jamais d'exécuter du code ou des commandes sans confirmation explicite. Toujours : quoi, pourquoi, puis comment. En cas de doute sur la sécurité, avertir et proposer une alternative plus sûre.", rules: ["Ne jamais exécuter de code ou commande sans confirmation explicite de l'utilisateur.", "Toujours expliquer le « quoi » et le « pourquoi » avant le « comment ».", "En cas de doute sur la sécurité, avertir et proposer une alternative plus sûre."], can_do: ["Expliquer et détailler les étapes.", "Proposer des commandes ou scripts à copier-coller après confirmation."], cannot_do: ["Exécuter du code ou des commandes sans confirmation.", "Modifier des fichiers sensibles sans demande claire."] },
+const AGENT_PROFILE_TEMPLATES: Array<{ label: string; name: string; role?: string; personality: string; rules: string[]; can_do: string[]; cannot_do: string[] }> = [
+  { label: "Neutral / versatile — professional, adaptable", name: "Akasha", role: "neutral professional assistant", personality: "You are a neutral, professional assistant. Clear, adaptable tone. Adapt to the request (technical, writing, advice). No superfluous preambles — get to the point.", rules: [], can_do: [], cannot_do: [] },
+  { label: "Kind / coach — encouraging, pedagogical", name: "Akasha", role: "kind encouraging assistant", personality: "You are a kind, encouraging assistant (coach style). Explain with pedagogy, rephrase to check understanding. Value progress and suggest clear steps. Stay attentive, non-judgmental. Suggest options rather than imposing one solution.", rules: ["Stay attentive and non-judgmental.", "Suggest options rather than imposing a single solution."], can_do: [], cannot_do: [] },
+  { label: "Concise / technical — short, precise, dev & sysadmin", name: "Akasha", role: "concise technical assistant", personality: "You are a concise, technical assistant. Short, precise answers focused on development and system administration. Get to the point: commands, code snippets, paths. No long intros or unnecessary politeness.", rules: ["Prioritize concrete output: commands, code snippets, paths.", "Avoid long introductions."], can_do: [], cannot_do: [] },
+  { label: "Creative / writer — free, creative, for writing and ideas", name: "Akasha", role: "creative open-minded assistant", personality: "You are a creative, open-minded assistant. Help structure ideas, write, brainstorm. Offer multiple phrasings or angles. Accept slightly unusual requests. Suggest variants and unexpected directions.", rules: [], can_do: ["Propose rephrasing and variants.", "Suggest complementary angles or ideas."], cannot_do: [] },
+  { label: "Strict / security-aware — no code run without confirmation", name: "Akasha", role: "careful security-aware assistant", personality: "You are a careful, security-aware assistant. Explain risks clearly before any action. Never suggest running code or commands without explicit confirmation. Always: what, why, then how. When in doubt about security, warn and suggest a safer alternative.", rules: ["Never run code or commands without explicit user confirmation.", "Always explain « what » and « why » before « how ».", "When in doubt about security, warn and suggest a safer alternative."], can_do: ["Explain and detail steps.", "Propose commands or scripts to copy-paste after confirmation."], cannot_do: ["Run code or commands without confirmation.", "Modify sensitive files without a clear request."] },
+  { label: "Joyful & fun — upbeat, light humor", name: "Akasha", role: "joyful fun assistant", personality: "You are a joyful, fun assistant. Upbeat, light humor, emojis when appropriate. Keep responses helpful but entertaining.", rules: [], can_do: [], cannot_do: [] },
+  { label: "Friendly advisor — warm, good counsel", name: "Akasha", role: "friendly advisor", personality: "You are a friendly advisor. Warm, good counsel, supportive. Give clear advice while staying approachable.", rules: [], can_do: [], cannot_do: [] },
+  { label: "Geek & nerdy — tech-loving, precise", name: "Akasha", role: "geeky nerdy assistant", personality: "You are a geeky, nerdy assistant. Love tech, references, and precise details. Helpful and enthusiastic about technical topics.", rules: [], can_do: [], cannot_do: [] },
 ];
 
 /** Format duration in seconds as "X min Y s" or "Y s". */
@@ -165,7 +170,10 @@ function App() {
   const [docContent, setDocContent] = useState<string | null>(null);
   const [docLoading, setDocLoading] = useState(false);
   const [docError, setDocError] = useState<string | null>(null);
-  const [tasksList, setTasksList] = useState<Array<{ id: string; status: string }>>([]);
+  type TaskListItem = { id: string; status: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string };
+  const [tasksList, setTasksList] = useState<Array<TaskListItem>>([]);
+  const [taskListFilter, setTaskListFilter] = useState<"active" | "completed">("active");
+  const [taskSearchQuery, setTaskSearchQuery] = useState("");
   const [tasksSelected, setTasksSelected] = useState(0);
   const [tasksEvents, setTasksEvents] = useState<Array<{ event_type: string; payload?: unknown; at: string }>>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
@@ -299,13 +307,26 @@ function App() {
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
   const userRagFileInputRef = useRef<HTMLInputElement>(null);
-  /** Agent profile (name, personality, rules, can_do, cannot_do) for Settings panel. */
-  const [agentProfile, setAgentProfile] = useState<{ name: string; personality: string; rules: string[]; can_do: string[]; cannot_do: string[] }>({
+  const agentAvatarFileInputRef = useRef<HTMLInputElement>(null);
+  const userAvatarFileInputRef = useRef<HTMLInputElement>(null);
+  /** Agent profile (name, role, gender, avatar, personality, rules, can_do, cannot_do) for Settings panel. */
+  const [agentProfile, setAgentProfile] = useState<{ name: string; role: string; gender: string; avatar: string; personality: string; rules: string[]; can_do: string[]; cannot_do: string[] }>({
     name: "",
+    role: "",
+    gender: "",
+    avatar: "",
     personality: "",
     rules: [],
     can_do: [],
     cannot_do: [],
+  });
+  /** User avatar (data URL) for chat display. Stored in localStorage. */
+  const [userAvatar, setUserAvatar] = useState<string>(() => {
+    try {
+      return localStorage.getItem("akasha_user_avatar") ?? "";
+    } catch {
+      return "";
+    }
   });
   const [agentProfileLoading, setAgentProfileLoading] = useState(false);
   const [agentProfileSaving, setAgentProfileSaving] = useState(false);
@@ -318,6 +339,7 @@ function App() {
   /** Attachments for the next message: images (vision) and documents (text appended to message). */
   const [attachments, setAttachments] = useState<Array<{ id: string; name: string; typ: "image" | "document"; content_base64: string; mime_type: string }>>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatInlineReplyRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Tasks for which we already auto-opened the human-input modal (avoid re-opening every poll). */
@@ -486,13 +508,37 @@ function App() {
     }
   }, []);
 
-  // Scroll chat to last message and keep focus on input
+  // Scroll chat to bottom when opening the chat tab or when messages/loading change
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
+    if (tab === "chat") {
+      requestAnimationFrame(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      });
+    }
+  }, [messages, loading, tab]);
+  // When a reply is pending and modal is not open, scroll the inline reply form into view
+  const pendingHumanInputKeys = Object.keys(pendingHumanInput);
+  useEffect(() => {
+    if (tab === "chat" && pendingHumanInputKeys.length > 0 && !humanInputModalTaskId) {
+      requestAnimationFrame(() => {
+        chatInlineReplyRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+    }
+  }, [tab, humanInputModalTaskId, pendingHumanInputKeys.length]);
   useEffect(() => {
     if (tab === "chat") chatInputRef.current?.focus();
   }, [tab]);
+
+  // Restore focus on chat input when loading finishes (task completed, failed, or slash command done)
+  const prevLoadingRef = useRef(loading);
+  useEffect(() => {
+    if (prevLoadingRef.current === true && loading === false && tab === "chat") {
+      requestAnimationFrame(() => {
+        chatInputRef.current?.focus();
+      });
+    }
+    prevLoadingRef.current = loading;
+  }, [loading, tab]);
 
   // Close pending-actions dropdown when clicking outside
   useEffect(() => {
@@ -587,12 +633,19 @@ function App() {
   const fetchTasksList = useCallback(async () => {
     setTasksLoading(true);
     try {
-      const data = await invoke<{ tasks?: Array<{ id?: string; status?: string }> }>("get_tasks", {
+      const data = await invoke<{ tasks?: Array<{ id?: string; status?: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string }> }>("get_tasks", {
         port: DAEMON_PORT,
       });
       const list = data?.tasks ?? [];
-      const tasks = list
-        .map((t) => ({ id: t.id ?? "", status: t.status ?? "?" }))
+      const tasks: Array<TaskListItem> = list
+        .map((t) => ({
+          id: t.id ?? "",
+          status: t.status ?? "?",
+          label: t.label,
+          created_at: t.created_at,
+          parent_task_id: t.parent_task_id,
+          assigned_agent: t.assigned_agent,
+        }))
         .filter((t) => t.id);
       setTasksList(tasks);
       setTasksSelected((prev) => (prev >= tasks.length && tasks.length > 0 ? tasks.length - 1 : prev));
@@ -603,6 +656,26 @@ function App() {
       setTasksLoading(false);
     }
   }, []);
+
+  const filteredTasksList = useMemo(() => {
+    let list = tasksList;
+    if (taskListFilter === "active") {
+      list = list.filter((t) => t.status === "pending" || t.status === "running");
+    } else {
+      list = list.filter((t) => t.status === "completed" || t.status === "failed");
+    }
+    const q = taskSearchQuery.trim().toLowerCase();
+    if (q) {
+      list = list.filter(
+        (t) =>
+          (t.label && t.label.toLowerCase().includes(q)) ||
+          (t.id && t.id.toLowerCase().includes(q))
+      );
+    }
+    return list;
+  }, [tasksList, taskListFilter, taskSearchQuery]);
+
+  const taskDisplayLabel = (t: TaskListItem) => (t.label && t.label.trim() ? t.label.trim() : t("tasks.task_unnamed") + t.id.slice(-8));
 
   const fetchTasksEvents = useCallback(async (taskId: string) => {
     try {
@@ -689,7 +762,7 @@ function App() {
 
   useEffect(() => {
     if (tab !== "tasks") return;
-    const cached = getCached<Array<{ id: string; status: string }>>("tasks");
+    const cached = getCached<Array<TaskListItem>>("tasks");
     if (cached != null) {
       setTasksList(cached);
       setTasksSelected((prev) => (prev >= cached.length && cached.length > 0 ? cached.length - 1 : prev));
@@ -698,6 +771,29 @@ function App() {
     }
     fetchTasksList();
   }, [tab, fetchTasksList]);
+
+  // SSE: subscribe to daemon events for real-time updates (< 1s) when daemon is healthy.
+  useEffect(() => {
+    if (!health?.ok) return;
+    const url = `http://127.0.0.1:${health.port ?? DAEMON_PORT}/api/events`;
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource(url);
+      es.onmessage = () => {
+        fetchTasksList();
+        fetchPendingHumanInput();
+      };
+      es.onerror = () => {
+        es?.close();
+        es = null;
+      };
+    } catch {
+      /* ignore */
+    }
+    return () => {
+      es?.close();
+    };
+  }, [health?.ok, health?.port, fetchTasksList, fetchPendingHumanInput]);
 
   useEffect(() => {
     const task = tasksList[tasksSelected];
@@ -802,13 +898,16 @@ function App() {
     setAgentProfileLoading(true);
     setAgentProfileError(null);
     try {
-      const data = await invoke<{ name?: string | null; personality?: string | null; rules?: string[]; can_do?: string[]; cannot_do?: string[] }>(
+      const data = await invoke<{ name?: string | null; personality?: string | null; role?: string | null; gender?: string | null; avatar?: string | null; rules?: string[]; can_do?: string[]; cannot_do?: string[] }>(
         "get_agent_profile",
         { port: DAEMON_PORT }
       );
       setAgentProfile({
         name: data?.name ?? "",
         personality: data?.personality ?? "",
+        role: data?.role ?? "",
+        gender: data?.gender ?? "",
+        avatar: data?.avatar ?? "",
         rules: Array.isArray(data?.rules) ? data.rules : [],
         can_do: Array.isArray(data?.can_do) ? data.can_do : [],
         cannot_do: Array.isArray(data?.cannot_do) ? data.cannot_do : [],
@@ -1259,6 +1358,10 @@ function App() {
     e.target.value = "";
   };
 
+  const handlePathClick = useCallback((path: string, openFolder?: boolean) => {
+    invoke(openFolder ? "open_path_in_explorer" : "open_path", { path }).catch(() => {});
+  }, []);
+
   const handleSend = async () => {
     const hasContent = message.trim() || attachments.length > 0;
     if (!hasContent || loading) return;
@@ -1370,6 +1473,7 @@ function App() {
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 const finalMsg = status?.progress?.slice(-1)[0]?.message ?? "Terminé.";
                 setMessages((prev) => [...prev, { role: "assistant", text: finalMsg }]);
+                requestAnimationFrame(() => chatInputRef.current?.focus());
                 return;
               }
               if (status?.status === "failed") {
@@ -1379,6 +1483,7 @@ function App() {
                 humanInputAutoOpenedRef.current.delete(taskId);
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 setMessages((prev) => [...prev, { role: "assistant", text: "Tâche en échec.", error: true }]);
+                requestAnimationFrame(() => chatInputRef.current?.focus());
                 return;
               }
             } catch {
@@ -1396,6 +1501,7 @@ function App() {
             return next;
           });
           setMessages((prev) => [...prev, { role: "assistant", text: "Délai dépassé. Consultez Tâches." }]);
+          requestAnimationFrame(() => chatInputRef.current?.focus());
         };
         pollUntilDone();
       }
@@ -1585,6 +1691,14 @@ function App() {
           <div className="container-main-inner">
             <header className="view-header">
               <h2 className="view-title">{t("tabs." + tab)}</h2>
+              <span
+                className={`daemon-status ${health?.ok ? "daemon-status-ok" : "daemon-status-off"}`}
+                role="status"
+                aria-live="polite"
+                title={health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
+              >
+                {health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
+              </span>
               <button
                 type="button"
                 className="sidebar-right-toggle"
@@ -1604,11 +1718,15 @@ function App() {
               <h2 id="onboarding-title">{t("onboarding.title")}</h2>
               <p className="onboarding-intro">{t("onboarding.intro")}</p>
               <ul className="onboarding-steps">
+                <li>{t("onboarding.step0")}</li>
                 <li>{t("onboarding.step1")}</li>
                 <li>{t("onboarding.step2")}</li>
                 <li>{t("onboarding.step3")}</li>
               </ul>
               <div className="onboarding-actions">
+                <button type="button" className="onboarding-doc-btn" onClick={() => { setTab("docs"); setShowOnboarding(false); }}>
+                  {t("onboarding.open_doc")}
+                </button>
                 <button type="button" className="onboarding-dismiss" onClick={() => { try { localStorage.setItem("akasha_onboarding_dismissed", "1"); } catch { /* ignore */ } setShowOnboarding(false); }}>
                   {t("onboarding.dismiss")}
                 </button>
@@ -1695,7 +1813,7 @@ function App() {
         {/* Device bridge: agent requested device access (camera, mic, etc.) */}
         {devicePendingRequest && (
           <div className="human-input-overlay" role="dialog" aria-labelledby="device-request-title" aria-modal="true">
-            <div className="human-input-modal">
+            <div className="human-input-modal" onClick={(e) => e.stopPropagation()}>
               <h2 id="device-request-title">{t("device_bridge.title")}</h2>
               <p className="human-input-question">
                 {t("device_bridge.description")} <strong>{devicePendingRequest.interface}</strong> — <strong>{devicePendingRequest.action}</strong>
@@ -1705,7 +1823,11 @@ function App() {
                   type="button"
                   className="human-input-choice-btn"
                   onClick={async () => {
-                    const { request_id, interface: iface, action: act, params: reqParams } = devicePendingRequest;
+                    const payload = { ...devicePendingRequest };
+                    setDevicePendingRequest(null);
+                    const { request_id, interface: iface, action: act, params: reqParams } = payload;
+                    const ALLOW_TIMEOUT_MS = 90000;
+                    const runAllow = async () => {
                     try {
                       if (iface === "synthetic_input") {
                         try {
@@ -1728,23 +1850,51 @@ function App() {
                           });
                         }
                       } else if (iface === "local_media" && (act === "capture" || act === "camera_capture")) {
-                        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                        const GETUSERMEDIA_TIMEOUT_MS = 15000;
+                        let stream: MediaStream;
+                        try {
+                          stream = await Promise.race([
+                            navigator.mediaDevices.getUserMedia({ video: true }),
+                            new Promise<never>((_, rej) => setTimeout(() => rej(new Error("getUserMedia 15s timeout")), GETUSERMEDIA_TIMEOUT_MS)),
+                          ]);
+                        } catch (e) {
+                          await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT }).catch(() => {});
+                          return;
+                        }
                         const video = document.createElement("video");
+                        video.muted = true;
+                        video.playsInline = true;
+                        video.autoplay = true;
                         video.srcObject = stream;
-                        await new Promise<void>((resolve, reject) => {
-                          video.onloadedmetadata = () => {
-                            video.play().then(() => resolve()).catch(reject);
-                          };
-                          video.onerror = () => reject(new Error("Video load failed"));
-                        });
-                        const canvas = document.createElement("canvas");
-                        canvas.width = video.videoWidth;
-                        canvas.height = video.videoHeight;
-                        const ctx = canvas.getContext("2d");
-                        if (ctx) ctx.drawImage(video, 0, 0);
-                        stream.getTracks().forEach((t) => t.stop());
-                        const data = canvas.toDataURL("image/png").split(",")[1] ?? "";
-                        await invoke("post_device_result", { request_id, success: true, data, port: DAEMON_PORT });
+                        video.play().catch(() => {});
+                        await new Promise<void>((r) => setTimeout(r, 800));
+                        try {
+                          const canvas = document.createElement("canvas");
+                          const maxW = 1024;
+                          const w = Math.max(1, video.videoWidth || 640);
+                          const h = Math.max(1, video.videoHeight || 480);
+                          const scale = w > maxW || h > maxW ? maxW / Math.max(w, h) : 1;
+                          canvas.width = Math.round(w * scale);
+                          canvas.height = Math.round(h * scale);
+                          const ctx = canvas.getContext("2d");
+                          if (ctx) ctx.drawImage(video, 0, 0, w, h, 0, 0, canvas.width, canvas.height);
+                          const data = canvas.toDataURL("image/jpeg", 0.85).split(",")[1] ?? "";
+                          const url = `http://127.0.0.1:${DAEMON_PORT}/api/device/result`;
+                          try {
+                            const res = await fetch(url, {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ request_id, success: true, data }),
+                            });
+                            if (!res.ok) {
+                              await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT }).catch(() => {});
+                            }
+                          } catch (e) {
+                            await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT }).catch(() => {});
+                          }
+                        } finally {
+                          stream.getTracks().forEach((t) => t.stop());
+                        }
                       } else if (iface === "local_media" && (act === "record" || act === "microphone_record")) {
                         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                         const recorder = new MediaRecorder(stream);
@@ -1778,7 +1928,15 @@ function App() {
                       console.error(e);
                       await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT });
                     }
-                    setDevicePendingRequest(null);
+                    };
+                    try {
+                      await Promise.race([
+                        runAllow(),
+                        new Promise<never>((_, rej) => setTimeout(() => rej(new Error("allow_timeout_90s")), ALLOW_TIMEOUT_MS)),
+                      ]);
+                    } catch (e) {
+                      await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT }).catch(() => {});
+                    }
                   }}
                 >
                   {t("device_bridge.allow")}
@@ -1863,9 +2021,12 @@ function App() {
                         key={i}
                         className={`message ${m.role} ${m.error ? "error" : ""} ${askUserData ? "message-ask-user" : ""}`}
                       >
-                        <span className="role" aria-hidden>
-                          {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : "Akasha"}
-                        </span>
+                        <div className="message-head">
+                          {m.role === "user" ? (userAvatar ? <img src={userAvatar} alt="" className="message-avatar message-avatar-user" /> : null) : m.role === "assistant" ? (agentProfile.avatar ? <img src={agentProfile.avatar} alt="" className="message-avatar message-avatar-assistant" /> : null) : null}
+                          <span className="role" aria-hidden>
+                            {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : (agentProfile.name || "Akasha")}
+                          </span>
+                        </div>
                         {m.role === "system" ? (
                           <div className="text system-text" style={{ whiteSpace: "pre-wrap" }}>
                             {m.text}
@@ -1882,19 +2043,37 @@ function App() {
                             )}
                             {askUserData.choices?.length ? (
                               <div className="message-ask-user-choices">
-                                {askUserData.choices.map((choice, j) => (
-                                  <span key={j} className="message-ask-user-choice-tag">
-                                    {choice}
-                                  </span>
-                                ))}
+                                {askUserData.choices.map((choice, j) => {
+                                  const pendingTaskIdForReply = Object.keys(pendingHumanInput)[0] ?? null;
+                                  return pendingTaskIdForReply ? (
+                                    <button
+                                      key={j}
+                                      type="button"
+                                      className="message-ask-user-choice-tag"
+                                      onClick={async () => {
+                                        try {
+                                          await invoke("post_task_human_reply", { taskId: pendingTaskIdForReply, response: choice, port: DAEMON_PORT });
+                                          setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskIdForReply]; return next; });
+                                          setHumanInputModalTaskId((c) => (c === pendingTaskIdForReply ? null : c));
+                                        } catch (e) {
+                                          console.error(e);
+                                        }
+                                      }}
+                                    >
+                                      {choice}
+                                    </button>
+                                  ) : (
+                                    <span key={j} className="message-ask-user-choice-tag">{choice}</span>
+                                  );
+                                })}
                               </div>
                             ) : null}
-                            <p className="message-ask-user-hint">Répondre dans le formulaire sous le chat ou via « Action requise » sur la tâche.</p>
+                            <p className="message-ask-user-hint">Répondre ci‑dessous (boutons ou champ texte) ou via « Action requise » sur la tâche.</p>
                           </div>
                         ) : (
                           <div className="text markdown-rendered">
-                            <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
-                              {m.text}
+                            <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent onPathClick={handlePathClick}>
+                              {preprocessMessagePaths(m.text)}
                             </LazyMarkdownContent></Suspense>
                           </div>
                         )}
@@ -2032,7 +2211,7 @@ function App() {
               const pending = pendingTaskId ? pendingHumanInput[pendingTaskId] : null;
               if (!pending || !pendingTaskId) return null;
               return (
-                <div className="chat-inline-human-reply" role="form" aria-labelledby="inline-reply-label">
+                <div ref={chatInlineReplyRef} className="chat-inline-human-reply" role="form" aria-labelledby="inline-reply-label">
                   <h3 id="inline-reply-label" className="chat-inline-human-reply-title">Répondre à l&apos;agent</h3>
                   <p className="chat-inline-human-reply-question">{pending.question}</p>
                   {pending.context && <p className="chat-inline-human-reply-context">{pending.context}</p>}
@@ -2312,37 +2491,154 @@ function App() {
             {!tasksLoading && (
               <div className="activity-panel-body">
                 <div className="activity-tasks-block">
-                  <h3>Liste des tâches</h3>
+                  <h3>{t("tasks.list_heading")}</h3>
+                  {tasksList.length > 0 && (
+                    <>
+                      <div className="activity-tasks-filters" role="tablist" aria-label={t("tasks.filter_label")}>
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={taskListFilter === "active"}
+                          className={"activity-filter-tab" + (taskListFilter === "active" ? " active" : "")}
+                          onClick={() => setTaskListFilter("active")}
+                        >
+                          {t("tasks.filter_active")}
+                        </button>
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={taskListFilter === "completed"}
+                          className={"activity-filter-tab" + (taskListFilter === "completed" ? " active" : "")}
+                          onClick={() => setTaskListFilter("completed")}
+                        >
+                          {t("tasks.filter_completed")}
+                        </button>
+                      </div>
+                      <div className="activity-tasks-search-wrap">
+                        <input
+                          type="search"
+                          className="activity-tasks-search"
+                          placeholder={t("tasks.search_placeholder")}
+                          value={taskSearchQuery}
+                          onChange={(e) => setTaskSearchQuery(e.target.value)}
+                          aria-label={t("tasks.search_placeholder")}
+                        />
+                      </div>
+                    </>
+                  )}
                   {tasksList.length === 0 ? (
                     <p className="empty-state">{t("tasks.empty")}</p>
+                  ) : filteredTasksList.length === 0 ? (
+                    <p className="empty-state">{t("tasks.no_match_filter")}</p>
                   ) : (
-                    <ul className="activity-task-list" role="list">
-                      {tasksList.map((t, i) => (
-                        <li
-                          key={t.id}
-                          className={i === tasksSelected ? "selected" : ""}
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => setTasksSelected(i)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault();
-                              setTasksSelected(i);
-                            }
-                            if (e.key === "ArrowDown" && i < tasksList.length - 1)
-                              setTasksSelected(i + 1);
-                            if (e.key === "ArrowUp" && i > 0) setTasksSelected(i - 1);
-                          }}
-                        >
-                          <span className="task-id">{t.id.slice(-8)}</span>{" "}
-                          <span className="task-status">{t.status}</span>
-                        </li>
-                      ))}
+                    <ul className="activity-task-cards" role="list">
+                      {filteredTasksList.map((task) => {
+                        const isSelected = tasksList[tasksSelected]?.id === task.id;
+                        const runningChip = task.status === "running" ? runningTaskChips[task.id] : undefined;
+                        const createdLabel = task.created_at ? (() => {
+                          try {
+                            const d = new Date(task.created_at);
+                            return d.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+                          } catch {
+                            return task.created_at;
+                          }
+                        })() : null;
+                        return (
+                          <li key={task.id} className={"activity-task-card" + (isSelected ? " selected" : "")}>
+                            <div
+                              className="activity-task-card-inner"
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => setTasksSelected(tasksList.findIndex((x) => x.id === task.id))}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  setTasksSelected(tasksList.findIndex((x) => x.id === task.id));
+                                }
+                                const idx = filteredTasksList.findIndex((x) => x.id === task.id);
+                                if (e.key === "ArrowDown" && idx < filteredTasksList.length - 1) {
+                                  const next = filteredTasksList[idx + 1];
+                                  setTasksSelected(tasksList.findIndex((x) => x.id === next.id));
+                                }
+                                if (e.key === "ArrowUp" && idx > 0) {
+                                  const prev = filteredTasksList[idx - 1];
+                                  setTasksSelected(tasksList.findIndex((x) => x.id === prev.id));
+                                }
+                              }}
+                            >
+                              <div className="activity-task-card-head">
+                                <span className="activity-task-card-title" title={taskDisplayLabel(task)}>
+                                  {taskDisplayLabel(task)}
+                                </span>
+                                <span className={"activity-task-status-pill status-" + task.status}>
+                                  {task.status}
+                                </span>
+                              </div>
+                              {task.status === "running" && runningChip != null && (
+                                <div className="activity-task-progress">
+                                  <div className="activity-task-progress-bar" style={{ width: `${runningChip.pct ?? 0}%` }} />
+                                  <span className="activity-task-progress-pct">{runningChip.pct ?? 0}%</span>
+                                </div>
+                              )}
+                              <div className="activity-task-meta">
+                                <span className="activity-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>
+                                {createdLabel && <span className="activity-task-created">{createdLabel}</span>}
+                                {task.assigned_agent && <span className="activity-task-agent">{task.assigned_agent}</span>}
+                              </div>
+                              <button
+                                type="button"
+                                className="activity-task-view-btn"
+                                onClick={(e) => { e.stopPropagation(); setTasksSelected(tasksList.findIndex((x) => x.id === task.id)); }}
+                              >
+                                {t("tasks.view_task")}
+                              </button>
+                            </div>
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                 </div>
                 <div className="activity-events-block">
                   <h3>Événements</h3>
+                  {tasksList.length > 0 && tasksList[tasksSelected] && (() => {
+                    const sel = tasksList[tasksSelected];
+                    const canCancel = sel.status === "pending" || sel.status === "running";
+                    const canRetry = sel.status === "failed";
+                    return (canCancel || canRetry) ? (
+                      <div className="task-actions-row" role="group" aria-label="Actions sur la tâche">
+                        {canCancel && (
+                          <button
+                            type="button"
+                            className="task-action-btn task-action-cancel"
+                            onClick={async () => {
+                              if (!sel?.id) return;
+                              try {
+                                await invoke<{ cancelled?: boolean }>("cancel_task", { task_id: sel.id, port: DAEMON_PORT });
+                                fetchTasksList();
+                              } catch (e) {
+                                console.error(e);
+                              }
+                            }}
+                          >
+                            Annuler
+                          </button>
+                        )}
+                        {canRetry && (
+                          <button
+                            type="button"
+                            className="task-action-btn task-action-retry"
+                            onClick={() => {
+                              setTab("chat");
+                              setMessage(sel?.label ?? sel?.initial_message ?? "Relance la tâche.");
+                            }}
+                          >
+                            Relancer
+                          </button>
+                        )}
+                      </div>
+                    ) : null;
+                  })()}
                   {tasksEvents.length === 0 ? (
                     <p className="empty-state">
                       {tasksList.length > 0 ? t("tasks.no_events") : t("tasks.select_task")}
@@ -3125,6 +3421,38 @@ function App() {
                   <option value="en">English</option>
                 </select>
               </dd>
+              <dt>{t("settings.user_avatar")}</dt>
+              <dd>
+                <input
+                  ref={userAvatarFileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="sr-only"
+                  aria-hidden
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    const MAX_AVATAR_BYTES = 200 * 1024;
+                    if (file.size > MAX_AVATAR_BYTES) return;
+                    try {
+                      const { content_base64, mime_type } = await readFileAsBase64(file);
+                      const dataUrl = `data:${mime_type};base64,${content_base64}`;
+                      setUserAvatar(dataUrl);
+                      localStorage.setItem("akasha_user_avatar", dataUrl);
+                    } catch {
+                      // ignore
+                    }
+                    e.target.value = "";
+                  }}
+                />
+                <div className="settings-avatar-row">
+                  {userAvatar ? <img src={userAvatar} alt="" className="settings-avatar-preview" /> : null}
+                  <div>
+                    <button type="button" className="btn-secondary" onClick={() => userAvatarFileInputRef.current?.click()}>{t("settings.user_avatar_choose")}</button>
+                    {userAvatar ? <button type="button" className="btn-secondary" onClick={() => { setUserAvatar(""); try { localStorage.removeItem("akasha_user_avatar"); } catch {} }}>{t("settings.user_avatar_remove")}</button> : null}
+                  </div>
+                </div>
+              </dd>
             </dl>
               </div>
             )}
@@ -3135,6 +3463,13 @@ function App() {
                   <dd><code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})</dd>
                   <dt>{t("settings.data_dir")}</dt>
                   <dd><code>%LOCALAPPDATA%\akasha</code> (Windows) ou <code>~/.local/share/akasha</code> (Linux/macOS)</dd>
+                  <dt>{t("settings.documentation")}</dt>
+                  <dd>
+                    <button type="button" className="settings-link-btn" onClick={() => setTab("docs")}>
+                      {t("settings.open_docs_tab")}
+                    </button>
+                    <span className="settings-doc muted"> — {t("settings.doc_from_daemon")}</span>
+                  </dd>
                 </dl>
               </div>
             )}
@@ -3144,7 +3479,7 @@ function App() {
                 {agentProfileError && <p className="error-inline" role="alert">{agentProfileError}</p>}
                 <div className="settings-agent-template-row">
                   <label htmlFor="agent-profile-template">{t("settings.agent_profile_apply_template")}</label>
-                  <select id="agent-profile-template" className="settings-theme-select" value="" onChange={(e) => { const idx = e.target.value ? parseInt(e.target.value, 10) : -1; e.target.value = ""; if (idx >= 0 && idx < AGENT_PROFILE_TEMPLATES.length) { const tpl = AGENT_PROFILE_TEMPLATES[idx]; setAgentProfile({ name: tpl.name, personality: tpl.personality, rules: [...tpl.rules], can_do: [...tpl.can_do], cannot_do: [...tpl.cannot_do] }); } }}>
+                  <select id="agent-profile-template" className="settings-theme-select" value="" onChange={(e) => { const idx = e.target.value ? parseInt(e.target.value, 10) : -1; e.target.value = ""; if (idx >= 0 && idx < AGENT_PROFILE_TEMPLATES.length) { const tpl = AGENT_PROFILE_TEMPLATES[idx]; setAgentProfile((p) => ({ ...p, name: tpl.name, role: tpl.role ?? "", personality: tpl.personality, rules: [...tpl.rules], can_do: [...tpl.can_do], cannot_do: [...tpl.cannot_do] })); } }}>
                     <option value="">—</option>
                     {AGENT_PROFILE_TEMPLATES.map((tpl, i) => (<option key={i} value={i}>{tpl.label}</option>))}
                   </select>
@@ -3159,13 +3494,59 @@ function App() {
                     </div>
                     <div className="settings-agent-tab-content">
                       {agentProfileSubTab === "identity" && (
-                        <dl className="settings-list">
-                          <dt>{t("settings.agent_profile_name")}</dt>
-                          <dd>
-                            <input type="text" aria-label={t("settings.agent_profile_name")} className="settings-input" maxLength={AGENT_PROFILE_LIMITS.name} value={agentProfile.name} onChange={(e) => setAgentProfile((p) => ({ ...p, name: e.target.value.slice(0, AGENT_PROFILE_LIMITS.name) }))} placeholder="Akasha" />
-                            <span className="settings-char-count">{agentProfile.name.length} / {AGENT_PROFILE_LIMITS.name}</span>
-                          </dd>
-                        </dl>
+                        <>
+                          <dl className="settings-list">
+                            <dt>{t("settings.agent_profile_name")}</dt>
+                            <dd>
+                              <input type="text" aria-label={t("settings.agent_profile_name")} className="settings-input" maxLength={AGENT_PROFILE_LIMITS.name} value={agentProfile.name} onChange={(e) => setAgentProfile((p) => ({ ...p, name: e.target.value.slice(0, AGENT_PROFILE_LIMITS.name) }))} placeholder="Akasha" />
+                              <span className="settings-char-count">{agentProfile.name.length} / {AGENT_PROFILE_LIMITS.name}</span>
+                            </dd>
+                            <dt>{t("settings.agent_profile_role")}</dt>
+                            <dd>
+                              <input type="text" aria-label={t("settings.agent_profile_role")} className="settings-input" maxLength={AGENT_PROFILE_LIMITS.role} value={agentProfile.role} onChange={(e) => setAgentProfile((p) => ({ ...p, role: e.target.value.slice(0, AGENT_PROFILE_LIMITS.role) }))} placeholder="e.g. joyful assistant, clever assistant" />
+                              <span className="settings-char-count">{agentProfile.role.length} / {AGENT_PROFILE_LIMITS.role}</span>
+                            </dd>
+                            <dt>{t("settings.agent_profile_gender")}</dt>
+                            <dd>
+                              <select aria-label={t("settings.agent_profile_gender")} className="settings-theme-select" value={agentProfile.gender} onChange={(e) => setAgentProfile((p) => ({ ...p, gender: e.target.value }))}>
+                                <option value="">—</option>
+                                <option value="male">{t("settings.gender_male")}</option>
+                                <option value="female">{t("settings.gender_female")}</option>
+                                <option value="neutral">{t("settings.gender_neutral")}</option>
+                              </select>
+                            </dd>
+                            <dt>{t("settings.agent_profile_avatar")}</dt>
+                            <dd>
+                              <input
+                                ref={agentAvatarFileInputRef}
+                                type="file"
+                                accept="image/*"
+                                className="sr-only"
+                                aria-hidden
+                                onChange={async (e) => {
+                                  const file = e.target.files?.[0];
+                                  if (!file) return;
+                                  const MAX_AVATAR_BYTES = 200 * 1024;
+                                  if (file.size > MAX_AVATAR_BYTES) { setAgentProfileError(`Image trop grande (max ${MAX_AVATAR_BYTES / 1024} Ko).`); e.target.value = ""; return; }
+                                  try {
+                                    const { content_base64, mime_type } = await readFileAsBase64(file);
+                                    const dataUrl = `data:${mime_type};base64,${content_base64}`;
+                                    setAgentProfile((p) => ({ ...p, avatar: dataUrl }));
+                                    setAgentProfileError(null);
+                                  } catch (err) { setAgentProfileError(String(err)); }
+                                  e.target.value = "";
+                                }}
+                              />
+                              <div className="settings-avatar-row">
+                                {agentProfile.avatar ? <img src={agentProfile.avatar} alt="" className="settings-avatar-preview" /> : null}
+                                <div>
+                                  <button type="button" className="btn-secondary" onClick={() => agentAvatarFileInputRef.current?.click()}>{t("settings.agent_profile_avatar_choose")}</button>
+                                  {agentProfile.avatar ? <button type="button" className="btn-secondary" onClick={() => setAgentProfile((p) => ({ ...p, avatar: "" }))}>{t("settings.agent_profile_avatar_remove")}</button> : null}
+                                </div>
+                              </div>
+                            </dd>
+                          </dl>
+                        </>
                       )}
                       {agentProfileSubTab === "personality" && (
                         <dl className="settings-list">
@@ -3354,7 +3735,7 @@ function App() {
                         </div>
                       )}
                     </div>
-                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
+                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role) || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
                   </>
                 )}
               </div>
@@ -3460,33 +3841,107 @@ function App() {
               >
                 {t("sidebar.refresh_tasks")}
               </button>
+              {tasksList.length > 0 && (
+                <>
+                  <div className="sidebar-right-filters" role="tablist" aria-label={t("tasks.filter_label")}>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={taskListFilter === "active"}
+                      className={"sidebar-right-filter-tab" + (taskListFilter === "active" ? " active" : "")}
+                      onClick={() => setTaskListFilter("active")}
+                    >
+                      {t("tasks.filter_active")}
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={taskListFilter === "completed"}
+                      className={"sidebar-right-filter-tab" + (taskListFilter === "completed" ? " active" : "")}
+                      onClick={() => setTaskListFilter("completed")}
+                    >
+                      {t("tasks.filter_completed")}
+                    </button>
+                  </div>
+                  <div className="sidebar-right-search-wrap">
+                    <input
+                      type="search"
+                      className="sidebar-right-search"
+                      placeholder={t("tasks.search_placeholder")}
+                      value={taskSearchQuery}
+                      onChange={(e) => setTaskSearchQuery(e.target.value)}
+                      aria-label={t("tasks.search_placeholder")}
+                    />
+                  </div>
+                </>
+              )}
               {tasksLoading && (
                 <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>
               )}
               {!tasksLoading && tasksList.length === 0 && (
                 <p className="empty-state">{t("tasks.empty")}</p>
               )}
-              {!tasksLoading && tasksList.length > 0 && (
+              {!tasksLoading && tasksList.length > 0 && filteredTasksList.length === 0 && (
+                <p className="empty-state">{t("tasks.no_match_filter")}</p>
+              )}
+              {!tasksLoading && filteredTasksList.length > 0 && (
                 <ul className="sidebar-right-task-list" role="list">
-                  {tasksList.map((task, i) => (
-                    <li
-                      key={task.id}
-                      className={i === tasksSelected ? "selected" : ""}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => { setTasksSelected(i); setTab("tasks"); }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          setTasksSelected(i);
-                          setTab("tasks");
-                        }
-                      }}
-                    >
-                      <span className="task-id">#{task.id.slice(-8)}</span>
-                      <span className="task-status">{task.status}</span>
-                    </li>
-                  ))}
+                  {filteredTasksList.map((task) => {
+                    const isSelected = tasksList[tasksSelected]?.id === task.id;
+                    const runningChip = task.status === "running" ? runningTaskChips[task.id] : undefined;
+                    const createdLabel = task.created_at ? (() => {
+                      try {
+                        const d = new Date(task.created_at);
+                        return d.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+                      } catch {
+                        return task.created_at;
+                      }
+                    })() : null;
+                    return (
+                      <li key={task.id} className={"sidebar-right-task-card" + (isSelected ? " selected" : "")}>
+                        <div
+                          className="sidebar-right-task-card-inner"
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => { setTasksSelected(tasksList.findIndex((x) => x.id === task.id)); setTab("tasks"); }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              setTasksSelected(tasksList.findIndex((x) => x.id === task.id));
+                              setTab("tasks");
+                            }
+                          }}
+                        >
+                          <div className="sidebar-right-task-card-head">
+                            <span className="sidebar-right-task-card-title" title={taskDisplayLabel(task)}>
+                              {taskDisplayLabel(task)}
+                            </span>
+                            <span className={"sidebar-right-task-status-pill status-" + task.status}>
+                              {task.status}
+                            </span>
+                          </div>
+                          {task.status === "running" && runningChip != null && (
+                            <div className="sidebar-right-task-progress">
+                              <div className="sidebar-right-task-progress-bar" style={{ width: `${runningChip.pct ?? 0}%` }} />
+                              <span className="sidebar-right-task-progress-pct">{runningChip.pct ?? 0}%</span>
+                            </div>
+                          )}
+                          <div className="sidebar-right-task-meta">
+                            <span className="sidebar-right-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>
+                            {createdLabel && <span className="sidebar-right-task-created">{createdLabel}</span>}
+                            {task.assigned_agent && <span className="sidebar-right-task-agent">{task.assigned_agent}</span>}
+                          </div>
+                          <button
+                            type="button"
+                            className="sidebar-right-task-view-btn"
+                            onClick={(e) => { e.stopPropagation(); setTasksSelected(tasksList.findIndex((x) => x.id === task.id)); setTab("tasks"); }}
+                          >
+                            {t("tasks.view_task")}
+                          </button>
+                        </div>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>

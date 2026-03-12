@@ -107,6 +107,53 @@ enum ConfigSub {
         #[command(subcommand)]
         sub: ConfigEnvSub,
     },
+    /// Configure LLM providers (Ollama URL, OpenAI/OpenRouter API keys) without full init
+    Provider {
+        #[command(subcommand)]
+        sub: ConfigProviderSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigProviderSub {
+    /// List providers defined in llm_router.yaml (names and main fields)
+    List,
+    /// Set or update Ollama base URL (and optionally default model for a category)
+    SetOllama {
+        /// Ollama base URL (e.g. http://localhost:11434)
+        #[arg(long)]
+        url: Option<String>,
+        /// Optional: set as primary for this task type (e.g. conversation)
+        #[arg(long)]
+        category: Option<String>,
+        /// Optional: model name when setting category (e.g. llama3.2)
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Add or update OpenAI provider; stores API key in vault, updates llm_router.yaml
+    AddOpenai {
+        /// API key (sk-...). If omitted, prompted on stdin.
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Optional: set as primary for this task type
+        #[arg(long)]
+        category: Option<String>,
+        /// Optional: model name when setting category (e.g. gpt-4o-mini)
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Add or update OpenRouter provider; stores API key in vault, updates llm_router.yaml
+    AddOpenrouter {
+        /// API key. If omitted, prompted on stdin.
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Optional: set as primary for this task type
+        #[arg(long)]
+        category: Option<String>,
+        /// Optional: model name when setting category (e.g. openai/gpt-4o-mini)
+        #[arg(long)]
+        model: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -500,7 +547,7 @@ fn akasha_data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("AKASHA_DATA_DIR") {
         return PathBuf::from(dir);
     }
-    dirs::data_local_dir()
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("akasha")
 }
@@ -516,7 +563,7 @@ fn cmd_paths() -> anyhow::Result<()> {
         println!("  AKASHA_DATA_DIR (env)  : {}", dir);
     } else {
         println!(
-            "  AKASHA_DATA_DIR (env)  : (non défini — utilisation de dirs::data_local_dir()/akasha)"
+            "  AKASHA_DATA_DIR (env)  : (non défini — utilisation du répertoire home/akasha)"
         );
     }
     println!("  Répertoire de données  : {}", data_dir.display());
@@ -656,61 +703,99 @@ fn init_prompt(prompt: &str) -> String {
     s.trim().to_string()
 }
 
-/// Agent personality templates for `akasha init`. Each returns (name, personality, rules, can_do, cannot_do) as JSON-compatible values.
+/// Agent personality templates for `akasha init`. Each returns (label, JSON with name, personality, role?, rules, can_do, cannot_do). Personality is in English and includes the role.
 fn agent_profile_templates() -> Vec<(&'static str, serde_json::Value)> {
     vec![
         (
-            "Neutre / polyvalent — ton professionnel, adapté à tous les usages",
+            "Neutral / versatile — professional tone, adaptable",
             serde_json::json!({
                 "name": "Akasha",
-                "personality": "Ton neutre et professionnel. Réponds de façon claire et adaptée au contexte, sans surcharge. Adapte-toi à la demande (technique, rédaction, conseil). Pas de préambule superflu du type « Bien sûr ! » ou « Avec plaisir » — va à l'essentiel.",
+                "role": "neutral professional assistant",
+                "personality": "You are a neutral, professional assistant. Clear, adaptable tone. Adapt to the request (technical, writing, advice). No superfluous preambles like « Of course! » or « With pleasure » — get to the point.",
                 "rules": [],
                 "can_do": [],
                 "cannot_do": []
             }),
         ),
         (
-            "Bienveillant / coach — encourageant, pédagogique, à l'écoute",
+            "Kind / coach — encouraging, pedagogical",
             serde_json::json!({
                 "name": "Akasha",
-                "personality": "Bienveillant et encourageant. Explique avec pédagogie, reformule pour vérifier que l'utilisateur a compris. Valorise les progrès et propose des étapes claires. Reste à l'écoute, ne juge pas. Propose des pistes plutôt que d'imposer une seule solution.",
-                "rules": ["Rester à l'écoute et ne pas juger.", "Proposer des pistes plutôt que d'imposer une seule solution."],
+                "role": "kind encouraging assistant",
+                "personality": "You are a kind, encouraging assistant (coach style). Explain with pedagogy, rephrase to check understanding. Value progress and suggest clear steps. Stay attentive, non-judgmental. Suggest options rather than imposing one solution.",
+                "rules": ["Stay attentive and non-judgmental.", "Suggest options rather than imposing a single solution."],
                 "can_do": [],
                 "cannot_do": []
             }),
         ),
         (
-            "Concis / technique — réponses courtes et précises, orienté dev et sysadmin",
+            "Concise / technical — short, precise, dev & sysadmin",
             serde_json::json!({
                 "name": "Akasha",
-                "personality": "Concis et technique. Réponses courtes et précises, orientées développement et administration système. Va à l'essentiel : commandes, extraits de code, chemins. Pas de longues introductions ni de formules de politesse superflues.",
-                "rules": ["Privilégier le concret : commandes, extraits de code, chemins.", "Éviter les longues introductions."],
+                "role": "concise technical assistant",
+                "personality": "You are a concise, technical assistant. Short, precise answers focused on development and system administration. Get to the point: commands, code snippets, paths. No long intros or unnecessary politeness.",
+                "rules": ["Prioritize concrete output: commands, code snippets, paths.", "Avoid long introductions."],
                 "can_do": [],
                 "cannot_do": []
             }),
         ),
         (
-            "Créatif / rédacteur — ton libre, créatif, pour rédaction et idées",
+            "Creative / writer — free, creative, for writing and ideas",
             serde_json::json!({
                 "name": "Akasha",
-                "personality": "Créatif et ouvert. Aide à structurer des idées, à rédiger, à brainstormer. Propose plusieurs formulations ou angles. Accepte les demandes un peu inhabituelles. Ose suggérer des variantes et des pistes inattendues.",
+                "role": "creative open-minded assistant",
+                "personality": "You are a creative, open-minded assistant. Help structure ideas, write, brainstorm. Offer multiple phrasings or angles. Accept slightly unusual requests. Suggest variants and unexpected directions.",
                 "rules": [],
-                "can_do": ["Proposer des reformulations et variantes.", "Suggérer des angles ou idées complémentaires."],
+                "can_do": ["Propose rephrasing and variants.", "Suggest complementary angles or ideas."],
                 "cannot_do": []
             }),
         ),
         (
-            "Strict / sécurisé — règles strictes, pas d'exécution de code sans confirmation",
+            "Strict / security-aware — no code run without confirmation",
             serde_json::json!({
                 "name": "Akasha",
-                "personality": "Précis et prudent. Explique clairement les risques avant toute action. Ne propose jamais d'exécuter du code ou des commandes sans confirmation explicite. Toujours : quoi, pourquoi, puis comment. En cas de doute sur la sécurité, avertir et proposer une alternative plus sûre.",
+                "role": "careful security-aware assistant",
+                "personality": "You are a careful, security-aware assistant. Explain risks clearly before any action. Never suggest running code or commands without explicit confirmation. Always: what, why, then how. When in doubt about security, warn and suggest a safer alternative.",
                 "rules": [
-                    "Ne jamais exécuter de code ou commande sans confirmation explicite de l'utilisateur.",
-                    "Toujours expliquer le « quoi » et le « pourquoi » avant le « comment ».",
-                    "En cas de doute sur la sécurité, avertir et proposer une alternative plus sûre."
+                    "Never run code or commands without explicit user confirmation.",
+                    "Always explain « what » and « why » before « how ».",
+                    "When in doubt about security, warn and suggest a safer alternative."
                 ],
-                "can_do": ["Expliquer et détailler les étapes.", "Proposer des commandes ou scripts à copier-coller après confirmation."],
-                "cannot_do": ["Exécuter du code ou des commandes sans confirmation.", "Modifier des fichiers sensibles sans demande claire."]
+                "can_do": ["Explain and detail steps.", "Propose commands or scripts to copy-paste after confirmation."],
+                "cannot_do": ["Run code or commands without confirmation.", "Modify sensitive files without a clear request."]
+            }),
+        ),
+        (
+            "Joyful & fun — upbeat, light humor",
+            serde_json::json!({
+                "name": "Akasha",
+                "role": "joyful fun assistant",
+                "personality": "You are a joyful, fun assistant. Upbeat, light humor, emojis when appropriate. Keep responses helpful but entertaining.",
+                "rules": [],
+                "can_do": [],
+                "cannot_do": []
+            }),
+        ),
+        (
+            "Friendly advisor — warm, good counsel",
+            serde_json::json!({
+                "name": "Akasha",
+                "role": "friendly advisor",
+                "personality": "You are a friendly advisor. Warm, good counsel, supportive. Give clear advice while staying approachable.",
+                "rules": [],
+                "can_do": [],
+                "cannot_do": []
+            }),
+        ),
+        (
+            "Geek & nerdy — tech-loving, precise",
+            serde_json::json!({
+                "name": "Akasha",
+                "role": "geeky nerdy assistant",
+                "personality": "You are a geeky, nerdy assistant. Love tech, references, and precise details. Helpful and enthusiastic about technical topics.",
+                "rules": [],
+                "can_do": [],
+                "cannot_do": []
             }),
         ),
     ]
@@ -1118,14 +1203,224 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                 }
             }
         }
+        ConfigSub::Provider { sub: provider_sub } => {
+            let path = llm_router_path();
+            if !path.exists() {
+                anyhow::bail!(
+                    "llm_router.yaml not found. Run 'akasha init' first or create {}",
+                    path.display()
+                );
+            }
+            let mut config = akasha_llm::RoutingConfig::load_from_path(&path)
+                .map_err(|e| anyhow::anyhow!("Load llm_router.yaml: {}", e))?;
+            let vault = akasha_vault::open_vault(&data_dir).map_err(|e| anyhow::anyhow!("Vault: {}", e))?;
+
+            match provider_sub {
+                ConfigProviderSub::List => {
+                    if config.providers.is_empty() {
+                        println!("No providers in llm_router.yaml.");
+                        return Ok(());
+                    }
+                    let mut names: Vec<_> = config.providers.keys().collect();
+                    names.sort();
+                    println!("Providers in llm_router.yaml:");
+                    for name in names {
+                        let p = config.providers.get(name).unwrap();
+                        let url = p.base_url.as_deref().unwrap_or("(not set)");
+                        let key_ref = p.api_key_ref.as_deref().unwrap_or("(none)");
+                        println!("  {}: base_url={}, api_key_ref={}", name, url, key_ref);
+                    }
+                }
+                ConfigProviderSub::SetOllama { url, category, model } => {
+                    let url = url
+                        .or_else(|| config.providers.get("ollama").and_then(|p| p.base_url.clone()))
+                        .unwrap_or_else(|| init_prompt("Ollama URL [http://localhost:11434]:\n> "));
+                    let url = if url.trim().is_empty() {
+                        "http://localhost:11434".to_string()
+                    } else {
+                        url.trim().to_string()
+                    };
+                    config.providers.insert(
+                        "ollama".to_string(),
+                        akasha_llm::config::ProviderConfig {
+                            api_key_ref: None,
+                            base_url: Some(url.clone()),
+                            organization: None,
+                            version: None,
+                            always_available: None,
+                            site_url: None,
+                            app_title: None,
+                        },
+                    );
+                    if let (Some(cat), Some(modl)) = (category, model) {
+                        let entry = akasha_llm::config::RouteEntry {
+                            provider: "ollama".into(),
+                            model: modl.trim().to_string(),
+                            config: None,
+                        };
+                        config.set_primary_route(&cat, entry);
+                        println!("Ollama URL set to {}; {} primary set to ollama / {}", url, cat, modl);
+                    } else {
+                        println!("Ollama base_url set to {}", url);
+                    }
+                }
+                ConfigProviderSub::AddOpenai { api_key, category, model } => {
+                    let key = api_key
+                        .or_else(|| Some(init_prompt("OpenAI API key (sk-...):\n> ")))
+                        .unwrap_or_default();
+                    let key = key.trim();
+                    if !key.is_empty() {
+                        let _ = vault.set("openai_api_key", key);
+                        println!("Vault: openai_api_key stored.");
+                    }
+                    config.providers.insert(
+                        "openai".to_string(),
+                        akasha_llm::config::ProviderConfig {
+                            api_key_ref: Some("vault://openai_api_key".to_string()),
+                            base_url: None,
+                            organization: None,
+                            version: None,
+                            always_available: None,
+                            site_url: None,
+                            app_title: None,
+                        },
+                    );
+                    if let (Some(cat), Some(modl)) = (category, model) {
+                        let entry = akasha_llm::config::RouteEntry {
+                            provider: "openai".into(),
+                            model: modl.trim().to_string(),
+                            config: None,
+                        };
+                        config.set_primary_route(&cat, entry);
+                        println!("OpenAI provider added; {} primary set to openai / {}", cat, modl);
+                    } else {
+                        println!("OpenAI provider added (api_key_ref: vault://openai_api_key). Use 'akasha config models set <category> openai <model>' to set primary.");
+                    }
+                }
+                ConfigProviderSub::AddOpenrouter { api_key, category, model } => {
+                    let key = api_key
+                        .or_else(|| Some(init_prompt("OpenRouter API key:\n> ")))
+                        .unwrap_or_default();
+                    let key = key.trim();
+                    if !key.is_empty() {
+                        let _ = vault.set("openrouter_api_key", key);
+                        println!("Vault: openrouter_api_key stored.");
+                    }
+                    config.providers.insert(
+                        "openrouter".to_string(),
+                        akasha_llm::config::ProviderConfig {
+                            api_key_ref: Some("vault://openrouter_api_key".to_string()),
+                            base_url: None,
+                            organization: None,
+                            version: None,
+                            always_available: None,
+                            site_url: None,
+                            app_title: None,
+                        },
+                    );
+                    if let (Some(cat), Some(modl)) = (category, model) {
+                        let entry = akasha_llm::config::RouteEntry {
+                            provider: "openrouter".into(),
+                            model: modl.trim().to_string(),
+                            config: None,
+                        };
+                        config.set_primary_route(&cat, entry);
+                        println!("OpenRouter provider added; {} primary set to openrouter / {}", cat, modl);
+                    } else {
+                        println!("OpenRouter provider added (api_key_ref: vault://openrouter_api_key). Use 'akasha config models set <category> openrouter <model>' to set primary.");
+                    }
+                }
+            }
+            config.save_to_path(&path)?;
+            println!("Config written to {}", path.display());
+        }
     }
     Ok(())
+}
+
+/// Replace bare unquoted `  - .` YAML list entries (standalone dot) with `replacement`,
+/// but only when the dot is the complete value (not part of a path like `.gitignore`).
+/// A bare dot value is followed by end-of-line, whitespace, or a YAML comment character `#`.
+fn replace_bare_dot_yaml(content: &str, replacement: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let target = "  - .";
+    let mut remaining = content;
+    while let Some(pos) = remaining.find(target) {
+        result.push_str(&remaining[..pos]);
+        let after = &remaining[pos + target.len()..];
+        let next_char = after.chars().next();
+        // Only replace when dot is the full value: followed by whitespace, '#', or end of string.
+        if next_char.map(|c| c.is_whitespace()).unwrap_or(true) || next_char == Some('#') {
+            result.push_str(replacement);
+        } else {
+            result.push_str(target);
+        }
+        remaining = after;
+    }
+    result.push_str(remaining);
+    result
 }
 
 fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
     let data_dir = akasha_data_dir();
     std::fs::create_dir_all(&data_dir)?;
     let data_dir_str = data_dir.display().to_string();
+
+    let llm_router_path = data_dir.join("llm_router.yaml");
+    let existing_config = llm_router_path.exists();
+
+    if existing_config && use_defaults {
+        println!("=== Akasha — Init ===\n");
+        println!("Répertoire de données : {}", data_dir_str);
+        println!("\nUne configuration existe déjà. Utilisez sans --defaults pour vérifier ou réparer.\n");
+        return Ok(());
+    }
+
+    if existing_config && !use_defaults {
+        println!("=== Akasha — Init ===\n");
+        println!("Répertoire de données : {}", data_dir_str);
+        println!("\nUn répertoire de configuration existe déjà.");
+        println!("  1) Vérifier / réparer la configuration (fichiers manquants, structure)");
+        println!("  2) Réinitialiser (refaire le wizard complet)");
+        println!("  3) Quitter");
+        let choice = init_prompt("Choix [1] :\n> ");
+        let choice = choice.trim();
+        if choice == "3" || choice.eq_ignore_ascii_case("q") {
+            println!("Au revoir.");
+            return Ok(());
+        }
+        if choice == "2" {
+            println!("\nRéinitialisation — suite du wizard.\n");
+            // fall through to full init (will overwrite)
+        } else {
+            // 1 or empty: verify/repair
+            let checks = run_config_checks(&data_dir);
+            println!("\n--- Vérification de la configuration ---");
+            let mut has_fail = false;
+            for (_, ok, msg) in &checks {
+                println!("  {}", msg);
+                if !ok {
+                    has_fail = true;
+                }
+            }
+            if has_fail {
+                let apply = init_prompt("\nCréer les fichiers manquants (comme doctor --fix) ? [O/n] :\n> ");
+                if apply.trim().is_empty() || apply.eq_ignore_ascii_case("o") || apply.eq_ignore_ascii_case("y") {
+                    let fixes = run_doctor_fixes(&data_dir)?;
+                    if !fixes.is_empty() {
+                        println!("\nFichiers créés ou réparés :");
+                        for f in &fixes {
+                            println!("  {}", f);
+                        }
+                    }
+                }
+            } else {
+                println!("\nTous les fichiers sont présents et conformes.");
+            }
+            println!("\nPour démarrer : akasha start");
+            return Ok(());
+        }
+    }
 
     println!("=== Akasha — Premier lancement ===\n");
     println!("Répertoire de données : {}\n", data_dir_str);
@@ -1158,12 +1453,6 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
             choice.trim().to_string()
         };
 
-        if provider_choice != "2" && provider_choice != "3" && provider_choice != "4" {
-            let url = init_prompt("Ollama URL [http://localhost:11434] :\n> ");
-            if !url.trim().is_empty() {
-                ollama_url = url.trim().to_string();
-            }
-        }
         if provider_choice == "3" || provider_choice == "5" {
             let key = init_prompt("Clé API OpenAI (sk-...) :\n> ");
             if !key.trim().is_empty() {
@@ -1186,8 +1475,45 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
         }
     }
 
-    // If user chose Ollama (1, 5 or 6): detect Ollama; if not detected, offer to open download page
+    // If user chose Ollama (1, 5 or 6): run discovery (local then network), then set URL or prompt
     let ollama_chosen = provider_choice == "1" || provider_choice == "5" || provider_choice == "6";
+    if ollama_chosen {
+        println!("Découverte Ollama (local puis réseau)…");
+        let rt = tokio::runtime::Runtime::new()?;
+        let discovered = rt.block_on(akasha_llm::discover_all());
+        if !discovered.is_empty() {
+            ollama_url = discovered[0].clone();
+            if !use_defaults {
+                println!("Ollama détecté ({} instance(s)) :", discovered.len());
+                for (i, url) in discovered.iter().enumerate() {
+                    let kind = if url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]") {
+                        "local"
+                    } else {
+                        "réseau"
+                    };
+                    println!("  {}  {}  [{}]", i + 1, url, kind);
+                }
+                let sel = init_prompt("Utiliser l'instance 1, choisir un numéro, ou saisir une URL personnalisée [1] :\n> ");
+                let sel = sel.trim();
+                if !sel.is_empty() {
+                    if let Ok(idx) = sel.parse::<usize>() {
+                        if idx >= 1 && idx <= discovered.len() {
+                            ollama_url = discovered[idx - 1].clone();
+                        }
+                    } else {
+                        ollama_url = sel.to_string();
+                    }
+                }
+            }
+        } else if !use_defaults {
+            let url = init_prompt("Ollama URL [http://localhost:11434] :\n> ");
+            if !url.trim().is_empty() {
+                ollama_url = url.trim().to_string();
+            }
+        }
+    }
+
+    // If user chose Ollama (1, 5 or 6): detect Ollama; if not detected, offer to open download page
     let ollama_available = ollama_chosen && ollama_detected(&ollama_url);
     if ollama_chosen && !ollama_available && !use_defaults {
         println!("\n  Ollama n'est pas détecté à {} (non installé ou non démarré).", ollama_url);
@@ -1450,28 +1776,46 @@ providers:
         let profile = &templates[0].1;
         let json = serde_json::to_string_pretty(profile).unwrap_or_else(|_| "{}".to_string());
         std::fs::write(&agent_profile_path, json)?;
-        println!("\n  Profil agent : template « Neutre / polyvalent » écrit dans {}", agent_profile_path.display());
+        println!("\n  Profil agent : template « Neutral / versatile » écrit dans {}", agent_profile_path.display());
     }
 
     // --- 4c. tools_policy.yaml (outils machine) ---
     let tools_policy_path = data_dir.join("tools_policy.yaml");
     if !tools_policy_path.exists() {
+        let data_dir_str = data_dir.display().to_string();
+        let data_dir_yaml = format!("'{}'", data_dir_str.replace('\'', "''"));
         let spec_dir = std::env::var("AKASHA_SPEC_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("spec"));
         let example = spec_dir.join("tools_policy.example.yaml");
         if example.exists() {
             std::fs::copy(&example, &tools_policy_path)?;
-            println!("  Fichier écrit : {} (depuis spec/tools_policy.example.yaml)", tools_policy_path.display());
+            let content = std::fs::read_to_string(&tools_policy_path)?;
+            // Replace quoted and unquoted "." entries in allowed_*_paths with data_dir.
+            // Only replace "." (standalone dot), not paths like ".gitignore" or ".config".
+            let replacement = format!("  - {}", data_dir_yaml);
+            let content = content
+                .replace("  - \".\"", &replacement)
+                .replace("  - '.'", &replacement);
+            // Replace unquoted "  - ." only when the dot is the full value (followed by
+            // whitespace, a comment character, or end of line).
+            let content = replace_bare_dot_yaml(&content, &replacement);
+            std::fs::write(&tools_policy_path, content)?;
+            println!("  Fichier écrit : {} (depuis spec/tools_policy.example.yaml, chemins par défaut = data_dir)", tools_policy_path.display());
         } else {
-            let minimal = r#"# tools_policy.yaml - éditez allowed_read_paths / allowed_write_paths selon vos besoins
-allowed_read_paths: []
-allowed_write_paths: []
+            let minimal = format!(
+                r#"# tools_policy.yaml - éditez allowed_read_paths / allowed_write_paths selon vos besoins
+allowed_read_paths:
+  - {}
+allowed_write_paths:
+  - {}
 allowed_commands: []
 command_timeout_secs: 60
-"#;
+"#,
+                data_dir_yaml, data_dir_yaml
+            );
             std::fs::write(&tools_policy_path, minimal)?;
-            println!("  Fichier écrit : {} (minimal ; éditez pour autoriser chemins et commandes)", tools_policy_path.display());
+            println!("  Fichier écrit : {} (minimal ; chemins par défaut = data_dir)", tools_policy_path.display());
         }
     }
 
@@ -1718,6 +2062,84 @@ fn cmd_stop() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Parse an env file (KEY=value per line). Returns (key->value map, list of (line_number, line) for invalid lines).
+fn parse_env_file(content: &str) -> (std::collections::HashMap<String, String>, Vec<(usize, String)>) {
+    let mut map = std::collections::HashMap::new();
+    let mut errors = Vec::new();
+    for (i, line) in content.lines().enumerate() {
+        let line_no = i + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = trimmed.split_once('=') {
+            let key = k.trim();
+            if key.is_empty() {
+                errors.push((line_no, line.to_string()));
+            } else {
+                map.insert(key.to_string(), v.trim().to_string());
+            }
+        } else {
+            errors.push((line_no, line.to_string()));
+        }
+    }
+    (map, errors)
+}
+
+/// Fix an existing env file: report invalid lines, add missing recommended keys with default values.
+fn doctor_fix_env_file(
+    path: &Path,
+    name: &str,
+    recommended_keys: &[&str],
+    comment_for_defaults: &str,
+    fixes: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let (map, errors) = parse_env_file(&content);
+    for (line_no, line) in &errors {
+        fixes.push(format!(
+            "{} ligne {}: format invalide (attendu KEY=value ou ligne vide/commentaire #). Ligne: \"{}\"",
+            name, line_no, line.trim()
+        ));
+    }
+    let mut to_append: Vec<String> = Vec::new();
+    for key in recommended_keys {
+        if !map.contains_key(*key) {
+            let default = match *key {
+                "AKASHA_PORT" => "3876",
+                "AKASHA_LOG" => "info",
+                "AKASHA_TELEGRAM_ENABLED" | "AKASHA_SLACK_ENABLED" | "AKASHA_DISCORD_ENABLED" => "",
+                _ => "",
+            };
+            if default.is_empty() {
+                to_append.push(format!("# {}=1", key));
+            } else {
+                to_append.push(format!("{}={}", key, default));
+            }
+        }
+    }
+    if !to_append.is_empty() {
+        let mut out = content.trim_end().to_string();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        if !out.is_empty() && !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        out.push_str(&format!("# {}\n", comment_for_defaults));
+        out.push_str(&to_append.join("\n"));
+        out.push('\n');
+        std::fs::write(path, out)?;
+        let keys_added: Vec<&str> = recommended_keys
+            .iter()
+            .filter(|k| !map.contains_key(**k))
+            .copied()
+            .collect();
+        fixes.push(format!("{}: entrées recommandées ajoutées ({}).", name, keys_added.join(", ")));
+    }
+    Ok(())
+}
+
 /// Apply fixes for missing or minimal config when `akasha doctor --fix` is run.
 /// Returns a list of messages describing what was fixed.
 fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
@@ -1746,26 +2168,74 @@ fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
         );
         config.save_to_path(&llm_router_path)?;
         fixes.push(format!("Created llm_router.yaml with default task_types and providers.ollama.base_url = {}", ollama_url));
+    } else {
+        match akasha_llm::RoutingConfig::load_from_path(&llm_router_path) {
+            Ok(config) => {
+                if let Err(e) = config.save_to_path(&llm_router_path) {
+                    fixes.push(format!("llm_router.yaml: impossible d'écrire après mise à jour — {}. Vérifiez les permissions.", e));
+                } else {
+                    fixes.push("llm_router.yaml: entrées de schéma manquantes ajoutées.".to_string());
+                }
+            }
+            Err(e) => {
+                fixes.push(format!(
+                    "llm_router.yaml: fichier invalide — {}. Corrigez la syntaxe YAML et la structure (voir spec/35_configuration_reference.md et spec/llm_router.example.yaml).",
+                    e
+                ));
+            }
+        }
     }
 
     let tools_policy_path = data_dir.join("tools_policy.yaml");
     if !tools_policy_path.exists() {
+        let data_dir_str = data_dir.display().to_string();
+        let data_dir_yaml = format!("'{}'", data_dir_str.replace('\'', "''"));
         let spec_dir = std::env::var("AKASHA_SPEC_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("spec"));
         let example = spec_dir.join("tools_policy.example.yaml");
         if example.exists() {
             std::fs::copy(&example, &tools_policy_path)?;
-            fixes.push(format!("Created tools_policy.yaml from {}", example.display()));
+            let content = std::fs::read_to_string(&tools_policy_path)?;
+            // Replace quoted and unquoted "." entries in allowed_*_paths with data_dir.
+            // Only replace "." (standalone dot), not paths like ".gitignore" or ".config".
+            let replacement = format!("  - {}", data_dir_yaml);
+            let content = content
+                .replace("  - \".\"", &replacement)
+                .replace("  - '.'", &replacement);
+            let content = replace_bare_dot_yaml(&content, &replacement);
+            std::fs::write(&tools_policy_path, content)?;
+            fixes.push(format!("Created tools_policy.yaml from {} (default paths = data_dir).", example.display()));
         } else {
-            let minimal = r#"# tools_policy.yaml - edit allowed_read_paths / allowed_write_paths as needed
-allowed_read_paths: []
-allowed_write_paths: []
+            let minimal = format!(
+                r#"# tools_policy.yaml - edit allowed_read_paths / allowed_write_paths as needed
+allowed_read_paths:
+  - {}
+allowed_write_paths:
+  - {}
 allowed_commands: []
 command_timeout_secs: 60
-"#;
+"#,
+                data_dir_yaml, data_dir_yaml
+            );
             std::fs::write(&tools_policy_path, minimal)?;
-            fixes.push("Created minimal tools_policy.yaml (no paths allowed by default; edit to add paths).".to_string());
+            fixes.push("Created minimal tools_policy.yaml (default paths = data_dir; edit to add more).".to_string());
+        }
+    } else {
+        match akasha_tools::ToolsPolicy::load_from_path(&tools_policy_path) {
+            Ok(policy) => {
+                if let Err(e) = policy.save_to_path(&tools_policy_path) {
+                    fixes.push(format!("tools_policy.yaml: impossible d'écrire après mise à jour — {}. Vérifiez les permissions.", e));
+                } else {
+                    fixes.push("tools_policy.yaml: entrées de schéma manquantes ajoutées.".to_string());
+                }
+            }
+            Err(e) => {
+                fixes.push(format!(
+                    "tools_policy.yaml: fichier invalide — {}. Corrigez la syntaxe YAML (voir spec/tools_policy.example.yaml et spec/35_configuration_reference.md).",
+                    e
+                ));
+            }
         }
     }
 
@@ -1776,6 +2246,34 @@ command_timeout_secs: 60
 "#;
         std::fs::write(&connectors_path, content)?;
         fixes.push("Created connectors.env (empty; set vars to 1 to enable Telegram/Slack/Discord).".to_string());
+    } else {
+        doctor_fix_env_file(
+            &connectors_path,
+            "connectors.env",
+            &["AKASHA_TELEGRAM_ENABLED", "AKASHA_SLACK_ENABLED", "AKASHA_DISCORD_ENABLED"],
+            "# Set to 1 to enable",
+            &mut fixes,
+        )?;
+    }
+
+    let akasha_env_path = data_dir.join("akasha.env");
+    if akasha_env_path.exists() {
+        doctor_fix_env_file(
+            &akasha_env_path,
+            "akasha.env",
+            &["AKASHA_PORT", "AKASHA_LOG"],
+            "# Variables principales (défauts: 3876, info)",
+            &mut fixes,
+        )?;
+    }
+
+    let agent_profile_path = data_dir.join("agent_profile.json");
+    if !agent_profile_path.exists() {
+        let templates = agent_profile_templates();
+        let profile = &templates[0].1;
+        let json = serde_json::to_string_pretty(profile).unwrap_or_else(|_| "{}".to_string());
+        std::fs::write(&agent_profile_path, json)?;
+        fixes.push("Created agent_profile.json (default template).".to_string());
     }
 
     Ok(fixes)
@@ -1828,6 +2326,23 @@ fn run_config_checks(data_dir: &Path) -> Vec<(String, bool, String)> {
         (false, "akasha.env: file missing (optional)".to_string())
     };
     out.push(("akasha_env".to_string(), ok, msg));
+
+    // agent_profile.json (existence + valid JSON)
+    let p = data_dir.join("agent_profile.json");
+    let (ok, msg) = if !p.exists() {
+        (false, "agent_profile.json: file missing".to_string())
+    } else {
+        match std::fs::read_to_string(&p) {
+            Ok(s) => {
+                match serde_json::from_str::<serde_json::Value>(&s) {
+                    Ok(_) => (true, "agent_profile.json: OK".to_string()),
+                    Err(e) => (false, format!("agent_profile.json: invalid — {}", e)),
+                }
+            }
+            Err(e) => (false, format!("agent_profile.json: unreadable — {}", e)),
+        }
+    };
+    out.push(("agent_profile_json".to_string(), ok, msg));
 
     out
 }

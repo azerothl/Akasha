@@ -21,7 +21,7 @@ Ce document décrit **tous les fichiers de configuration** utilisés par Akasha 
 | `global.enable_fallback`                    | booléen      | Non         | Activer le fallback entre providers (défaut : true).                                                                                                                            |
 | `global.default_timeout_secs`               | entier (u64) | Non         | Timeout par requête LLM en secondes (défaut : 300).                                                                                                                             |
 | `global.default_max_retries`                | entier (u32) | Non         | Nombre max de tentatives (défaut : 2).                                                                                                                                          |
-| `providers`                                 | objet        | Non         | Config par provider (clé = nom : `ollama`, `openai`, `openrouter`).                                                                                                             |
+| `providers`                                 | objet        | Non         | Config par provider (clé = nom : `ollama`, `openai`, `openrouter`, `bitnet`).                                                                                                    |
 | `providers.<nom>.base_url`                  | string       | Non         | URL de base (ex. `http://localhost:11434` pour Ollama).                                                                                                                         |
 | `providers.<nom>.api_key_ref`               | string       | Non         | Référence de la clé API : `vault://nom_cle` (résolution via vault en priorité), ou nom de clé sans préfixe (résolution via variable d'environnement, ex. `openrouter_api_key`). |
 | `providers.<nom>.organization`              | string       | Non         | Ex. OpenAI organization.                                                                                                                                                        |
@@ -42,7 +42,7 @@ Ce document décrit **tous les fichiers de configuration** utilisés par Akasha 
 | Clé                                | Type           | Obligatoire            | Description                                                                           |
 | ---------------------------------- | -------------- | ---------------------- | ------------------------------------------------------------------------------------- |
 | `primary`                          | objet          | Non                    | Route principale.                                                                     |
-| `primary.provider`                 | string         | Oui si primary présent | Nom du provider : `ollama`, `openai`, `openrouter`, `akasha_embedded`, `akasha_core`. |
+| `primary.provider`                 | string         | Oui si primary présent | Nom du provider : `ollama`, `openai`, `openrouter`, `bitnet`, `akasha_embedded`, `akasha_core`. |
 | `primary.model`                    | string         | Oui si primary présent | Nom du modèle (ex. `default`, `llama3.2`, `gpt-4`).                                   |
 | `primary.config`                   | objet          | Non                    | Options libres (max_tokens, temperature, etc.).                                       |
 | `fallback`                         | liste d’objets | Non                    | Liste de `{ provider, model, config? }` en cas d’échec du primary.                    |
@@ -61,6 +61,7 @@ Voir [llm_router.example.yaml](llm_router.example.yaml).
 
 - **Premier lancement** : `akasha init` ou `akasha doctor --fix` génère un fichier par défaut (akasha_embedded + akasha_core).
 - **Utiliser Ollama** : ajouter `providers.ollama.base_url` et `akasha config models set conversation ollama llama3.2`.
+- **Utiliser BitNet** (serveur local type llama-server / BitNet) : ajouter `providers.bitnet.base_url: "http://127.0.0.1:8080"` (optionnel, défaut 8080) et définir la route avec `provider: bitnet`, `model: default` (voir [36_bitnet_integration_study.md](36_bitnet_integration_study.md)).
 - **Utiliser OpenAI** : `providers.openai.api_key_ref: "vault://openai_api_key"` puis définir la route pour une catégorie.
 - **Modèle système (mémoire, décomposition)** : la catégorie `system` doit exister ; par défaut elle pointe vers `akasha_embedded` (voir [06_memory_model.md](06_memory_model.md)).
 - **OpenRouter / OpenAI en primary** : le daemon enregistre le provider OpenRouter (resp. OpenAI) dès qu’une clé API est disponible : variable d’environnement `OPENROUTER_API_KEY` (resp. `OPENAI_API_KEY`) ou vault `vault://openrouter_api_key` (resp. `vault://openai_api_key`). Il n’est pas obligatoire d’avoir une section `providers.openrouter` (resp. `providers.openai`) dans `llm_router.yaml` ; définir la route (ex. `task_types.conversation.primary: { provider: openrouter, model: "..." }`) via la TUI ou le fichier suffit une fois la clé définie.
@@ -89,6 +90,8 @@ Voir [llm_router.example.yaml](llm_router.example.yaml).
 | `tool_profiles`               | objet            | Non                              | Profils d’outils : clé = nom du profil, valeur = liste de noms d’outils (ex. `coding: [read_file, write_file, run_command]`).                                                                       |
 | `default_profile`             | string           | Non                              | Nom du profil actif ; si défini, seuls les outils listés dans `tool_profiles[default_profile]` sont autorisés.                                                                                      |
 | `allowed_skill_install_hosts` | liste de strings | Non (défaut : GitHub uniquement) | Hôtes autorisés pour `install_skill` (ex. `github.com`, `gitlab.com`, `raw.githubusercontent.com`, `mon-site.com`). Utiliser `["*"]` pour autoriser tout hôte HTTPS. Par défaut : GitHub seulement. |
+| `allowed_device_interfaces`   | liste de strings | Non (défaut : [])                | Interfaces appareil autorisées pour `device_discover` / `device_invoke` (caméra, micro, imprimantes, etc.). Valeurs possibles : `local_media`, `system`, `synthetic_input`, `usb`, etc. Utiliser `["*"]` pour tout autoriser (sous réserve de `blocked_device_interfaces`). |
+| `blocked_device_interfaces`   | liste de strings | Non (défaut : [])                | Interfaces appareil interdites ; prioritaire sur `allowed_device_interfaces`. Ex. `[usb]` pour tout autoriser sauf USB. |
 
 
 Les chemins peuvent être relatifs (ex. `.`) ou absolus ; sous Windows, utiliser des backslashes échappés ou des chemins normaux.
@@ -105,6 +108,7 @@ Voir [tools_policy.example.yaml](tools_policy.example.yaml).
 - **Restreindre l’écriture** : n’ajouter que des répertoires précis dans `allowed_write_paths`.
 - **Projets longs (roman, BD, projet de code)** : pour que le projet n'impacte pas le reste du système, créer un **répertoire dédié** par projet (ex. `~/akasha_projects/mon_roman`, `~/projets/code/ma_app`) et l'ajouter seul dans `allowed_read_paths` et `allowed_write_paths`. Ne pas autoriser `"."` ou un répertoire parent large si l'on veut isoler. Voir [projects_long_running.md](projects_long_running.md).
 - **Initiative recherche web (météo, actualités)** : pour que l'agent utilise spontanément `web_search` pour répondre aux demandes d'information externes (météo, prévisions, actualités, horaires, etc.) au lieu de suggérer des sites à l'utilisateur, définir `web_search_enabled: true` et configurer une clé Brave (variable d'environnement `BRAVE_API_KEY` ou vault `brave_api_key`). Sans cela, l'agent pourra au mieux suggérer des sites ou expliquer comment activer la recherche web.
+- **Interfaces appareil (device)** : pour autoriser la découverte et l’invocation d’appareils (caméra, micro, imprimantes, etc.) via `device_discover` et `device_invoke`, définir `allowed_device_interfaces`. Ex. `["*"]` pour tout autoriser (avec `blocked_device_interfaces: [usb]` pour exclure l’USB) ; ou `[local_media, system]` pour uniquement média local et imprimantes ; ou `[local_media, synthetic_input]` pour ajouter les entrées synthétiques (raccourcis clavier, clics/déplacements souris — jeux, logiciels de dessin). Pour `synthetic_input`, il est recommandé d’ajouter `device_invoke` dans `require_approval` afin que l’utilisateur confirme chaque action (human-in-the-loop). Voir [tools_policy.example.yaml](tools_policy.example.yaml).
 
 ---
 
@@ -121,23 +125,26 @@ Définit l’**identité et la personnalité** de l’agent : nom, ton, règles 
 | Clé          | Type            | Obligatoire | Description                                                                 |
 | ------------ | --------------- | ----------- | --------------------------------------------------------------------------- |
 | `name`       | string          | Non         | Nom de l’agent (ex. « Akasha », « Assistant »). Si vide ou absent, « Akasha » est utilisé dans le prompt et, à la sauvegarde (POST ou init), persisté par défaut. |
-| `personality`| string          | Non         | Description du ton et de la personnalité (ex. « Concis et technique », « Bienveillant et pédagogique »). Renforcé dans le prompt par une phrase du type « Tu adoptes ce ton et cette personnalité à chaque réponse. » |
+| `personality`| string          | Non         | Description du ton et de la personnalité, **rédigée en anglais**, incluant le **rôle** (ex. « You are a joyful assistant. Upbeat, light humor… »). Pour un comportement stable du modèle, toujours préciser le rôle dans le texte (e.g. « You are a concise, technical assistant… »). |
+| `role`       | string          | Non         | Rôle explicite de l’assistant (ex. « joyful assistant », « clever assistant », « friendly advisor »). Renforcé dans le prompt par une ligne « Your role: … ». |
+| `gender`     | string          | Non         | Genre pour la cohérence des pronoms : `"male"`, `"female"` ou `"neutral"`. Injecté dans le prompt (he/she/they) si présent. |
+| `avatar`     | string          | Non         | URL ou data URL de l’image d’avatar (affichée dans les interfaces à côté des réponses de l’agent). Non utilisé dans le prompt. |
 | `rules`      | liste de strings | Non         | Règles à respecter (une par ligne).                                        |
 | `can_do`     | liste de strings | Non         | Comportements autorisés.                                                    |
 | `cannot_do`   | liste de strings | Non         | Comportements interdits.                                                    |
 
 ### Limites (UI)
 
-L'interface web applique des limites : **name** 128 caractères, **personality** 2 000, **rules** 30 entrées max (500 car. par règle), **can_do** / **cannot_do** 30 entrées max (300 car. par entrée). Compteurs affichés dans chaque champ.
+L'interface web applique des limites : **name** et **role** 128 caractères, **personality** 2 000, **rules** 30 entrées max (500 car. par règle), **can_do** / **cannot_do** 30 entrées max (300 car. par entrée). Avatar : images jusqu’à 200 Ko. Compteurs affichés dans chaque champ.
 
 ### Lien avec le prompt
 
-Le daemon charge le profil au démarrage (et après chaque POST `/api/agent-profile`). À chaque tour, il produit un bloc `[Profil et consignes de l'agent]` avec : identité (nom toujours présent, avec formulation du type « Tu es « X ». C’est ton nom. Tu te souviens de ton nom… »), personnalité, règles, can_do, cannot_do. Ce bloc est injecté en tête du contexte système avant la mémoire et le RAG.
+Le daemon charge le profil au démarrage (et après chaque POST `/api/agent-profile`). À chaque tour, il produit un bloc `[Agent profile and instructions]` en anglais avec : identité (nom toujours présent), rôle (si défini), personnalité, consigne de pronoms (si `gender` défini : he/she/they), règles, can_do, cannot_do. Ce bloc est injecté en tête du contexte système avant la mémoire et le RAG. L’avatar n’est pas inclus dans le prompt ; il sert uniquement à l’affichage dans les interfaces.
 
 ### Édition
 
-- **CLI** : `akasha init` propose des templates de personnalité (Neutre, Bienveillant, Concis/technique, Créatif, Strict/sécurisé) et écrit `agent_profile.json`.
-- **UI** : Paramètres → section « Profil de l’agent » : champs Nom, Personnalité, Règles, Autorisé, Interdit ; sélecteur de template de personnalité (5 templates) ; bouton Enregistrer (POST `/api/agent-profile`). Paramètres organisés en 4 onglets : Affichage, Système, Agent, Data.
+- **CLI** : `akasha init` propose des templates de personnalité (Neutre, Kind/coach, Concis/technique, Créatif, Strict/sécurisé, Joyful & fun, Friendly advisor, Geek & nerdy) en anglais avec rôle ; écrit `agent_profile.json`.
+- **UI** : Paramètres → section « Profil de l’agent » : champs Nom, Rôle, Genre (male/female/neutral), Avatar (image), Personnalité, Règles, Autorisé, Interdit ; sélecteur de template (8 templates) ; bouton Enregistrer (POST `/api/agent-profile`). En Affichage : « Votre avatar » (stocké en localStorage, affiché à côté des messages utilisateur dans le chat). Paramètres organisés en 4 onglets : Affichage, Système, Agent, Data.
 - **Manuel** : éditer `data_dir/agent_profile.json` puis redémarrer le daemon (ou envoyer POST pour invalider le cache).
 
 ### Exemple
@@ -145,12 +152,16 @@ Le daemon charge le profil au démarrage (et après chaque POST `/api/agent-prof
 ```json
 {
   "name": "Akasha",
-  "personality": "Concis et technique. Réponses courtes, précises. Pas de longues introductions.",
-  "rules": ["Privilégier le concret : commandes, extraits de code.", "Éviter les longues introductions."],
+  "role": "concise technical assistant",
+  "personality": "You are a concise, technical assistant. Short, precise answers. No long intros or unnecessary politeness.",
+  "gender": "neutral",
+  "rules": ["Prioritize concrete output: commands, code snippets, paths.", "Avoid long introductions."],
   "can_do": [],
   "cannot_do": []
 }
 ```
+
+Le champ `avatar` (optionnel) peut contenir une data URL d’image (ex. `data:image/png;base64,...`) pour l’affichage dans le chat.
 
 ---
 
@@ -221,7 +232,7 @@ AKASHA_TELEGRAM_ENABLED=1
 
 ## 5. cluster.yaml (optionnel)
 
-**Emplacement** : `data_dir/cluster.yaml` (ex. `%LOCALAPPDATA%\akasha\cluster.yaml` sous Windows).  
+**Emplacement** : `data_dir/cluster.yaml` (ex. `%USERPROFILE%\akasha\cluster.yaml` sous Windows).  
 **Format** : YAML.  
 **Utilisé par** : mode cluster (NATS, mTLS). Les variables d’environnement `NATS_URL`, `AKASHA_NODE_ID`, `AKASHA_NATS_TLS_CA`, etc. peuvent surcharger ce fichier.
 
@@ -290,7 +301,7 @@ Voir [spec/skills/read_file_skill.yaml](skills/read_file_skill.yaml).
 
 ## Chemins et ordre de recherche
 
-- **data_dir** : par défaut `~/.local/share/akasha` (Linux/macOS) ou `%LOCALAPPDATA%\akasha` (Windows), sauf si `AKASHA_DATA_DIR` est défini. Affiché par `akasha paths`.
+- **data_dir** : par défaut `~/akasha` (Linux/macOS) ou `%USERPROFILE%\akasha` (Windows), sauf si `AKASHA_DATA_DIR` est défini. Affiché par `akasha paths`.
 - **llm_router.yaml** : recherché dans `data_dir` puis à la racine du projet.
 - **tools_policy.yaml**, **akasha.env**, **connectors.env**, **cluster.yaml** : dans `data_dir` uniquement.
 

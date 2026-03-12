@@ -11,14 +11,16 @@ Ce document décrit comment **obtenir et utiliser Akasha sans installer Rust ni 
 1. Allez sur la page **Releases** du dépôt (ex. `https://github.com/VOTRE_ORG/akasha/releases`).
 2. Choisissez la dernière version (ex. **v0.1.0**).
 3. Téléchargez l’archive correspondant à votre système :
-   - **Windows** : `akasha-windows-x86_64.zip`
-   - **Linux** : `akasha-linux-x86_64.zip`
-   - **macOS Intel** : `akasha-macos-x86_64.zip`
-   - **macOS Apple Silicon (M1/M2/M3)** : `akasha-macos-aarch64.zip`
-   - **App desktop (Tauri)** : installateurs dans les pièces jointes (`.msi`/`.exe`, `.dmg`, `.deb`/`.AppImage`).
-4. Décompressez l’archive dans un dossier (ex. `C:\Akasha` ou `~/Akasha`). Installez l'app desktop avec l'installateur de votre OS si besoin.
+   - **Installeur unifié (recommandé)** : `akasha-full-windows-x86_64.zip`, `akasha-full-linux-x86_64.zip`, `akasha-full-macos-x86_64.zip` ou `akasha-full-macos-aarch64.zip` (CLI + daemon + TUI + scripts setup + bundle app desktop).
+   - **CLI seul** : `akasha-windows-x86_64.zip`, `akasha-linux-x86_64.zip`, `akasha-macos-x86_64.zip`, `akasha-macos-aarch64.zip`.
+   - **App desktop (Tauri)** : installateurs dans les pièces jointes (`.msi`/`.exe`, `.dmg`, `.deb`/`.AppImage`) ou inclus dans le zip « full ».
+4. Décompressez l’archive dans un dossier (ex. `C:\Akasha` ou `~/Akasha`).
 
-**Installation rapide (recommandé)** : après extraction, exécutez le script d’installation qui copie les binaires, lance l’init et enregistre le daemon au démarrage :
+**Installation avec installeur unifié (recommandé)** : après extraction du zip **full**, exécutez le script de setup. Il vous demandera : installer l’application desktop ? Démarrer le daemon à chaque connexion ? Puis il installe les binaires, lance `akasha init --defaults`, démarre le daemon une fois et, si vous le souhaitez, enregistre le daemon au démarrage et installe l’app Tauri. En cas de crash du daemon, il est relancé automatiquement (superviseur sous Windows, systemd/launchd sous Linux/macOS).
+- **Windows** : `.\scripts\setup.ps1` (PowerShell). Optionnel : `-InstallDir C:\Akasha`, `-InstallUi` / `-NoInstallUi`, `-AutoStart` / `-NoAutoStart`.
+- **Linux / macOS** : `./scripts/setup.sh`. Optionnel : `--dir DIR`, `--install-ui` / `--no-install-ui`, `--auto-start` / `--no-auto-start`.
+
+**Installation rapide (sans setup, zip CLI seul)** : après extraction, exécutez le script d’installation qui copie les binaires, lance l’init, démarre le daemon une fois et enregistre le daemon au démarrage :
 - **Windows** : `.\scripts\install.ps1` (PowerShell). Optionnel : `-InstallDir C:\Akasha`, `-NoAutoStart`.
 - **Linux / macOS** : `./scripts/install.sh`. Optionnel : `--dir /usr/local/bin`, `--no-auto-start`.
 
@@ -34,14 +36,21 @@ Vous obtenez (dans l'archive CLI) :
 
 ## 2. Premier lancement
 
-### Avec le script d’installation (recommandé)
+### Avec l’installeur unifié (recommandé, zip « full »)
 
-Après avoir extrait l’archive, exécutez le script : il déploie les binaires, lance `akasha init --defaults` et enregistre le daemon pour qu’il démarre au prochain logon.
+Après avoir extrait le zip **akasha-full-***, exécutez le script de setup : il vous demande si vous voulez installer l’application desktop et si le daemon doit démarrer à chaque connexion, puis déploie les binaires, lance `akasha init --defaults`, démarre le daemon une fois et configure éventuellement le démarrage automatique et l’app Tauri.
+
+- **Windows** : `.\scripts\setup.ps1`
+- **Linux / macOS** : `chmod +x scripts/setup.sh && ./scripts/setup.sh`
+
+Le daemon est démarré une fois par le script ; s’il a été enregistré au démarrage, il redémarrera à la prochaine connexion. En cas de crash, il est relancé automatiquement.
+
+### Avec le script d’installation (zip CLI seul)
+
+Après avoir extrait l’archive CLI, exécutez le script : il déploie les binaires, lance `akasha init --defaults`, démarre le daemon une fois et enregistre le daemon pour qu’il démarre au prochain logon (sauf si `-NoAutoStart` / `--no-auto-start`).
 
 - **Windows** : `.\scripts\install.ps1`
 - **Linux / macOS** : `chmod +x scripts/install.sh && ./scripts/install.sh`
-
-Puis démarrez le daemon (ou redémarrez la session pour le lancement automatique) : `akasha start`.
 
 ### Installation manuelle
 
@@ -124,9 +133,9 @@ Lorsqu’un tag de version est poussé (ex. `v0.1.0`), le workflow **Release** c
 | Étape | Action |
 |-------|--------|
 | 1 | Aller sur GitHub → Releases → dernière version |
-| 2 | Télécharger le zip pour son OS (Windows / Linux / Mac) |
+| 2 | Télécharger le zip **full** pour son OS (ex. `akasha-full-windows-x86_64.zip`) |
 | 3 | Décompresser dans un dossier |
-| 4 | Lancer `akasha init` (premier lancement) puis `akasha start` |
-| 5 | Optionnel : `akasha tui` pour l’interface en terminal, ou ouvrir l’app desktop si installée |
+| 4 | Lancer `.\scripts\setup.ps1` (Windows) ou `./scripts/setup.sh` (Linux/macOS) et répondre aux deux questions (app desktop, daemon au démarrage) |
+| 5 | Le daemon est démarré une fois ; optionnel : `akasha tui` pour l’interface terminal, ou lancer l’app desktop si installée |
 
-Aucune compilation ni installation de Rust nécessaire.
+Aucune compilation ni installation de Rust nécessaire. Le daemon est relancé automatiquement en cas de crash (superviseur ou systemd/launchd selon l’OS).
