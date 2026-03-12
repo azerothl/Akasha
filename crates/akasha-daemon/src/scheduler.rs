@@ -6,6 +6,7 @@ use akasha_store::{
 };
 use chrono::{Duration, Utc};
 use rrule::{RRuleSet, Tz as RruleTz};
+use std::str::FromStr;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -75,10 +76,13 @@ async fn tick(
                 }
             };
             let exceptions = schedule_store.get_exceptions_for_schedule(schedule.id)?;
+            let tz_for_exceptions: RruleTz = chrono_tz::Tz::from_str(&schedule.timezone)
+                .map(RruleTz::from)
+                .unwrap_or(RruleTz::UTC);
             for planned_for in slots
                 .into_iter()
                 .filter(|pf| {
-                    let d = pf.naive_utc().date();
+                    let d = pf.with_timezone(&tz_for_exceptions).date_naive();
                     !exceptions.iter().any(|e| e.type_ == ScheduleExceptionType::Skip && e.date == d)
                 })
                 .take(MAX_CATCHUP)
@@ -223,12 +227,20 @@ fn due_slots_rrule(
     let last_planned = runs.into_iter().next().map(|r| r.planned_for);
     let after = last_planned.unwrap_or_else(|| schedule.start_at - Duration::seconds(1));
     let before = now + Duration::seconds(1);
-    let after_tz = after.with_timezone(&RruleTz::UTC);
-    let before_tz = before.with_timezone(&RruleTz::UTC);
-    let dtstart = format!(
-        "DTSTART:{}Z",
-        schedule.start_at.format("%Y%m%dT%H%M%S")
-    );
+    let chrono_tz = chrono_tz::Tz::from_str(&schedule.timezone)
+        .map_err(|e| anyhow::anyhow!("invalid schedule timezone {}: {:?}", schedule.timezone, e))?;
+    let tz: RruleTz = RruleTz::from(chrono_tz);
+    let after_tz = after.with_timezone(&tz);
+    let before_tz = before.with_timezone(&tz);
+    let start_at_tz = schedule.start_at.with_timezone(&tz);
+    // Use UTC format (Z suffix) for UTC-equivalent timezones, TZID format for all others.
+    let tz_name = chrono_tz.name();
+    let is_utc_equiv = matches!(tz_name, "UTC" | "Etc/UTC" | "Etc/GMT" | "GMT");
+    let dtstart = if is_utc_equiv {
+        format!("DTSTART:{}Z", schedule.start_at.format("%Y%m%dT%H%M%S"))
+    } else {
+        format!("DTSTART;TZID={}:{}", tz_name, start_at_tz.format("%Y%m%dT%H%M%S"))
+    };
     let rrule_set_str = format!("{}\nRRULE:{}", dtstart, schedule.rrule.trim());
     let rrule_set: RRuleSet = rrule_set_str.parse().map_err(|e| anyhow::anyhow!("{:?}", e))?;
     let limit = (MAX_CATCHUP * 2).min(u16::MAX as usize) as u16;

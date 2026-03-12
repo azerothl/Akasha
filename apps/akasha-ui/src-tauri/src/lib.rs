@@ -434,11 +434,15 @@ fn open_path(path: String) -> Result<(), String> {
         return Err("Only absolute paths are allowed".to_string());
     }
     let path_str = canonical.to_string_lossy();
-    let _ = match std::env::consts::OS {
+    let status_result = match std::env::consts::OS {
         "windows" => std::process::Command::new("cmd").args(["/c", "start", "", path_str.as_ref()]).status(),
         "macos" => std::process::Command::new("open").arg(path_str.as_ref()).status(),
         _ => std::process::Command::new("xdg-open").arg(path_str.as_ref()).status(),
     };
+    let exit_status = status_result.map_err(|e| format!("Failed to launch system opener: {}", e))?;
+    if !exit_status.success() {
+        return Err(format!("System opener exited with status: {}", exit_status));
+    }
     Ok(())
 }
 
@@ -462,6 +466,11 @@ fn read_file_as_data_url(path: String) -> Result<String, String> {
         "webp" => "image/webp",
         _ => return Err("Only image files (png, jpg, gif, webp) are allowed".to_string()),
     };
+    const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024; // 20 MiB
+    let metadata = std::fs::metadata(&canonical).map_err(|e| e.to_string())?;
+    if metadata.len() > MAX_IMAGE_BYTES {
+        return Err(format!("File too large: {} bytes (max {} bytes)", metadata.len(), MAX_IMAGE_BYTES));
+    }
     let bytes = std::fs::read(&canonical).map_err(|e| e.to_string())?;
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
     Ok(format!("data:{};base64,{}", mime, b64))
