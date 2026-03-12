@@ -1728,22 +1728,33 @@ providers:
     // --- 4c. tools_policy.yaml (outils machine) ---
     let tools_policy_path = data_dir.join("tools_policy.yaml");
     if !tools_policy_path.exists() {
+        let data_dir_str = data_dir.display().to_string();
+        let data_dir_yaml = format!("'{}'", data_dir_str.replace('\'', "''"));
         let spec_dir = std::env::var("AKASHA_SPEC_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("spec"));
         let example = spec_dir.join("tools_policy.example.yaml");
         if example.exists() {
             std::fs::copy(&example, &tools_policy_path)?;
-            println!("  Fichier écrit : {} (depuis spec/tools_policy.example.yaml)", tools_policy_path.display());
+            let content = std::fs::read_to_string(&tools_policy_path)?;
+            // Remplacer la valeur "." par data_dir dans les deux listes (première occurrence = read, deuxième = write)
+            let content = content.replace("  - \".\"", &format!("  - {}", data_dir_yaml));
+            std::fs::write(&tools_policy_path, content)?;
+            println!("  Fichier écrit : {} (depuis spec/tools_policy.example.yaml, chemins par défaut = data_dir)", tools_policy_path.display());
         } else {
-            let minimal = r#"# tools_policy.yaml - éditez allowed_read_paths / allowed_write_paths selon vos besoins
-allowed_read_paths: []
-allowed_write_paths: []
+            let minimal = format!(
+                r#"# tools_policy.yaml - éditez allowed_read_paths / allowed_write_paths selon vos besoins
+allowed_read_paths:
+  - {}
+allowed_write_paths:
+  - {}
 allowed_commands: []
 command_timeout_secs: 60
-"#;
+"#,
+                data_dir_yaml, data_dir_yaml
+            );
             std::fs::write(&tools_policy_path, minimal)?;
-            println!("  Fichier écrit : {} (minimal ; éditez pour autoriser chemins et commandes)", tools_policy_path.display());
+            println!("  Fichier écrit : {} (minimal ; chemins par défaut = data_dir)", tools_policy_path.display());
         }
     }
 
@@ -2116,22 +2127,32 @@ fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
 
     let tools_policy_path = data_dir.join("tools_policy.yaml");
     if !tools_policy_path.exists() {
+        let data_dir_str = data_dir.display().to_string();
+        let data_dir_yaml = format!("'{}'", data_dir_str.replace('\'', "''"));
         let spec_dir = std::env::var("AKASHA_SPEC_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("spec"));
         let example = spec_dir.join("tools_policy.example.yaml");
         if example.exists() {
             std::fs::copy(&example, &tools_policy_path)?;
-            fixes.push(format!("Created tools_policy.yaml from {}", example.display()));
+            let content = std::fs::read_to_string(&tools_policy_path)?;
+            let content = content.replace("  - \".\"", &format!("  - {}", data_dir_yaml));
+            std::fs::write(&tools_policy_path, content)?;
+            fixes.push(format!("Created tools_policy.yaml from {} (default paths = data_dir).", example.display()));
         } else {
-            let minimal = r#"# tools_policy.yaml - edit allowed_read_paths / allowed_write_paths as needed
-allowed_read_paths: []
-allowed_write_paths: []
+            let minimal = format!(
+                r#"# tools_policy.yaml - edit allowed_read_paths / allowed_write_paths as needed
+allowed_read_paths:
+  - {}
+allowed_write_paths:
+  - {}
 allowed_commands: []
 command_timeout_secs: 60
-"#;
+"#,
+                data_dir_yaml, data_dir_yaml
+            );
             std::fs::write(&tools_policy_path, minimal)?;
-            fixes.push("Created minimal tools_policy.yaml (no paths allowed by default; edit to add paths).".to_string());
+            fixes.push("Created minimal tools_policy.yaml (default paths = data_dir; edit to add more).".to_string());
         }
     } else {
         match akasha_tools::ToolsPolicy::load_from_path(&tools_policy_path) {

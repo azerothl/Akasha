@@ -2,7 +2,7 @@
 
 Ce guide décrit les étapes pour faire tourner Akasha après un clone ou une installation.
 
-**Utilisateurs des binaires (releases)** : après avoir téléchargé et extrait l’archive (voir [distribution.md](distribution.md)), exécutez le script d’installation (`scripts/install.ps1` sous Windows, `scripts/install.sh` sous Linux/macOS) pour déployer les binaires, lancer l’init et enregistrer le daemon au démarrage. Puis `akasha start` (ou redémarrez la session pour le lancement automatique).
+**Utilisateurs des binaires (releases)** : après avoir téléchargé et extrait l’archive **full** (voir [distribution.md](distribution.md)), exécutez le script de setup (`scripts/setup.ps1` sous Windows, `scripts/setup.sh` sous Linux/macOS) : il propose d’installer l’application desktop et de démarrer le daemon au démarrage, puis déploie les binaires, lance l’init et démarre le daemon. Avec le zip CLI seul, utilisez `scripts/install.ps1` ou `scripts/install.sh` puis `akasha start` (ou redémarrez la session si démarrage auto activé).
 
 ## 1. Prérequis
 

@@ -66,6 +66,10 @@ fi
 # Daemon at login
 if [[ "$NO_AUTO_START" == true ]]; then
     echo "Skipped auto-start. To start the daemon: akasha start"
+    echo "Starting daemon once..."
+    nohup "$INSTALL_DIR/akasha" start >/dev/null 2>&1 &
+    echo "Daemon started."
+    echo "Installation complete."
     exit 0
 fi
 
@@ -92,7 +96,9 @@ EOF
     fi
     systemctl --user daemon-reload
     systemctl --user enable akasha-daemon.service
-    echo "systemd user service enabled. Start now: systemctl --user start akasha-daemon"
+    echo "systemd user service enabled."
+    echo "Starting daemon once..."
+    systemctl --user start akasha-daemon.service 2>/dev/null || true
 elif [[ "$(uname -s)" == "Darwin" ]]; then
     # launchd user agent
     PLIST="$HOME/Library/LaunchAgents/app.akasha.daemon.plist"
@@ -122,7 +128,11 @@ elif [[ "$(uname -s)" == "Darwin" ]]; then
 EOF
     launchctl load "$PLIST"
     echo "launchd agent loaded. Daemon will start at login."
+    echo "Starting daemon once..."
+    launchctl start app.akasha.daemon 2>/dev/null || nohup "$AKASHA_PATH" start >/dev/null 2>&1 &
 else
     echo "Auto-start not configured for this OS. Run 'akasha start' to start the daemon."
+    echo "Starting daemon once..."
+    nohup "$INSTALL_DIR/akasha" start >/dev/null 2>&1 &
 fi
 echo "Installation complete."

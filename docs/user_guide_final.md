@@ -9,38 +9,51 @@ Ce guide s’adresse aux utilisateurs qui ont téléchargé les **binaires préc
 ### Téléchargement
 
 1. Rendez-vous sur la page **Releases** du dépôt Akasha (ex. GitHub).
-2. Téléchargez l’archive correspondant à votre système (Windows, Linux ou macOS).
+2. Pour une installation complète en une étape, téléchargez l’archive **« Akasha full »** correspondant à votre système (ex. `akasha-full-windows-x86_64.zip`, `akasha-full-linux-x86_64.zip`, `akasha-full-macos-x86_64.zip`). Sinon, téléchargez l’archive CLI (akasha, daemon, TUI) et, si besoin, l’archive de l’application desktop (Tauri) séparément.
 3. Décompressez l’archive dans un dossier (ex. `C:\Akasha` ou `~/Akasha`).
 
-Vous obtenez les exécutables **akasha** (ou akasha.exe), **akasha-daemon** et **akasha-tui**, ainsi que le dossier **docs** contenant ce guide.
+Vous obtenez les exécutables **akasha** (ou akasha.exe), **akasha-daemon** et **akasha-tui**, le dossier **scripts** (install et setup), **docs**, et dans le zip « full » un sous-dossier **ui** contenant l’installateur de l’application desktop.
+
+### Installation recommandée (installeur unifié)
+
+Après avoir extrait le zip **full** :
+
+- **Windows (PowerShell)** : exécutez `.\scripts\setup.ps1`. Le script vous demandera : installer l’application desktop (interface web) ? Démarrer le daemon à chaque connexion ? Il installe les binaires, lance le premier `akasha init`, démarre le daemon une fois et, si vous le souhaitez, enregistre le daemon au démarrage de Windows et installe l’app Tauri.
+- **Linux / macOS** : exécutez `./scripts/setup.sh` (ou `bash scripts/setup.sh`). Mêmes choix (application desktop, daemon au démarrage). Le script installe les binaires, lance l’init, démarre le daemon une fois et, sous Linux (systemd) ou macOS (launchd), peut enregistrer le daemon pour qu’il démarre à chaque connexion.
+
+**Redémarrage en cas de crash** : si vous avez activé le démarrage automatique, le daemon est relancé en cas d’arrêt — sous Windows via le superviseur intégré à `akasha start`, sous Linux/macOS via systemd ou launchd.
+
+### Installation manuelle (sans setup)
+
+**Windows (PowerShell ou CMD)**  
+Ouvrez un terminal dans le dossier où vous avez extrait l’archive, puis :
+
+```
+.\scripts\install.ps1
+.\akasha.exe start
+```
+
+(Optionnel : `-NoAutoStart` pour ne pas enregistrer le daemon à la connexion.)
+
+**Linux / macOS**  
+Dans un terminal, depuis le dossier d’extraction :
+
+```bash
+chmod +x akasha akasha-daemon akasha-tui scripts/*.sh
+./scripts/install.sh
+./akasha start
+```
+
+(Optionnel : `--no-auto-start` pour ne pas enregistrer le daemon au démarrage.)
+
+Pour afficher l’interface en terminal : `akasha tui` (ou `.\akasha.exe tui` sous Windows).
 
 ### Prérequis
 
 - **Ollama** (optionnel) : pour utiliser des modèles LLM locaux. Sinon, configurez un fournisseur cloud (OpenAI, OpenRouter) lors de l’initialisation.
 - Aucune installation de Rust ou Node n’est nécessaire pour utiliser les binaires.
 
-### Premier lancement
-
-**Windows (PowerShell ou CMD)**  
-Ouvrez un terminal dans le dossier où vous avez extrait l’archive, puis :
-
-```
-.\akasha.exe init
-.\akasha.exe start
-```
-
-**Linux / macOS**  
-Dans un terminal, depuis le dossier d’extraction :
-
-```bash
-chmod +x akasha akasha-daemon akasha-tui
-./akasha init
-./akasha start
-```
-
-Pour afficher l’interface en terminal : `akasha tui` (ou `.\akasha.exe tui` sous Windows).
-
-**Important** : lancez `akasha start` depuis le dossier où vous avez extrait l’archive afin que l’onglet **Doc** des interfaces affiche cette documentation.
+**Important** : lancez `akasha start` depuis le dossier d’installation (ou après avoir ajouté ce dossier au PATH) afin que l’onglet **Doc** des interfaces affiche cette documentation.
 
 ---
 
