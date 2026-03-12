@@ -103,10 +103,15 @@ impl Daemon {
         }
 
         // Phase 3: Trust store (plugin signing); when keys present, only signed plugins are loaded
-        let trust_store = akasha_core::TrustStore::load_from_dir(&self.data_dir.join("trust_store"))
-            .ok()
-            .filter(|t| t.requires_signing())
-            .map(std::sync::Arc::new);
+        let trust_store_dir = self.data_dir.join("trust_store");
+        let trust_store = match akasha_core::TrustStore::load_from_dir(&trust_store_dir) {
+            Ok(store) if store.requires_signing() => Some(std::sync::Arc::new(store)),
+            Ok(_) => None,
+            Err(e) => {
+                warn!(path = %trust_store_dir.display(), error = %e, "Failed to load trust store; refusing startup to avoid unsigned plugin fail-open");
+                return Err(e.into());
+            }
+        };
 
         // Phase 5: Plugin registry + reputation
         let reputation = match crate::plugins::ReputationStore::open(&self.data_dir) {
