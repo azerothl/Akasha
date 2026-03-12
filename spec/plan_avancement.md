@@ -55,3 +55,10 @@ Suivi des étapes du plan de mise en place (phases non développées). Voir [40_
 - [33_agents_tools_orchestrator_skills.md](33_agents_tools_orchestrator_skills.md)
 - [36_ui_architecture.md](36_ui_architecture.md)
 - [42_image_generation.md](42_image_generation.md)
+
+---
+
+## Notes
+
+- **Étapes 1–5** : réalisées dans cette vague (scheduler RRULE, polish UI, SSE, onboarding, generate_image).
+- **Étapes 6–10** (priorité basse / optionnel) : à traiter dans une prochaine itération. Étape 9 (WhatsApp) : décision « hors scope v1 » documentée dans les specs si non implémentée.
