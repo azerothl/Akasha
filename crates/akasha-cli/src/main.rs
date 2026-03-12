@@ -1453,12 +1453,6 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
             choice.trim().to_string()
         };
 
-        if provider_choice != "2" && provider_choice != "3" && provider_choice != "4" {
-            let url = init_prompt("Ollama URL [http://localhost:11434] :\n> ");
-            if !url.trim().is_empty() {
-                ollama_url = url.trim().to_string();
-            }
-        }
         if provider_choice == "3" || provider_choice == "5" {
             let key = init_prompt("Clé API OpenAI (sk-...) :\n> ");
             if !key.trim().is_empty() {
@@ -1481,8 +1475,45 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
         }
     }
 
-    // If user chose Ollama (1, 5 or 6): detect Ollama; if not detected, offer to open download page
+    // If user chose Ollama (1, 5 or 6): run discovery (local then network), then set URL or prompt
     let ollama_chosen = provider_choice == "1" || provider_choice == "5" || provider_choice == "6";
+    if ollama_chosen {
+        println!("Découverte Ollama (local puis réseau)…");
+        let rt = tokio::runtime::Runtime::new()?;
+        let discovered = rt.block_on(akasha_llm::discover_all());
+        if !discovered.is_empty() {
+            ollama_url = discovered[0].clone();
+            if !use_defaults {
+                println!("Ollama détecté ({} instance(s)) :", discovered.len());
+                for (i, url) in discovered.iter().enumerate() {
+                    let kind = if url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]") {
+                        "local"
+                    } else {
+                        "réseau"
+                    };
+                    println!("  {}  {}  [{}]", i + 1, url, kind);
+                }
+                let sel = init_prompt("Utiliser l'instance 1, choisir un numéro, ou saisir une URL personnalisée [1] :\n> ");
+                let sel = sel.trim();
+                if !sel.is_empty() {
+                    if let Ok(idx) = sel.parse::<usize>() {
+                        if idx >= 1 && idx <= discovered.len() {
+                            ollama_url = discovered[idx - 1].clone();
+                        }
+                    } else {
+                        ollama_url = sel.to_string();
+                    }
+                }
+            }
+        } else if !use_defaults {
+            let url = init_prompt("Ollama URL [http://localhost:11434] :\n> ");
+            if !url.trim().is_empty() {
+                ollama_url = url.trim().to_string();
+            }
+        }
+    }
+
+    // If user chose Ollama (1, 5 or 6): detect Ollama; if not detected, offer to open download page
     let ollama_available = ollama_chosen && ollama_detected(&ollama_url);
     if ollama_chosen && !ollama_available && !use_defaults {
         println!("\n  Ollama n'est pas détecté à {} (non installé ou non démarré).", ollama_url);
