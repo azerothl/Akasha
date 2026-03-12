@@ -564,9 +564,10 @@ impl LLMProvider for BitNetProvider {
             Err(_) => return false,
         };
         // Try GET on base URL or /v1/models; many llama.cpp servers respond to root or models
+        let models_url = format!("{}/v1/models", self.base_url);
         let urls = [
             self.base_url.as_str(),
-            &format!("{}/v1/models", self.base_url),
+            models_url.as_str(),
         ];
         for u in &urls {
             if client.get(*u).send().is_ok() {
@@ -581,7 +582,7 @@ impl LLMProvider for BitNetProvider {
     }
 
     fn supports_streaming(&self) -> bool {
-        true
+        false
     }
 
     async fn complete(
