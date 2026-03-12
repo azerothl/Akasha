@@ -38,7 +38,7 @@ Suivi des étapes du plan de mise en place (phases non développées). Voir [40_
 - [x] **Étape 8 — Session terminal (spec 33)**  
   Session terminal interactive (PTY, timeout, isolation) ; exposition via outil ou API ; UI pour afficher/saisir. Livrable : agent peut utiliser une session terminal.
 
-- [ ] **Étape 9 — WhatsApp**  
+- [x] **Étape 9 — WhatsApp**  
   Adapter WhatsApp (API Business/partenaire) ou stub / doc « hors scope v1 ». Livrable : adapter ou décision documentée.
 
 - [ ] **Étape 10 — Task Center et Calendrier (détail)**  
