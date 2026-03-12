@@ -675,7 +675,7 @@ function App() {
     return list;
   }, [tasksList, taskListFilter, taskSearchQuery]);
 
-  const taskDisplayLabel = (t: TaskListItem) => (t.label && t.label.trim() ? t.label.trim() : t("tasks.task_unnamed") + t.id.slice(-8));
+  const taskDisplayLabel = (task: TaskListItem) => (task.label && task.label.trim() ? task.label.trim() : t("tasks.task_unnamed") + task.id.slice(-8));
 
   const fetchTasksEvents = useCallback(async (taskId: string) => {
     try {
@@ -2630,7 +2630,7 @@ function App() {
                             className="task-action-btn task-action-retry"
                             onClick={() => {
                               setTab("chat");
-                              setMessage(sel?.label ?? sel?.initial_message ?? "Relance la tâche.");
+                              setMessage(sel?.label ?? "Relance la tâche.");
                             }}
                           >
                             Relancer

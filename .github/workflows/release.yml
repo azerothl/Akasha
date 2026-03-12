@@ -97,11 +97,12 @@ jobs:
           mkdir staging
           mkdir staging\docs
           mkdir staging\scripts
-          cp target/${{ matrix.target }}/release/akasha.exe staging/
-          cp target/${{ matrix.target }}/release/akasha-daemon.exe staging/
-          cp target/${{ matrix.target }}/release/akasha-tui.exe staging/
-          cp docs/user_guide_final.md staging/docs/user_guide.md
-          cp scripts/install.ps1 scripts/setup.ps1 staging/scripts/
+          Copy-Item target/${{ matrix.target }}/release/akasha.exe staging/
+          Copy-Item target/${{ matrix.target }}/release/akasha-daemon.exe staging/
+          Copy-Item target/${{ matrix.target }}/release/akasha-tui.exe staging/
+          Copy-Item docs/user_guide_final.md staging/docs/user_guide.md
+          Copy-Item scripts/install.ps1 staging/scripts/
+          Copy-Item scripts/setup.ps1 staging/scripts/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
