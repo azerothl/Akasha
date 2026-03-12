@@ -71,6 +71,7 @@ Voir aussi les documents listés en [§1](#1-vision-et-périmètre) (scope, FR, 
 | [28_internal_model.md](28_internal_model.md) | Akasha Core Model (modèle interne natif) |
 | [30_architecture_d_entrainement.md](30_architecture_d_entrainement.md) | Architecture d’entraînement du Core Model (RAG, fine-tune, evals) |
 | [34_embedded_small_model.md](34_embedded_small_model.md) | **Modèle petit et intégré** : onboarding, diagnostics, validation, réponses simples (sans LLM externe) — objectif et options techniques |
+| [42_image_generation.md](42_image_generation.md) | **Génération d’images** : modèle dédié ou multimodal, outil generate_image, affichage dans le chat (TUI, Tauri) |
 
 ### Canaux et cluster
 
@@ -164,4 +165,5 @@ Ces fichiers sont conservés pour référence mais pointent vers la version à j
 | Agents, outils, skills, orchestrateur | [33_agents_tools_orchestrator_skills.md](33_agents_tools_orchestrator_skills.md) |
 | Task Center, suivi des tâches en direct | [36_ui_architecture.md](36_ui_architecture.md) |
 | Calendrier, récurrences, scheduler | [37_scheduler_design.md](37_scheduler_design.md) |
+| Génération d’images, affichage dans le chat | [42_image_generation.md](42_image_generation.md) |
 | Diagnostic / redémarrage | [runbooks/](runbooks/) |
