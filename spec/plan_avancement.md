@@ -9,7 +9,7 @@ Suivi des étapes du plan de mise en place (phases non développées). Voir [40_
 - [x] **Étape 1 — Scheduler : RRULE / cron (spec 37)**  
   Calcul des créneaux dus à partir de `rrule` (iCal) ou expression cron ; sinon conserver `interval_seconds`. Parser RRULE/cron en Rust ; dans `scheduler.rs`, si `schedule.rrule` non vide, calculer `due_slots` via ce parser entre `start_at` et `end_at`. Livrable : récurrences RRULE/cron exécutées au bon moment.
 
-- [ ] **Étape 2 — Phase 9 : Polish UI (spec 40, 41)**  
+- [x] **Étape 2 — Phase 9 : Polish UI (spec 40, 41)**  
   Compléter la checklist 41 : Chat (formatage, indicateur de progression, erreurs claires) ; état daemon visible ; métriques routeur complètes + TUI si besoin ; page/panneau Paramètres (env, port, data_dir) ; thème et feedback visuel ; accessibilité (contrastes, focus, labels). Livrable : UI cohérente, lisible et accessible.
 
 ---

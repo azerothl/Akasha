@@ -264,6 +264,23 @@ pre,
   font-weight: 600;
 }
 
+.daemon-status {
+  font-size: 0.75rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-weight: 500;
+}
+.daemon-status-ok {
+  background: color-mix(in srgb, var(--akasha-success, #22c55e) 20%, transparent);
+  color: var(--akasha-success, #22c55e);
+  border: 1px solid var(--akasha-success, #22c55e);
+}
+.daemon-status-off {
+  background: color-mix(in srgb, var(--akasha-error) 20%, transparent);
+  color: var(--akasha-error);
+  border: 1px solid var(--akasha-error);
+}
+
 .sidebar-right-toggle {
   padding: 0.25rem 0.5rem;
   background: transparent;
@@ -2175,6 +2192,19 @@ pre,
 .settings-list dd {
   margin: 0.25rem 0 0;
   font-size: 0.9375rem;
+}
+
+.settings-link-btn {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.875rem;
+  background: var(--akasha-accent);
+  color: var(--akasha-bg);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.settings-link-btn:hover {
+  filter: brightness(1.1);
 }
 
 .settings-list code {

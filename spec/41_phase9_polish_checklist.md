@@ -4,24 +4,24 @@ Ce document liste les points à vérifier ou à compléter pour la Phase 9 (Poli
 
 ## Chat
 
-- [ ] Mise en forme des réponses (markdown, code blocks)
-- [ ] Indicateur de progression de tâche (chips ou barre)
-- [ ] Messages d’erreur clairs et actionnables
+- [x] Mise en forme des réponses (markdown, code blocks)
+- [x] Indicateur de progression de tâche (chips ou barre)
+- [x] Messages d’erreur clairs et actionnables
 
 ## État
 
-- [ ] Affichage « daemon connecté / déconnecté » dans l’UI
+- [x] Affichage « daemon connecté / déconnecté » dans l’UI
 - [ ] (Optionnel) Statut des checks (health)
 
 ## Métriques routeur
 
-- [ ] Page ou panneau « Router » : requêtes, modèle utilisé, fallbacks, latence
-- [ ] L’API `GET /api/router/metrics` existe ; à exposer dans un onglet dédié (TUI et Web)
+- [x] Page ou panneau « Router » : requêtes, modèle utilisé, fallbacks, latence
+- [x] L’API `GET /api/router/metrics` existe ; à exposer dans un onglet dédié (TUI et Web)
 
 ## Paramètres
 
-- [ ] Rappel des variables d’environnement ou lien vers la doc
-- [ ] Formulaire minimal (port, chemin data_dir) si pertinent
+- [x] Rappel des variables d’environnement ou lien vers la doc
+- [x] Formulaire minimal (port, chemin data_dir) si pertinent
 
 ## Cohérence visuelle
 

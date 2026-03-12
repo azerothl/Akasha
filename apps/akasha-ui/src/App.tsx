@@ -1668,6 +1668,14 @@ function App() {
           <div className="container-main-inner">
             <header className="view-header">
               <h2 className="view-title">{t("tabs." + tab)}</h2>
+              <span
+                className={`daemon-status ${health?.ok ? "daemon-status-ok" : "daemon-status-off"}`}
+                role="status"
+                aria-live="polite"
+                title={health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
+              >
+                {health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
+              </span>
               <button
                 type="button"
                 className="sidebar-right-toggle"
@@ -3390,6 +3398,13 @@ function App() {
                   <dd><code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})</dd>
                   <dt>{t("settings.data_dir")}</dt>
                   <dd><code>%LOCALAPPDATA%\akasha</code> (Windows) ou <code>~/.local/share/akasha</code> (Linux/macOS)</dd>
+                  <dt>{t("settings.documentation")}</dt>
+                  <dd>
+                    <button type="button" className="settings-link-btn" onClick={() => setTab("docs")}>
+                      {t("settings.open_docs_tab")}
+                    </button>
+                    <span className="settings-doc muted"> — {t("settings.doc_from_daemon")}</span>
+                  </dd>
                 </dl>
               </div>
             )}
