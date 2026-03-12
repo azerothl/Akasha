@@ -12,3 +12,5 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1.0"
 anyhow = "1.0"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+hex = "0.4"

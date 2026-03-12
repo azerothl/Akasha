@@ -1,5 +1,6 @@
 //! Phase 5 — Plugin registry: load WASM from dir, list, call tool, reputation.
 
+use akasha_core::TrustStore;
 use akasha_plugin_api::{PluginManifest, PluginKind};
 use akasha_plugin_host::WasmPlugin;
 use std::collections::HashMap;
@@ -23,6 +24,7 @@ pub struct PluginRegistry {
     plugins_dir: PathBuf,
     plugins: std::sync::RwLock<HashMap<String, LoadedPlugin>>,
     reputation: Arc<ReputationStore>,
+    trust_store: Option<Arc<TrustStore>>,
 }
 
 struct LoadedPlugin {
@@ -31,11 +33,16 @@ struct LoadedPlugin {
 }
 
 impl PluginRegistry {
-    pub fn new(plugins_dir: PathBuf, reputation: Arc<ReputationStore>) -> Self {
+    pub fn new(
+        plugins_dir: PathBuf,
+        reputation: Arc<ReputationStore>,
+        trust_store: Option<Arc<TrustStore>>,
+    ) -> Self {
         Self {
             plugins_dir,
             plugins: std::sync::RwLock::new(HashMap::new()),
             reputation,
+            trust_store,
         }
     }
 
@@ -68,6 +75,34 @@ impl PluginRegistry {
                                 continue;
                             }
                             let wasm_path = manifest.wasm_path.as_ref().map(|p| path.join(p)).unwrap_or_else(|| path.join("plugin.wasm"));
+                            if let Some(ref store) = self.trust_store {
+                                if store.requires_signing() {
+                                    let wasm_bytes = match std::fs::read(&wasm_path) {
+                                        Ok(b) => b,
+                                        Err(_) => {
+                                            warn!(id = %manifest.id, path = ?wasm_path, "Failed to read WASM for signature check");
+                                            continue;
+                                        }
+                                    };
+                                    let sig_path = wasm_path.with_extension("wasm.sig");
+                                    let sig_path = if sig_path.exists() { sig_path } else { wasm_path.with_extension("sig") };
+                                    let sig = match std::fs::read(&sig_path) {
+                                        Ok(s) if s.len() == 64 => s,
+                                        Ok(_) => {
+                                            warn!(id = %manifest.id, "Plugin signature file invalid length (expected 64 bytes), skipping");
+                                            continue;
+                                        }
+                                        Err(_) => {
+                                            warn!(id = %manifest.id, "Plugin unsigned (no .sig file) and trust store requires signing, skipping");
+                                            continue;
+                                        }
+                                    };
+                                    if store.verify_plugin(&wasm_bytes, &sig).is_err() {
+                                        warn!(id = %manifest.id, "Plugin signature verification failed, skipping");
+                                        continue;
+                                    }
+                                }
+                            }
                             if let Ok(wasm) = WasmPlugin::load(&wasm_path) {
                                 let loaded = LoadedPlugin {
                                     manifest: manifest.clone(),

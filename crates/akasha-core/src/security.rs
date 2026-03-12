@@ -1,5 +1,6 @@
 //! Phase 3 — RBAC, output redaction, prompt injection guard, trust store
 
+use ed25519_dalek::{Signature, VerifyingKey};
 use std::path::Path;
 
 /// Roles from spec 08_permissions_model.yaml
@@ -76,29 +77,67 @@ pub struct PromptInjectionError {
     pub pattern: String,
 }
 
-/// Trust store: verifies plugin signatures (Ed25519). Unsigned plugins rejected.
+/// Trust store: verifies plugin signatures (Ed25519). When keys are present, unsigned plugins are rejected.
 pub struct TrustStore {
     allowed_public_keys: Vec<[u8; 32]>,
 }
 
 impl TrustStore {
-    pub fn load_from_dir(_dir: &Path) -> std::io::Result<Self> {
-        // Phase 3: empty trust store; no plugins allowed until keys added
-        Ok(Self {
-            allowed_public_keys: Vec::new(),
-        })
+    /// Load public keys from directory: each file matching `*.pub` may contain one or more hex-encoded
+    /// 32-byte (64 hex chars) keys, one per line. Lines starting with # are ignored.
+    pub fn load_from_dir(dir: &Path) -> std::io::Result<Self> {
+        let mut allowed_public_keys = Vec::new();
+        if !dir.exists() {
+            return Ok(Self { allowed_public_keys });
+        }
+        let entries = std::fs::read_dir(dir)?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "pub").unwrap_or(false) {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    for line in content.lines() {
+                        let line = line.split('#').next().unwrap_or(line).trim();
+                        if line.len() == 64 && line.chars().all(|c| c.is_ascii_hexdigit()) {
+                            if let Ok(bytes) = hex::decode(line) {
+                                if bytes.len() == 32 {
+                                    let mut key = [0u8; 32];
+                                    key.copy_from_slice(&bytes);
+                                    allowed_public_keys.push(key);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Self { allowed_public_keys })
     }
 
-    /// Verify plugin signature. Returns Ok(()) only if signature valid and key in trust store.
-    pub fn verify_plugin(&self, _plugin_bytes: &[u8], _signature: &[u8]) -> Result<(), TrustStoreError> {
+    /// Returns true if the trust store has at least one key (signing required).
+    pub fn requires_signing(&self) -> bool {
+        !self.allowed_public_keys.is_empty()
+    }
+
+    /// Verify plugin signature. Returns Ok(()) only if signature is valid and key is in trust store.
+    /// Signature must be 64 bytes (Ed25519). If store has no keys, returns NoTrustedKeys (caller may allow unsigned).
+    pub fn verify_plugin(&self, plugin_bytes: &[u8], signature: &[u8]) -> Result<(), TrustStoreError> {
         if self.allowed_public_keys.is_empty() {
             return Err(TrustStoreError::NoTrustedKeys);
         }
-        // TODO: Ed25519 verify when we have plugin payloads
-        Ok(())
+        if signature.len() != 64 {
+            return Err(TrustStoreError::InvalidSignature);
+        }
+        let sig = Signature::from_bytes(signature.try_into().map_err(|_| TrustStoreError::InvalidSignature)?);
+        for key_bytes in &self.allowed_public_keys {
+            let key = VerifyingKey::from_bytes(key_bytes).map_err(|_| TrustStoreError::InvalidSignature)?;
+            if key.verify_strict(plugin_bytes, &sig).is_ok() {
+                return Ok(());
+            }
+        }
+        Err(TrustStoreError::InvalidSignature)
     }
 
-    /// Phase 3 criterion: unsigned plugins refused
+    /// Phase 3 criterion: unsigned plugins refused when signing is required
     pub fn reject_unsigned() -> TrustStoreError {
         TrustStoreError::UnsignedNotAllowed
     }

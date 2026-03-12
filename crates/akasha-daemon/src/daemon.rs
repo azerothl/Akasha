@@ -92,9 +92,21 @@ impl Daemon {
                 }
             }
         }
+        if std::env::var("AKASHA_TEAMS_ENABLED").as_deref() == Ok("1") {
+            if let Ok(v) = &vault {
+                if let (Ok(app_id), Ok(app_password)) = (v.get("teams_app_id"), v.get("teams_app_password")) {
+                    channel_config.teams_app_id = Some(app_id);
+                    channel_config.teams_app_password = Some(app_password);
+                    info!("Teams adapter enabled (Bot Framework webhook)");
+                }
+            }
+        }
 
-        // Phase 3: Trust store (plugin signing)
-        let _trust_store = akasha_core::TrustStore::load_from_dir(&self.data_dir.join("trust_store")).ok();
+        // Phase 3: Trust store (plugin signing); when keys present, only signed plugins are loaded
+        let trust_store = akasha_core::TrustStore::load_from_dir(&self.data_dir.join("trust_store"))
+            .ok()
+            .filter(|t| t.requires_signing())
+            .map(std::sync::Arc::new);
 
         // Phase 5: Plugin registry + reputation
         let reputation = match crate::plugins::ReputationStore::open(&self.data_dir) {
@@ -105,7 +117,7 @@ impl Daemon {
             }
         };
         let plugins_dir = self.data_dir.join("plugins");
-        let plugin_registry = Arc::new(crate::plugins::PluginRegistry::new(plugins_dir, reputation));
+        let plugin_registry = Arc::new(crate::plugins::PluginRegistry::new(plugins_dir, reputation, trust_store));
         plugin_registry.load_all();
 
         // Phase 6: LLM Router (task classifier, providers, fallback, degraded mode)
