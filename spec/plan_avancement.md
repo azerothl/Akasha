@@ -29,7 +29,7 @@ Suivi des étapes du plan de mise en place (phases non développées). Voir [40_
 
 ## Priorité basse / optionnel
 
-- [ ] **Étape 6 — Modèle petit intégré (spec 34)**  
+- [x] **Étape 6 — Modèle petit intégré (spec 34)**  
   Stack Candle ou GGUF ; petit modèle pour doctor/advice et réponses courtes sans LLM externe. Livrable : conseils sans Ollama/cloud.
 
 - [ ] **Étape 7 — Outils browser, image, pdf (spec 33)**  

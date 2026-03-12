@@ -879,9 +879,10 @@ impl AkashaCoreProvider {
     }
 }
 
+/// Placeholder when no embedded model is available (spec 34: messages utiles, liens init/paths/doc).
 fn placeholder_response(prompt_len: usize) -> CompletionResponse {
     let reply = format!(
-        "[Akasha Core] Request received ({} chars). Local model placeholder. Configure Ollama or cloud providers for full completion.",
+        "Request received ({} chars). No local LLM available. For full replies: run Ollama (e.g. ollama run llama3) or add providers in llm_router.yaml. Setup: akasha init; paths: akasha paths; see Documentation tab for the guide.",
         prompt_len
     );
     let completion_tokens = reply.split_whitespace().count() as u64;
