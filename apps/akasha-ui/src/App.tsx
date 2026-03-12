@@ -1718,11 +1718,15 @@ function App() {
               <h2 id="onboarding-title">{t("onboarding.title")}</h2>
               <p className="onboarding-intro">{t("onboarding.intro")}</p>
               <ul className="onboarding-steps">
+                <li>{t("onboarding.step0")}</li>
                 <li>{t("onboarding.step1")}</li>
                 <li>{t("onboarding.step2")}</li>
                 <li>{t("onboarding.step3")}</li>
               </ul>
               <div className="onboarding-actions">
+                <button type="button" className="onboarding-doc-btn" onClick={() => { setTab("docs"); setShowOnboarding(false); }}>
+                  {t("onboarding.open_doc")}
+                </button>
                 <button type="button" className="onboarding-dismiss" onClick={() => { try { localStorage.setItem("akasha_onboarding_dismissed", "1"); } catch { /* ignore */ } setShowOnboarding(false); }}>
                   {t("onboarding.dismiss")}
                 </button>
