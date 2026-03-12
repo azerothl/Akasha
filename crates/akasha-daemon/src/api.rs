@@ -568,6 +568,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
     ("device_discover", "device_discover [interface] — lister les appareils accessibles (optionnel: local_media, system, network, usb). Filtre par politique allowed_device_interfaces / blocked_device_interfaces."),
     ("device_invoke", "device_invoke <interface> <device_id> <action> [params] — exécuter une action sur un appareil. local_media: caméra (device_id camera, action capture), micro (device_id microphone, action record). Appelle directement ; une fenêtre d'autorisation s'affichera dans l'UI. Ne pas demander à l'utilisateur d'« ouvrir l'UI » — utiliser l'outil. synthetic_input: device_id keyboard|mouse, action shortcut|key|type|mouse_move|mouse_click|..."),
+    ("generate_image", "generate_image <prompt> [size] — générer une image par IA (ex. OpenAI DALL·E). Prompt en texte libre ; size optionnel (1024x1024, 512x512). Retourne l'image en data URL dans la réponse (spec 42)."),
 ];
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -620,6 +621,17 @@ fn message_suggests_camera_or_mic(message: &str) -> bool {
         "micro", "microphone", "enregistre avec le micro", "enregistrer avec le micro",
         "obtenir une image", "get an image", "image avec la webcam", "image avec la caméra",
         "continuer pour obtenir une image", "proceed to get an image",
+    ];
+    keywords.iter().any(|k| m.contains(k))
+}
+
+fn message_suggests_image_generation(message: &str) -> bool {
+    let m = message.to_lowercase();
+    let keywords = [
+        "génère une image", "genere une image", "générer une image", "génère moi une image",
+        "generate an image", "generate a picture", "draw", "dessine", "dessiner",
+        "crée une image", "cree une image", "créer une image", "create an image",
+        "image par ia", "image par ia", "ai image", "dall-e", "dalle",
     ];
     keywords.iter().any(|k| m.contains(k))
 }
@@ -1088,6 +1100,7 @@ const WRITE_FILE_REMINDER: &str = "\n[Rappel: l'utilisateur demande d'enregistre
 const WEB_SEARCH_REMINDER: &str = "\n[Rappel: l'utilisateur demande des informations externes (météo, actualités, etc.). Tu DOIS utiliser TOOL: web_search <requête> pour chercher toi-même puis répondre avec les résultats. Ne propose pas d'aller sur un site sans avoir d'abord utilisé web_search.]\n\n";
 
 const DEVICE_CAMERA_REMINDER: &str = "\n[Rappel: demande de photo webcam/caméra. Tu DOIS enchaîner directement : TOOL: device_discover local_media puis TOOL: device_invoke local_media camera capture. Ne demande PAS à l'utilisateur « quelle action appareil ? » ou « which device action ? » avec ask_user — il a déjà dit qu'il veut une photo, appelle device_invoke camera capture. Ne propose PAS : upload fichier, ouvrir l'UI, image IA.]\n\n";
+const IMAGE_GENERATION_REMINDER: &str = "\n[Rappel: demande de « générer une image », « dessine », « crée une image » (par IA, pas webcam). Tu DOIS utiliser TOOL: generate_image <prompt> (ex. TOOL: generate_image un chat sur un canapé). Spec 42.]\n\n";
 
 /// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
 const APP_CONTEXT: &str = concat!(
@@ -1990,6 +2003,15 @@ async fn execute_tool_call(
                 (false, format!("[device_invoke] interface '{}' handler not yet implemented", interface), None)
             }
         }
+        "generate_image" => {
+            let prompt = args.get(0).map(String::as_str).unwrap_or("").trim();
+            if prompt.is_empty() {
+                (false, "[generate_image] usage: generate_image <prompt> [size]".to_string(), None)
+            } else {
+                // Spec 42: call image API (e.g. OpenAI Images); for now stub — returns message asking to configure.
+                (false, "[generate_image] Génération d'image non configurée : configurer image_generation (provider openai, api_key dans vault) — spec 42_image_generation.md.".to_string(), None)
+            }
+        }
         _ => {
             if executor.policy.can_run_command(tool_name) {
                 match executor.run_command(tool_name, args, None, None).await {
@@ -2413,6 +2435,11 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
+    let image_generation_reminder = if message_suggests_image_generation(&message) {
+        IMAGE_GENERATION_REMINDER
+    } else {
+        ""
+    };
     // When user clearly wants a photo from camera, prefix the message with an imperative so the model responds with device_invoke directly (no ask_user).
     let user_message = if !device_camera_reminder.is_empty() {
         format!(
@@ -2426,11 +2453,12 @@ pub(crate) async fn run_message_via_llm(
         user_message.clone()
     } else {
         format!(
-            "{}{}{}{}Utilisateur:\n{}",
+            "{}{}{}{}{}Utilisateur:\n{}",
             context_prefix.trim_end(),
             write_reminder,
             web_search_reminder,
             device_camera_reminder,
+            image_generation_reminder,
             user_message
         )
     };

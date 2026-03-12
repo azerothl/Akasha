@@ -19,10 +19,10 @@ Suivi des étapes du plan de mise en place (phases non développées). Voir [40_
 - [x] **Étape 3 — Transport temps réel (spec 36)**  
   Endpoint SSE (ou WebSocket) dans le daemon diffusant tâches, statut, device pending ; UI Tauri abonnée au flux ; polling en fallback. Livrable : mises à jour < 1 s.
 
-- [ ] **Étape 4 — Onboarding guidé dans l’UI**  
+- [x] **Étape 4 — Onboarding guidé dans l’UI**  
   Détecter premier lancement ; wizard ou étapes guidées (vault, Ollama, llm_router, doctor) ; lien vers onboarding / user_guide. Livrable : nouvel utilisateur guidé.
 
-- [ ] **Étape 5 — Génération d’images (spec 42)**  
+- [x] **Étape 5 — Génération d’images (spec 42)**  
   Outil `generate_image` (ou route dédiée) ; appel API images (ex. OpenAI) ; image en data URL dans la réponse ; config + sécurité. Livrable : image générée visible dans le chat.
 
 ---
