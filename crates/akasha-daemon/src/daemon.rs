@@ -727,34 +727,46 @@ impl Daemon {
                                         _ => buf,
                                     };
                                     let (method, path, body, headers) = parse_request(&full_buf);
-                                    let response = handle_api(
-                                        &method,
-                                        &path,
-                                        body,
-                                        &headers,
-                                        &db_path,
-                                        &progress,
-                                        &events_clone,
-                                        &main_agent,
-                                        &channel_config,
-                                        &plugin_registry,
-                                        &llm_router,
-                                        &rag_pack,
-                                        ollama_url.as_deref(),
-                                        &spec_dir,
-                                        restart_tx,
-                                        tools_executor.as_ref(),
-                                        &skill_registry,
-                                        Some(short_term),
-                                        long_term_client,
-                                        Some(human_input_store),
-                                        &user_rag_store,
-                                        &agent_profile_cache,
-                                        &update_check_cache_clone,
-                                        task_usage_store.as_ref(),
-                                        Some(&device_bridge),
-                                    )
-                                    .await;
+                                    let response = if method == "OPTIONS" {
+                                        "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, PATCH, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n".to_string()
+                                    } else {
+                                        let mut resp = handle_api(
+                                            &method,
+                                            &path,
+                                            body,
+                                            &headers,
+                                            &db_path,
+                                            &progress,
+                                            &events_clone,
+                                            &main_agent,
+                                            &channel_config,
+                                            &plugin_registry,
+                                            &llm_router,
+                                            &rag_pack,
+                                            ollama_url.as_deref(),
+                                            &spec_dir,
+                                            restart_tx,
+                                            tools_executor.as_ref(),
+                                            &skill_registry,
+                                            Some(short_term),
+                                            long_term_client,
+                                            Some(human_input_store),
+                                            &user_rag_store,
+                                            &agent_profile_cache,
+                                            &update_check_cache_clone,
+                                            task_usage_store.as_ref(),
+                                            Some(&device_bridge),
+                                        )
+                                        .await;
+                                        if let Some(idx) = resp.find("\r\n") {
+                                            resp = format!(
+                                                "{}\r\nAccess-Control-Allow-Origin: *{}",
+                                                &resp[..idx],
+                                                &resp[idx..]
+                                            );
+                                        }
+                                        resp
+                                    };
                                     let _ = stream.write_all(response.as_bytes()).await;
                                     let _ = stream.shutdown().await;
                                 });

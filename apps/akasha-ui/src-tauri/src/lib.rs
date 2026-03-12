@@ -991,6 +991,7 @@ async fn get_device_pending(port: Option<u16>) -> Result<serde_json::Value, Stri
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
+        eprintln!("[device_bridge UI] GET {} -> {}", url, resp.status());
         return Err(format!("{}", resp.status()));
     }
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
@@ -1007,12 +1008,12 @@ async fn post_device_result(
 ) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/device/result", daemon_base_url(port));
-    let client = http_client();
     let body = serde_json::json!({
         "request_id": request_id,
         "success": success,
         "data": data,
     });
+    let client = http_client();
     let resp = client
         .post(&url)
         .json(&body)
@@ -1020,7 +1021,9 @@ async fn post_device_result(
         .await
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        return Err(format!("{}", resp.status()));
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{} {}", status, text));
     }
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok(json)

@@ -1001,6 +1001,12 @@ pre,
   background: var(--akasha-accent);
   color: white;
   border-radius: 6px;
+  border: none;
+  cursor: pointer;
+}
+
+.message-ask-user-card .message-ask-user-choice-tag:hover {
+  filter: brightness(1.1);
 }
 
 .message-ask-user-card .message-ask-user-hint {

@@ -339,6 +339,7 @@ function App() {
   /** Attachments for the next message: images (vision) and documents (text appended to message). */
   const [attachments, setAttachments] = useState<Array<{ id: string; name: string; typ: "image" | "document"; content_base64: string; mime_type: string }>>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatInlineReplyRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Tasks for which we already auto-opened the human-input modal (avoid re-opening every poll). */
@@ -511,6 +512,15 @@ function App() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
+  // When a reply is pending and modal is not open, scroll the inline reply form into view
+  const pendingHumanInputKeys = Object.keys(pendingHumanInput);
+  useEffect(() => {
+    if (tab === "chat" && pendingHumanInputKeys.length > 0 && !humanInputModalTaskId) {
+      requestAnimationFrame(() => {
+        chatInlineReplyRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+    }
+  }, [tab, humanInputModalTaskId, pendingHumanInputKeys.length]);
   useEffect(() => {
     if (tab === "chat") chatInputRef.current?.focus();
   }, [tab]);
@@ -1764,7 +1774,7 @@ function App() {
         {/* Device bridge: agent requested device access (camera, mic, etc.) */}
         {devicePendingRequest && (
           <div className="human-input-overlay" role="dialog" aria-labelledby="device-request-title" aria-modal="true">
-            <div className="human-input-modal">
+            <div className="human-input-modal" onClick={(e) => e.stopPropagation()}>
               <h2 id="device-request-title">{t("device_bridge.title")}</h2>
               <p className="human-input-question">
                 {t("device_bridge.description")} <strong>{devicePendingRequest.interface}</strong> — <strong>{devicePendingRequest.action}</strong>
@@ -1774,7 +1784,11 @@ function App() {
                   type="button"
                   className="human-input-choice-btn"
                   onClick={async () => {
-                    const { request_id, interface: iface, action: act, params: reqParams } = devicePendingRequest;
+                    const payload = { ...devicePendingRequest };
+                    setDevicePendingRequest(null);
+                    const { request_id, interface: iface, action: act, params: reqParams } = payload;
+                    const ALLOW_TIMEOUT_MS = 90000;
+                    const runAllow = async () => {
                     try {
                       if (iface === "synthetic_input") {
                         try {
@@ -1797,23 +1811,51 @@ function App() {
                           });
                         }
                       } else if (iface === "local_media" && (act === "capture" || act === "camera_capture")) {
-                        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                        const GETUSERMEDIA_TIMEOUT_MS = 15000;
+                        let stream: MediaStream;
+                        try {
+                          stream = await Promise.race([
+                            navigator.mediaDevices.getUserMedia({ video: true }),
+                            new Promise<never>((_, rej) => setTimeout(() => rej(new Error("getUserMedia 15s timeout")), GETUSERMEDIA_TIMEOUT_MS)),
+                          ]);
+                        } catch (e) {
+                          await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT }).catch(() => {});
+                          return;
+                        }
                         const video = document.createElement("video");
+                        video.muted = true;
+                        video.playsInline = true;
+                        video.autoplay = true;
                         video.srcObject = stream;
-                        await new Promise<void>((resolve, reject) => {
-                          video.onloadedmetadata = () => {
-                            video.play().then(() => resolve()).catch(reject);
-                          };
-                          video.onerror = () => reject(new Error("Video load failed"));
-                        });
-                        const canvas = document.createElement("canvas");
-                        canvas.width = video.videoWidth;
-                        canvas.height = video.videoHeight;
-                        const ctx = canvas.getContext("2d");
-                        if (ctx) ctx.drawImage(video, 0, 0);
-                        stream.getTracks().forEach((t) => t.stop());
-                        const data = canvas.toDataURL("image/png").split(",")[1] ?? "";
-                        await invoke("post_device_result", { request_id, success: true, data, port: DAEMON_PORT });
+                        video.play().catch(() => {});
+                        await new Promise<void>((r) => setTimeout(r, 800));
+                        try {
+                          const canvas = document.createElement("canvas");
+                          const maxW = 1024;
+                          const w = Math.max(1, video.videoWidth || 640);
+                          const h = Math.max(1, video.videoHeight || 480);
+                          const scale = w > maxW || h > maxW ? maxW / Math.max(w, h) : 1;
+                          canvas.width = Math.round(w * scale);
+                          canvas.height = Math.round(h * scale);
+                          const ctx = canvas.getContext("2d");
+                          if (ctx) ctx.drawImage(video, 0, 0, w, h, 0, 0, canvas.width, canvas.height);
+                          const data = canvas.toDataURL("image/jpeg", 0.85).split(",")[1] ?? "";
+                          const url = `http://127.0.0.1:${DAEMON_PORT}/api/device/result`;
+                          try {
+                            const res = await fetch(url, {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ request_id, success: true, data }),
+                            });
+                            if (!res.ok) {
+                              await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT }).catch(() => {});
+                            }
+                          } catch (e) {
+                            await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT }).catch(() => {});
+                          }
+                        } finally {
+                          stream.getTracks().forEach((t) => t.stop());
+                        }
                       } else if (iface === "local_media" && (act === "record" || act === "microphone_record")) {
                         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                         const recorder = new MediaRecorder(stream);
@@ -1847,7 +1889,15 @@ function App() {
                       console.error(e);
                       await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT });
                     }
-                    setDevicePendingRequest(null);
+                    };
+                    try {
+                      await Promise.race([
+                        runAllow(),
+                        new Promise<never>((_, rej) => setTimeout(() => rej(new Error("allow_timeout_90s")), ALLOW_TIMEOUT_MS)),
+                      ]);
+                    } catch (e) {
+                      await invoke("post_device_result", { request_id, success: false, data: null, port: DAEMON_PORT }).catch(() => {});
+                    }
                   }}
                 >
                   {t("device_bridge.allow")}
@@ -1954,14 +2004,32 @@ function App() {
                             )}
                             {askUserData.choices?.length ? (
                               <div className="message-ask-user-choices">
-                                {askUserData.choices.map((choice, j) => (
-                                  <span key={j} className="message-ask-user-choice-tag">
-                                    {choice}
-                                  </span>
-                                ))}
+                                {askUserData.choices.map((choice, j) => {
+                                  const pendingTaskIdForReply = Object.keys(pendingHumanInput)[0] ?? null;
+                                  return pendingTaskIdForReply ? (
+                                    <button
+                                      key={j}
+                                      type="button"
+                                      className="message-ask-user-choice-tag"
+                                      onClick={async () => {
+                                        try {
+                                          await invoke("post_task_human_reply", { taskId: pendingTaskIdForReply, response: choice, port: DAEMON_PORT });
+                                          setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskIdForReply]; return next; });
+                                          setHumanInputModalTaskId((c) => (c === pendingTaskIdForReply ? null : c));
+                                        } catch (e) {
+                                          console.error(e);
+                                        }
+                                      }}
+                                    >
+                                      {choice}
+                                    </button>
+                                  ) : (
+                                    <span key={j} className="message-ask-user-choice-tag">{choice}</span>
+                                  );
+                                })}
                               </div>
                             ) : null}
-                            <p className="message-ask-user-hint">Répondre dans le formulaire sous le chat ou via « Action requise » sur la tâche.</p>
+                            <p className="message-ask-user-hint">Répondre ci‑dessous (boutons ou champ texte) ou via « Action requise » sur la tâche.</p>
                           </div>
                         ) : (
                           <div className="text markdown-rendered">
@@ -2104,7 +2172,7 @@ function App() {
               const pending = pendingTaskId ? pendingHumanInput[pendingTaskId] : null;
               if (!pending || !pendingTaskId) return null;
               return (
-                <div className="chat-inline-human-reply" role="form" aria-labelledby="inline-reply-label">
+                <div ref={chatInlineReplyRef} className="chat-inline-human-reply" role="form" aria-labelledby="inline-reply-label">
                   <h3 id="inline-reply-label" className="chat-inline-human-reply-title">Répondre à l&apos;agent</h3>
                   <p className="chat-inline-human-reply-question">{pending.question}</p>
                   {pending.context && <p className="chat-inline-human-reply-context">{pending.context}</p>}
