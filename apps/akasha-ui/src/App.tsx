@@ -772,6 +772,29 @@ function App() {
     fetchTasksList();
   }, [tab, fetchTasksList]);
 
+  // SSE: subscribe to daemon events for real-time updates (< 1s) when daemon is healthy.
+  useEffect(() => {
+    if (!health?.ok) return;
+    const url = `http://127.0.0.1:${health.port ?? DAEMON_PORT}/api/events`;
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource(url);
+      es.onmessage = () => {
+        fetchTasksList();
+        fetchPendingHumanInput();
+      };
+      es.onerror = () => {
+        es?.close();
+        es = null;
+      };
+    } catch {
+      /* ignore */
+    }
+    return () => {
+      es?.close();
+    };
+  }, [health?.ok, health?.port, fetchTasksList, fetchPendingHumanInput]);
+
   useEffect(() => {
     const task = tasksList[tasksSelected];
     if (task?.id) fetchTasksEvents(task.id);

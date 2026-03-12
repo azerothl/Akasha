@@ -16,7 +16,7 @@ Suivi des étapes du plan de mise en place (phases non développées). Voir [40_
 
 ## Priorité moyenne
 
-- [ ] **Étape 3 — Transport temps réel (spec 36)**  
+- [x] **Étape 3 — Transport temps réel (spec 36)**  
   Endpoint SSE (ou WebSocket) dans le daemon diffusant tâches, statut, device pending ; UI Tauri abonnée au flux ; polling en fallback. Livrable : mises à jour < 1 s.
 
 - [ ] **Étape 4 — Onboarding guidé dans l’UI**  

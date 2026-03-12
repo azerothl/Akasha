@@ -761,11 +761,12 @@ impl Daemon {
                 let user_rag_store = user_rag_store.clone();
                 let agent_profile_cache = agent_profile_cache.clone();
                 let task_usage_store = task_usage_store.clone();
-                let device_bridge = device_bridge.clone();
-                // Body reading is done inside the spawned task so slow/large uploads
-                                // don't block the accept loop from handling other connections or signals.
-                                let update_check_cache_clone = update_check_cache.clone();
-                                tokio::spawn(async move {
+                                let device_bridge = device_bridge.clone();
+                                let bus_clone = bus.clone();
+                                // Body reading is done inside the spawned task so slow/large uploads
+                                                // don't block the accept loop from handling other connections or signals.
+                                                let update_check_cache_clone = update_check_cache.clone();
+                                                tokio::spawn(async move {
                                     const INITIAL_READ: usize = 65536;
                                     const MAX_BODY: usize = 10 * 1024 * 1024; // 10 MiB for POST body (e.g. documents in base64)
                                     let mut buf = vec![0u8; INITIAL_READ];
@@ -792,6 +793,10 @@ impl Daemon {
                                         _ => buf,
                                     };
                                     let (method, path, body, headers) = parse_request(&full_buf);
+                                    if method == "GET" && path == "/api/events" {
+                                        let _ = crate::api::stream_sse_events(&bus_clone, &mut stream).await;
+                                        return;
+                                    }
                                     let response = if method == "OPTIONS" {
                                         "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, PATCH, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n".to_string()
                                     } else {

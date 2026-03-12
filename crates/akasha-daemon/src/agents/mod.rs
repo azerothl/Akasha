@@ -6,7 +6,7 @@ mod orchestrator;
 mod progress_subscriber;
 mod worker;
 
-pub use bus::{new_event_bus, EventBus};
+pub use bus::{new_event_bus, subscribe, EventBus};
 pub use main_agent::{MainAgent, OrchestratorSender, OrchestratorTask, TaskPriority};
 pub use orchestrator::Orchestrator;
 pub use progress_subscriber::{run_events_subscriber, run_progress_subscriber};

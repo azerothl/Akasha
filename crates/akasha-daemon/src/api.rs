@@ -12,6 +12,7 @@ use crate::memory_actor::LongTermMemoryClient;
 use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::RwLock;
@@ -3174,6 +3175,40 @@ async fn notify_task_completion(registry: &Option<TaskCompletionRegistry>, task_
 
 /// Optional channel to trigger daemon shutdown (for POST /api/restart).
 pub type RestartTx = Option<tokio::sync::mpsc::Sender<()>>;
+
+/// Stream event-bus events as Server-Sent Events (GET /api/events). Keeps connection open until client disconnects.
+pub async fn stream_sse_events<W>(bus: &EventBus, stream: &mut W) -> std::io::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut rx = crate::agents::subscribe(bus);
+    let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n";
+    stream.write_all(headers.as_bytes()).await?;
+    stream.flush().await?;
+    loop {
+        match rx.recv().await {
+            Ok(envelope) => {
+                let payload = serde_json::json!({
+                    "id": envelope.id.to_string(),
+                    "event_type": envelope.event_type.as_str(),
+                    "payload": envelope.payload,
+                    "timestamp": envelope.timestamp.to_rfc3339(),
+                    "correlation_id": envelope.correlation_id.map(|u| u.to_string()),
+                });
+                let line = format!("data: {}\n\n", payload.to_string());
+                if stream.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+                if stream.flush().await.is_err() {
+                    break;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+    Ok(())
+}
 
 pub async fn handle_api(
     method: &str,
