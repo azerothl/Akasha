@@ -1,7 +1,9 @@
 //! Scheduler service: tick, create task_runs with dedup, push to orchestrator (spec 37_scheduler_design)
 
 use akasha_core::{EventEnvelope, EventType};
-use akasha_store::{Schedule, ScheduleStore, Task, TaskRun, TaskRunStatus, TaskStatus, TaskStore};
+use akasha_store::{
+    Schedule, ScheduleExceptionType, ScheduleStore, Task, TaskRun, TaskRunStatus, TaskStatus, TaskStore,
+};
 use chrono::{Duration, Utc};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -61,7 +63,15 @@ async fn tick(
                 continue;
             };
             let slots = due_slots(&schedule_store, &schedule, now, interval_secs)?;
-            for planned_for in slots.into_iter().take(MAX_CATCHUP) {
+            let exceptions = schedule_store.get_exceptions_for_schedule(schedule.id)?;
+            for planned_for in slots
+                .into_iter()
+                .filter(|pf| {
+                    let d = pf.naive_utc().date();
+                    !exceptions.iter().any(|e| e.type_ == ScheduleExceptionType::Skip && e.date == d)
+                })
+                .take(MAX_CATCHUP)
+            {
                 let dedup_key = format!("{}:{}", schedule.id, planned_for.timestamp());
                 if schedule_store.dedup_key_exists(&dedup_key)? {
                     continue;
