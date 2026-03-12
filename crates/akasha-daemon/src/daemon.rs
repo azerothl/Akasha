@@ -157,6 +157,9 @@ impl Daemon {
         let resolved_ollama_url = ollama_url.clone();
         let openai_cfg = router_config.providers.get("openai").cloned();
         let openrouter_cfg = router_config.providers.get("openrouter").cloned();
+        let anthropic_cfg = router_config.providers.get("anthropic").cloned();
+        let azure_openai_cfg = router_config.providers.get("azure_openai").cloned();
+        let google_cfg = router_config.providers.get("google").cloned();
         let bitnet_url = router_config.providers.get("bitnet").and_then(|c| c.base_url.clone());
         let metrics_persistence: Option<Arc<dyn akasha_llm::MetricsPersistence>> = match MetricsStore::open(&db_path) {
             Ok(store) => {
@@ -226,6 +229,33 @@ impl Daemon {
                 app_title,
             )));
             info!("OpenRouter provider registered");
+        }
+        // Anthropic (cloud)
+        let anthropic_key = anthropic_cfg
+            .as_ref()
+            .and_then(|c| resolve_api_key(c.api_key_ref.as_ref(), "ANTHROPIC_API_KEY"));
+        if let Some(k) = anthropic_key {
+            let base_url = anthropic_cfg.as_ref().and_then(|c| c.base_url.clone());
+            llm_router.register_provider(Arc::new(akasha_llm::AnthropicProvider::new(Some(k), base_url)));
+            info!("Anthropic provider registered");
+        }
+        // Azure OpenAI (cloud)
+        let azure_key = azure_openai_cfg
+            .as_ref()
+            .and_then(|c| resolve_api_key(c.api_key_ref.as_ref(), "AZURE_OPENAI_API_KEY"));
+        if let Some(k) = azure_key {
+            let base_url = azure_openai_cfg.as_ref().and_then(|c| c.base_url.clone());
+            llm_router.register_provider(Arc::new(akasha_llm::AzureOpenAIProvider::new(Some(k), base_url)));
+            info!("Azure OpenAI provider registered");
+        }
+        // Google AI (Gemini)
+        let google_key = google_cfg
+            .as_ref()
+            .and_then(|c| resolve_api_key(c.api_key_ref.as_ref(), "GOOGLE_AI_API_KEY"));
+        if let Some(k) = google_key {
+            let base_url = google_cfg.as_ref().and_then(|c| c.base_url.clone());
+            llm_router.register_provider(Arc::new(akasha_llm::GoogleAIProvider::new(Some(k), base_url)));
+            info!("Google AI provider registered");
         }
         // BitNet (local llama-server / BitNet inference, OpenAI-compatible API)
         llm_router.register_provider(Arc::new(akasha_llm::BitNetProvider::new(bitnet_url.clone())));
