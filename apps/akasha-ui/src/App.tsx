@@ -170,7 +170,10 @@ function App() {
   const [docContent, setDocContent] = useState<string | null>(null);
   const [docLoading, setDocLoading] = useState(false);
   const [docError, setDocError] = useState<string | null>(null);
-  const [tasksList, setTasksList] = useState<Array<{ id: string; status: string }>>([]);
+  type TaskListItem = { id: string; status: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string };
+  const [tasksList, setTasksList] = useState<Array<TaskListItem>>([]);
+  const [taskListFilter, setTaskListFilter] = useState<"active" | "completed">("active");
+  const [taskSearchQuery, setTaskSearchQuery] = useState("");
   const [tasksSelected, setTasksSelected] = useState(0);
   const [tasksEvents, setTasksEvents] = useState<Array<{ event_type: string; payload?: unknown; at: string }>>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
@@ -616,12 +619,19 @@ function App() {
   const fetchTasksList = useCallback(async () => {
     setTasksLoading(true);
     try {
-      const data = await invoke<{ tasks?: Array<{ id?: string; status?: string }> }>("get_tasks", {
+      const data = await invoke<{ tasks?: Array<{ id?: string; status?: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string }> }>("get_tasks", {
         port: DAEMON_PORT,
       });
       const list = data?.tasks ?? [];
-      const tasks = list
-        .map((t) => ({ id: t.id ?? "", status: t.status ?? "?" }))
+      const tasks: Array<TaskListItem> = list
+        .map((t) => ({
+          id: t.id ?? "",
+          status: t.status ?? "?",
+          label: t.label,
+          created_at: t.created_at,
+          parent_task_id: t.parent_task_id,
+          assigned_agent: t.assigned_agent,
+        }))
         .filter((t) => t.id);
       setTasksList(tasks);
       setTasksSelected((prev) => (prev >= tasks.length && tasks.length > 0 ? tasks.length - 1 : prev));
@@ -632,6 +642,26 @@ function App() {
       setTasksLoading(false);
     }
   }, []);
+
+  const filteredTasksList = useMemo(() => {
+    let list = tasksList;
+    if (taskListFilter === "active") {
+      list = list.filter((t) => t.status === "pending" || t.status === "running");
+    } else {
+      list = list.filter((t) => t.status === "completed" || t.status === "failed");
+    }
+    const q = taskSearchQuery.trim().toLowerCase();
+    if (q) {
+      list = list.filter(
+        (t) =>
+          (t.label && t.label.toLowerCase().includes(q)) ||
+          (t.id && t.id.toLowerCase().includes(q))
+      );
+    }
+    return list;
+  }, [tasksList, taskListFilter, taskSearchQuery]);
+
+  const taskDisplayLabel = (t: TaskListItem) => (t.label && t.label.trim() ? t.label.trim() : t("tasks.task_unnamed") + t.id.slice(-8));
 
   const fetchTasksEvents = useCallback(async (taskId: string) => {
     try {
@@ -718,7 +748,7 @@ function App() {
 
   useEffect(() => {
     if (tab !== "tasks") return;
-    const cached = getCached<Array<{ id: string; status: string }>>("tasks");
+    const cached = getCached<Array<TaskListItem>>("tasks");
     if (cached != null) {
       setTasksList(cached);
       setTasksSelected((prev) => (prev >= cached.length && cached.length > 0 ? cached.length - 1 : prev));
@@ -2354,7 +2384,7 @@ function App() {
             {!tasksLoading && (
               <div className="activity-panel-body">
                 <div className="activity-tasks-block">
-                  <h3>Liste des tâches</h3>
+                  <h3>{t("tasks.list_heading")}</h3>
                   {tasksList.length === 0 ? (
                     <p className="empty-state">{t("tasks.empty")}</p>
                   ) : (
@@ -2376,7 +2406,7 @@ function App() {
                             if (e.key === "ArrowUp" && i > 0) setTasksSelected(i - 1);
                           }}
                         >
-                          <span className="task-id">{t.id.slice(-8)}</span>{" "}
+                          <span className="task-label">{taskDisplayLabel(t)}</span>
                           <span className="task-status">{t.status}</span>
                         </li>
                       ))}
@@ -3603,7 +3633,7 @@ function App() {
                         }
                       }}
                     >
-                      <span className="task-id">#{task.id.slice(-8)}</span>
+                      <span className="task-label">{taskDisplayLabel(task)}</span>
                       <span className="task-status">{task.status}</span>
                     </li>
                   ))}
