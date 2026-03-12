@@ -559,9 +559,9 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("sessions_spawn", "sessions_spawn <message> [session_id] — créer une sous-tâche et la lancer"),
     ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
     ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
-    ("browser", "browser navigate <url> | browser screenshot | browser snapshot — automation navigateur (non implémenté, prévu phase 3)"),
-    ("image", "image <path|url> [prompt] — analyse d'image par modèle vision (non implémenté, prévu phase 3)"),
-    ("pdf", "pdf <path|url> — extraire le texte d'un PDF (non implémenté, prévu phase 3)"),
+    ("browser", "browser navigate <url> | browser screenshot | browser snapshot — screenshot via device_invoke synthetic_input shortcut; navigate → use web_fetch for content"),
+    ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
+    ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
     ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (ex. search pour recherche web). agent_type: search | code | conversation | financial | documentalist | project_manager | technical_writer | research | security_audit | creative. Un seul niveau de délégation autorisé."),
     ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
@@ -1641,9 +1641,43 @@ async fn execute_tool_call(
                 None => (false, "[message] AKASHA_MESSAGE_WEBHOOK_URL not set".to_string(), None),
             }
         }
-        "browser" => (false, "[browser] browser automation not implemented (planned Phase 3)".to_string(), None),
-        "image" => (false, "[image] image analysis (vision) not implemented (planned Phase 3)".to_string(), None),
-        "pdf" => (false, "[pdf] PDF extraction not implemented (planned Phase 3)".to_string(), None),
+        "browser" => {
+            let sub = args.get(0).map(String::as_str).unwrap_or("").trim();
+            if sub == "screenshot" {
+                (true, "[browser] For screenshot use: TOOL: device_invoke synthetic_input keyboard shortcut (e.g. Win+Shift+S on Windows, Cmd+Shift+4 on macOS) then paste or share the image.".to_string(), None)
+            } else if sub == "navigate" && args.get(1).map(|s| s.starts_with("http")).unwrap_or(false) {
+                (true, "[browser] Full browser automation (navigate) not implemented. Use web_fetch <url> to get page content.".to_string(), None)
+            } else {
+                (false, "[browser] usage: browser navigate <url> | browser screenshot | browser snapshot. Screenshot: use device_invoke synthetic_input keyboard shortcut.".to_string(), None)
+            }
+        }
+        "image" => {
+            let path_or_url = args.get(0).map(String::as_str).unwrap_or("").trim();
+            if path_or_url.is_empty() {
+                (false, "[image] usage: image <path|url> [prompt]. For vision analysis attach the image in chat (vision-capable model in llm_router) or use a local path.".to_string(), None)
+            } else {
+                (true, "[image] Vision analysis: use image as attachment in chat with a vision-capable model (llm_router). Local path metadata not yet implemented (spec 33).".to_string(), None)
+            }
+        }
+        "pdf" => {
+            let p = path_arg(0);
+            match p {
+                Some(path) if executor.policy.can_read(path) => {
+                    match tokio::fs::read(path).await {
+                        Ok(bytes) => match pdf_extract::extract_text_from_mem(&bytes) {
+                            Ok(text) => {
+                                let preview = if text.len() > 2000 { format!("{}…", text.chars().take(2000).collect::<String>()) } else { text.clone() };
+                                (true, format!("[pdf {}] extracted {} chars:\n{}", path.display(), text.len(), preview), None)
+                            }
+                            Err(e) => (false, format!("[pdf] extraction failed: {}", e), None),
+                        },
+                        Err(e) => (false, format!("[pdf] read failed: {}", e), None),
+                    }
+                }
+                Some(_) => (false, "[pdf] path not allowed by policy (allowed_read_paths)".to_string(), None),
+                None => (false, "[pdf] usage: pdf <path> — path must be in allowed_read_paths".to_string(), None),
+            }
+        }
         "search_files" => {
             let dir = path_arg(0).unwrap_or(Path::new("."));
             let pattern = args.get(1).map(String::as_str).unwrap_or("*");

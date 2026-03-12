@@ -32,7 +32,7 @@ Suivi des étapes du plan de mise en place (phases non développées). Voir [40_
 - [x] **Étape 6 — Modèle petit intégré (spec 34)**  
   Stack Candle ou GGUF ; petit modèle pour doctor/advice et réponses courtes sans LLM externe. Livrable : conseils sans Ollama/cloud.
 
-- [ ] **Étape 7 — Outils browser, image, pdf (spec 33)**  
+- [x] **Étape 7 — Outils browser, image, pdf (spec 33)**  
   Remplacer les stubs par implémentations réelles (screenshot, extract, PDF text/metadata) dans api.rs ou akasha-tools. Livrable : outils utilisables par l’agent.
 
 - [ ] **Étape 8 — Session terminal (spec 33)**  
