@@ -35,7 +35,7 @@ Suivi des étapes du plan de mise en place (phases non développées). Voir [40_
 - [x] **Étape 7 — Outils browser, image, pdf (spec 33)**  
   Remplacer les stubs par implémentations réelles (screenshot, extract, PDF text/metadata) dans api.rs ou akasha-tools. Livrable : outils utilisables par l’agent.
 
-- [ ] **Étape 8 — Session terminal (spec 33)**  
+- [x] **Étape 8 — Session terminal (spec 33)**  
   Session terminal interactive (PTY, timeout, isolation) ; exposition via outil ou API ; UI pour afficher/saisir. Livrable : agent peut utiliser une session terminal.
 
 - [ ] **Étape 9 — WhatsApp**  

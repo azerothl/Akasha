@@ -544,6 +544,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
     ("run_terminal", "run_terminal <cmd> [args...] — exécuter une commande (même que run_command)"),
     ("run_command_background", "run_command_background <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
+    ("terminal_session", "terminal_session — session PTY interactive (prévue ultérieurement, spec 43). Pour l’instant utiliser run_command / run_terminal pour une commande, run_command_background + process pour suivi."),
     ("process", "process list | process poll <session_id> | process kill <session_id> — lister, consulter ou arrêter des commandes en arrière-plan"),
     ("file_diff", "file_diff <path_a> <path_b> — diff texte entre deux fichiers"),
     ("edit_file", "edit_file <path> <start_line> <end_line> <new_content> — remplacer les lignes start..end par new_content (lignes 1-based)"),
@@ -1384,6 +1385,7 @@ async fn execute_tool_call(
                 None => (false, "[run_command_background] process registry not available".to_string(), None),
             }
         }
+        "terminal_session" => (true, "[terminal_session] Interactive PTY session planned (spec 43). Use run_command or run_terminal for a single command; run_command_background + process for background execution.".to_string(), None),
         "process" => {
             let sub = args.get(0).map(String::as_str).unwrap_or("");
             match (process_registry, sub) {
