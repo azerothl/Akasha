@@ -2385,31 +2385,110 @@ function App() {
               <div className="activity-panel-body">
                 <div className="activity-tasks-block">
                   <h3>{t("tasks.list_heading")}</h3>
+                  {tasksList.length > 0 && (
+                    <>
+                      <div className="activity-tasks-filters" role="tablist" aria-label={t("tasks.filter_label")}>
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={taskListFilter === "active"}
+                          className={"activity-filter-tab" + (taskListFilter === "active" ? " active" : "")}
+                          onClick={() => setTaskListFilter("active")}
+                        >
+                          {t("tasks.filter_active")}
+                        </button>
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={taskListFilter === "completed"}
+                          className={"activity-filter-tab" + (taskListFilter === "completed" ? " active" : "")}
+                          onClick={() => setTaskListFilter("completed")}
+                        >
+                          {t("tasks.filter_completed")}
+                        </button>
+                      </div>
+                      <div className="activity-tasks-search-wrap">
+                        <input
+                          type="search"
+                          className="activity-tasks-search"
+                          placeholder={t("tasks.search_placeholder")}
+                          value={taskSearchQuery}
+                          onChange={(e) => setTaskSearchQuery(e.target.value)}
+                          aria-label={t("tasks.search_placeholder")}
+                        />
+                      </div>
+                    </>
+                  )}
                   {tasksList.length === 0 ? (
                     <p className="empty-state">{t("tasks.empty")}</p>
+                  ) : filteredTasksList.length === 0 ? (
+                    <p className="empty-state">{t("tasks.no_match_filter")}</p>
                   ) : (
-                    <ul className="activity-task-list" role="list">
-                      {tasksList.map((t, i) => (
-                        <li
-                          key={t.id}
-                          className={i === tasksSelected ? "selected" : ""}
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => setTasksSelected(i)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault();
-                              setTasksSelected(i);
-                            }
-                            if (e.key === "ArrowDown" && i < tasksList.length - 1)
-                              setTasksSelected(i + 1);
-                            if (e.key === "ArrowUp" && i > 0) setTasksSelected(i - 1);
-                          }}
-                        >
-                          <span className="task-label">{taskDisplayLabel(t)}</span>
-                          <span className="task-status">{t.status}</span>
-                        </li>
-                      ))}
+                    <ul className="activity-task-cards" role="list">
+                      {filteredTasksList.map((task) => {
+                        const isSelected = tasksList[tasksSelected]?.id === task.id;
+                        const runningChip = task.status === "running" ? runningTaskChips[task.id] : undefined;
+                        const createdLabel = task.created_at ? (() => {
+                          try {
+                            const d = new Date(task.created_at);
+                            return d.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+                          } catch {
+                            return task.created_at;
+                          }
+                        })() : null;
+                        return (
+                          <li key={task.id} className={"activity-task-card" + (isSelected ? " selected" : "")}>
+                            <div
+                              className="activity-task-card-inner"
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => setTasksSelected(tasksList.findIndex((x) => x.id === task.id))}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  setTasksSelected(tasksList.findIndex((x) => x.id === task.id));
+                                }
+                                const idx = filteredTasksList.findIndex((x) => x.id === task.id);
+                                if (e.key === "ArrowDown" && idx < filteredTasksList.length - 1) {
+                                  const next = filteredTasksList[idx + 1];
+                                  setTasksSelected(tasksList.findIndex((x) => x.id === next.id));
+                                }
+                                if (e.key === "ArrowUp" && idx > 0) {
+                                  const prev = filteredTasksList[idx - 1];
+                                  setTasksSelected(tasksList.findIndex((x) => x.id === prev.id));
+                                }
+                              }}
+                            >
+                              <div className="activity-task-card-head">
+                                <span className="activity-task-card-title" title={taskDisplayLabel(task)}>
+                                  {taskDisplayLabel(task)}
+                                </span>
+                                <span className={"activity-task-status-pill status-" + task.status}>
+                                  {task.status}
+                                </span>
+                              </div>
+                              {task.status === "running" && runningChip != null && (
+                                <div className="activity-task-progress">
+                                  <div className="activity-task-progress-bar" style={{ width: `${runningChip.pct ?? 0}%` }} />
+                                  <span className="activity-task-progress-pct">{runningChip.pct ?? 0}%</span>
+                                </div>
+                              )}
+                              <div className="activity-task-meta">
+                                <span className="activity-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>
+                                {createdLabel && <span className="activity-task-created">{createdLabel}</span>}
+                                {task.assigned_agent && <span className="activity-task-agent">{task.assigned_agent}</span>}
+                              </div>
+                              <button
+                                type="button"
+                                className="activity-task-view-btn"
+                                onClick={(e) => { e.stopPropagation(); setTasksSelected(tasksList.findIndex((x) => x.id === task.id)); }}
+                              >
+                                {t("tasks.view_task")}
+                              </button>
+                            </div>
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                 </div>
@@ -3610,33 +3689,107 @@ function App() {
               >
                 {t("sidebar.refresh_tasks")}
               </button>
+              {tasksList.length > 0 && (
+                <>
+                  <div className="sidebar-right-filters" role="tablist" aria-label={t("tasks.filter_label")}>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={taskListFilter === "active"}
+                      className={"sidebar-right-filter-tab" + (taskListFilter === "active" ? " active" : "")}
+                      onClick={() => setTaskListFilter("active")}
+                    >
+                      {t("tasks.filter_active")}
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={taskListFilter === "completed"}
+                      className={"sidebar-right-filter-tab" + (taskListFilter === "completed" ? " active" : "")}
+                      onClick={() => setTaskListFilter("completed")}
+                    >
+                      {t("tasks.filter_completed")}
+                    </button>
+                  </div>
+                  <div className="sidebar-right-search-wrap">
+                    <input
+                      type="search"
+                      className="sidebar-right-search"
+                      placeholder={t("tasks.search_placeholder")}
+                      value={taskSearchQuery}
+                      onChange={(e) => setTaskSearchQuery(e.target.value)}
+                      aria-label={t("tasks.search_placeholder")}
+                    />
+                  </div>
+                </>
+              )}
               {tasksLoading && (
                 <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>
               )}
               {!tasksLoading && tasksList.length === 0 && (
                 <p className="empty-state">{t("tasks.empty")}</p>
               )}
-              {!tasksLoading && tasksList.length > 0 && (
+              {!tasksLoading && tasksList.length > 0 && filteredTasksList.length === 0 && (
+                <p className="empty-state">{t("tasks.no_match_filter")}</p>
+              )}
+              {!tasksLoading && filteredTasksList.length > 0 && (
                 <ul className="sidebar-right-task-list" role="list">
-                  {tasksList.map((task, i) => (
-                    <li
-                      key={task.id}
-                      className={i === tasksSelected ? "selected" : ""}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => { setTasksSelected(i); setTab("tasks"); }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          setTasksSelected(i);
-                          setTab("tasks");
-                        }
-                      }}
-                    >
-                      <span className="task-label">{taskDisplayLabel(task)}</span>
-                      <span className="task-status">{task.status}</span>
-                    </li>
-                  ))}
+                  {filteredTasksList.map((task) => {
+                    const isSelected = tasksList[tasksSelected]?.id === task.id;
+                    const runningChip = task.status === "running" ? runningTaskChips[task.id] : undefined;
+                    const createdLabel = task.created_at ? (() => {
+                      try {
+                        const d = new Date(task.created_at);
+                        return d.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+                      } catch {
+                        return task.created_at;
+                      }
+                    })() : null;
+                    return (
+                      <li key={task.id} className={"sidebar-right-task-card" + (isSelected ? " selected" : "")}>
+                        <div
+                          className="sidebar-right-task-card-inner"
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => { setTasksSelected(tasksList.findIndex((x) => x.id === task.id)); setTab("tasks"); }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              setTasksSelected(tasksList.findIndex((x) => x.id === task.id));
+                              setTab("tasks");
+                            }
+                          }}
+                        >
+                          <div className="sidebar-right-task-card-head">
+                            <span className="sidebar-right-task-card-title" title={taskDisplayLabel(task)}>
+                              {taskDisplayLabel(task)}
+                            </span>
+                            <span className={"sidebar-right-task-status-pill status-" + task.status}>
+                              {task.status}
+                            </span>
+                          </div>
+                          {task.status === "running" && runningChip != null && (
+                            <div className="sidebar-right-task-progress">
+                              <div className="sidebar-right-task-progress-bar" style={{ width: `${runningChip.pct ?? 0}%` }} />
+                              <span className="sidebar-right-task-progress-pct">{runningChip.pct ?? 0}%</span>
+                            </div>
+                          )}
+                          <div className="sidebar-right-task-meta">
+                            <span className="sidebar-right-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>
+                            {createdLabel && <span className="sidebar-right-task-created">{createdLabel}</span>}
+                            {task.assigned_agent && <span className="sidebar-right-task-agent">{task.assigned_agent}</span>}
+                          </div>
+                          <button
+                            type="button"
+                            className="sidebar-right-task-view-btn"
+                            onClick={(e) => { e.stopPropagation(); setTasksSelected(tasksList.findIndex((x) => x.id === task.id)); setTab("tasks"); }}
+                          >
+                            {t("tasks.view_task")}
+                          </button>
+                        </div>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
