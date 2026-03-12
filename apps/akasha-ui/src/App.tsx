@@ -508,10 +508,14 @@ function App() {
     }
   }, []);
 
-  // Scroll chat to last message and keep focus on input
+  // Scroll chat to bottom when opening the chat tab or when messages/loading change
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
+    if (tab === "chat") {
+      requestAnimationFrame(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      });
+    }
+  }, [messages, loading, tab]);
   // When a reply is pending and modal is not open, scroll the inline reply form into view
   const pendingHumanInputKeys = Object.keys(pendingHumanInput);
   useEffect(() => {
