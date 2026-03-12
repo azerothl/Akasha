@@ -308,6 +308,21 @@ impl Daemon {
                 }
             }
         }
+        let nats_client_opt: Option<async_nats::Client> = if cluster_enabled {
+            let config = akasha_cluster::ClusterConfig::load(&self.data_dir);
+            match akasha_cluster::connect_nats(&config).await {
+                Ok(c) => {
+                    info!("Cluster: NATS connected for replication");
+                    Some(c)
+                }
+                Err(e) => {
+                    warn!(error = %e, "Cluster: NATS connect failed, replication disabled");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let mut leader_rx_opt: Option<tokio::sync::mpsc::Receiver<bool>> = if cluster_enabled {
             let config = akasha_cluster::ClusterConfig::load(&self.data_dir);
             if config.tls_ca.is_some() || config.tls_client_cert.is_some() {
@@ -327,10 +342,9 @@ impl Daemon {
                 if let Ok(log) = ImmutableLog::open(&log_path) {
                     if log.verify().unwrap_or(false) {
                         if let Ok(entry) = log.append("daemon_started") {
-                            let config = akasha_cluster::ClusterConfig::load(&self.data_dir);
-                            if let Ok(client) = akasha_cluster::connect_nats(&config).await {
+                            if let Some(ref client) = nats_client_opt {
                                 let _ = akasha_cluster::publish_log_entry(
-                                    &client,
+                                    client,
                                     &entry.payload,
                                     entry.index,
                                 )
@@ -390,6 +404,15 @@ impl Daemon {
 
             // Phase 2: Event bus, agents, progress cache, events cache (Phase F). Memory (spec 06): short-term + long-term store, embedder (in-process).
             let (bus, _) = crate::agents::new_event_bus();
+            if let Some(ref nats) = nats_client_opt {
+                let nats_pub = nats.clone();
+                let bus_rep = bus.clone();
+                let db_rep = db_path.clone();
+                tokio::spawn(async move {
+                    crate::replication::run_replication_publisher(bus_rep, nats_pub, &db_rep).await;
+                });
+                crate::replication::spawn_replication_subscriber(nats.clone(), db_path.clone());
+            }
             let progress = new_progress_cache();
             let events = new_events_cache();
             let agent_profile_cache = new_agent_profile_cache();
