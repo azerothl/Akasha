@@ -5,6 +5,7 @@ use akasha_store::{
     Schedule, ScheduleExceptionType, ScheduleStore, Task, TaskRun, TaskRunStatus, TaskStatus, TaskStore,
 };
 use chrono::{Duration, Utc};
+use rrule::{RRuleSet, Tz as RruleTz};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -59,10 +60,20 @@ async fn tick(
         let enabled = schedule_store.list_enabled_schedules()?;
         let mut pending = Vec::new();
         for schedule in enabled {
-            let Some(interval_secs) = schedule.interval_seconds else {
-                continue;
+            let slots = if schedule.rrule.trim().is_empty() {
+                let Some(interval_secs) = schedule.interval_seconds else {
+                    continue;
+                };
+                due_slots_interval(&schedule_store, &schedule, now, interval_secs)?
+            } else {
+                match due_slots_rrule(&schedule_store, &schedule, now) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(schedule_id = %schedule.id, error = %e, "Scheduler: RRULE parse failed, skipping schedule");
+                        continue;
+                    }
+                }
             };
-            let slots = due_slots(&schedule_store, &schedule, now, interval_secs)?;
             let exceptions = schedule_store.get_exceptions_for_schedule(schedule.id)?;
             for planned_for in slots
                 .into_iter()
@@ -196,9 +207,45 @@ fn sync_terminal_task_run_statuses(
     Ok(())
 }
 
-/// Returns all due slots (<= now) for which no run has been created yet, starting from the
-/// slot after the last known run. Bounded implicitly by MAX_CATCHUP at the call site.
-fn due_slots(
+/// Returns due slots from RRULE (iCal): occurrences between last run (or start_at) and now.
+/// Bounded by MAX_CATCHUP at call site.
+fn due_slots_rrule(
+    schedule_store: &ScheduleStore,
+    schedule: &Schedule,
+    now: chrono::DateTime<Utc>,
+) -> anyhow::Result<Vec<chrono::DateTime<Utc>>> {
+    if let Some(end_at) = schedule.end_at {
+        if end_at < now {
+            return Ok(vec![]);
+        }
+    }
+    let runs = schedule_store.list_task_runs(Some(schedule.id), 1)?;
+    let last_planned = runs.into_iter().next().map(|r| r.planned_for);
+    let after = last_planned.unwrap_or_else(|| schedule.start_at - Duration::seconds(1));
+    let before = now + Duration::seconds(1);
+    let after_tz = after.with_timezone(&RruleTz::UTC);
+    let before_tz = before.with_timezone(&RruleTz::UTC);
+    let dtstart = format!(
+        "DTSTART:{}Z",
+        schedule.start_at.format("%Y%m%dT%H%M%S")
+    );
+    let rrule_set_str = format!("{}\nRRULE:{}", dtstart, schedule.rrule.trim());
+    let rrule_set: RRuleSet = rrule_set_str.parse().map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    let limit = (MAX_CATCHUP * 2).min(u16::MAX as usize) as u16;
+    let result = rrule_set.after(after_tz).before(before_tz).all(limit);
+    let slots: Vec<chrono::DateTime<Utc>> = result
+        .dates
+        .into_iter()
+        .map(|dt| dt.with_timezone(&Utc))
+        .filter(|dt| *dt <= now && (last_planned.is_none() || *dt > last_planned.unwrap()))
+        .filter(|dt| schedule.end_at.map(|e| *dt <= e).unwrap_or(true))
+        .take(MAX_CATCHUP)
+        .collect();
+    Ok(slots)
+}
+
+/// Returns all due slots (<= now) for interval-based schedules.
+fn due_slots_interval(
     schedule_store: &ScheduleStore,
     schedule: &Schedule,
     now: chrono::DateTime<Utc>,
