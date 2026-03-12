@@ -3744,8 +3744,10 @@ pub async fn handle_api(
         if let (Some(ref app_id), Some(ref app_password)) =
             (&channel_config.teams_app_id, &channel_config.teams_app_password)
         {
+            let auth_header = headers.get("authorization").map(String::as_str);
             return crate::channels::teams::handle_teams_message(
                 body,
+                auth_header,
                 app_id,
                 app_password,
                 channel_config.port,

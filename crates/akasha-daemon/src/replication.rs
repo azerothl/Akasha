@@ -70,7 +70,14 @@ pub fn spawn_replication_subscriber(nats_client: async_nats::Client, store_path:
     };
     let on_task = move |msg: TaskEventMsg| {
         let store_path = store_path.clone();
-        if let Ok(store) = TaskStore::open(&store_path) {
+        tokio::task::spawn_blocking(move || {
+            let store = match TaskStore::open(&store_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "Replication: failed to open task store");
+                    return;
+                }
+            };
             let task_id = match uuid::Uuid::parse_str(&msg.task_id) {
                 Ok(id) => id,
                 Err(_) => return,
@@ -128,7 +135,7 @@ pub fn spawn_replication_subscriber(nats_client: async_nats::Client, store_path:
                 }
                 _ => {}
             }
-        }
+        });
     };
     tokio::spawn(async move {
         replicate_subscribe(nats_client, on_log, on_task).await;

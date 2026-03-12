@@ -1737,8 +1737,12 @@ providers:
         if example.exists() {
             std::fs::copy(&example, &tools_policy_path)?;
             let content = std::fs::read_to_string(&tools_policy_path)?;
-            // Remplacer la valeur "." par data_dir dans les deux listes (première occurrence = read, deuxième = write)
-            let content = content.replace("  - \".\"", &format!("  - {}", data_dir_yaml));
+            // Replace both quoted and unquoted "." entries in allowed_*_paths with data_dir.
+            let replacement = format!("  - {}", data_dir_yaml);
+            let content = content
+                .replace("  - \".\"", &replacement)
+                .replace("  - '.'", &replacement)
+                .replace("  - .", &replacement);
             std::fs::write(&tools_policy_path, content)?;
             println!("  Fichier écrit : {} (depuis spec/tools_policy.example.yaml, chemins par défaut = data_dir)", tools_policy_path.display());
         } else {
@@ -2136,7 +2140,12 @@ fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
         if example.exists() {
             std::fs::copy(&example, &tools_policy_path)?;
             let content = std::fs::read_to_string(&tools_policy_path)?;
-            let content = content.replace("  - \".\"", &format!("  - {}", data_dir_yaml));
+            // Replace both quoted and unquoted "." entries in allowed_*_paths with data_dir.
+            let replacement = format!("  - {}", data_dir_yaml);
+            let content = content
+                .replace("  - \".\"", &replacement)
+                .replace("  - '.'", &replacement)
+                .replace("  - .", &replacement);
             std::fs::write(&tools_policy_path, content)?;
             fixes.push(format!("Created tools_policy.yaml from {} (default paths = data_dir).", example.display()));
         } else {

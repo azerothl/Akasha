@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useI18n } from "./useI18n";
 
 export { preprocessMessagePaths } from "./preprocessMessagePaths";
 
@@ -22,6 +23,7 @@ type MarkdownContentProps = { children?: string; className?: string; onPathClick
 
 /** Lazy-loaded markdown renderer to reduce initial bundle (react-markdown + remark-gfm in separate chunk). */
 export default function MarkdownContent({ children = "", className, onPathClick }: MarkdownContentProps) {
+  const { t } = useI18n();
   return (
     <div className={className ?? "markdown-rendered"}>
       <ReactMarkdown
@@ -29,7 +31,12 @@ export default function MarkdownContent({ children = "", className, onPathClick 
         components={{
           a: ({ href, children: linkChildren, ...props }) => {
             if (href?.startsWith("path:") && onPathClick) {
-              const path = decodeURIComponent(href.slice(5));
+              let path: string;
+              try {
+                path = decodeURIComponent(href.slice(5));
+              } catch {
+                path = href.slice(5);
+              }
               return (
                 <a
                   href="#"
@@ -46,7 +53,12 @@ export default function MarkdownContent({ children = "", className, onPathClick 
               );
             }
             if (href?.startsWith("pathfolder:") && onPathClick) {
-              const path = decodeURIComponent(href.slice(11));
+              let path: string;
+              try {
+                path = decodeURIComponent(href.slice(11));
+              } catch {
+                path = href.slice(11);
+              }
               const isImage = IMAGE_EXT.test(path);
               return (
                 <span className="path-link-block path-link-folder-block">
@@ -74,7 +86,7 @@ export default function MarkdownContent({ children = "", className, onPathClick 
                           onPathClick(path, true);
                         }}
                       >
-                        Ouvrir le dossier
+                        {t("path_link.open_folder")}
                       </button>
                     </>
                   )}

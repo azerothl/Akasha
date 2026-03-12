@@ -187,5 +187,6 @@
   "sidebar.tasks_panel": "Tasks panel",
   "sidebar.show_tasks": "Show Tasks panel",
   "sidebar.hide_tasks": "Hide Tasks panel",
-  "sidebar.refresh_tasks": "Refresh"
+  "sidebar.refresh_tasks": "Refresh",
+  "path_link.open_folder": "Open folder"
 }

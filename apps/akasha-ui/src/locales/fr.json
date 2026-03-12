@@ -187,5 +187,6 @@
   "sidebar.tasks_panel": "Panneau Tâches",
   "sidebar.show_tasks": "Afficher le panneau Tâches",
   "sidebar.hide_tasks": "Masquer le panneau Tâches",
-  "sidebar.refresh_tasks": "Rafraîchir"
+  "sidebar.refresh_tasks": "Rafraîchir",
+  "path_link.open_folder": "Ouvrir le dossier"
 }
