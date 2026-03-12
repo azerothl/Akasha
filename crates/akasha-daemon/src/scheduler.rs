@@ -233,10 +233,13 @@ fn due_slots_rrule(
     let after_tz = after.with_timezone(&tz);
     let before_tz = before.with_timezone(&tz);
     let start_at_tz = schedule.start_at.with_timezone(&tz);
-    let dtstart = if schedule.timezone == "UTC" {
+    // Use UTC format (Z suffix) for UTC-equivalent timezones, TZID format for all others.
+    let tz_name = chrono_tz.name();
+    let is_utc_equiv = matches!(tz_name, "UTC" | "Etc/UTC" | "Etc/GMT" | "GMT");
+    let dtstart = if is_utc_equiv {
         format!("DTSTART:{}Z", schedule.start_at.format("%Y%m%dT%H%M%S"))
     } else {
-        format!("DTSTART;TZID={}:{}", schedule.timezone, start_at_tz.format("%Y%m%dT%H%M%S"))
+        format!("DTSTART;TZID={}:{}", tz_name, start_at_tz.format("%Y%m%dT%H%M%S"))
     };
     let rrule_set_str = format!("{}\nRRULE:{}", dtstart, schedule.rrule.trim());
     let rrule_set: RRuleSet = rrule_set_str.parse().map_err(|e| anyhow::anyhow!("{:?}", e))?;

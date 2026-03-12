@@ -35,21 +35,24 @@ fn validate_teams_jwt(authorization: Option<&str>, app_id: &str) -> Result<(), &
         _ => return Err("missing_authorization"),
     };
     // Decode JWT payload (middle segment, base64url encoded JSON).
+    // JWT uses base64url without padding; try URL_SAFE_NO_PAD first, then with padding added.
     let parts: Vec<&str> = auth.splitn(3, '.').collect();
     if parts.len() != 3 {
         return Err("invalid_jwt_format");
     }
     let payload_b64 = parts[1];
-    let padded = match payload_b64.len() % 4 {
-        2 => format!("{}==", payload_b64),
-        3 => format!("{}=", payload_b64),
-        _ => payload_b64.to_string(),
-    };
     let decoded = base64::Engine::decode(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD,
         payload_b64,
     )
-    .or_else(|_| base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE, &padded))
+    .or_else(|_| {
+        let padded = match payload_b64.len() % 4 {
+            2 => format!("{}==", payload_b64),
+            3 => format!("{}=", payload_b64),
+            _ => payload_b64.to_string(),
+        };
+        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &padded)
+    })
     .map_err(|_| "jwt_payload_decode_error")?;
     let payload: serde_json::Value =
         serde_json::from_slice(&decoded).map_err(|_| "jwt_payload_parse_error")?;
@@ -97,10 +100,14 @@ fn validate_service_url(service_url: &str) -> Result<(), &'static str> {
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-    if !ALLOWED_SERVICE_URL_DOMAINS
-        .iter()
-        .any(|suffix| host.ends_with(suffix))
-    {
+    // Validate that the host is exactly one of the allowed domains, or is a proper subdomain
+    // (i.e., the domain boundary check: host must be `domain` or end with `.domain`).
+    let is_allowed = ALLOWED_SERVICE_URL_DOMAINS.iter().any(|suffix| {
+        // suffix starts with '.' so ends_with correctly requires a domain boundary before suffix
+        host.ends_with(suffix)
+            || host == suffix.trim_start_matches('.')
+    });
+    if !is_allowed {
         warn!(host = %host, "Teams: serviceUrl domain not in allowlist");
         return Err("service_url_domain_not_allowed");
     }

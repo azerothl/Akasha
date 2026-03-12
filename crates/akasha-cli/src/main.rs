@@ -1338,6 +1338,29 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Replace bare unquoted `  - .` YAML list entries (standalone dot) with `replacement`,
+/// but only when the dot is the complete value (not part of a path like `.gitignore`).
+/// A bare dot value is followed by end-of-line, whitespace, or a YAML comment character `#`.
+fn replace_bare_dot_yaml(content: &str, replacement: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let target = "  - .";
+    let mut remaining = content;
+    while let Some(pos) = remaining.find(target) {
+        result.push_str(&remaining[..pos]);
+        let after = &remaining[pos + target.len()..];
+        let next_char = after.chars().next();
+        // Only replace when dot is the full value: followed by whitespace, '#', or end of string.
+        if next_char.map(|c| c.is_whitespace()).unwrap_or(true) || next_char == Some('#') {
+            result.push_str(replacement);
+        } else {
+            result.push_str(target);
+        }
+        remaining = after;
+    }
+    result.push_str(remaining);
+    result
+}
+
 fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
     let data_dir = akasha_data_dir();
     std::fs::create_dir_all(&data_dir)?;
@@ -1737,12 +1760,15 @@ providers:
         if example.exists() {
             std::fs::copy(&example, &tools_policy_path)?;
             let content = std::fs::read_to_string(&tools_policy_path)?;
-            // Replace both quoted and unquoted "." entries in allowed_*_paths with data_dir.
+            // Replace quoted and unquoted "." entries in allowed_*_paths with data_dir.
+            // Only replace "." (standalone dot), not paths like ".gitignore" or ".config".
             let replacement = format!("  - {}", data_dir_yaml);
             let content = content
                 .replace("  - \".\"", &replacement)
-                .replace("  - '.'", &replacement)
-                .replace("  - .", &replacement);
+                .replace("  - '.'", &replacement);
+            // Replace unquoted "  - ." only when the dot is the full value (followed by
+            // whitespace, a comment character, or end of line).
+            let content = replace_bare_dot_yaml(&content, &replacement);
             std::fs::write(&tools_policy_path, content)?;
             println!("  Fichier écrit : {} (depuis spec/tools_policy.example.yaml, chemins par défaut = data_dir)", tools_policy_path.display());
         } else {
@@ -2140,12 +2166,13 @@ fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
         if example.exists() {
             std::fs::copy(&example, &tools_policy_path)?;
             let content = std::fs::read_to_string(&tools_policy_path)?;
-            // Replace both quoted and unquoted "." entries in allowed_*_paths with data_dir.
+            // Replace quoted and unquoted "." entries in allowed_*_paths with data_dir.
+            // Only replace "." (standalone dot), not paths like ".gitignore" or ".config".
             let replacement = format!("  - {}", data_dir_yaml);
             let content = content
                 .replace("  - \".\"", &replacement)
-                .replace("  - '.'", &replacement)
-                .replace("  - .", &replacement);
+                .replace("  - '.'", &replacement);
+            let content = replace_bare_dot_yaml(&content, &replacement);
             std::fs::write(&tools_policy_path, content)?;
             fixes.push(format!("Created tools_policy.yaml from {} (default paths = data_dir).", example.display()));
         } else {

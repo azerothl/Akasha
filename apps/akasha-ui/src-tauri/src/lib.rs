@@ -434,14 +434,14 @@ fn open_path(path: String) -> Result<(), String> {
         return Err("Only absolute paths are allowed".to_string());
     }
     let path_str = canonical.to_string_lossy();
-    let status = match std::env::consts::OS {
+    let status_result = match std::env::consts::OS {
         "windows" => std::process::Command::new("cmd").args(["/c", "start", "", path_str.as_ref()]).status(),
         "macos" => std::process::Command::new("open").arg(path_str.as_ref()).status(),
         _ => std::process::Command::new("xdg-open").arg(path_str.as_ref()).status(),
     };
-    let status = status.map_err(|e| format!("Failed to launch system opener: {}", e))?;
-    if !status.success() {
-        return Err(format!("System opener exited with status: {}", status));
+    let exit_status = status_result.map_err(|e| format!("Failed to launch system opener: {}", e))?;
+    if !exit_status.success() {
+        return Err(format!("System opener exited with status: {}", exit_status));
     }
     Ok(())
 }
