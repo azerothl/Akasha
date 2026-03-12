@@ -2352,6 +2352,34 @@ pre,
   flex-shrink: 0;
 }
 
+.task-actions-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  flex-shrink: 0;
+}
+
+.task-action-btn {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.875rem;
+  border-radius: 4px;
+  border: 1px solid var(--akasha-border);
+  background: var(--akasha-bg-elevated);
+  cursor: pointer;
+}
+
+.task-action-btn:hover {
+  background: var(--akasha-bg-hover);
+}
+
+.task-action-cancel {
+  color: var(--akasha-fg);
+}
+
+.task-action-retry {
+  color: var(--akasha-accent, #0a7ea4);
+}
+
 .activity-events-block .activity-events-list {
   flex: 1;
   min-height: 0;

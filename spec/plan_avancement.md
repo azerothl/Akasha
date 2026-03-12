@@ -41,7 +41,7 @@ Suivi des étapes du plan de mise en place (phases non développées). Voir [40_
 - [x] **Étape 9 — WhatsApp**  
   Adapter WhatsApp (API Business/partenaire) ou stub / doc « hors scope v1 ». Livrable : adapter ou décision documentée.
 
-- [ ] **Étape 10 — Task Center et Calendrier (détail)**  
+- [x] **Étape 10 — Task Center et Calendrier (détail)**  
   Auditer UI (Tâches, Calendrier) ; affichage/édition des exceptions de récurrence ; graphe/timeline ; actions relance/pause/annuler. Livrable : Task Center et Calendrier alignés spec 36.
 
 ---
@@ -60,5 +60,5 @@ Suivi des étapes du plan de mise en place (phases non développées). Voir [40_
 
 ## Notes
 
-- **Étapes 1–5** : réalisées dans cette vague (scheduler RRULE, polish UI, SSE, onboarding, generate_image).
-- **Étapes 6–10** (priorité basse / optionnel) : à traiter dans une prochaine itération. Étape 9 (WhatsApp) : décision « hors scope v1 » documentée dans les specs si non implémentée.
+- **Étapes 1–5** : réalisées (scheduler RRULE, polish UI, SSE, onboarding, generate_image).
+- **Étapes 6–10** : réalisées — stub modèle intégré (spec 34), outils browser/image/pdf (pdf extraction réelle), session terminal (spec 43), WhatsApp hors scope v1 (spec 44), Task Center / Calendrier (spec 45, actions Annuler/Relancer).

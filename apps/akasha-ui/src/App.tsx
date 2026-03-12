@@ -2601,6 +2601,44 @@ function App() {
                 </div>
                 <div className="activity-events-block">
                   <h3>Événements</h3>
+                  {tasksList.length > 0 && tasksList[tasksSelected] && (() => {
+                    const sel = tasksList[tasksSelected];
+                    const canCancel = sel.status === "pending" || sel.status === "running";
+                    const canRetry = sel.status === "failed";
+                    return (canCancel || canRetry) ? (
+                      <div className="task-actions-row" role="group" aria-label="Actions sur la tâche">
+                        {canCancel && (
+                          <button
+                            type="button"
+                            className="task-action-btn task-action-cancel"
+                            onClick={async () => {
+                              if (!sel?.id) return;
+                              try {
+                                await invoke<{ cancelled?: boolean }>("cancel_task", { task_id: sel.id, port: DAEMON_PORT });
+                                fetchTasksList();
+                              } catch (e) {
+                                console.error(e);
+                              }
+                            }}
+                          >
+                            Annuler
+                          </button>
+                        )}
+                        {canRetry && (
+                          <button
+                            type="button"
+                            className="task-action-btn task-action-retry"
+                            onClick={() => {
+                              setTab("chat");
+                              setMessage(sel?.label ?? sel?.initial_message ?? "Relance la tâche.");
+                            }}
+                          >
+                            Relancer
+                          </button>
+                        )}
+                      </div>
+                    ) : null;
+                  })()}
                   {tasksEvents.length === 0 ? (
                     <p className="empty-state">
                       {tasksList.length > 0 ? t("tasks.no_events") : t("tasks.select_task")}
