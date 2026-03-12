@@ -3640,6 +3640,23 @@ pub async fn handle_api(
         return json_response("404 Not Found", r#"{"error":"slack_not_configured"}"#);
     }
 
+    // Phase 4: Microsoft Teams Bot Framework webhook
+    if method == "POST" && (path == "/channels/teams" || path == "/channels/teams/message") {
+        if let (Some(ref app_id), Some(ref app_password)) =
+            (&channel_config.teams_app_id, &channel_config.teams_app_password)
+        {
+            return crate::channels::teams::handle_teams_message(
+                body,
+                app_id,
+                app_password,
+                channel_config.port,
+                main_agent,
+                store_path,
+            );
+        }
+        return json_response("404 Not Found", r#"{"error":"teams_not_configured"}"#);
+    }
+
     if method == "POST" && path == "/api/message" {
         let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
         let mut message = body_json
