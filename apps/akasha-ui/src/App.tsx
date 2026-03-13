@@ -232,7 +232,9 @@ function App() {
   const [scheduleDetailError, setScheduleDetailError] = useState<string | null>(null);
   const [scheduleEditPrompt, setScheduleEditPrompt] = useState("");
   const [schedulePromptSaving, setSchedulePromptSaving] = useState(false);
-  const [_calendarRunsCollapsed, _setCalendarRunsCollapsed] = useState(false);
+    const [calendarSchedulesSelectedForDelete, setCalendarSchedulesSelectedForDelete] = useState<Set<string>>(new Set());
+    const [scheduleDeleting, setScheduleDeleting] = useState(false);
+    const [_calendarRunsCollapsed, _setCalendarRunsCollapsed] = useState(false);
   type CalendarGridView = "day" | "week" | "month";
   const [calendarGridView, setCalendarGridView] = useState<CalendarGridView>("week");
   type CalendarGridEvent = { at: string; task_id: string; type: string; status: string; label?: string; schedule_id?: string | null };
@@ -3026,26 +3028,106 @@ function App() {
                 {schedules.length === 0 ? (
                   <p className="empty-state">{t("calendar.no_schedules")}</p>
                 ) : (
-                  <ul className="calendar-schedule-list" role="list">
-                    {schedules.map((s) => (
-                      <li
-                        key={s.id}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => setCalendarSelectedScheduleId(s.id)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            setCalendarSelectedScheduleId(s.id);
-                          }
-                        }}
-                      >
-                        <strong>{s.name || s.id.slice(0, 8)}</strong>{" "}
-                        {s.enabled ? "(activée)" : "(en pause)"}
-                        {s.interval_seconds != null && ` — toutes les ${s.interval_seconds}s`}
-                      </li>
-                    ))}
-                  </ul>
+                  <>
+                    {calendarSchedulesSelectedForDelete.size > 0 && (
+                      <div className="calendar-schedules-toolbar">
+                        <button
+                          type="button"
+                          className="calendar-schedule-delete-selection"
+                          disabled={scheduleDeleting}
+                          onClick={async () => {
+                            const ids = Array.from(calendarSchedulesSelectedForDelete);
+                            if (ids.length === 0) return;
+                            setScheduleDeleting(true);
+                            const toDelete = new Set(ids);
+                            try {
+                              for (const id of ids) {
+                                try {
+                                  await invoke("delete_schedule", { scheduleId: id, port: DAEMON_PORT });
+                                } catch {
+                                  /* continue */
+                                }
+                              }
+                              setSchedules((prev) => prev.filter((s) => !toDelete.has(s.id)));
+                              setCalendarSchedulesSelectedForDelete(new Set());
+                              if (calendarSelectedScheduleId && toDelete.has(calendarSelectedScheduleId)) {
+                                setCalendarSelectedScheduleId(null);
+                                setScheduleDetail(null);
+                              }
+                              const cached = getCached<{ schedules: typeof schedules; taskRuns: unknown }>("calendar");
+                              if (cached) setCached("calendar", { ...cached, schedules: schedules.filter((s) => !toDelete.has(s.id)) });
+                            } finally {
+                              setScheduleDeleting(false);
+                            }
+                          }}
+                        >
+                          {scheduleDeleting ? "…" : t("calendar.delete_selection")} ({calendarSchedulesSelectedForDelete.size})
+                        </button>
+                      </div>
+                    )}
+                    <ul className="calendar-schedule-list" role="list">
+                      {schedules.map((s) => (
+                        <li
+                          key={s.id}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => setCalendarSelectedScheduleId(s.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              setCalendarSelectedScheduleId(s.id);
+                            }
+                          }}
+                          className="calendar-schedule-list-item"
+                        >
+                          <label className="calendar-schedule-checkbox" onClick={(e) => e.stopPropagation()} title={t("calendar.delete_selection")}>
+                            <input
+                              type="checkbox"
+                              checked={calendarSchedulesSelectedForDelete.has(s.id)}
+                              onChange={(e) => {
+                                setCalendarSchedulesSelectedForDelete((prev) => {
+                                  const next = new Set(prev);
+                                  if (e.target.checked) next.add(s.id);
+                                  else next.delete(s.id);
+                                  return next;
+                                });
+                              }}
+                              aria-label={t("calendar.delete_schedule")}
+                            />
+                          </label>
+                          <span className="calendar-schedule-list-label">
+                            <strong>{s.name || s.id.slice(0, 8)}</strong>{" "}
+                            {s.enabled ? "(activée)" : "(en pause)"}
+                            {s.interval_seconds != null && ` — toutes les ${s.interval_seconds}s`}
+                          </span>
+                          <button
+                            type="button"
+                            className="calendar-schedule-delete-one"
+                            title={t("calendar.delete_schedule")}
+                            aria-label={t("calendar.delete_schedule")}
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              try {
+                                await invoke("delete_schedule", { scheduleId: s.id, port: DAEMON_PORT });
+                                setSchedules((prev) => prev.filter((x) => x.id !== s.id));
+                                setCalendarSchedulesSelectedForDelete((prev) => { const n = new Set(prev); n.delete(s.id); return n; });
+                                if (calendarSelectedScheduleId === s.id) {
+                                  setCalendarSelectedScheduleId(null);
+                                  setScheduleDetail(null);
+                                }
+                                const cached = getCached<{ schedules: typeof schedules; taskRuns: unknown }>("calendar");
+                                if (cached) setCached("calendar", { ...cached, schedules: schedules.filter((x) => x.id !== s.id) });
+                              } catch {
+                                /* toast or leave list as-is */
+                              }
+                            }}
+                          >
+                            {t("settings.delete")}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
                 )}
               </div>
             )}
@@ -3232,6 +3314,31 @@ function App() {
                             {scheduleDetail.rrule && (
                               <p className="schedule-rrule"><strong>Règle:</strong> <code>{scheduleDetail.rrule}</code></p>
                             )}
+                            <div className="schedule-detail-actions">
+                              <button
+                                type="button"
+                                className="calendar-schedule-delete-one schedule-detail-delete"
+                                disabled={scheduleDeleting}
+                                onClick={async () => {
+                                  const id = calendarSelectedScheduleId;
+                                  if (!id) return;
+                                  setScheduleDeleting(true);
+                                  try {
+                                    await invoke("delete_schedule", { scheduleId: id, port: DAEMON_PORT });
+                                    setSchedules((prev) => prev.filter((s) => s.id !== id));
+                                    setCalendarSchedulesSelectedForDelete((prev) => { const n = new Set(prev); n.delete(id); return n; });
+                                    setCalendarSelectedScheduleId(null);
+                                    setScheduleDetail(null);
+                                    const cached = getCached<{ schedules: { id: string }[]; taskRuns: unknown }>("calendar");
+                                    if (cached) setCached("calendar", { ...cached, schedules: cached.schedules.filter((s) => s.id !== id) });
+                                  } finally {
+                                    setScheduleDeleting(false);
+                                  }
+                                }}
+                              >
+                                {scheduleDeleting ? "…" : t("calendar.delete_schedule")}
+                              </button>
+                            </div>
                           </>
                         ) : (
                           <p className="loading-inline">{t("common.loading")}</p>

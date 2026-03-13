@@ -2941,6 +2941,84 @@ pre,
 
 .calendar-recent-panel .calendar-runs-header { margin-top: 0; }
 .calendar-schedules-panel h3 { margin-top: 0; }
+.calendar-schedules-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.calendar-schedule-delete-selection {
+  padding: 0.35rem 0.6rem;
+  font-size: 0.875rem;
+  background: color-mix(in srgb, var(--akasha-error) 15%, var(--akasha-bg-surface));
+  color: var(--akasha-error);
+  border: 1px solid var(--akasha-error);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.calendar-schedule-delete-selection:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--akasha-error) 25%, var(--akasha-bg-surface));
+}
+.calendar-schedule-delete-selection:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+.calendar-schedule-list-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.calendar-schedule-list-item .calendar-schedule-list-label {
+  flex: 1;
+  min-width: 0;
+}
+.calendar-schedule-checkbox {
+  flex-shrink: 0;
+  margin: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+.calendar-schedule-checkbox input {
+  margin: 0;
+  cursor: pointer;
+}
+.calendar-schedule-delete-one {
+  flex-shrink: 0;
+  padding: 0.2rem 0.45rem;
+  font-size: 0.75rem;
+  background: transparent;
+  color: var(--akasha-text-muted);
+  border: 1px solid var(--akasha-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.calendar-schedule-delete-one:hover {
+  color: var(--akasha-error);
+  border-color: var(--akasha-error);
+  background: color-mix(in srgb, var(--akasha-error) 8%, transparent);
+}
+.schedule-detail-actions {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--akasha-border);
+}
+.schedule-detail-delete {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.875rem;
+  background: color-mix(in srgb, var(--akasha-error) 12%, var(--akasha-bg-surface));
+  color: var(--akasha-error);
+  border: 1px solid var(--akasha-error);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.schedule-detail-delete:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--akasha-error) 22%, var(--akasha-bg-surface));
+}
+.schedule-detail-delete:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
 .calendar-run-item-title { display: block; margin-bottom: 0.15rem; }
 
 .calendar-runs-header {
