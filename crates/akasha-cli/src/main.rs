@@ -1556,6 +1556,10 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
     }
 
     // --- 3. llm_router.yaml --- (primary from provider choice; with --defaults: Ollama if available else akasha_embedded)
+    // Build RoutingConfig and serialize with serde_yaml so the daemon can parse it correctly.
+    use akasha_llm::config::{GlobalConfig, ProviderConfig, RouteEntry, RoutingConfig, TaskTypeConfig};
+    use std::collections::HashMap;
+
     let (primary_provider, primary_model) = if use_defaults {
         if ollama_detected(&ollama_url) {
             ("ollama", DEFAULT_OLLAMA_MODEL)
@@ -1574,88 +1578,88 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
         }
     };
 
-    let yaml = format!(
-        r#"# Généré par akasha init — {date}
-version: "1.0"
-global:
-  enable_metrics: true
-  enable_fallback: true
-  default_timeout_secs: 300
-  default_max_retries: 2
-providers:
-  ollama:
-    base_url: "{ollama_url}"
-"#,
-        date = chrono::Utc::now().format("%Y-%m-%d"),
-        ollama_url = ollama_url
+    let mut providers: HashMap<String, ProviderConfig> = HashMap::new();
+    providers.insert(
+        "ollama".to_string(),
+        ProviderConfig {
+            api_key_ref: None,
+            base_url: Some(ollama_url.clone()),
+            organization: None,
+            version: None,
+            always_available: None,
+            site_url: None,
+            app_title: None,
+        },
     );
-    let yaml = if openai_key.is_some() {
-        format!(
-            r#"{}
-  openai:
-    api_key_ref: "vault://openai_api_key"
-"#,
-            yaml
-        )
-    } else {
-        format!("{}\n", yaml)
+    if openai_key.is_some() {
+        providers.insert(
+            "openai".to_string(),
+            ProviderConfig {
+                api_key_ref: Some("vault://openai_api_key".to_string()),
+                base_url: None,
+                organization: None,
+                version: None,
+                always_available: None,
+                site_url: None,
+                app_title: None,
+            },
+        );
+    }
+    if openrouter_key.is_some() {
+        providers.insert(
+            "openrouter".to_string(),
+            ProviderConfig {
+                api_key_ref: Some("vault://openrouter_api_key".to_string()),
+                base_url: None,
+                organization: None,
+                version: None,
+                always_available: None,
+                site_url: None,
+                app_title: None,
+            },
+        );
+    }
+
+    let primary_entry = RouteEntry {
+        provider: primary_provider.to_string(),
+        model: primary_model.to_string(),
+        config: None,
     };
-    let yaml = if openrouter_key.is_some() {
-        format!(
-            r#"{}
-  openrouter:
-    api_key_ref: "vault://openrouter_api_key"
-"#,
-            yaml
-        )
-    } else {
-        yaml
+    let fallback_entry = RouteEntry {
+        provider: "akasha_core".to_string(),
+        model: "core".to_string(),
+        config: None,
     };
-    // When primary is internal (akasha_embedded or akasha_core), no fallback; otherwise fallback to core
-    let fallback_block = if primary_provider == "akasha_embedded" || primary_provider == "akasha_core" {
-        "[]".to_string()
+    let fallback_list = if primary_provider == "akasha_embedded" || primary_provider == "akasha_core" {
+        vec![]
     } else {
-        "\n      - provider: akasha_core\n        model: core".to_string()
+        vec![fallback_entry]
     };
-    let yaml = format!(
-        "{}task_types:\n\
-  conversation:\n\
-    primary:\n\
-      provider: {}\n\
-      model: {}\n\
-    fallback:{}\n\
-  code_generation:\n\
-    primary:\n\
-      provider: {}\n\
-      model: {}\n\
-    fallback:{}\n\
-  creative_writing:\n\
-    primary:\n\
-      provider: {}\n\
-      model: {}\n\
-    fallback:{}\n\
-  system_diagnostic:\n\
-    primary:\n\
-      provider: {}\n\
-      model: {}\n\
-    fallback:{}\n",
-        yaml,
-        primary_provider,
-        primary_model,
-        fallback_block,
-        primary_provider,
-        primary_model,
-        fallback_block,
-        primary_provider,
-        primary_model,
-        fallback_block,
-        primary_provider,
-        primary_model,
-        fallback_block,
-    );
+
+    let task_type = TaskTypeConfig {
+        primary: Some(primary_entry.clone()),
+        fallback: fallback_list,
+        constraints: None,
+    };
+    let mut task_types: HashMap<String, TaskTypeConfig> = HashMap::new();
+    for name in ["conversation", "code_generation", "creative_writing", "system_diagnostic", "system"] {
+        task_types.insert(name.to_string(), task_type.clone());
+    }
+
+    let router_config = RoutingConfig {
+        global: GlobalConfig {
+            enable_metrics: Some(true),
+            enable_fallback: Some(true),
+            default_timeout_secs: Some(300),
+            default_max_retries: Some(2),
+        },
+        task_types,
+        providers,
+        model_options: HashMap::new(),
+    };
 
     let router_path = data_dir.join("llm_router.yaml");
-    std::fs::write(&router_path, &yaml)?;
+    router_config.save_to_path(&router_path)?;
     println!("\n  Fichier écrit : {}", router_path.display());
 
     // If primary is Ollama and Ollama is available: ensure default model is pulled

@@ -409,3 +409,157 @@ impl LongTermStore {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn embedding_f32_to_bytes(v: &[f32]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(v.len() * 4);
+        for &f in v {
+            out.extend_from_slice(&f.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn cosine_similarity_identical() {
+        let v = [1.0f32, 0.0, 0.0];
+        assert!((cosine_similarity(&v, &v) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_orthogonal() {
+        let a = [1.0f32, 0.0, 0.0];
+        let b = [0.0f32, 1.0, 0.0];
+        assert!((cosine_similarity(&a, &b) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_length_mismatch() {
+        assert_eq!(cosine_similarity(&[1.0], &[1.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn cosine_similarity_empty() {
+        assert_eq!(cosine_similarity(&[], &[]), 0.0);
+    }
+
+    #[test]
+    fn decode_embedding_bytes_roundtrip() {
+        let v = [1.0f32, -0.5, 0.0, 3.14];
+        let bytes = embedding_f32_to_bytes(&v);
+        let decoded = decode_embedding_bytes(&bytes);
+        assert_eq!(decoded.len(), v.len());
+        for (a, b) in v.iter().zip(decoded.iter()) {
+            assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn open_creates_schema() {
+        let f = NamedTempFile::new().unwrap();
+        let store = LongTermStore::open(f.path()).unwrap();
+        let (count, _) = store.stats().unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn insert_and_list() {
+        let f = NamedTempFile::new().unwrap();
+        let store = LongTermStore::open(f.path()).unwrap();
+        let emb = embedding_f32_to_bytes(&[1.0, 0.0, 0.0]);
+        let id = store.insert("hello world", &emb, "test").unwrap();
+        let list = store.list_recent(10).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].0, id.to_string());
+        assert_eq!(list[0].1, "hello world");
+    }
+
+    #[test]
+    fn insert_with_attribution_and_search_filter() {
+        let f = NamedTempFile::new().unwrap();
+        let store = LongTermStore::open(f.path()).unwrap();
+        let emb = embedding_f32_to_bytes(&[1.0, 0.0, 0.0]);
+        store
+            .insert_with_attribution("s1 entry", &emb, "test", None, None, Some("s1"), None, None)
+            .unwrap();
+        store
+            .insert_with_attribution("s2 entry", &emb, "test", None, None, Some("s2"), None, None)
+            .unwrap();
+        let filter = MemorySearchFilter {
+            session_id: Some("s1".to_string()),
+            ..Default::default()
+        };
+        let results = store.search_by_embedding(&[1.0, 0.0, 0.0], 10, Some(&filter)).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "s1 entry");
+    }
+
+    #[test]
+    fn search_by_embedding_order_and_top_k() {
+        let f = NamedTempFile::new().unwrap();
+        let store = LongTermStore::open(f.path()).unwrap();
+        // [1,0,0] is closest to query [0.99, 0.01, 0], then [0.5,0.5,0], then [0,1,0]
+        store
+            .insert("projet X", &embedding_f32_to_bytes(&[1.0, 0.0, 0.0]), "test")
+            .unwrap();
+        store
+            .insert("météo Paris", &embedding_f32_to_bytes(&[0.0, 1.0, 0.0]), "test")
+            .unwrap();
+        store
+            .insert("projet X suite", &embedding_f32_to_bytes(&[0.99, 0.01, 0.0]), "test")
+            .unwrap();
+        let query = [0.99f32, 0.01, 0.0];
+        let results = store.search_by_embedding(&query, 10, None).unwrap();
+        assert!(results.len() >= 2);
+        assert_eq!(results[0].content, "projet X suite");
+        assert_eq!(results[1].content, "projet X");
+
+        let top2 = store.search_by_embedding(&query, 2, None).unwrap();
+        assert_eq!(top2.len(), 2);
+    }
+
+    #[test]
+    fn search_by_keywords() {
+        let f = NamedTempFile::new().unwrap();
+        let store = LongTermStore::open(f.path()).unwrap();
+        let emb = embedding_f32_to_bytes(&[0.0; 4]);
+        store.insert("apple banana", &emb, "test").unwrap();
+        store.insert("banana cherry", &emb, "test").unwrap();
+        let results = store.search_by_keywords("banana", 10, None).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn stats() {
+        let f = NamedTempFile::new().unwrap();
+        let store = LongTermStore::open(f.path()).unwrap();
+        let (c, sz) = store.stats().unwrap();
+        assert_eq!(c, 0);
+        assert_eq!(sz, 0);
+        store.insert("x", &embedding_f32_to_bytes(&[0.0]), "test").unwrap();
+        let (c2, _) = store.stats().unwrap();
+        assert_eq!(c2, 1);
+    }
+
+    #[test]
+    fn delete_by_id() {
+        let f = NamedTempFile::new().unwrap();
+        let store = LongTermStore::open(f.path()).unwrap();
+        let id = store.insert("to delete", &embedding_f32_to_bytes(&[0.0]), "test").unwrap();
+        assert!(store.delete_by_id(id).unwrap());
+        assert!(!store.delete_by_id(id).unwrap());
+        assert!(store.list_recent(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn content_exists() {
+        let f = NamedTempFile::new().unwrap();
+        let store = LongTermStore::open(f.path()).unwrap();
+        assert!(!store.content_exists("unique content").unwrap());
+        store.insert("unique content", &embedding_f32_to_bytes(&[0.0]), "test").unwrap();
+        assert!(store.content_exists("unique content").unwrap());
+    }
+}

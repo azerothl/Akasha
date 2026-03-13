@@ -31,6 +31,8 @@ Exemples : `cargo test -p akasha-daemon`, `cargo test -p akasha-llm`, `cargo tes
 | Domaine | Fichier | Ce qui est testé | Commande |
 |--------|---------|-------------------|----------|
 | **API (HTTP, parsing, heuristiques)** | `api.rs` | `parse_content_length` (début de requête HTTP), `parse_device_invoke_params` (arguments device_invoke), `message_suggests_tool_only_action` (caméra, météo, sauvegarde, image, code), `agent_role_system_prompt` (rôle par type d’agent) | `cargo test -p akasha-daemon --lib api::tests` |
+| **Device bridge** | `device_bridge.rs` | File d'attente : `submit_request` → `get_pending` → `fulfill` (receiver reçoit le `DeviceResult`) ; `get_pending` vide → `None` ; `fulfill` avec mauvais `request_id` → `false` ; `cancel` → receiver en erreur | `cargo test -p akasha-daemon --lib device_bridge::tests` |
+| **Génération d'image** | `image_generation.rs` | **`resolve_api_key`** : fallback env, vault mock `vault://key` ; **`generate_image_impl`** : sans config → erreur « non configurée » ; provider inconnu → « non supporté » ; OpenAI sans clé → « Clé API non trouvée » | `cargo test -p akasha-daemon --lib image_generation::tests` |
 | **Orchestrateur** | `agents/orchestrator.rs` | Override de décomposition : un step `code` pour une action outil (ex. « Prends une photo ») → réécrit en `conversation` ; step `code` pour une vraie demande de code ou step `search` → inchangé | `cargo test -p akasha-daemon --lib agents::orchestrator::tests` |
 | **Planificateur** | `scheduler.rs` | `sync_terminal_task_run_statuses` : marquage des runs terminés pour les tâches récurrentes | `cargo test -p akasha-daemon --lib scheduler::tests` |
 | **RAG utilisateur** | `user_rag.rs` | `UserRagStore` : ajout, liste, recherche par requête, suppression de documents ; requête vide retourne des chunks | `cargo test -p akasha-daemon --lib user_rag::tests` |
@@ -97,7 +99,22 @@ cargo test -p akasha-llm -F embedded
 
 ---
 
-### 2.5 akasha-tools
+### 2.5 akasha-store
+
+**Emplacement** : `crates/akasha-store/src/long_term_memory.rs` (module `tests`).
+
+| Domaine | Ce qui est testé |
+|--------|-------------------|
+| **Similarité et encodage** | `cosine_similarity` (identiques → 1, orthogonaux → 0, longueurs différentes / vides → 0) ; `decode_embedding_bytes` et roundtrip bytes ↔ `Vec<f32>` |
+| **Persistance** | `open` (création schéma sur SQLite temporaire), `insert` / `insert_with_attribution`, `list_recent` |
+| **Recherche** | `search_by_embedding` : ordre par similarité, top_k, filtre par `session_id` ; `search_by_keywords` |
+| **Utilitaires** | `stats`, `delete_by_id`, `content_exists` |
+
+**Commande** : `cargo test -p akasha-store`.
+
+---
+
+### 2.6 akasha-tools
 
 **Emplacement** : `crates/akasha-tools/src/policy.rs`.
 
@@ -110,7 +127,7 @@ cargo test -p akasha-llm -F embedded
 
 ---
 
-### 2.6 akasha-embeddings
+### 2.7 akasha-embeddings
 
 **Emplacement** : `crates/akasha-embeddings/src/lib.rs`.
 
@@ -119,6 +136,24 @@ cargo test -p akasha-llm -F embedded
 | `roundtrip_embedding_bytes` | Sérialisation/désérialisation des vecteurs d’embedding (bytes ↔ `Vec<f32>`) |
 
 **Commande** : `cargo test -p akasha-embeddings`.
+
+---
+
+### 2.8 akasha-ui (frontend)
+
+**Emplacement** : `apps/akasha-ui/src/*.test.ts` (Vitest).
+
+| Domaine | Fichier | Ce qui est testé |
+|--------|---------|-------------------|
+| **Prétraitement images data URL** | `preprocessDataUrlImages.test.ts` | Conversion markdown `![label](<data:image/...>)` → `<div class="markdown-data-image-wrap">` + `<img src="...">` avec `alt` échappé ; chaîne vide, pas de correspondance, plusieurs images |
+
+**Lancer les tests** (depuis la racine du dépôt ou depuis `apps/akasha-ui`) :
+
+```bash
+cd apps/akasha-ui && npm run test
+```
+
+En mode watch : `npm run test:watch`.
 
 ---
 
@@ -157,7 +192,9 @@ cargo bench -p akasha-daemon --no-default-features --features "embedded"
 | Objectif | Commande |
 |----------|----------|
 | Tous les tests (workspace) | `cargo test` |
-| Tests du daemon uniquement | `cargo test -p akasha-daemon --lib` |
+| Tests du daemon uniquement | `cargo test -p akasha-daemon --no-default-features --features "embedded" --lib` (voir remarque Windows/ONNX ci‑dessus) |
+| Tests store (mémoire long terme) | `cargo test -p akasha-store` |
+| Tests UI (Vitest) | `cd apps/akasha-ui && npm run test` |
 | Tests du routeur LLM (sans embedded) | `cargo test -p akasha-llm --no-default-features` |
 | Tests du modèle embedded | `cargo test -p akasha-embedded-llm --lib` |
 | Tests E2E santé daemon | `cargo test -p akasha-daemon --test e2e_health -- --ignored` (avec `RUN_E2E=1`) |

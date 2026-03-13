@@ -8,7 +8,7 @@ const DEFAULT_SIZE: &str = "1024x1024";
 const IMAGE_TIMEOUT_SECS: u64 = 120;
 
 /// Resolve API key: vault (vault://key or key name) then env var.
-fn resolve_api_key(
+pub(crate) fn resolve_api_key(
     vault: Option<&dyn akasha_vault::Vault>,
     api_key_ref: Option<&String>,
     default_env: &str,
@@ -351,4 +351,119 @@ async fn call_openrouter_image(
         "[generate_image] Image générée (OpenRouter).".to_string(),
         data_url,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_api_key_fallback_default_env() {
+        let key = "AKASHA_TEST_IMAGE_RESOLVE_KEY_12345";
+        std::env::set_var(key, "env_secret");
+        let r = resolve_api_key(None, None, key);
+        std::env::remove_var(key);
+        assert_eq!(r.as_deref(), Some("env_secret"));
+    }
+
+    #[test]
+    fn resolve_api_key_none_when_no_vault_no_ref_no_env() {
+        let r = resolve_api_key(None, None, "AKASHA_NONEXISTENT_ENV_98765");
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn resolve_api_key_vault_prefix() {
+        struct MockVault;
+        impl akasha_vault::Vault for MockVault {
+            fn get(&self, k: &str) -> Result<String, akasha_vault::VaultError> {
+                if k == "openai_key" {
+                    Ok("vault_secret".to_string())
+                } else {
+                    Err(akasha_vault::VaultError::NotFound(k.to_string()))
+                }
+            }
+            fn set(&self, _: &str, _: &str) -> Result<(), akasha_vault::VaultError> {
+                Ok(())
+            }
+            fn delete(&self, _: &str) -> Result<(), akasha_vault::VaultError> {
+                Ok(())
+            }
+            fn list_keys(&self) -> Result<Vec<String>, akasha_vault::VaultError> {
+                Ok(vec![])
+            }
+        }
+        let vault = MockVault;
+        let ref_str = String::from("vault://openai_key");
+        let r = resolve_api_key(Some(&vault), Some(&ref_str), "OPENAI_API_KEY");
+        assert_eq!(r.as_deref(), Some("vault_secret"));
+    }
+
+    #[tokio::test]
+    async fn generate_image_impl_no_config_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // No llm_router.yaml -> default config has no image_generation task_type
+        let res = generate_image_impl(dir.path(), "a cat", None).await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("non configurée") || err.contains("image_generation"),
+            "expected config error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_image_impl_unknown_provider_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+task_types:
+  image_generation:
+    primary:
+      provider: unknown_provider
+      model: fake-model
+providers: {}
+"#;
+        std::fs::write(dir.path().join("llm_router.yaml"), yaml).unwrap();
+        let res = generate_image_impl(dir.path(), "a cat", None).await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("non supporté") && err.contains("unknown_provider"),
+            "expected unsupported provider, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_image_impl_openai_missing_key_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+task_types:
+  image_generation:
+    primary:
+      provider: openai
+      model: dall-e-3
+providers:
+  openai:
+    api_key_ref: vault://openai_key
+"#;
+        std::fs::write(dir.path().join("llm_router.yaml"), yaml).unwrap();
+        // Ensure no OPENAI_API_KEY so fallback doesn't mask the error
+        let prev = std::env::var_os("OPENAI_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+        let res = generate_image_impl(dir.path(), "a cat", None).await;
+        if let Some(v) = prev {
+            std::env::set_var("OPENAI_API_KEY", v);
+        } else {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("Clé API") || err.contains("non trouvée"),
+            "expected missing key error, got: {}",
+            err
+        );
+    }
 }

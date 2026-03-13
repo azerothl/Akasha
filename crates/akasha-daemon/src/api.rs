@@ -693,13 +693,18 @@ static CAPTURE_ACK_PATTERNS: &[&str] = &[
 
 /// If the text ends with an unclosed fenced code block (odd number of ```), appends "\n```\n" so that
 /// content appended after (e.g. image markdown) is not rendered inside a code block.
-fn ensure_no_open_code_block(text: &str) -> String {
+pub(crate) fn ensure_no_open_code_block(text: &str) -> String {
     let count = text.matches("```").count();
     if count % 2 == 1 {
         format!("{}\n```\n", text.trim_end())
     } else {
         text.to_string()
     }
+}
+
+/// Build markdown image snippet: `\n\n![label](<url>)`. Angle brackets around URL allow parens in data URLs.
+pub(crate) fn build_image_markdown(label: &str, url: &str) -> String {
+    format!("\n\n![{}](<{}>)", label, url)
 }
 
 /// Returns true if content should be skipped when capturing to long-term memory (noise, loop risk, or too short/long).
@@ -3182,7 +3187,7 @@ pub(crate) async fn run_message_via_llm(
                     .map(|b| {
                         let url = if b.starts_with("data:") { b.clone() } else { format!("data:image/jpeg;base64,{}", b) };
                         let label = if b.starts_with("data:") { "Image générée" } else { "Photo capturée" };
-                        format!("\n\n![{}](<{}>)", label, url)
+                        build_image_markdown(&label, &url)
                     })
                     .unwrap_or_default();
                 // #region agent log
@@ -3220,7 +3225,7 @@ pub(crate) async fn run_message_via_llm(
             .map(|b| {
                 let url = if b.starts_with("data:") { b.clone() } else { format!("data:image/jpeg;base64,{}", b) };
                 let label = if b.starts_with("data:") { "Image générée" } else { "Photo capturée" };
-                format!("\n\n![{}](<{}>)", label, url)
+                build_image_markdown(&label, &url)
             })
             .unwrap_or_default();
         // #region agent log
@@ -5289,9 +5294,9 @@ async fn get_schedule_run_reports(store_path: &Path, progress: &ProgressCache) -
 #[cfg(test)]
 mod tests {
     use super::{
-    agent_role_system_prompt, message_suggests_tool_only_action, parse_content_length,
-    parse_device_invoke_params,
-};
+        agent_role_system_prompt, build_image_markdown, ensure_no_open_code_block,
+        message_suggests_tool_only_action, parse_content_length, parse_device_invoke_params,
+    };
 
     #[test]
     fn parse_content_length_returns_header_end_and_content_length() {
@@ -5402,5 +5407,36 @@ mod tests {
         assert!(agent_role_system_prompt("").is_none());
         // schedule is handled specially (recurring task), no role prompt
         assert!(agent_role_system_prompt("schedule").is_none());
+    }
+
+    // --- ensure_no_open_code_block ---
+
+    #[test]
+    fn ensure_no_open_code_block_zero_backticks() {
+        let s = "hello";
+        assert_eq!(ensure_no_open_code_block(s), "hello");
+    }
+
+    #[test]
+    fn ensure_no_open_code_block_one_backtick_open() {
+        let s = "code:\n```";
+        assert_eq!(ensure_no_open_code_block(s), "code:\n```\n```\n");
+    }
+
+    #[test]
+    fn ensure_no_open_code_block_two_backticks_closed() {
+        let s = "```\nfn x() {}\n```";
+        assert_eq!(ensure_no_open_code_block(s), "```\nfn x() {}\n```");
+    }
+
+    // --- build_image_markdown ---
+
+    #[test]
+    fn build_image_markdown_data_url() {
+        let url = "data:image/jpeg;base64,ABC";
+        let out = build_image_markdown("Photo", url);
+        assert!(out.contains("](<data:image/"), "output should contain ](<data:image/: {:?}", out);
+        assert!(out.ends_with(">)"), "output should end with >): {:?}", out);
+        assert_eq!(out, "\n\n![Photo](<data:image/jpeg;base64,ABC>)");
     }
 }
