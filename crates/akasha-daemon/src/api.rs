@@ -1,5 +1,27 @@
 //! Simple HTTP API: POST /api/message, GET /api/tasks/:id, GET / (health)
 
+// #region agent log
+#[allow(dead_code)]
+fn debug_log(session_id: &str, hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    let line = serde_json::json!({
+        "sessionId": session_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": chrono::Utc::now().timestamp_millis()
+    });
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("debug-68cde2.log")
+        .and_then(|mut f| {
+            use std::io::Write;
+            writeln!(f, "{}", line)
+        });
+}
+// #endregion
+
 use akasha_core::{EventEnvelope, EventType};
 use akasha_vault::Vault;
 use akasha_llm::CompletionRequest;
@@ -622,6 +644,7 @@ fn message_suggests_camera_or_mic(message: &str) -> bool {
         "webcam", "caméra", "camera", "prend une photo", "prends une photo", "prendre une photo",
         "take a photo", "take a picture", "prends moi en photo", "photo avec la webcam",
         "accède à la webcam", "accede a la webcam", "utilise la caméra", "utilise la camera",
+        "affiche-la dans le chat", "afficher dans le chat", "display in the chat", "show in the chat",
         "micro", "microphone", "enregistre avec le micro", "enregistrer avec le micro",
         "obtenir une image", "get an image", "image avec la webcam", "image avec la caméra",
         "continuer pour obtenir une image", "proceed to get an image",
@@ -640,6 +663,28 @@ fn message_suggests_image_generation(message: &str) -> bool {
     keywords.iter().any(|k| m.contains(k))
 }
 
+/// True if the user message explicitly asks to write or generate code/script (not just "perform an action").
+fn message_suggests_code_generation(message: &str) -> bool {
+    let m = message.to_lowercase();
+    let keywords = [
+        "écris un script", "ecris un script", "écrire un script", "ecrire un script",
+        "write a script", "write the script", "génère du code", "genere du code",
+        "generate code", "génère le code", "code python", "python script",
+        "un programme qui", "a program that", "fonction qui", "function that",
+        "snippet", "extrait de code", "piece of code", "exemple de code",
+    ];
+    keywords.iter().any(|k| m.contains(k))
+}
+
+/// True if the user message suggests a tool-only action (camera, web search, save file, image gen) without asking for code generation. Used by the orchestrator to override mistaken "code" decomposition.
+pub fn message_suggests_tool_only_action(message: &str) -> bool {
+    (message_suggests_camera_or_mic(message)
+        || message_suggests_save_file(message)
+        || message_suggests_external_info(message)
+        || message_suggests_image_generation(message))
+        && !message_suggests_code_generation(message)
+}
+
 /// True if the user message suggests a long-running project (novel, comic, code project) or continuing one.
 /// Capture limits for post-reply memory promotion (plan court terme 7, inspired by OpenClaw plugin).
 const CAPTURE_MIN_CHARS: usize = 16;
@@ -651,6 +696,17 @@ static CAPTURE_ACK_PATTERNS: &[&str] = &[
     "ok", "okay", "oui", "non", "merci", "thanks", "thank you", "d'accord", "daccord",
     "👍", "👌", "ok.", "parfait", "super", "cool", "noted", "compris", "c'est noté",
 ];
+
+/// If the text ends with an unclosed fenced code block (odd number of ```), appends "\n```\n" so that
+/// content appended after (e.g. image markdown) is not rendered inside a code block.
+fn ensure_no_open_code_block(text: &str) -> String {
+    let count = text.matches("```").count();
+    if count % 2 == 1 {
+        format!("{}\n```\n", text.trim_end())
+    } else {
+        text.to_string()
+    }
+}
 
 /// Returns true if content should be skipped when capturing to long-term memory (noise, loop risk, or too short/long).
 fn should_skip_capture_content(content: &str) -> bool {
@@ -1141,7 +1197,7 @@ const WRITE_FILE_REMINDER: &str = "\n[Rappel: l'utilisateur demande d'enregistre
 
 const WEB_SEARCH_REMINDER: &str = "\n[Rappel: l'utilisateur demande des informations externes (météo, actualités, etc.). Tu DOIS utiliser TOOL: web_search <requête> pour chercher toi-même puis répondre avec les résultats. Ne propose pas d'aller sur un site sans avoir d'abord utilisé web_search.]\n\n";
 
-const DEVICE_CAMERA_REMINDER: &str = "\n[Rappel: demande de photo webcam/caméra. Tu DOIS enchaîner directement : TOOL: device_discover local_media puis TOOL: device_invoke local_media camera capture. Ne demande PAS à l'utilisateur « quelle action appareil ? » ou « which device action ? » avec ask_user — il a déjà dit qu'il veut une photo, appelle device_invoke camera capture. Ne propose PAS : upload fichier, ouvrir l'UI, image IA.]\n\n";
+const DEVICE_CAMERA_REMINDER: &str = "\n[Rappel: demande de photo webcam/caméra. Tu DOIS enchaîner directement : TOOL: device_discover local_media puis TOOL: device_invoke local_media camera capture. Ne demande PAS à l'utilisateur « quelle action appareil ? » ou « which device action ? » avec ask_user — il a déjà dit qu'il veut une photo, appelle device_invoke camera capture. Ne propose PAS : upload fichier, ouvrir l'UI, image IA. Ne parle PAS de tools_policy.yaml ni de allowed_write_paths pour cette demande : l'utilisateur veut une photo prise par la caméra, pas configurer l'écriture de fichiers. Si l'utilisateur demande d'« afficher la photo dans le chat » / « affiche-la dans le chat » / « display in the chat », après la capture réponds UNIQUEMENT par une courte confirmation (ex. « Photo prise. Elle s'affiche ci-dessous. » en français, ou « Photo captured. It is shown below. » en anglais) : ne propose PAS « save to file », « get a description », « take another photo » ni « What would you like to do next? » — l'image est ajoutée automatiquement sous ta réponse. Réponds dans la même langue que l'utilisateur (français si la demande est en français).]\n\n";
 const IMAGE_GENERATION_REMINDER: &str = "\n[Rappel: demande de « générer une image », « dessine », « crée une image » (par IA, pas webcam). Tu DOIS utiliser TOOL: generate_image <prompt> (ex. TOOL: generate_image un chat sur un canapé). Spec 42.]\n\n";
 
 /// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
@@ -1169,14 +1225,14 @@ const APP_CONTEXT: &str = concat!(
     "Ne pose pas la question en texte libre, sinon la réponse ouvrira une nouvelle tâche et tu ne pourras pas continuer. ",
     "Pour un accès à un service externe (GitHub, API, etc.), ne réponds pas « je ne peux pas » ; utilise ask_user pour demander le token ou explique comment configurer. ",
     "Si l'utilisateur a déjà confirmé (ex. « clé dans le vault », « c'est configuré »), n'envoie pas une deuxième fois ask_user ; enchaîne. ",
-    "Tu as accès à la caméra et au micro via device_discover et device_invoke (interface local_media). Quand l'utilisateur demande une photo avec la caméra / webcam / « prendre une photo » / « obtenir une image » (photo), tu DOIS enchaîner : TOOL: device_discover local_media puis TOOL: device_invoke local_media camera capture, sans demander avec ask_user « quelle action ? » ou « which device ? » — l'utilisateur a déjà dit qu'il veut une photo. La fenêtre d'autorisation s'affichera automatiquement ; ne dis pas « sans UI active ». Ne propose pas upload fichier, ouvrir l'UI, ou image IA : utilise device_invoke directement. ",
+    "Tu as accès à la caméra et au micro via device_discover et device_invoke (interface local_media). Quand l'utilisateur demande une photo avec la caméra / webcam / « prendre une photo » / « affiche-la dans le chat » / « display in the chat », tu DOIS enchaîner : TOOL: device_discover local_media puis TOOL: device_invoke local_media camera capture, sans demander avec ask_user. Après la capture, si l'utilisateur a demandé d'afficher la photo dans le chat, réponds UNIQUEMENT par une courte phrase de confirmation dans sa langue (ex. en français : « Photo prise. Elle s'affiche ci-dessous. ») ; ne propose PAS « sauvegarder dans un fichier », « description de la scène », « prendre une autre photo » ni « What would you like to do next? » — l'image est ajoutée automatiquement sous ta réponse. Réponds toujours dans la langue de l'utilisateur (français si la demande est en français). Ne parle jamais de tools_policy.yaml pour une simple demande de photo webcam. ",
     "Ne invente pas de commandes (ex. /status repo:... n'existe pas) ; les commandes sont dans /help.\n\n",
 );
 
 /// Returns an English [Role] system prompt for the given agent type, or None for conversation/unknown.
 fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
     match agent_type {
-        "code" => Some("You are the code generation agent. Produce correct, readable code. Prefer run_command or write_file when the user asks to create or run code. Do not invent APIs; use read_file when needed to match existing code."),
+        "code" => Some("You are the code generation agent. Produce correct, readable code. Prefer run_command or write_file when the user asks to create or run code. Do not invent APIs; use read_file when needed to match existing code. When the user asks to *perform* an action (take a photo, run a command, search the web, save a file), use the appropriate TOOL; do not generate a script. Use code only when the user explicitly asks to *write* or *generate* code or a script."),
         "search" => Some("You are the search agent. Use web_search to find external information (weather, news, facts). Synthesize results and cite sources. Do not claim information you have not retrieved via web_search when it is available."),
         "financial" => Some("You are the financial specialist. Help with budgets, cost analysis, financial reports, numeric reasoning. Be precise with figures and units. Do not invent data; state what is missing if needed."),
         "documentalist" => Some("You are the documentalist. Answer from the user's document base (RAG). Prioritize [Documents utilisateur] and [Mémoire à long terme]. Use memory_search when relevant. Quote or summarize from excerpts; if insufficient, say so and suggest adding documents."),
@@ -2079,6 +2135,21 @@ async fn execute_tool_call(
                         } else {
                             None
                         };
+                        // #region agent log
+                        if interface == "local_media" && action == "capture" {
+                            debug_log(
+                                "68cde2",
+                                "H1",
+                                "api.rs:device_invoke_capture",
+                                "device_invoke capture result",
+                                serde_json::json!({
+                                    "success": result.success,
+                                    "data_len": result.data.as_ref().map(|d| d.len()).unwrap_or(0),
+                                    "out_image_some": out_image_base64.is_some(),
+                                }),
+                            );
+                        }
+                        // #endregion
                         (result.success, msg, out_image_base64)
                     }
                     Ok(Err(_)) => {
@@ -2408,7 +2479,8 @@ pub(crate) async fn run_message_via_llm(
             "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
              Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
-             WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix.\n\
+             CAMERA RULE (PRIORITAIRE sur WRITE): When the user asks for a webcam/camera photo (e.g. \"prends une photo\", \"take a photo\", \"photo depuis la webcam\", \"affiche-la dans le chat\", \"display it in the chat\"), you MUST reply ONLY with TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture. Do NOT mention tools_policy.yaml, allowed_write_paths, or file writing. After the tool returns, if the user asked to \"display in the chat\" / \"affiche-la dans le chat\" / \"show it in the chat\", reply with ONLY a short confirmation in the user's language (e.g. in French: \"Photo prise. Elle s'affiche ci-dessous.\"; in English: \"Photo captured. It is shown below.\"). Do NOT offer \"save to file\", \"get a description\", \"take another photo\", or \"What would you like to do next?\" — the image is appended automatically below your message. Use the same language as the user (French if they wrote in French).\n\
+             WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user.\n\
              INSTALL CLI RULE: When the user asks to install a CLI or package globally (e.g. \"install bankr CLI\", \"npm install -g @bankr/cli\", \"install the bankr cli in global\"), you MUST reply ONLY with TOOL: run_command <cmd> <args> (e.g. TOOL: run_command npm install -g @bankr/cli). Do NOT generate a script or ask the user to run commands themselves; run the installation command via the tool.\n\
              VAULT ENV RULE: When the user asks to use an API key or secret from the vault (e.g. \"use the key in the vault bankr_api_key\", \"utilise la clé bankr_api_key du vault\"), you CAN pass it to a command by adding VAULT:<vault_key>=<ENV_VAR> as first argument(s) of run_command. Example: TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (the system injects the vault value into BANKR_API_KEY for the command). You can chain several: VAULT:key1=VAR1 VAULT:key2=VAR2 cmd args.\n\
@@ -3040,6 +3112,19 @@ pub(crate) async fn run_message_via_llm(
                     )
                     .await
                 };
+                // #region agent log
+                debug_log(
+                    "68cde2",
+                    "H2",
+                    "api.rs:after_execute_tool",
+                    "captured_image after tool",
+                    serde_json::json!({
+                        "actual_tool": actual_tool,
+                        "captured_image_some": captured_image.is_some(),
+                        "captured_image_len": captured_image.as_ref().map(|s| s.len()).unwrap_or(0),
+                    }),
+                );
+                // #endregion
                 if let Some(img) = captured_image {
                     last_captured_image_base64 = Some(img);
                 }
@@ -3098,17 +3183,28 @@ pub(crate) async fn run_message_via_llm(
                 let image_md = last_captured_image_base64.as_ref()
                     .filter(|b| !b.is_empty())
                     .map(|b| {
-                        if b.starts_with("data:") {
-                            format!("\n\n![Image générée]({})", b)
-                        } else {
-                            format!("\n\n![Photo capturée](data:image/jpeg;base64,{})", b)
-                        }
+                        let url = if b.starts_with("data:") { b.clone() } else { format!("data:image/jpeg;base64,{}", b) };
+                        let label = if b.starts_with("data:") { "Image générée" } else { "Photo capturée" };
+                        format!("\n\n![{}](<{}>)", label, url)
                     })
                     .unwrap_or_default();
+                // #region agent log
+                debug_log(
+                    "68cde2",
+                    "H3",
+                    "api.rs:image_md_max_rounds",
+                    "image_md when max rounds",
+                    serde_json::json!({
+                        "last_captured_some": last_captured_image_base64.is_some(),
+                        "image_md_len": image_md.len(),
+                    }),
+                );
+                // #endregion
+                let response_clean = ensure_no_open_code_block(&response_for_user);
                 reply_text = if response_for_user.is_empty() {
                     format!("{}{}", limit_msg, image_md)
                 } else {
-                    format!("{}\n\n[{}]{}", response_for_user, limit_msg, image_md)
+                    format!("{}\n\n[{}]{}", response_clean, limit_msg, image_md)
                 };
                 break;
             }
@@ -3125,17 +3221,28 @@ pub(crate) async fn run_message_via_llm(
         let image_md = last_captured_image_base64.as_ref()
             .filter(|b| !b.is_empty())
             .map(|b| {
-                if b.starts_with("data:") {
-                    format!("\n\n![Image générée]({})", b)
-                } else {
-                    format!("\n\n![Photo capturée](data:image/jpeg;base64,{})", b)
-                }
+                let url = if b.starts_with("data:") { b.clone() } else { format!("data:image/jpeg;base64,{}", b) };
+                let label = if b.starts_with("data:") { "Image générée" } else { "Photo capturée" };
+                format!("\n\n![{}](<{}>)", label, url)
             })
             .unwrap_or_default();
+        // #region agent log
+        debug_log(
+            "68cde2",
+            "H3",
+            "api.rs:image_md_normal_break",
+            "image_md when normal break",
+            serde_json::json!({
+                "last_captured_some": last_captured_image_base64.is_some(),
+                "image_md_len": image_md.len(),
+            }),
+        );
+        // #endregion
+        let response_clean = ensure_no_open_code_block(&response_for_user);
         reply_text = if response_for_user.is_empty() {
             format!("{}{}", response, image_md)
         } else {
-            format!("{}{}", response_for_user, image_md)
+            format!("{}{}", response_clean, image_md)
         };
         break;
     }
@@ -3331,6 +3438,19 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
         });
     }
 
+    // #region agent log
+    debug_log(
+        "68cde2",
+        "H4",
+        "api.rs:before_progress_update",
+        "reply_text before ProgressUpdate",
+        serde_json::json!({
+            "reply_text_len": reply_text.len(),
+            "contains_data_image": reply_text.contains("data:image"),
+            "contains_base64": reply_text.contains("base64,"),
+        }),
+    );
+    // #endregion
     let _ = bus.send(
         EventEnvelope::new(
             EventType::ProgressUpdate,

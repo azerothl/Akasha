@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::{EventBus, OrchestratorTask};
-use crate::api::{ProgressCache, TaskCompletionRegistry};
+use crate::api::{message_suggests_tool_only_action, ProgressCache, TaskCompletionRegistry};
 
 /// One subtask from decomposition: (agent_type, message for that agent).
 pub type Subtask = (String, String);
@@ -23,10 +23,12 @@ async fn decompose_request(
     let prompt = format!(
         r#"You are a task decomposer. Output one line per subtask: agent_type|message. One line per distinct user action (e.g. one for generating a report, another for creating a file).
 Agent types: conversation (general chat), code (code gen), search (info search), schedule (create recurring task IN THE APP), financial (budget, costs, reports), documentalist (answer from user's document base / RAG), project_manager (project tracking, milestones, planning), technical_writer (technical docs, procedures, tutorials), research (deep research, multi-source synthesis), security_audit (security review of code/config), creative (copywriting, marketing content).
+- Use **conversation** when the user asks to *perform* an action using existing tools: take a photo (camera/webcam), web search, save a file, generate an image (AI), run a command. The conversation agent will use tools (device_invoke, web_search, write_file, generate_image, run_command); do NOT choose "code" for these.
+- Reserve **code** only for *explicit* requests to write or generate code/script (e.g. "écris un script qui…", "génère du code pour…").
 - If the user asks to CREATE a recurring/scheduled task (e.g. "tâche récurrente", "rappel toutes les 2 heures", "crée un rappel"), output exactly ONE line: schedule|interval_seconds|name|message
   where interval_seconds is in seconds (3600=1h, 7200=2h, 86400=1 day), name is a short title, message is the reminder text shown when the task runs. Example: schedule|7200|Rappel Github|Rappel: regarder l'avancement du projet sur GitHub
 - If the user asks for several distinct deliverables or actions (e.g. "make a report and then create a file", "do X then do Y"), output one line per deliverable/action. Example: first line for the report, second line for creating the file.
-- Otherwise output agent_type|message. Example: conversation|What is 2+2?
+- Otherwise output agent_type|message. Examples: "Prends une photo avec la caméra" → conversation|Prends une photo avec la caméra. "Écris un script Python qui lit un fichier" → code|Écris un script Python qui lit un fichier.
 
 User request:
 
@@ -182,8 +184,14 @@ async fn process_root_task(
         .with_correlation(root_task_id),
     );
 
-    let steps = decompose_request(&llm_router, &message).await;
-    // Decomposition is fully driven by the LLM; no keyword-based override.
+    let mut steps = decompose_request(&llm_router, &message).await;
+    // Override: if decomposer returned a single "code" step but the message is clearly a tool-only action (camera, web search, save file, image gen), route to conversation so the agent uses TOOL: instead of generating a script.
+    if steps.len() == 1
+        && steps[0].0 == "code"
+        && message_suggests_tool_only_action(&steps[0].1)
+    {
+        steps = vec![("conversation".to_string(), steps[0].1.clone())];
+    }
     let _ = bus.send(
         EventEnvelope::new(
             EventType::TaskDecomposed,

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
 import { preprocessMessagePaths } from "./preprocessMessagePaths";
 import { getCached, setCached } from "./useTabCache";
 import { useI18n } from "./useI18n";
@@ -2073,7 +2074,7 @@ function App() {
                         ) : (
                           <div className="text markdown-rendered">
                             <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent onPathClick={handlePathClick}>
-                              {preprocessMessagePaths(m.text)}
+                              {preprocessMessagePaths(preprocessDataUrlImages(m.text))}
                             </LazyMarkdownContent></Suspense>
                           </div>
                         )}
