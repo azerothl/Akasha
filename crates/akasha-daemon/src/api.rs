@@ -614,75 +614,69 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
         .join(" ; ")
 }
 
-/// True if the user message suggests they want to save/write a file to disk.
-fn message_suggests_save_file(message: &str) -> bool {
-    let m = message.to_lowercase();
-    let keywords = [
-        "enregistre", "enregistrer", "sauvegarde", "sauvegarder", "écris dans", "ecris dans",
-        "write to file", "save to", "save the file", "write the file", "dans le dossier",
-        "dans le fichier", "dans un fichier", "sur le disque", "to disk", "to the file",
-    ];
-    keywords.iter().any(|k| m.contains(k))
+/// Single-pass intent flags for a message (one to_lowercase() shared by all checks).
+struct MessageIntentFlags {
+    save_file: bool,
+    external_info: bool,
+    camera_or_mic: bool,
+    image_generation: bool,
+    code_generation: bool,
 }
 
-/// True if the user message suggests they want external/live information (weather, news, etc.).
-fn message_suggests_external_info(message: &str) -> bool {
+fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
     let m = message.to_lowercase();
-    let keywords = [
-        "météo", "meteo", "weather", "prévisions", "previsions", "actualités", "actualites",
-        "horaires", "trafic", "prix", "cours ", "bourse", "news", "nouvelle", "semaine à",
-        "aujourd'hui", "demain", "connaître la", "connaitre la", "quelle est la météo",
-        "quel temps", "prévision", "prevision",
-    ];
-    keywords.iter().any(|k| m.contains(k))
-}
-
-/// True if the user message suggests using the camera/webcam to take a photo or the microphone.
-fn message_suggests_camera_or_mic(message: &str) -> bool {
-    let m = message.to_lowercase();
-    let keywords = [
-        "webcam", "caméra", "camera", "prend une photo", "prends une photo", "prendre une photo",
-        "take a photo", "take a picture", "prends moi en photo", "photo avec la webcam",
-        "accède à la webcam", "accede a la webcam", "utilise la caméra", "utilise la camera",
-        "affiche-la dans le chat", "afficher dans le chat", "display in the chat", "show in the chat",
-        "micro", "microphone", "enregistre avec le micro", "enregistrer avec le micro",
-        "obtenir une image", "get an image", "image avec la webcam", "image avec la caméra",
-        "continuer pour obtenir une image", "proceed to get an image",
-    ];
-    keywords.iter().any(|k| m.contains(k))
-}
-
-fn message_suggests_image_generation(message: &str) -> bool {
-    let m = message.to_lowercase();
-    let keywords = [
-        "génère une image", "genere une image", "générer une image", "génère moi une image",
-        "generate an image", "generate a picture", "draw", "dessine", "dessiner",
-        "crée une image", "cree une image", "créer une image", "create an image",
-        "image par ia", "image par ia", "ai image", "dall-e", "dalle",
-    ];
-    keywords.iter().any(|k| m.contains(k))
-}
-
-/// True if the user message explicitly asks to write or generate code/script (not just "perform an action").
-fn message_suggests_code_generation(message: &str) -> bool {
-    let m = message.to_lowercase();
-    let keywords = [
-        "écris un script", "ecris un script", "écrire un script", "ecrire un script",
-        "write a script", "write the script", "génère du code", "genere du code",
-        "generate code", "génère le code", "code python", "python script",
-        "un programme qui", "a program that", "fonction qui", "function that",
-        "snippet", "extrait de code", "piece of code", "exemple de code",
-    ];
-    keywords.iter().any(|k| m.contains(k))
+    MessageIntentFlags {
+        save_file: [
+            "enregistre", "enregistrer", "sauvegarde", "sauvegarder", "écris dans", "ecris dans",
+            "write to file", "save to", "save the file", "write the file", "dans le dossier",
+            "dans le fichier", "dans un fichier", "sur le disque", "to disk", "to the file",
+        ]
+        .iter()
+        .any(|k| m.contains(k)),
+        external_info: [
+            "météo", "meteo", "weather", "prévisions", "previsions", "actualités", "actualites",
+            "horaires", "trafic", "prix", "cours ", "bourse", "news", "nouvelle", "semaine à",
+            "aujourd'hui", "demain", "connaître la", "connaitre la", "quelle est la météo",
+            "quel temps", "prévision", "prevision",
+        ]
+        .iter()
+        .any(|k| m.contains(k)),
+        camera_or_mic: [
+            "webcam", "caméra", "camera", "prend une photo", "prends une photo", "prendre une photo",
+            "take a photo", "take a picture", "prends moi en photo", "photo avec la webcam",
+            "accède à la webcam", "accede a la webcam", "utilise la caméra", "utilise la camera",
+            "affiche-la dans le chat", "afficher dans le chat", "display in the chat", "show in the chat",
+            "micro", "microphone", "enregistre avec le micro", "enregistrer avec le micro",
+            "obtenir une image", "get an image", "image avec la webcam", "image avec la caméra",
+            "continuer pour obtenir une image", "proceed to get an image",
+        ]
+        .iter()
+        .any(|k| m.contains(k)),
+        image_generation: [
+            "génère une image", "genere une image", "générer une image", "génère moi une image",
+            "generate an image", "generate a picture", "draw", "dessine", "dessiner",
+            "crée une image", "cree une image", "créer une image", "create an image",
+            "image par ia", "ai image", "dall-e", "dalle",
+        ]
+        .iter()
+        .any(|k| m.contains(k)),
+        code_generation: [
+            "écris un script", "ecris un script", "écrire un script", "ecrire un script",
+            "write a script", "write the script", "génère du code", "genere du code",
+            "generate code", "génère le code", "code python", "python script",
+            "un programme qui", "a program that", "fonction qui", "function that",
+            "snippet", "extrait de code", "piece of code", "exemple de code",
+        ]
+        .iter()
+        .any(|k| m.contains(k)),
+    }
 }
 
 /// True if the user message suggests a tool-only action (camera, web search, save file, image gen) without asking for code generation. Used by the orchestrator to override mistaken "code" decomposition.
 pub fn message_suggests_tool_only_action(message: &str) -> bool {
-    (message_suggests_camera_or_mic(message)
-        || message_suggests_save_file(message)
-        || message_suggests_external_info(message)
-        || message_suggests_image_generation(message))
-        && !message_suggests_code_generation(message)
+    let flags = compute_message_intent_flags(message);
+    (flags.camera_or_mic || flags.save_file || flags.external_info || flags.image_generation)
+        && !flags.code_generation
 }
 
 /// True if the user message suggests a long-running project (novel, comic, code project) or continuing one.
@@ -1230,7 +1224,8 @@ const APP_CONTEXT: &str = concat!(
 );
 
 /// Returns an English [Role] system prompt for the given agent type, or None for conversation/unknown.
-fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
+/// Exposed for tests and benchmarks.
+pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
     match agent_type {
         "code" => Some("You are the code generation agent. Produce correct, readable code. Prefer run_command or write_file when the user asks to create or run code. Do not invent APIs; use read_file when needed to match existing code. When the user asks to *perform* an action (take a photo, run a command, search the web, save a file), use the appropriate TOOL; do not generate a script. Use code only when the user explicitly asks to *write* or *generate* code or a script."),
         "search" => Some("You are the search agent. Use web_search to find external information (weather, news, facts). Synthesize results and cite sources. Do not claim information you have not retrieved via web_search when it is available."),
@@ -2499,7 +2494,8 @@ pub(crate) async fn run_message_via_llm(
     };
 
     // Build prompt with short-term + long-term memory (spec 06)
-    let mut context_prefix = String::new();
+    // Pre-allocate to reduce reallocations when appending role, memory, and document blocks.
+    let mut context_prefix = String::with_capacity(8192);
     context_prefix.push_str(APP_CONTEXT);
     if let Some(role_prompt) = agent_role_system_prompt(&assigned_agent) {
         context_prefix.push_str("[Role]\n");
@@ -2634,12 +2630,13 @@ pub(crate) async fn run_message_via_llm(
             context_prefix.push_str("\n\n");
         }
     }
-    let write_reminder = if message_suggests_save_file(&message) {
+    let intent_flags = compute_message_intent_flags(&message);
+    let write_reminder = if intent_flags.save_file {
         WRITE_FILE_REMINDER
     } else {
         ""
     };
-    let web_search_reminder = if message_suggests_external_info(&message)
+    let web_search_reminder = if intent_flags.external_info
         && tools_executor_snapshot
             .as_ref()
             .map(|e| e.policy.can_use_tool("web_search"))
@@ -2649,7 +2646,7 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let device_camera_reminder = if message_suggests_camera_or_mic(&message)
+    let device_camera_reminder = if intent_flags.camera_or_mic
         && tools_executor_snapshot
             .as_ref()
             .map(|e| e.policy.can_use_device_interface("local_media"))
@@ -2659,7 +2656,7 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let image_generation_reminder = if message_suggests_image_generation(&message) {
+    let image_generation_reminder = if intent_flags.image_generation {
         IMAGE_GENERATION_REMINDER
     } else {
         ""
@@ -5291,7 +5288,10 @@ async fn get_schedule_run_reports(store_path: &Path, progress: &ProgressCache) -
 
 #[cfg(test)]
 mod tests {
-    use super::parse_content_length;
+    use super::{
+    agent_role_system_prompt, message_suggests_tool_only_action, parse_content_length,
+    parse_device_invoke_params,
+};
 
     #[test]
     fn parse_content_length_returns_header_end_and_content_length() {
@@ -5344,5 +5344,63 @@ mod tests {
         let args = vec![s("synthetic_input"), s("keyboard"), s("type"), s("hello"), s("world")];
         let p = parse_device_invoke_params(&args);
         assert_eq!(p, serde_json::json!(["hello", "world"]));
+    }
+
+    // --- message_suggests_tool_only_action ---
+
+    #[test]
+    fn tool_only_action_true_for_camera() {
+        assert!(message_suggests_tool_only_action("Prends une photo avec la caméra"));
+        assert!(message_suggests_tool_only_action("Take a photo from the webcam"));
+    }
+
+    #[test]
+    fn tool_only_action_true_for_weather() {
+        assert!(message_suggests_tool_only_action("Quelle est la météo à Paris ?"));
+    }
+
+    #[test]
+    fn tool_only_action_true_for_save_file() {
+        assert!(message_suggests_tool_only_action("Sauvegarde ce code dans /tmp/foo.py"));
+    }
+
+    #[test]
+    fn tool_only_action_true_for_image_generation() {
+        assert!(message_suggests_tool_only_action("Génère une image d'un lapin"));
+    }
+
+    #[test]
+    fn tool_only_action_false_for_code_generation() {
+        assert!(!message_suggests_tool_only_action("Écris un script Python qui lit un fichier"));
+        assert!(!message_suggests_tool_only_action("Génère du code pour trier une liste"));
+    }
+
+    #[test]
+    fn tool_only_action_false_when_code_intent_dominates() {
+        // Explicit code request even if it mentions photo → do not override to conversation
+        assert!(!message_suggests_tool_only_action("écris un script qui prend une photo"));
+    }
+
+    // --- agent_role_system_prompt ---
+
+    #[test]
+    fn agent_role_prompt_some_for_recognized_types() {
+        let with_role = [
+            "code", "search", "financial", "documentalist", "project_manager",
+            "technical_writer", "research", "security_audit", "creative",
+        ];
+        for t in &with_role {
+            let s = agent_role_system_prompt(t);
+            assert!(s.is_some(), "agent_type {:?} should have a role prompt", t);
+            assert!(!s.unwrap().is_empty(), "agent_type {:?} role prompt must be non-empty", t);
+        }
+    }
+
+    #[test]
+    fn agent_role_prompt_none_for_conversation_and_unknown() {
+        assert!(agent_role_system_prompt("conversation").is_none());
+        assert!(agent_role_system_prompt("").is_none());
+        // schedule is handled specially (recurring task), no role prompt
+        assert!(agent_role_system_prompt("schedule").is_none());
     }
 }

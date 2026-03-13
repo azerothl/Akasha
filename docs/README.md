@@ -5,6 +5,8 @@ Ce dossier est le point d’entrée vers la documentation du projet.
 | Document | Description |
 |----------|-------------|
 | [user_guide.md](user_guide.md) | Renvoi vers le **guide utilisateur complet** ([spec/user_guide.md](../spec/user_guide.md)) : commandes, config, interfaces, slash, canaux. |
+| [bench_prompt_results.md](bench_prompt_results.md) | Benchmarks des prompts et heuristiques agents, optimisations appliquées et propositions d'amélioration. |
+| [tests_and_benchmarks.md](tests_and_benchmarks.md) | Vue d'ensemble des tests et benchmarks : ce qu'ils analysent et comment les lancer. |
 
 **Documentation détaillée :**
 

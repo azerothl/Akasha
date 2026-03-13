@@ -1073,3 +1073,60 @@ impl LLMProvider for AkashaEmbeddedProvider {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn ollama_provider_name_and_local() {
+        let p = OllamaProvider::new(None);
+        assert_eq!(p.name(), "ollama");
+        assert!(p.is_local());
+    }
+
+    #[test]
+    fn ollama_provider_is_available_no_panic() {
+        let p = OllamaProvider::new(None);
+        let _ = p.is_available();
+    }
+
+    #[test]
+    fn akasha_embedded_provider_name_and_local() {
+        let p = AkashaEmbeddedProvider::new();
+        assert_eq!(p.name(), "akasha_embedded");
+        assert!(p.is_local());
+    }
+
+    #[test]
+    fn akasha_embedded_provider_availability_matches_embedded_llm_when_feature_enabled() {
+        let p = AkashaEmbeddedProvider::new();
+        #[cfg(feature = "embedded")]
+        assert_eq!(
+            p.is_available(),
+            akasha_embedded_llm::EmbeddedLlm::is_available(),
+            "AkashaEmbeddedProvider.is_available() should match EmbeddedLlm::is_available() when feature embedded is on"
+        );
+        #[cfg(not(feature = "embedded"))]
+        assert!(!p.is_available());
+    }
+
+    #[tokio::test]
+    async fn akasha_embedded_provider_complete_when_unavailable_returns_unavailable() {
+        let p = AkashaEmbeddedProvider::new();
+        if p.is_available() {
+            return;
+        }
+        let req = CompletionRequest {
+            prompt: "Hi".into(),
+            max_tokens: Some(10),
+            temperature: Some(0.0),
+            preferred_task_type: None,
+            image_data_urls: None,
+        };
+        let r = p.complete(&req, Duration::from_secs(5), None).await;
+        assert!(r.is_err());
+        assert!(matches!(r.unwrap_err(), ProviderError::Unavailable));
+    }
+}

@@ -2,7 +2,7 @@
 
 mod bus;
 mod main_agent;
-mod orchestrator;
+pub mod orchestrator;
 mod progress_subscriber;
 mod worker;
 

@@ -317,3 +317,95 @@ impl LLMRouter {
         Ok(response)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RouteEntry;
+    use crate::provider::{ProviderError, TokenUsage};
+    use async_trait::async_trait;
+    use std::time::Duration;
+
+    /// Mock local provider for tests: returns a fixed response without calling any real model.
+    struct MockLocalProvider {
+        response_text: String,
+    }
+
+    #[async_trait]
+    impl LLMProvider for MockLocalProvider {
+        fn name(&self) -> &str {
+            "mock_local"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn is_local(&self) -> bool {
+            true
+        }
+        async fn complete(
+            &self,
+            _request: &crate::provider::CompletionRequest,
+            _timeout: Duration,
+            _model_override: Option<&str>,
+        ) -> Result<crate::provider::CompletionResponse, ProviderError> {
+            Ok(crate::provider::CompletionResponse {
+                text: self.response_text.clone(),
+                usage: Some(TokenUsage {
+                    prompt_tokens: 0,
+                    completion_tokens: 1,
+                }),
+                model_used: "mock".into(),
+                cost_usd: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn router_complete_uses_registered_local_provider() {
+        let config = RoutingConfig::default_config();
+        let mut router = LLMRouter::new(config);
+        let mock_text = "mock local model reply";
+        router.register_provider(Arc::new(MockLocalProvider {
+            response_text: mock_text.to_string(),
+        }));
+        router.set_primary_route(
+            "conversation",
+            RouteEntry {
+                provider: "mock_local".into(),
+                model: "default".into(),
+                config: None,
+            },
+        );
+        let request = CompletionRequest {
+            prompt: "Hello".into(),
+            max_tokens: Some(10),
+            temperature: Some(0.0),
+            preferred_task_type: Some("conversation".into()),
+            image_data_urls: None,
+        };
+        let response = router.complete(&request).await.expect("complete should succeed");
+        assert_eq!(response.text, mock_text);
+        assert_eq!(response.model_used, "mock");
+    }
+
+    #[test]
+    fn router_with_embedded_registered_reports_embedded_available() {
+        let config = RoutingConfig::default_config();
+        let mut router = LLMRouter::new(config);
+        router.register_provider(Arc::new(crate::provider::AkashaEmbeddedProvider::new()));
+        #[cfg(feature = "embedded")]
+        assert_eq!(
+            router.embedded_available(),
+            akasha_embedded_llm::EmbeddedLlm::is_available(),
+        );
+        #[cfg(not(feature = "embedded"))]
+        assert!(!router.embedded_available());
+    }
+
+    #[test]
+    fn router_resolve_task_type_conversation_returns_conversation() {
+        let config = RoutingConfig::default_config();
+        let router = LLMRouter::new(config);
+        assert_eq!(router.resolve_task_type_for_agent("conversation"), "conversation");
+    }
+}

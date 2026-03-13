@@ -15,13 +15,22 @@ use crate::api::{message_suggests_tool_only_action, ProgressCache, TaskCompletio
 /// One subtask from decomposition: (agent_type, message for that agent).
 pub type Subtask = (String, String);
 
-/// Decompose a user request into one or more subtasks via LLM. Falls back to single "conversation" on error, timeout or empty.
-async fn decompose_request(
-    llm_router: &Arc<akasha_llm::LLMRouter>,
-    message: &str,
-) -> Vec<Subtask> {
-    let prompt = format!(
-        r#"You are a task decomposer. Output one line per subtask: agent_type|message. One line per distinct user action (e.g. one for generating a report, another for creating a file).
+/// Applies the tool-only override: if the decomposer returned a single "code" step but the
+/// step message suggests a tool-only action (camera, web search, save file, image gen),
+/// re-route to conversation so the agent uses TOOL: instead of generating a script.
+/// Exposed for unit tests.
+pub(crate) fn apply_decomposition_override(_message: &str, steps: Vec<Subtask>) -> Vec<Subtask> {
+    if steps.len() == 1
+        && steps[0].0 == "code"
+        && message_suggests_tool_only_action(&steps[0].1)
+    {
+        vec![("conversation".to_string(), steps[0].1.clone())]
+    } else {
+        steps
+    }
+}
+
+const DECOMPOSER_PROMPT_TEMPLATE: &str = r#"You are a task decomposer. Output one line per subtask: agent_type|message. One line per distinct user action (e.g. one for generating a report, another for creating a file).
 Agent types: conversation (general chat), code (code gen), search (info search), schedule (create recurring task IN THE APP), financial (budget, costs, reports), documentalist (answer from user's document base / RAG), project_manager (project tracking, milestones, planning), technical_writer (technical docs, procedures, tutorials), research (deep research, multi-source synthesis), security_audit (security review of code/config), creative (copywriting, marketing content).
 - Use **conversation** when the user asks to *perform* an action using existing tools: take a photo (camera/webcam), web search, save a file, generate an image (AI), run a command. The conversation agent will use tools (device_invoke, web_search, write_file, generate_image, run_command); do NOT choose "code" for these.
 - Reserve **code** only for *explicit* requests to write or generate code/script (e.g. "écris un script qui…", "génère du code pour…").
@@ -32,9 +41,19 @@ Agent types: conversation (general chat), code (code gen), search (info search),
 
 User request:
 
-{}"#,
-        message
-    );
+"#;
+
+/// Builds the decomposer prompt string (template + message). Used by benchmarks and by decompose_request.
+pub fn build_decomposer_prompt(message: &str) -> String {
+    format!("{}{}", DECOMPOSER_PROMPT_TEMPLATE, message)
+}
+
+/// Decompose a user request into one or more subtasks via LLM. Falls back to single "conversation" on error, timeout or empty.
+async fn decompose_request(
+    llm_router: &Arc<akasha_llm::LLMRouter>,
+    message: &str,
+) -> Vec<Subtask> {
+    let prompt = build_decomposer_prompt(message);
     // Models with "thinking" (e.g. glm-4.7-flash) use output tokens for thinking then response; 512 is too low and yields empty response (done_reason: length).
     let system_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
         .ok()
@@ -185,13 +204,7 @@ async fn process_root_task(
     );
 
     let mut steps = decompose_request(&llm_router, &message).await;
-    // Override: if decomposer returned a single "code" step but the message is clearly a tool-only action (camera, web search, save file, image gen), route to conversation so the agent uses TOOL: instead of generating a script.
-    if steps.len() == 1
-        && steps[0].0 == "code"
-        && message_suggests_tool_only_action(&steps[0].1)
-    {
-        steps = vec![("conversation".to_string(), steps[0].1.clone())];
-    }
+    steps = apply_decomposition_override(&message, steps);
     let _ = bus.send(
         EventEnvelope::new(
             EventType::TaskDecomposed,
@@ -553,4 +566,48 @@ N'ajoute aucune information qui ne figure pas dans les réponses des agents ci-d
         );
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_decomposition_override, Subtask};
+
+    fn step(agent: &str, msg: &str) -> Subtask {
+        (agent.to_string(), msg.to_string())
+    }
+
+    #[test]
+    fn override_single_code_step_tool_only_to_conversation() {
+        let steps = vec![step("code", "Prends une photo")];
+        let out = apply_decomposition_override("Prends une photo", steps);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "conversation");
+        assert_eq!(out[0].1, "Prends une photo");
+    }
+
+    #[test]
+    fn override_keeps_code_step_when_explicit_code_request() {
+        let steps = vec![step("code", "Écris un script Python")];
+        let out = apply_decomposition_override("Écris un script Python", steps);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "code");
+        assert_eq!(out[0].1, "Écris un script Python");
+    }
+
+    #[test]
+    fn override_leaves_multiple_steps_unchanged() {
+        let steps = vec![step("code", "foo"), step("search", "bar")];
+        let out = apply_decomposition_override("do both", steps);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, "code");
+        assert_eq!(out[1].0, "search");
+    }
+
+    #[test]
+    fn override_leaves_single_search_step_unchanged() {
+        let steps = vec![step("search", "Quelle météo ?")];
+        let out = apply_decomposition_override("Quelle météo ?", steps);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "search");
+    }
 }
