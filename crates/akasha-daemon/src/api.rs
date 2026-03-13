@@ -621,6 +621,8 @@ struct MessageIntentFlags {
     camera_or_mic: bool,
     image_generation: bool,
     code_generation: bool,
+    /// User asks for GitHub repo/API info and mentions vault or GITHUB_TOKEN.
+    github_with_vault: bool,
 }
 
 fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
@@ -669,6 +671,11 @@ fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
         ]
         .iter()
         .any(|k| m.contains(k)),
+        github_with_vault: {
+            let github = ["github", "dépôt privé", "depot prive", "private repo", "api.github.com"].iter().any(|k| m.contains(k));
+            let vault = ["vault", "github_token", "clé du vault", "cle du vault", "key in the vault", "token dans le vault", "clef dans le vault"].iter().any(|k| m.contains(k));
+            github && vault
+        },
     }
 }
 
@@ -1199,6 +1206,9 @@ const WEB_SEARCH_REMINDER: &str = "\n[Rappel: l'utilisateur demande des informat
 const DEVICE_CAMERA_REMINDER: &str = "\n[Rappel: demande de photo webcam/caméra. Tu DOIS enchaîner directement : TOOL: device_discover local_media puis TOOL: device_invoke local_media camera capture. Ne demande PAS à l'utilisateur « quelle action appareil ? » ou « which device action ? » avec ask_user — il a déjà dit qu'il veut une photo, appelle device_invoke camera capture. Ne propose PAS : upload fichier, ouvrir l'UI, image IA. Ne parle PAS de tools_policy.yaml ni de allowed_write_paths pour cette demande : l'utilisateur veut une photo prise par la caméra, pas configurer l'écriture de fichiers. Si l'utilisateur demande d'« afficher la photo dans le chat » / « affiche-la dans le chat » / « display in the chat », après la capture réponds UNIQUEMENT par une courte confirmation (ex. « Photo prise. Elle s'affiche ci-dessous. » en français, ou « Photo captured. It is shown below. » en anglais) : ne propose PAS « save to file », « get a description », « take another photo » ni « What would you like to do next? » — l'image est ajoutée automatiquement sous ta réponse. Réponds dans la même langue que l'utilisateur (français si la demande est en français).]\n\n";
 const IMAGE_GENERATION_REMINDER: &str = "\n[Rappel: demande de « générer une image », « dessine », « crée une image » (par IA, pas webcam). Tu DOIS utiliser TOOL: generate_image <prompt> (ex. TOOL: generate_image un chat sur un canapé). Spec 42.]\n\n";
 
+/// Reminder when the user asks for GitHub (private repo / API) and mentions the vault (e.g. GITHUB_TOKEN).
+const GITHUB_VAULT_REMINDER: &str = "\n[Rappel: l'utilisateur demande des infos sur un dépôt GitHub (privé ou API). La clé est dans le vault (ex. GITHUB_TOKEN). Tu DOIS utiliser TOOL: run_command avec VAULT:GITHUB_TOKEN=GITHUB_TOKEN puis une commande qui utilise ce token. Exemples: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN gh repo view owner/repo --json name,description,pullRequests,issues ; ou TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sH \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo. Ne réponds pas « je n'ai pas trouvé » sans avoir appelé run_command avec le VAULT:.]\n\n";
+
 /// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
 const APP_CONTEXT: &str = concat!(
     "[Contexte Akasha] Tu es l'assistant intégré à Akasha. Akasha est l'application dans laquelle tu tournes actuellement. ",
@@ -1207,6 +1217,7 @@ const APP_CONTEXT: &str = concat!(
     "commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, /skills reload, etc.). ",
     "Pour installer un CLI en global (ex. « installe le CLI bankr », « npm install -g @bankr/cli »), répondre par TOOL: run_command npm install -g <package> (ne pas générer de script à faire exécuter par l'utilisateur). ",
     "Pour utiliser une clé du vault dans une commande : TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (le système injecte la valeur du vault). ",
+    "Pour un dépôt GitHub privé ou l'API GitHub avec une clé dans le vault (ex. GITHUB_TOKEN) : utilise TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN gh repo view owner/repo (ou curl -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo) ; ne dis pas « je n'ai pas trouvé » sans avoir appelé run_command avec VAULT:GITHUB_TOKEN=GITHUB_TOKEN. ",
     "Skills (capacités supplémentaires) : l'utilisateur peut en ajouter sans modifier le code. Quand l'utilisateur demande d'installer un skill depuis une URL (ex. « installe le skill bankr depuis … »), tu DOIS répondre par TOOL: install_skill <url>. ",
     "Pour désinstaller un skill : TOOL: uninstall_skill <nom> (ex. TOOL: uninstall_skill bankr). ",
     "Quand l'utilisateur te demande d'effectuer une action avec un skill (ex. « vérifie mon wallet bankr », « lance bankr whoami »), tu DOIS répondre UNIQUEMENT par une ligne TOOL: <nom_du_skill> <arguments> (ex. TOOL: bankr whoami) pour que le système exécute la commande ; ne dis pas à l'utilisateur de lancer la commande lui-même. ",
@@ -2514,7 +2525,7 @@ pub(crate) async fn run_message_via_llm(
              WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user.\n\
              INSTALL CLI RULE: When the user asks to install a CLI or package globally (e.g. \"install bankr CLI\", \"npm install -g @bankr/cli\", \"install the bankr cli in global\"), you MUST reply ONLY with TOOL: run_command <cmd> <args> (e.g. TOOL: run_command npm install -g @bankr/cli). Do NOT generate a script or ask the user to run commands themselves; run the installation command via the tool.\n\
-             VAULT ENV RULE: When the user asks to use an API key or secret from the vault (e.g. \"use the key in the vault bankr_api_key\", \"utilise la clé bankr_api_key du vault\"), you CAN pass it to a command by adding VAULT:<vault_key>=<ENV_VAR> as first argument(s) of run_command. Example: TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (the system injects the vault value into BANKR_API_KEY for the command). You can chain several: VAULT:key1=VAR1 VAULT:key2=VAR2 cmd args.\n\
+             VAULT ENV RULE: When the user asks to use an API key or secret from the vault (e.g. \"use the key in the vault bankr_api_key\", \"utilise la clé bankr_api_key du vault\"), you CAN pass it to a command by adding VAULT:<vault_key>=<ENV_VAR> as first argument(s) of run_command. Example: TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (the system injects the vault value into BANKR_API_KEY for the command). You can chain several: VAULT:key1=VAR1 VAULT:key2=VAR2 cmd args. For a private GitHub repo or GitHub API when the user says the token is in the vault (e.g. GITHUB_TOKEN): use TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN gh repo view owner/repo --json name,pullRequests,issues (or curl -sH \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo). Do NOT reply that you cannot access the repo without having called run_command with VAULT:GITHUB_TOKEN=GITHUB_TOKEN first.\n\
              INSTALL SKILL RULE: When the user asks to install a skill from a URL (e.g. \"install the bankr skill from https://github.com/BankrBot/skills/tree/main/bankr\"), you MUST reply ONLY with TOOL: install_skill <url>. Do not give manual steps; perform the installation yourself.\n\
              UNINSTALL SKILL RULE: When the user asks to uninstall or remove a skill (e.g. \"désinstalle bankr\", \"remove the bankr skill\"), you MUST reply ONLY with TOOL: uninstall_skill <name> (e.g. TOOL: uninstall_skill bankr).\n\
              SKILL USE RULE: When the user asks you to perform an action using a skill (e.g. \"vérifie mon wallet bankr\", \"check my balance with bankr\", \"run bankr whoami\"), you MUST reply ONLY with a single line: TOOL: <skill_name> <args> (e.g. TOOL: bankr whoami). The system will execute the command and return the result. Do NOT tell the user to run the command themselves or to \"use TOOL: bankr whoami\"; you must output that line yourself so the tool is executed.\n\
@@ -2697,6 +2708,16 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
+    let github_vault_reminder = if intent_flags.github_with_vault
+        && tools_executor_snapshot
+            .as_ref()
+            .map(|e| e.policy.can_use_tool("run_command"))
+            .unwrap_or(false)
+    {
+        GITHUB_VAULT_REMINDER
+    } else {
+        ""
+    };
     // When user clearly wants a photo from camera, prefix the message with an imperative so the model responds with device_invoke directly (no ask_user).
     let user_message = if !device_camera_reminder.is_empty() {
         format!(
@@ -2710,12 +2731,13 @@ pub(crate) async fn run_message_via_llm(
         user_message.clone()
     } else {
         format!(
-            "{}{}{}{}{}Utilisateur:\n{}",
+            "{}{}{}{}{}{}Utilisateur:\n{}",
             context_prefix.trim_end(),
             write_reminder,
             web_search_reminder,
             device_camera_reminder,
             image_generation_reminder,
+            github_vault_reminder,
             user_message
         )
     };
