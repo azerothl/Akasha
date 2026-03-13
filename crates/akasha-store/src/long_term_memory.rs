@@ -46,6 +46,14 @@ pub struct LongTermStore {
     conn: Connection,
 }
 
+/// Optional attribution filter for search (plan: court terme 3).
+#[derive(Debug, Clone, Default)]
+pub struct MemorySearchFilter {
+    pub entity_id: Option<String>,
+    pub process_id: Option<String>,
+    pub session_id: Option<String>,
+}
+
 impl LongTermStore {
     pub fn open<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
@@ -61,6 +69,17 @@ impl LongTermStore {
             CREATE INDEX IF NOT EXISTS idx_memory_entries_created ON memory_entries(created_at);
             "#,
         )?;
+        // Migration: add attribution columns if missing (plan court terme 3).
+        let has_col = |name: &str| -> anyhow::Result<bool> {
+            let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('memory_entries') WHERE name = ?1")?;
+            let exists: bool = stmt.exists(rusqlite::params![name])?;
+            Ok(exists)
+        };
+        for col in ["entity_id", "process_id", "session_id"] {
+            if !has_col(col)? {
+                conn.execute(&format!("ALTER TABLE memory_entries ADD COLUMN {} TEXT", col), [])?;
+            }
+        }
         Ok(Self { conn })
     }
 
@@ -70,14 +89,36 @@ impl LongTermStore {
         embedding: &[u8],
         source: &str,
     ) -> anyhow::Result<Uuid> {
+        self.insert_with_attribution(content, embedding, source, None, None, None)
+    }
+
+    /// Insert with optional attribution (entity_id, process_id, session_id).
+    pub fn insert_with_attribution(
+        &self,
+        content: &str,
+        embedding: &[u8],
+        source: &str,
+        entity_id: Option<&str>,
+        process_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<Uuid> {
         let id = Uuid::new_v4();
         let now = Utc::now();
         self.conn.execute(
             r#"
-            INSERT INTO memory_entries (id, content, embedding, created_at, source)
-            VALUES (?1, ?2, ?3, ?4, ?5)
+            INSERT INTO memory_entries (id, content, embedding, created_at, source, entity_id, process_id, session_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
-            rusqlite::params![id.to_string(), content, embedding, now.to_rfc3339(), source],
+            rusqlite::params![
+                id.to_string(),
+                content,
+                embedding,
+                now.to_rfc3339(),
+                source,
+                entity_id,
+                process_id,
+                session_id,
+            ],
         )?;
         Ok(id)
     }
@@ -111,13 +152,19 @@ impl LongTermStore {
     }
 
     /// Retrieve all entries with their embeddings for similarity search in memory.
+    /// When filter is provided, only rows matching entity_id/process_id/session_id (or NULL) are returned.
     fn get_all_with_embedding(
         &self,
+        filter: Option<&MemorySearchFilter>,
     ) -> anyhow::Result<Vec<(String, String, Vec<u8>, String, String)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, content, embedding, created_at, source FROM memory_entries ORDER BY created_at",
-        )?;
-        let rows = stmt.query_map([], |row| {
+        let (where_clause, params) = Self::filter_clause(filter);
+        let sql = format!(
+            "SELECT id, content, embedding, created_at, source FROM memory_entries {} ORDER BY created_at",
+            where_clause
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -127,6 +174,31 @@ impl LongTermStore {
             ))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn filter_clause(filter: Option<&MemorySearchFilter>) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let mut conditions = Vec::new();
+        if let Some(f) = filter {
+            if let Some(ref e) = f.entity_id {
+                conditions.push("(entity_id IS NULL OR entity_id = ?)");
+                params.push(Box::new(e.clone()));
+            }
+            if let Some(ref p) = f.process_id {
+                conditions.push("(process_id IS NULL OR process_id = ?)");
+                params.push(Box::new(p.clone()));
+            }
+            if let Some(ref s) = f.session_id {
+                conditions.push("(session_id IS NULL OR session_id = ?)");
+                params.push(Box::new(s.clone()));
+            }
+        }
+        let where_clause = if conditions.is_empty() {
+            "".to_string()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+        (where_clause, params)
     }
 
     /// List most recent entries (no embedding). For display in UI. Returns (id, content, created_at_rfc3339, source).
@@ -148,13 +220,76 @@ impl LongTermStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Search by keywords (lexical fallback when embedder is unavailable).
+    /// Optionally filter by entity_id/process_id/session_id.
+    pub fn search_by_keywords(
+        &self,
+        query: &str,
+        top_k: usize,
+        filter: Option<&MemorySearchFilter>,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let words: Vec<String> = query
+            .split_whitespace()
+            .map(|s| s.trim())
+            .filter(|s| s.len() >= 2)
+            .map(|s| {
+                s.replace('%', "\\%")
+                    .replace('_', "\\_")
+                    .replace('\\', "\\\\")
+            })
+            .collect();
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (filter_where, filter_params) = Self::filter_clause(filter);
+        let like_conditions: String = words
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                if i > 0 {
+                    " AND content LIKE ? ESCAPE '\\'"
+                } else {
+                    "content LIKE ? ESCAPE '\\'"
+                }
+            })
+            .collect();
+        let filter_conditions = filter_where.trim_start_matches("WHERE ").trim();
+        let where_sql = if filter_conditions.is_empty() {
+            like_conditions
+        } else {
+            format!("{} AND {}", like_conditions, filter_conditions)
+        };
+        let sql = format!(
+            "SELECT id, content FROM memory_entries WHERE {} ORDER BY created_at DESC LIMIT ?",
+            where_sql
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let patterns: Vec<String> = words.iter().map(|w| format!("%{}%", w)).collect();
+        let limit = top_k as i64;
+        let mut param_refs: Vec<&dyn rusqlite::ToSql> = patterns.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        for p in &filter_params {
+            param_refs.push(p.as_ref());
+        }
+        param_refs.push(&limit);
+        let mut rows = stmt.query(param_refs.as_slice())?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let content: String = row.get(1)?;
+            out.push((id, content));
+        }
+        Ok(out)
+    }
+
     /// Search by embedding: returns up to `top_k` entries ordered by cosine similarity (desc).
+    /// Optionally filter by entity_id/process_id/session_id.
     pub fn search_by_embedding(
         &self,
         query_embedding: &[f32],
         top_k: usize,
+        filter: Option<&MemorySearchFilter>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
-        let rows = self.get_all_with_embedding()?;
+        let rows = self.get_all_with_embedding(filter)?;
         let mut scored: Vec<(f32, (String, String, Vec<u8>, String, String))> = rows
             .into_iter()
             .map(|row| {

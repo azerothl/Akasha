@@ -8,7 +8,7 @@ pub mod tasks;
 
 pub use log::ImmutableLog;
 pub use metrics::{MetricsEvent, MetricsStore, ModelMetricsRow};
-pub use long_term_memory::{LongTermStore, MemoryEntry};
+pub use long_term_memory::{LongTermStore, MemoryEntry, MemorySearchFilter};
 pub use schedules::{
     Schedule, ScheduleException, ScheduleExceptionType, ScheduleStore, TaskRun, TaskRunStatus,
 };

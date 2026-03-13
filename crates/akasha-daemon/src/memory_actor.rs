@@ -5,8 +5,18 @@ use std::path::Path;
 use std::thread;
 
 pub enum MemoryRequest {
-    Search { query_text: String, top_k: usize },
-    Promote { content: String, source: String },
+    Search {
+        query_text: String,
+        top_k: usize,
+        filter: Option<akasha_store::MemorySearchFilter>,
+    },
+    Promote {
+        content: String,
+        source: String,
+        entity_id: Option<String>,
+        process_id: Option<String>,
+        session_id: Option<String>,
+    },
     List { limit: usize },
     Delete { id: String },
     HasDailySummary { date: String },
@@ -28,13 +38,18 @@ pub struct LongTermMemoryClient {
 }
 
 impl LongTermMemoryClient {
-    /// Search long-term memory. Returns `(id, content)` pairs so callers can decide
-    /// whether to include the UUID (e.g. tool output) or just the content (e.g. context injection).
-    pub fn search(&self, query_text: String, _top_k: usize) -> Vec<(String, String)> {
+    /// Search long-term memory. Returns `(id, content)` pairs.
+    /// Optional filter limits results by entity_id/process_id/session_id (plan court terme 3).
+    pub fn search(
+        &self,
+        query_text: String,
+        top_k: usize,
+        filter: Option<akasha_store::MemorySearchFilter>,
+    ) -> Vec<(String, String)> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-            if self.tx.send((MemoryRequest::Search { query_text, top_k: _top_k }, resp_tx)).is_err() {
+            if self.tx.send((MemoryRequest::Search { query_text, top_k, filter }, resp_tx)).is_err() {
                 return Vec::new();
             }
             match resp_rx.blocking_recv() {
@@ -44,16 +59,23 @@ impl LongTermMemoryClient {
         }
         #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
         {
-            let _ = query_text;
+            let _ = (query_text, filter);
             Vec::new()
         }
     }
 
-    pub fn promote(&self, content: String, source: String) -> Result<(), String> {
+    pub fn promote(
+        &self,
+        content: String,
+        source: String,
+        entity_id: Option<String>,
+        process_id: Option<String>,
+        session_id: Option<String>,
+    ) -> Result<(), String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-            if self.tx.send((MemoryRequest::Promote { content, source }, resp_tx)).is_err() {
+            if self.tx.send((MemoryRequest::Promote { content, source, entity_id, process_id, session_id }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
             match resp_rx.blocking_recv() {
@@ -63,7 +85,7 @@ impl LongTermMemoryClient {
         }
         #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
         {
-            let _ = (content, source);
+            let _ = (content, source, entity_id, process_id, session_id);
             Ok(())
         }
     }
@@ -164,23 +186,23 @@ pub fn start_memory_actor(
                         let entries = store.list_recent(limit).unwrap_or_default();
                         MemoryResponse::List(entries)
                     }
-                    MemoryRequest::Search { query_text, top_k } => {
-                        let vec = match embedder.embed_one(&query_text) {
-                            Ok(v) => v,
+                    MemoryRequest::Search { query_text, top_k, filter } => {
+                        let filter_ref = filter.as_ref();
+                        let contents = match embedder.embed_one(&query_text) {
+                            Ok(vec) => {
+                                let entries = store.search_by_embedding(&vec, top_k, filter_ref).unwrap_or_default();
+                                entries
+                                    .into_iter()
+                                    .map(|e| (e.id.to_string(), e.content))
+                                    .collect::<Vec<(String, String)>>()
+                            }
                             Err(_) => {
-                                let _ = resp_tx.send(MemoryResponse::Search(Vec::new()));
-                                continue;
+                                store.search_by_keywords(&query_text, top_k, filter_ref).unwrap_or_default()
                             }
                         };
-                        let entries = store.search_by_embedding(&vec, top_k).unwrap_or_default();
-                        let contents: Vec<(String, String)> = entries
-                            .into_iter()
-                            .map(|e| (e.id.to_string(), e.content))
-                            .collect();
                         MemoryResponse::Search(contents)
                     }
-                    MemoryRequest::Promote { content, source } => {
-                        // Skip if an identical fact is already stored (dedup).
+                    MemoryRequest::Promote { content, source, entity_id, process_id, session_id } => {
                         let already_exists = store.content_exists(&content).unwrap_or(false);
                         if already_exists {
                             tracing::debug!(content = %content.chars().take(60).collect::<String>(), "Skipping duplicate long-term memory entry");
@@ -191,7 +213,16 @@ pub fn start_memory_actor(
                                 .map_err(|e| e.to_string())
                                 .and_then(|vec| {
                                     let bytes = embedding_to_bytes(&vec);
-                                    store.insert(&content, &bytes, &source).map_err(|e| e.to_string())?;
+                                    store
+                                        .insert_with_attribution(
+                                            &content,
+                                            &bytes,
+                                            &source,
+                                            entity_id.as_deref(),
+                                            process_id.as_deref(),
+                                            session_id.as_deref(),
+                                        )
+                                        .map_err(|e| e.to_string())?;
                                     Ok(())
                                 });
                             MemoryResponse::Promote(result)
