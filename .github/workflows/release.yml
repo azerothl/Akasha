@@ -191,22 +191,36 @@ jobs:
           VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
         run: |
           set -e
-          mkdir -p release
+          RELEASE_DIR="$(pwd)/release"
+          mkdir -p "$RELEASE_DIR"
 
-          for dir in artifacts/akasha-*; do
+          # download-artifact@v4 may place artifacts in artifacts/ or artifacts/artifact/ (see actions/download-artifact#356)
+          ARTIFACTS_ROOT=artifacts
+          if [ -d "artifacts/artifact" ] && [ -n "$(ls -A artifacts/artifact 2>/dev/null)" ]; then
+            ARTIFACTS_ROOT=artifacts/artifact
+          fi
+          echo "Using artifacts root: $ARTIFACTS_ROOT"
+          ls -la "$ARTIFACTS_ROOT" || true
+          ARTIFACT_COUNT=$(find "$ARTIFACTS_ROOT" -maxdepth 1 -type d -name 'akasha-*' 2>/dev/null | wc -l)
+          if [ "$ARTIFACT_COUNT" -eq 0 ]; then
+            echo "::error::No artifact directories (akasha-*) found under $ARTIFACTS_ROOT. Ensure build and build-tauri jobs completed and uploaded artifacts."
+            exit 1
+          fi
+
+          for dir in "$ARTIFACTS_ROOT"/akasha-*; do
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
-            (cd "$dir" && zip -r "../../release/${name}.zip" .)
+            (cd "$dir" && zip -r "$RELEASE_DIR/${name}.zip" .)
           done
 
-          for dir in artifacts/akasha-ui-*; do
+          for dir in "$ARTIFACTS_ROOT"/akasha-ui-*; do
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
-            (cd "$dir" && zip -r "../../release/${name}.zip" .)
+            (cd "$dir" && zip -r "$RELEASE_DIR/${name}.zip" .)
           done
 
           # Full installer zips: CLI + setup scripts + UI bundle per OS
-          for cli_dir in artifacts/akasha-windows-x86_64 artifacts/akasha-linux-x86_64 artifacts/akasha-macos-x86_64 artifacts/akasha-macos-aarch64; do
+          for cli_dir in "$ARTIFACTS_ROOT"/akasha-windows-x86_64 "$ARTIFACTS_ROOT"/akasha-linux-x86_64 "$ARTIFACTS_ROOT"/akasha-macos-x86_64 "$ARTIFACTS_ROOT"/akasha-macos-aarch64; do
             [ -d "$cli_dir" ] || continue
             base=$(basename "$cli_dir")
             suffix=${base#akasha-}
@@ -217,24 +231,38 @@ jobs:
               macos-*)        ui_name=akasha-ui-macos ;;
             esac
             full_name="akasha-full-${suffix}"
-            mkdir -p "release/${full_name}"
-            cp -r "$cli_dir"/* "release/${full_name}/"
-            if [ -d "artifacts/${ui_name}" ]; then
-              mkdir -p "release/${full_name}/ui"
-              cp -r "artifacts/${ui_name}"/* "release/${full_name}/ui/"
+            mkdir -p "$RELEASE_DIR/${full_name}"
+            cp -r "$cli_dir"/* "$RELEASE_DIR/${full_name}/"
+            if [ -d "$ARTIFACTS_ROOT/${ui_name}" ]; then
+              mkdir -p "$RELEASE_DIR/${full_name}/ui"
+              cp -r "$ARTIFACTS_ROOT/${ui_name}"/* "$RELEASE_DIR/${full_name}/ui/"
             fi
-            (cd "release/${full_name}" && zip -r "../${full_name}.zip" .)
-            rm -rf "release/${full_name}"
+            (cd "$RELEASE_DIR/${full_name}" && zip -r "$RELEASE_DIR/${full_name}.zip" .)
+            rm -rf "$RELEASE_DIR/${full_name}"
           done
 
+          echo "Contents of release/ after zipping:"
+          ls -la "$RELEASE_DIR/" || true
+
           shopt -s nullglob
-          RELEASE_FILES=(release/*.zip)
+          RELEASE_FILES=("$RELEASE_DIR"/*.zip)
           if [ ${#RELEASE_FILES[@]} -eq 0 ]; then
-            echo "::error::No zip files produced in release/. Check artifact downloads."
+            echo "::error::No zip files produced in release/. Check that build and build-tauri jobs uploaded artifacts and that artifact paths match (see ARTIFACTS_ROOT=$ARTIFACTS_ROOT)."
             exit 1
           fi
 
           git fetch --tags
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "Tag $VERSION already exists locally/remote."
+          else
+            echo "::error::Tag $VERSION does not exist. Create the tag first (e.g. git tag $VERSION && git push origin $VERSION), or use a new version."
+            exit 1
+          fi
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "::error::Release $VERSION already exists. Use a new version (e.g. v0.4.1) or delete the release and tag on GitHub first. Avoid force-pushing tags (would clobber existing tag)."
+            exit 1
+          fi
+
           PREV_TAG=$(git tag -l 'v*' --sort=-v:refname | sed -n '2p')
           NOTES_OPT="--generate-notes"
           [ -n "$PREV_TAG" ] && NOTES_OPT="$NOTES_OPT --notes-start-tag $PREV_TAG"
