@@ -1,4 +1,5 @@
 //! Orchestrator — single entry point: receive (task_id, message), decompose (LLM), delegate to workers, aggregate (Phase E).
+//! Includes satisfaction check: only complete when the aggregated response is satisfactory or agents clearly could not perform the task; otherwise one refinement round.
 
 use akasha_core::{EventEnvelope, EventType};
 use akasha_llm::CompletionRequest;
@@ -11,6 +12,17 @@ use uuid::Uuid;
 
 use super::{EventBus, OrchestratorTask};
 use crate::api::{message_suggests_tool_only_action, ProgressCache, TaskCompletionRegistry};
+
+/// Outcome of evaluating whether the aggregated sub-agent response satisfies the user request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SatisfactionOutcome {
+    /// Response fully or substantially answers the request → complete task.
+    Satisfactory,
+    /// Agents clearly stated they could not perform the task → complete with that answer.
+    CannotDo,
+    /// Response is incomplete or does not directly address the request → run one refinement round.
+    NeedsRefinement,
+}
 
 /// One subtask from decomposition: (agent_type, message for that agent).
 pub type Subtask = (String, String);
@@ -104,6 +116,55 @@ async fn decompose_request(
             tracing::debug!("Decompose LLM timed out, using single conversation step");
             vec![("conversation".to_string(), message.to_string())]
         }
+    }
+}
+
+/// Asks the LLM whether the aggregated response satisfies the user request or agents clearly could not do the task.
+/// On timeout or parse error, returns Satisfactory (current behaviour: complete as-is).
+async fn check_satisfaction(
+    llm_router: &Arc<akasha_llm::LLMRouter>,
+    user_request: &str,
+    aggregated_response: &str,
+) -> SatisfactionOutcome {
+    let prompt = format!(
+        r#"You are an evaluator. Given the user's request and the combined response from sub-agents, output exactly one word:
+
+SATISFACTORY — the response fully or substantially answers the user's request.
+CANNOT_DO — the agents clearly stated they could not perform the task, lack information, or do not have the necessary tools.
+NEEDS_REFINEMENT — the response is incomplete, vague, off-topic, or does not directly address the request (e.g. only a promise to do something, or partial information).
+
+User request: "{}"
+
+Combined response: "{}"
+
+Output only: SATISFACTORY, CANNOT_DO, or NEEDS_REFINEMENT"#,
+        user_request.trim().chars().take(500).collect::<String>(),
+        aggregated_response.trim().chars().take(2000).collect::<String>()
+    );
+    let req = CompletionRequest {
+        prompt,
+        max_tokens: Some(32),
+        temperature: Some(0.0),
+        preferred_task_type: Some("system".to_string()),
+        image_data_urls: None,
+    };
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        llm_router.complete(&req),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => {
+            let t = resp.text.to_uppercase();
+            if t.contains("NEEDS_REFINEMENT") {
+                SatisfactionOutcome::NeedsRefinement
+            } else if t.contains("CANNOT_DO") {
+                SatisfactionOutcome::CannotDo
+            } else {
+                SatisfactionOutcome::Satisfactory
+            }
+        }
+        _ => SatisfactionOutcome::Satisfactory,
     }
 }
 
@@ -427,6 +488,8 @@ async fn process_root_task(
     let store_path_buf = store_path.to_path_buf();
     let steps_count = steps.len();
     let user_message = message.clone();
+    let conversation_tx_aggregator = conversation_tx.clone();
+    let session_id_aggregator = session_id.clone();
     const GENERIC_MESSAGES: &[&str] = &["Done.", "Terminé.", "Échec.", "Annulé."];
     // Per-child timeout: mirrors the delegation handler's 5-minute limit.  Children are processed
     // sequentially by the conversation worker, so total wait is bounded by N × PER_CHILD_TIMEOUT.
@@ -537,13 +600,74 @@ N'ajoute aucune information qui ne figure pas dans les réponses des agents ci-d
                 }
             }
         };
+        // Satisfaction check: only complete when response is satisfactory or agents clearly could not do the task.
+        let mut final_aggregated = aggregated.clone();
+        let satisfaction = check_satisfaction(&llm_router, &user_message, &aggregated).await;
+        if satisfaction == SatisfactionOutcome::NeedsRefinement {
+            // One refinement round: ask a single conversation agent to produce a complete answer or clearly state what is missing.
+            let refinement_prompt = format!(
+                r#"Demande initiale de l'utilisateur : « {} »
+
+Réponses actuelles des sous-agents (incomplètes ou insuffisantes) :
+
+{}
+
+Tu dois soit : (1) produire une réponse complète et directe à la demande de l'utilisateur en t'appuyant sur les éléments ci-dessus, soit (2) indiquer clairement que tu ne peux pas réaliser la tâche et expliquer pourquoi (information manquante, outil indisponible, etc.). Ne te contente pas de promettre de faire quelque chose — réponds ou dis clairement que tu ne peux pas."#,
+                user_message.trim(),
+                aggregated.trim()
+            );
+            let refinement_child_id = Uuid::new_v4();
+            let refinement_task = Task {
+                id: refinement_child_id,
+                parent_task_id: Some(root_task_id),
+                status: TaskStatus::Pending,
+                assigned_agent: "conversation".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                initial_message: Some(
+                    refinement_prompt
+                        .chars()
+                        .take(500)
+                        .chain(std::iter::once('…'))
+                        .collect::<String>(),
+                ),
+            };
+            if store.insert(&refinement_task).is_ok() {
+                let notify_refinement = Arc::new(tokio::sync::Notify::new());
+                task_completion.write().await.insert(refinement_child_id, notify_refinement.clone());
+                let _ = conversation_tx_aggregator
+                    .send(OrchestratorTask {
+                        task_id: refinement_child_id,
+                        message: refinement_prompt,
+                        session_id: session_id_aggregator.clone(),
+                        image_data_urls: None,
+                    })
+                    .await;
+                if tokio::time::timeout(PER_CHILD_TIMEOUT, notify_refinement.notified())
+                    .await
+                    .is_ok()
+                {
+                    task_completion.write().await.remove(&refinement_child_id);
+                    let refinement_content = {
+                        let g = progress.read().await;
+                        g.get(&refinement_child_id)
+                            .and_then(|q| q.back().map(|e| e.message.trim().to_string()))
+                            .filter(|s| !s.is_empty() && !GENERIC_MESSAGES.contains(&s.as_str()))
+                    };
+                    if let Some(content) = refinement_content {
+                        final_aggregated = content;
+                    }
+                }
+                let _ = store.update_status(refinement_child_id, TaskStatus::Completed);
+            }
+        }
         let _ = bus.send(
             EventEnvelope::new(
                 EventType::ProgressUpdate,
                 Some(serde_json::json!({
                     "task_id": root_task_id.to_string(),
                     "progress_pct": 100,
-                    "message": aggregated
+                    "message": final_aggregated
                 })),
             )
             .with_correlation(root_task_id),

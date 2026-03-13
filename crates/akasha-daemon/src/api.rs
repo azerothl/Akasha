@@ -2367,6 +2367,37 @@ Réponse en français, factuelle.\n\n{}",
     }
 }
 
+/// Returns true if the text looks like a placeholder / promise ("I'll do it", "one second") rather than an actual answer.
+/// Used after tool calls to avoid completing the task with "Je vais récupérer… Une seconde." instead of the real result.
+fn looks_like_placeholder_after_tools(text: &str) -> bool {
+    let t = text.trim();
+    if t.len() > 200 {
+        return false;
+    }
+    let lower = t.to_lowercase();
+    let placeholder_phrases = [
+        "une seconde",
+        "one second",
+        "one moment",
+        "un instant",
+        "je vais ",
+        "i'll ",
+        "i will ",
+        "let me fetch",
+        "let me get",
+        "let me check",
+        "let me find",
+        "je vais récupérer",
+        "je vais chercher",
+        "je vais consulter",
+        "génération",
+        "récupération",
+        "attendez",
+        "wait ",
+    ];
+    placeholder_phrases.iter().any(|p| lower.contains(p))
+}
+
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
 /// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
 pub(crate) async fn run_message_via_llm(
@@ -2692,6 +2723,8 @@ pub(crate) async fn run_message_via_llm(
     const MAX_TOOL_ROUNDS: u32 = 3;
     let mut round = 0u32;
     let mut tool_loop_history: Vec<(String, String)> = Vec::new();
+    let mut last_tool_results_blob: Option<String> = None;
+    let mut force_synthesis_attempted = false;
     let mut last_captured_image_base64: Option<String> = None;
 
     let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
@@ -3164,6 +3197,7 @@ pub(crate) async fn run_message_via_llm(
                 tool_results.push(res);
             }
             let results_blob = tool_results.join("\n");
+            last_tool_results_blob = Some(results_blob.clone());
             current_prompt = format!("{}\n\nTool results:\n{}\n\nProvide your final answer to the user (no more TOOL: lines).", response, results_blob);
             if round >= MAX_TOOL_ROUNDS {
                 let response_for_user = response
@@ -3220,6 +3254,19 @@ pub(crate) async fn run_message_via_llm(
             .join("\n")
             .trim()
             .to_string();
+        // If we already ran tools but the model returned a placeholder ("Je vais… Une seconde."), force one more round to get the actual answer.
+        if !tool_loop_history.is_empty()
+            && last_tool_results_blob.as_ref().map_or(false, |b| !b.is_empty())
+            && looks_like_placeholder_after_tools(&response_for_user)
+            && !force_synthesis_attempted
+        {
+            force_synthesis_attempted = true;
+            current_prompt = format!(
+                "Tool results:\n{}\n\nThe user is waiting for the actual answer. Your previous message was only a placeholder. Based on the tool results above, write ONLY the final answer now (e.g. weather summary, search result). Do not say you will do it — do it. No TOOL: lines.",
+                last_tool_results_blob.as_deref().unwrap_or("")
+            );
+            continue;
+        }
         let image_md = last_captured_image_base64.as_ref()
             .filter(|b| !b.is_empty())
             .map(|b| {
