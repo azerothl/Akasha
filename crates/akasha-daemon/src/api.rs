@@ -2132,8 +2132,12 @@ async fn execute_tool_call(
             if prompt.is_empty() {
                 (false, "[generate_image] usage: generate_image <prompt> [size]".to_string(), None)
             } else {
-                // Spec 42: call image API (e.g. OpenAI Images); for now stub — returns message asking to configure.
-                (false, "[generate_image] Génération d'image non configurée : configurer image_generation (provider openai, api_key dans vault) — spec 42_image_generation.md.".to_string(), None)
+                let size = args.get(1).map(String::as_str).filter(|s| !s.is_empty());
+                let data_dir = store_path.and_then(|p| p.parent()).unwrap_or_else(|| Path::new("."));
+                match crate::image_generation::generate_image_impl(data_dir, prompt, size).await {
+                    Ok((msg, data_url)) => (true, msg, Some(data_url)),
+                    Err(e) => (false, e, None),
+                }
             }
         }
         _ => {
@@ -2614,6 +2618,7 @@ pub(crate) async fn run_message_via_llm(
     const MAX_TOOL_ROUNDS: u32 = 3;
     let mut round = 0u32;
     let mut tool_loop_history: Vec<(String, String)> = Vec::new();
+    let mut last_captured_image_base64: Option<String> = None;
 
     let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
         .ok()
@@ -2776,7 +2781,6 @@ pub(crate) async fn run_message_via_llm(
         if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), tool_calls) {
             round += 1;
             let mut tool_results = Vec::new();
-            let mut last_captured_image_base64: Option<String> = None;
             for (name, args) in &calls {
                 // Phase D: resolve skill name to tool_ref (spec 33)
                 let actual_tool = match &skill_registry {
@@ -3084,6 +3088,8 @@ pub(crate) async fn run_message_via_llm(
                     .to_string();
                 let limit_msg = if tool_results.iter().any(|r| r.contains("device_invoke") && (r.contains("timeout") || r.contains("refused"))) {
                     "L'accès à l'appareil (caméra/micro) a expiré ou a été refusé. Vous pouvez réessayer en renvoyant votre demande."
+                } else if tool_results.iter().any(|r| r.contains("generate_image") && r.contains("générée")) {
+                    "Image générée."
                 } else if tool_results.iter().any(|r| r.contains("device_invoke") && r.contains("success")) {
                     "Photo reçue."
                 } else {
@@ -3091,7 +3097,13 @@ pub(crate) async fn run_message_via_llm(
                 };
                 let image_md = last_captured_image_base64.as_ref()
                     .filter(|b| !b.is_empty())
-                    .map(|b| format!("\n\n![Photo capturée](data:image/jpeg;base64,{})", b))
+                    .map(|b| {
+                        if b.starts_with("data:") {
+                            format!("\n\n![Image générée]({})", b)
+                        } else {
+                            format!("\n\n![Photo capturée](data:image/jpeg;base64,{})", b)
+                        }
+                    })
                     .unwrap_or_default();
                 reply_text = if response_for_user.is_empty() {
                     format!("{}{}", limit_msg, image_md)
@@ -3110,7 +3122,21 @@ pub(crate) async fn run_message_via_llm(
             .join("\n")
             .trim()
             .to_string();
-        reply_text = if response_for_user.is_empty() { response } else { response_for_user };
+        let image_md = last_captured_image_base64.as_ref()
+            .filter(|b| !b.is_empty())
+            .map(|b| {
+                if b.starts_with("data:") {
+                    format!("\n\n![Image générée]({})", b)
+                } else {
+                    format!("\n\n![Photo capturée](data:image/jpeg;base64,{})", b)
+                }
+            })
+            .unwrap_or_default();
+        reply_text = if response_for_user.is_empty() {
+            format!("{}{}", response, image_md)
+        } else {
+            format!("{}{}", response_for_user, image_md)
+        };
         break;
     }
 
