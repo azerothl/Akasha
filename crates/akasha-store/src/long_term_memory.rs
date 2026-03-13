@@ -17,8 +17,8 @@ pub struct MemoryEntry {
     pub source: String, // e.g. "compaction", "promote", "explicit"
 }
 
-/// Cosine similarity between two unit-normalized vectors (or any vectors; result in [-1, 1]).
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+/// Cosine similarity between two vectors (result in [-1, 1]). Public for hybrid rerank in daemon.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
@@ -31,7 +31,8 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a * norm_b)
 }
 
-fn bytes_to_f32_slice(b: &[u8]) -> Vec<f32> {
+/// Decode embedding bytes (little-endian f32) to vector. Public for hybrid rerank in daemon.
+pub fn decode_embedding_bytes(b: &[u8]) -> Vec<f32> {
     let n = b.len() / 4;
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -75,7 +76,7 @@ impl LongTermStore {
             let exists: bool = stmt.exists(rusqlite::params![name])?;
             Ok(exists)
         };
-        for col in ["entity_id", "process_id", "session_id"] {
+        for col in ["entity_id", "process_id", "session_id", "title", "tags"] {
             if !has_col(col)? {
                 conn.execute(&format!("ALTER TABLE memory_entries ADD COLUMN {} TEXT", col), [])?;
             }
@@ -89,10 +90,10 @@ impl LongTermStore {
         embedding: &[u8],
         source: &str,
     ) -> anyhow::Result<Uuid> {
-        self.insert_with_attribution(content, embedding, source, None, None, None)
+        self.insert_with_attribution(content, embedding, source, None, None, None, None, None)
     }
 
-    /// Insert with optional attribution (entity_id, process_id, session_id).
+    /// Insert with optional attribution and metadata (plan long terme 4: title, tags).
     pub fn insert_with_attribution(
         &self,
         content: &str,
@@ -101,13 +102,15 @@ impl LongTermStore {
         entity_id: Option<&str>,
         process_id: Option<&str>,
         session_id: Option<&str>,
+        title: Option<&str>,
+        tags: Option<&str>,
     ) -> anyhow::Result<Uuid> {
         let id = Uuid::new_v4();
         let now = Utc::now();
         self.conn.execute(
             r#"
-            INSERT INTO memory_entries (id, content, embedding, created_at, source, entity_id, process_id, session_id)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            INSERT INTO memory_entries (id, content, embedding, created_at, source, entity_id, process_id, session_id, title, tags)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             "#,
             rusqlite::params![
                 id.to_string(),
@@ -118,6 +121,8 @@ impl LongTermStore {
                 entity_id,
                 process_id,
                 session_id,
+                title,
+                tags,
             ],
         )?;
         Ok(id)
@@ -127,6 +132,71 @@ impl LongTermStore {
     pub fn delete_by_id(&self, id: Uuid) -> anyhow::Result<bool> {
         let n = self.conn.execute("DELETE FROM memory_entries WHERE id = ?1", rusqlite::params![id.to_string()])?;
         Ok(n > 0)
+    }
+
+    /// Delete entries matching a keyword query (same logic as search_by_keywords). Returns number of deleted rows (plan moyen terme 9).
+    pub fn delete_by_keywords(&self, query: &str) -> anyhow::Result<u64> {
+        let words: Vec<String> = query
+            .split_whitespace()
+            .map(|s| s.trim())
+            .filter(|s| s.len() >= 2)
+            .map(|s| {
+                s.replace('%', "\\%")
+                    .replace('_', "\\_")
+                    .replace('\\', "\\\\")
+            })
+            .collect();
+        if words.is_empty() {
+            return Ok(0);
+        }
+        let mut sql = String::from("DELETE FROM memory_entries WHERE ");
+        for (i, _) in words.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(" AND ");
+            }
+            sql.push_str("content LIKE ? ESCAPE '\\'");
+        }
+        let patterns: Vec<String> = words.iter().map(|w| format!("%{}%", w)).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = patterns.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let n = self.conn.execute(&sql, param_refs.as_slice())?;
+        Ok(n as u64)
+    }
+
+    /// Return (entry_count, approximate_size_bytes) for the memory DB (plan moyen terme 9).
+    pub fn stats(&self) -> anyhow::Result<(u64, u64)> {
+        let count: u64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM memory_entries",
+            [],
+            |row| row.get(0),
+        )?;
+        let size: Option<i64> = self.conn.query_row(
+            "SELECT SUM(LENGTH(content) + LENGTH(embedding) + LENGTH(created_at) + LENGTH(source)) FROM memory_entries",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok((count, size.unwrap_or(0) as u64))
+    }
+
+    /// Delete entries older than retention_days. If protect_sources is Some(list), never delete rows with source in list. Returns deleted count (plan moyen terme 9).
+    pub fn gc(&self, retention_days: u32, protect_sources: Option<&[String]>) -> anyhow::Result<u64> {
+        let cutoff = Utc::now() - chrono::Duration::days(retention_days as i64);
+        let cutoff_s = cutoff.to_rfc3339();
+        let n = if let Some(protect) = protect_sources {
+            if protect.is_empty() {
+                self.conn.execute("DELETE FROM memory_entries WHERE created_at < ?1", rusqlite::params![cutoff_s])?
+            } else {
+                let placeholders = protect.iter().enumerate().map(|(i, _)| format!("?{}", i + 2)).collect::<Vec<_>>().join(", ");
+                let sql = format!("DELETE FROM memory_entries WHERE created_at < ?1 AND source NOT IN ({})", placeholders);
+                let mut params: Vec<&dyn rusqlite::ToSql> = vec![&cutoff_s];
+                for s in protect.iter() {
+                    params.push(s);
+                }
+                self.conn.execute(&sql, params.as_slice())?
+            }
+        } else {
+            self.conn.execute("DELETE FROM memory_entries WHERE created_at < ?1", rusqlite::params![cutoff_s])?
+        };
+        Ok(n as u64)
     }
 
     /// Return true if an entry with the exact same content already exists.
@@ -220,6 +290,27 @@ impl LongTermStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Load (id, content, embedding) for given ids (for hybrid rerank, plan moyen terme 2).
+    pub fn get_entries_with_embeddings_by_ids(
+        &self,
+        ids: &[String],
+    ) -> anyhow::Result<Vec<(String, String, Vec<u8>)>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT id, content, embedding FROM memory_entries WHERE id IN ({})",
+            placeholders
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Search by keywords (lexical fallback when embedder is unavailable).
     /// Optionally filter by entity_id/process_id/session_id.
     pub fn search_by_keywords(
@@ -293,7 +384,7 @@ impl LongTermStore {
         let mut scored: Vec<(f32, (String, String, Vec<u8>, String, String))> = rows
             .into_iter()
             .map(|row| {
-                let vec = bytes_to_f32_slice(&row.2);
+                let vec = decode_embedding_bytes(&row.2);
                 let sim = cosine_similarity(query_embedding, &vec);
                 (sim, row)
             })

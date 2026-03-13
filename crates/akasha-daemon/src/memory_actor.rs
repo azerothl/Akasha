@@ -19,6 +19,15 @@ pub enum MemoryRequest {
     },
     List { limit: usize },
     Delete { id: String },
+    /// Forget by keyword query (plan moyen terme 9).
+    ForgetByQuery { query: String },
+    /// Stats: (entry_count, size_bytes).
+    Stats,
+    /// GC: retention_days, protect_sources. Returns deleted count.
+    Gc {
+        retention_days: u32,
+        protect_sources: Option<Vec<String>>,
+    },
     HasDailySummary { date: String },
 }
 
@@ -27,6 +36,9 @@ pub enum MemoryResponse {
     Promote(Result<(), String>),
     List(Vec<(String, String, String, String)>), // (id, content, created_at, source)
     Delete(Result<(), String>),
+    ForgetByQuery(Result<u64, String>),
+    Stats(Result<(u64, u64), String>),
+    Gc(Result<u64, String>),
     HasDailySummary(bool),
 }
 
@@ -149,6 +161,63 @@ impl LongTermMemoryClient {
             false
         }
     }
+
+    /// Forget (delete) entries matching a keyword query. Returns number deleted or Err (plan moyen terme 9).
+    pub fn forget_by_query(&self, query: String) -> Result<u64, String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::ForgetByQuery { query }, resp_tx)).is_err() {
+                return Err("memory actor disconnected".into());
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::ForgetByQuery(r)) => r,
+                _ => Err("no response".into()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = query;
+            Err("long-term memory disabled".into())
+        }
+    }
+
+    /// Stats: (entry_count, approximate size bytes). Err if disabled (plan moyen terme 9).
+    pub fn stats(&self) -> Result<(u64, u64), String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::Stats, resp_tx)).is_err() {
+                return Err("memory actor disconnected".into());
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::Stats(r)) => r,
+                _ => Err("no response".into()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        Err("long-term memory disabled".into())
+    }
+
+    /// GC: delete entries older than retention_days; protect_sources are never deleted. Returns deleted count (plan moyen terme 9).
+    pub fn gc(&self, retention_days: u32, protect_sources: Option<Vec<String>>) -> Result<u64, String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::Gc { retention_days, protect_sources }, resp_tx)).is_err() {
+                return Err("memory actor disconnected".into());
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::Gc(r)) => r,
+                _ => Err("no response".into()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = (retention_days, protect_sources);
+            Err("long-term memory disabled".into())
+        }
+    }
 }
 
 /// Start the long-term memory actor on a dedicated thread. Returns a client and the join handle.
@@ -163,7 +232,7 @@ pub fn start_memory_actor(
         use tokio::sync::oneshot;
         use uuid::Uuid;
         use akasha_embeddings::{embedding_to_bytes, Embedder};
-        use akasha_store::LongTermStore;
+        use akasha_store::{cosine_similarity, decode_embedding_bytes, LongTermStore};
 
         let (tx, rx) = mpsc::channel::<(MemoryRequest, oneshot::Sender<MemoryResponse>)>();
         let memory_db_path = _memory_db_path.to_path_buf();
@@ -188,13 +257,30 @@ pub fn start_memory_actor(
                     }
                     MemoryRequest::Search { query_text, top_k, filter } => {
                         let filter_ref = filter.as_ref();
+                        const HYBRID_CANDIDATES: usize = 50;
                         let contents = match embedder.embed_one(&query_text) {
-                            Ok(vec) => {
-                                let entries = store.search_by_embedding(&vec, top_k, filter_ref).unwrap_or_default();
-                                entries
-                                    .into_iter()
-                                    .map(|e| (e.id.to_string(), e.content))
-                                    .collect::<Vec<(String, String)>>()
+                            Ok(query_vec) => {
+                                // Hybrid (plan moyen terme 2): keyword candidates then rerank by embedding.
+                                let keyword_candidates = store
+                                    .search_by_keywords(&query_text, HYBRID_CANDIDATES, filter_ref)
+                                    .unwrap_or_default();
+                                if keyword_candidates.is_empty() {
+                                    let entries = store.search_by_embedding(&query_vec, top_k, filter_ref).unwrap_or_default();
+                                    entries.into_iter().map(|e| (e.id.to_string(), e.content)).collect()
+                                } else {
+                                    let ids: Vec<String> = keyword_candidates.iter().map(|(id, _)| id.clone()).collect();
+                                    let with_emb = store.get_entries_with_embeddings_by_ids(&ids).unwrap_or_default();
+                                    let mut scored: Vec<(f32, (String, String))> = with_emb
+                                        .into_iter()
+                                        .map(|(id, content, emb_bytes)| {
+                                            let emb = decode_embedding_bytes(&emb_bytes);
+                                            let sim = cosine_similarity(&query_vec, &emb);
+                                            (sim, (id, content))
+                                        })
+                                        .collect();
+                                    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                                    scored.into_iter().take(top_k).map(|(_, pair)| pair).collect()
+                                }
                             }
                             Err(_) => {
                                 store.search_by_keywords(&query_text, top_k, filter_ref).unwrap_or_default()
@@ -221,6 +307,8 @@ pub fn start_memory_actor(
                                             entity_id.as_deref(),
                                             process_id.as_deref(),
                                             session_id.as_deref(),
+                                            None,
+                                            None,
                                         )
                                         .map_err(|e| e.to_string())?;
                                     Ok(())
@@ -234,6 +322,20 @@ pub fn start_memory_actor(
                             .and_then(|uuid| store.delete_by_id(uuid).map_err(|e| e.to_string()))
                             .and_then(|deleted| if deleted { Ok(()) } else { Err("not found".to_string()) });
                         MemoryResponse::Delete(result)
+                    }
+                    MemoryRequest::ForgetByQuery { query } => {
+                        let result = store.delete_by_keywords(&query).map_err(|e| e.to_string());
+                        MemoryResponse::ForgetByQuery(result)
+                    }
+                    MemoryRequest::Stats => {
+                        let result = store.stats().map_err(|e| e.to_string());
+                        MemoryResponse::Stats(result)
+                    }
+                    MemoryRequest::Gc { retention_days, protect_sources } => {
+                        let result = store
+                            .gc(retention_days, protect_sources.as_deref())
+                            .map_err(|e| e.to_string());
+                        MemoryResponse::Gc(result)
                     }
                     MemoryRequest::HasDailySummary { date } => {
                         let exists = store.has_daily_summary_for_date(&date).unwrap_or(false);

@@ -556,6 +556,9 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
     ("memory_store", "memory_store <content> <source> — stocker/promouvoir un contenu en mémoire long terme"),
     ("memory_delete", "memory_delete <id> — supprimer une entrée de la mémoire long terme par son id (UUID)"),
+    ("memory_forget", "memory_forget <query> — supprimer les entrées dont le contenu correspond aux mots-clés (plan moyen terme 9)"),
+    ("memory_stats", "memory_stats — nombre d'entrées et taille approximative de la mémoire long terme"),
+    ("memory_gc", "memory_gc [retention_days] [protect_sources...] — supprimer les entrées plus anciennes que N jours (sources protégées optionnelles, ex. user_fact project)"),
     ("sessions_list", "sessions_list [limit] — lister les tâches/sessions récentes"),
     ("sessions_spawn", "sessions_spawn <message> [session_id] — créer une sous-tâche et la lancer"),
     ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
@@ -1557,6 +1560,53 @@ async fn execute_tool_call(
                 None => (false, "[memory_delete] long-term memory not available".to_string(), None),
             }
         }
+        "memory_forget" => {
+            let query = args.get(0).map(|a| a.as_str()).unwrap_or("").trim();
+            if query.is_empty() {
+                return (false, "[memory_forget] usage: memory_forget <query> (mots-clés)".to_string(), None);
+            }
+            match long_term_client {
+                Some(client) => {
+                    let client = client.clone();
+                    let q = query.to_string();
+                    let out = tokio::task::spawn_blocking(move || client.forget_by_query(q)).await.ok().and_then(|r| r.ok());
+                    match out {
+                        Some(n) => (true, format!("[memory_forget] {} entrée(s) supprimée(s)", n), None),
+                        None => (false, "[memory_forget] failed or long-term memory not available".to_string(), None),
+                    }
+                }
+                None => (false, "[memory_forget] long-term memory not available".to_string(), None),
+            }
+        }
+        "memory_stats" => {
+            match long_term_client {
+                Some(client) => {
+                    let client = client.clone();
+                    let out = tokio::task::spawn_blocking(move || client.stats()).await.ok().and_then(|r| r.ok());
+                    match out {
+                        Some((count, size)) => (true, format!("[memory_stats] {} entrée(s), ~{} octets", count, size), None),
+                        None => (false, "[memory_stats] failed or long-term memory not available".to_string(), None),
+                    }
+                }
+                None => (false, "[memory_stats] long-term memory not available".to_string(), None),
+            }
+        }
+        "memory_gc" => {
+            let retention_days = args.get(0).and_then(|s| s.parse::<u32>().ok()).unwrap_or(90);
+            let protect_sources: Vec<String> = args.iter().skip(1).map(|a| a.as_str().trim().to_string()).filter(|s| !s.is_empty()).collect();
+            let protect = if protect_sources.is_empty() { None } else { Some(protect_sources) };
+            match long_term_client {
+                Some(client) => {
+                    let client = client.clone();
+                    let out = tokio::task::spawn_blocking(move || client.gc(retention_days, protect)).await.ok().and_then(|r| r.ok());
+                    match out {
+                        Some(n) => (true, format!("[memory_gc] {} entrée(s) supprimée(s) (rétention {} j)", n, retention_days), None),
+                        None => (false, "[memory_gc] failed or long-term memory not available".to_string(), None),
+                    }
+                }
+                None => (false, "[memory_gc] long-term memory not available".to_string(), None),
+            }
+        }
         "sessions_list" => {
             let limit = args.get(0).and_then(|s| s.parse::<usize>().ok()).unwrap_or(20).min(50);
             match store_path {
@@ -2390,6 +2440,25 @@ pub(crate) async fn run_message_via_llm(
     let profile_block = agent_profile.format_for_prompt();
     if !profile_block.is_empty() {
         context_prefix.push_str(&profile_block);
+    }
+
+    // Short-term: last 15 messages from this session, cap 2000 chars (plan moyen terme 8, inspired by OpenClaw plugin).
+    if let Some(ref st) = short_term {
+        let turns = st.get_turns(&session_id).await;
+        let last_15: Vec<_> = turns.iter().rev().take(15).cloned().rev().collect();
+        if !last_15.is_empty() {
+            let short_ctx = ShortTermStore::turns_to_context(&last_15);
+            let capped = if short_ctx.chars().count() > 2000 {
+                short_ctx.chars().take(2000).collect::<String>() + "…"
+            } else {
+                short_ctx
+            };
+            if !capped.is_empty() {
+                context_prefix.push_str("[Contexte récent (cette session)]\n");
+                context_prefix.push_str(&capped);
+                context_prefix.push_str("\n\n");
+            }
+        }
     }
 
     // Long-term: retrieve top-k relevant memories by embedding similarity (current message + optional user-identity for first message)
