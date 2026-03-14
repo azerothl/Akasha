@@ -54,4 +54,42 @@ describe("preprocessDataUrlImages", () => {
     expect(withPaths).toContain("</div>");
     expect(withPaths).not.toMatch(/\]\(path:[^)]*%2F%3E%3C%2Fdiv/);
   });
+
+  it("skips (does not inject) a data URL that fails strict validation", () => {
+    // URL contains a quote character — should not be injected as HTML
+    const input = '![img](<data:image/jpeg;base64,">)';
+    const out = preprocessDataUrlImages(input);
+    expect(out).not.toContain("<img");
+    expect(out).not.toContain("<div");
+  });
+
+  it("escapes src URL for HTML attribute", () => {
+    // Even a valid base64 URL should be attr-escaped in src=""
+    const input = "![x](<data:image/png;base64,ABC>)";
+    const out = preprocessDataUrlImages(input);
+    // Basic check: src attribute contains expected data URL
+    expect(out).toContain('src="data:image/png;base64,ABC"');
+  });
+});
+
+describe("preprocessMessagePaths", () => {
+  it("does not convert </tag> closing HTML tags into path links", () => {
+    const input = "text </div> more";
+    const out = preprocessMessagePaths(input);
+    expect(out).toContain("</div>");
+    expect(out).not.toContain("path:");
+  });
+
+  it("does not convert self-closing /> into path links", () => {
+    const input = '<br /> and <img src="x" />';
+    const out = preprocessMessagePaths(input);
+    expect(out).not.toContain("path:");
+  });
+
+  it("converts a Unix path preceded by whitespace", () => {
+    const input = "see /home/user/file.txt for details";
+    const out = preprocessMessagePaths(input);
+    expect(out).toContain("path:");
+    expect(out).toContain("/home/user/file.txt");
+  });
 });

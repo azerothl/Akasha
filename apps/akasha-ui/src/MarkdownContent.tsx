@@ -2,9 +2,31 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { useI18n } from "./useI18n";
 import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
+
+/** Sanitization schema: extends the safe default to allow the div/img elements
+ *  injected by preprocessDataUrlImages, while blocking scripts and other dangerous tags.
+ *  Security note: "data" is allowed for `src` because raw-HTML data:image/ URLs originate
+ *  exclusively from preprocessDataUrlImages, which validates them against a strict
+ *  data:image/<type>;base64,<payload> pattern before injection. Non-image data: URLs
+ *  in <img src> are inert (browsers load them as images, not as webpages or scripts).
+ *  Event handlers (onerror, onclick, etc.) and <script> tags remain blocked by the schema. */
+const sanitizeSchema = {
+  ...defaultSchema,
+  tagNames: [...(defaultSchema.tagNames ?? []), "div"],
+  attributes: {
+    ...defaultSchema.attributes,
+    div: ["className", "class"],
+    img: ["src", "alt", "className", "class", "title", "width", "height"],
+  },
+  protocols: {
+    ...defaultSchema.protocols,
+    src: [...(defaultSchema.protocols?.src ?? ["http", "https"]), "data"],
+  },
+};
 
 export { preprocessMessagePaths } from "./preprocessMessagePaths";
 export { preprocessDataUrlImages } from "./preprocessDataUrlImages";
@@ -32,7 +54,7 @@ export default function MarkdownContent({ children = "", className, onPathClick 
     <div className={className ?? "markdown-rendered"}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
         components={{
           img: ({ src, alt, ...props }) => {
             if (!src || src.trim() === "") return null;

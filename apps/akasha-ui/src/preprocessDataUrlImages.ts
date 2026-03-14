@@ -7,6 +7,11 @@ function escapeHtmlAttr(s: string): string {
     .replace(/>/g, "&gt;");
 }
 
+/** Validates that a data URL is a safe image data URL (data:image/<type>;base64,<payload>). */
+function isValidDataImageUrl(url: string): boolean {
+  return /^data:image\/[a-zA-Z0-9+\-]+(?:;[a-zA-Z0-9\-=]+)*;base64,[A-Za-z0-9+/]+=*$/.test(url);
+}
+
 /**
  * Convert markdown image syntax with data: URLs to raw <img> so they bypass
  * micromark's URI sanitizer (which strips data: and leaves src empty).
@@ -29,8 +34,13 @@ export function preprocessDataUrlImages(text: string): string {
         : result.slice(urlStart);
     const fullMatchStart = altStart !== -1 ? altStart : idx;
     const fullMatchEnd = closeBracket !== -1 ? closeBracket + 2 : result.length;
+    if (!isValidDataImageUrl(url)) {
+      // Skip invalid/unsafe URLs: advance past this marker to avoid infinite loop.
+      result = result.slice(0, idx) + result.slice(idx + marker.length);
+      continue;
+    }
     // Wrap in <div> so the markdown parser recognizes it as an HTML block (inline <img> alone may be escaped).
-    const img = `\n\n<div class="markdown-data-image-wrap"><img src="${url}" alt="${escapeHtmlAttr(alt)}" class="markdown-data-image" /></div>\n\n`;
+    const img = `\n\n<div class="markdown-data-image-wrap"><img src="${escapeHtmlAttr(url)}" alt="${escapeHtmlAttr(alt)}" class="markdown-data-image" /></div>\n\n`;
     result = result.slice(0, fullMatchStart) + img + result.slice(fullMatchEnd);
   }
   return result;
