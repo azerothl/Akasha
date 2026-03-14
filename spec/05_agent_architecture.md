@@ -70,3 +70,14 @@ Prompt de tâche (couche 3) : pour analyste, architecte, frontend, backend, data
 Accès:
 - Limité et scoped
 - Secrets uniquement si explicitement autorisé (ex. VAULT: dans run_command)
+
+---
+
+## 4️⃣ Améliorations (inspirées Deep Agents)
+
+- **Todo list** : outils `write_todos`, `read_todos`, `update_todo` pour que l’agent définisse et suive des étapes ; persistance par tâche (table `task_todos`), événement `TodoListUpdated` pour l’UI.
+- **Structured output** : instruction stricte en fin de réponse (bloc ```json``` avec `status`, `summary`, `files_created`, `issues_found`, optionnel `blocked`) pour les agents production/QA ; parsing via `parse_contract_from_response`.
+- **Interrupt before tool** : configuration `require_approval` dans tools_policy ; pour les outils listés, pause et événements `TaskWaitingUserInput` + `ToolApprovalRequest` ; reprise après approbation/refus (ou `ToolApprovalExpired`).
+- **Skills à la demande** : outils `list_skills` et `read_skill` pour charger le détail d’un skill à la demande au lieu d’injecter tout le corps dans le prompt.
+- **Workspace virtuel** : chemins `workspace:/<path>` pour `read_file`/`write_file` sur un stockage temporaire par tâche (en mémoire) ; utile pour brouillons et gros contextes.
+- **Checkpointer** : en mode Orchestré, persistance du checkpoint (steps, etc.) dans `pipeline_context.checkpoint_json` ; au redémarrage du daemon, les tâches Running avec pipeline sont marquées Failed (interrompues).
