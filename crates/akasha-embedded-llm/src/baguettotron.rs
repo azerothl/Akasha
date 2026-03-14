@@ -202,7 +202,6 @@ where
     generated.push(next_token);
     let mut prev_decoded_len = 0usize;
     let prompt_byte_len = prompt.len();
-    let mut stopped_reason = "max_new";
 
     for _ in 1..max_new {
         let decoded = pipeline
@@ -238,7 +237,6 @@ where
             .map_err(|e| EmbeddedLlmError::Inference(e.to_string()))?;
         let next_token = sample_next_token(&logits, TEMPERATURE, &mut rng)?;
         if next_token == eos_token_id {
-            stopped_reason = "eos";
             break;
         }
         generated.push(next_token);

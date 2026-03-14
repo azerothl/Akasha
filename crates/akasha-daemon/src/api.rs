@@ -2862,7 +2862,6 @@ pub(crate) async fn run_message_via_llm(
         let stream_join = tokio::spawn(async move { router.complete_stream(&request, stream_tx).await });
         let mut accumulated = String::new();
         let mut first_wait = true;
-        let stream_exit_reason: &str;
         let overall_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(llm_timeout_secs);
         loop {
             // Check the overall deadline before waiting for a chunk to avoid spurious zero-duration timeouts.
@@ -2897,12 +2896,8 @@ pub(crate) async fn run_message_via_llm(
                         .with_correlation(task_id),
                     );
                 }
-                Ok(None) => {
-                    stream_exit_reason = "channel_closed";
-                    break;
-                }
+                Ok(None) => break,
                 Err(_) => {
-                    stream_exit_reason = "idle_timeout";
                     tracing::debug!(idle_secs = idle_timeout_secs, "Stream idle timeout, waiting for final response");
                     break;
                 }
