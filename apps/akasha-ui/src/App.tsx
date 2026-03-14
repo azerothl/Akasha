@@ -3151,7 +3151,12 @@ function App() {
                                   setScheduleDetail(null);
                                 }
                                 const cached = getCached<{ schedules: typeof schedules; taskRuns: unknown }>("calendar");
-                                if (cached) setCached("calendar", { ...cached, schedules: schedules.filter((x) => x.id !== s.id) });
+                                if (cached) {
+                                  setCached("calendar", {
+                                    ...cached,
+                                    schedules: cached.schedules.filter((x) => x.id !== s.id),
+                                  });
+                                }
                               } catch {
                                 /* toast or leave list as-is */
                               }
