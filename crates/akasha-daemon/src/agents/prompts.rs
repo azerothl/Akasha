@@ -29,7 +29,7 @@ pub fn build_task_prompt(
         }
     } else if is_production_or_qa_agent(agent_type) {
         out.push_str(
-            "Format de sortie : en fin de réponse, tu peux inclure un bloc JSON (ex. ```json {\"status\": \"done\"|\"blocked\"|\"needs_review\", \"summary\": \"...\", \"files_created\": [], \"issues_found\": []} ```) pour structurer le livrable.\n",
+            "Format de sortie : en fin de réponse, tu DOIS produire un bloc ```json``` valide contenant exactement les champs : status (done | blocked | needs_review), summary (string), files_created (array de chemins), issues_found (array de strings). Optionnel : blocked (objet avec cause, information_missing, impact, workaround_proposal). Aucun autre texte après ce bloc. Exemple : ```json\n{\"status\": \"done\", \"summary\": \"...\", \"files_created\": [], \"issues_found\": []}\n```\n",
         );
     }
     out.push_str("\n---\n\n");
