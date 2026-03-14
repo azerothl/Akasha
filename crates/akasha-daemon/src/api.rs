@@ -3,7 +3,7 @@
 use akasha_core::{EventEnvelope, EventType};
 use akasha_vault::Vault;
 use akasha_llm::CompletionRequest;
-use akasha_store::{Schedule, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore};
+use akasha_store::{parse_todos_from_payload, Schedule, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore, TodoStatus};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use crate::agent_profile::AgentProfile;
 use crate::agents::{EventBus, OrchestratorTask, TaskPriority};
@@ -21,6 +21,13 @@ use tracing::Instrument;
 
 /// In-memory cache for AgentProfile to avoid repeated disk reads (invalidated on POST /api/agent-profile and after profile save in run_message_via_llm).
 pub type AgentProfileCache = Arc<RwLock<Option<AgentProfile>>>;
+
+/// Virtual workspace per task (Deep Agents-style). Paths prefixed with "workspace:/" or "workspace:" are read/written here instead of disk.
+pub type TaskWorkspaceStore = Arc<RwLock<std::collections::HashMap<Uuid, std::collections::HashMap<String, String>>>>;
+
+pub fn new_task_workspace_store() -> TaskWorkspaceStore {
+    Arc::new(RwLock::new(std::collections::HashMap::new()))
+}
 
 pub fn new_agent_profile_cache() -> AgentProfileCache {
     Arc::new(RwLock::new(None))
@@ -538,8 +545,8 @@ pub fn json_response(status: &str, body: &str) -> String {
 /// Format: une ligne par outil "nom — usage".
 /// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
-    ("read_file", "read_file <path> — lire le contenu d'un fichier texte"),
-    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier. À UTILISER dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier (ex. « enregistre dans … », « sauvegarde … ») ; ne jamais refuser ni proposer de copier-coller. Path Windows (C:\\...) ou Unix."),
+    ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
+    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier. Path réel (Windows/Unix) ou workspace:/<path> pour le workspace virtuel (temporaire). À UTILISER dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier ; ne jamais refuser ni proposer de copier-coller."),
     ("search_files", "search_files <dir> <pattern> — chercher des fichiers (glob) sous un répertoire"),
     ("grep_content", "grep_content <dir> <pattern> [file_glob] — chercher le motif dans le contenu des fichiers (ex. grep_content . \"fn \" \"*.rs\")"),
     ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
@@ -574,6 +581,11 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("device_discover", "device_discover [interface] — lister les appareils accessibles (optionnel: local_media, system, network, usb). Filtre par politique allowed_device_interfaces / blocked_device_interfaces."),
     ("device_invoke", "device_invoke <interface> <device_id> <action> [params] — exécuter une action sur un appareil. local_media: caméra (device_id camera, action capture), micro (device_id microphone, action record). Appelle directement ; une fenêtre d'autorisation s'affichera dans l'UI. Ne pas demander à l'utilisateur d'« ouvrir l'UI » — utiliser l'outil. synthetic_input: device_id keyboard|mouse, action shortcut|key|type|mouse_move|mouse_click|..."),
     ("generate_image", "generate_image <prompt> [size] — générer une image par IA (ex. OpenAI DALL·E). Prompt en texte libre ; size optionnel (1024x1024, 512x512). Retourne l'image en data URL dans la réponse (spec 42)."),
+    ("write_todos", "write_todos <payload> — définir la liste d'étapes (todo) de la tâche. Payload: JSON array [{\"title\":\"...\", \"status\":\"pending\"|\"done\"|\"cancelled\"}] ou une ligne par étape. Remplace toute la liste. Utiliser pour décomposer une tâche complexe et suivre la progression."),
+    ("read_todos", "read_todos — retourne la liste des étapes (todos) de la tâche courante."),
+    ("update_todo", "update_todo <index> <status> — marquer l'étape à l'index (1-based) comme status (done, cancelled)."),
+    ("list_skills", "list_skills — retourne la liste des skills installés (nom et description). Utiliser avant read_skill pour charger le détail d'un skill."),
+    ("read_skill", "read_skill <name> — charge le contenu (instructions, usage) du skill. À utiliser quand tu as besoin du détail d'un skill avant de l'invoquer par son nom."),
 ];
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -582,7 +594,7 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
             AVAILABLE_TOOLS
                 .iter()
                 .filter(move |(name, _)| {
-                    *name == "ask_user" || *name == "install_skill" || *name == "uninstall_skill" || allowed.iter().any(|a| a == *name)
+                    *name == "ask_user" || *name == "install_skill" || *name == "uninstall_skill" || *name == "write_todos" || *name == "read_todos" || *name == "update_todo" || *name == "list_skills" || *name == "read_skill" || allowed.iter().any(|a| a == *name)
                 }),
         )
     } else {
@@ -1417,6 +1429,7 @@ async fn execute_tool_call(
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     message_webhook_url: Option<&str>,
     device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
+    workspace_store: Option<&TaskWorkspaceStore>,
 ) -> (bool, String, Option<String>) {
     use std::path::Path;
     if !executor.policy.can_use_tool(tool_name) {
@@ -1425,6 +1438,29 @@ async fn execute_tool_call(
     let path_arg = |i: usize| args.get(i).map(|s| Path::new(s.as_str()));
     let result = match tool_name {
         "read_file" => {
+            if let Some(path_str) = args.get(0) {
+                let path_str = path_str.as_str();
+                if path_str.starts_with("workspace:/") || path_str.starts_with("workspace:") {
+                    match workspace_store {
+                        Some(ws) => {
+                            let key = path_str
+                                .trim_start_matches("workspace:/")
+                                .trim_start_matches("workspace:")
+                                .trim_start_matches('/')
+                                .to_string();
+                            let guard = ws.read().await;
+                            if let Some(map) = guard.get(&task_id) {
+                                if let Some(content) = map.get(&key) {
+                                    let preview = if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] };
+                                    return (true, format!("[read_file workspace:{}] {} chars: {}", key, content.len(), preview), None);
+                                }
+                            }
+                            return (false, format!("[read_file workspace] path not found: {}", key), None);
+                        }
+                        None => return (false, "[read_file] workspace paths require a workspace store.".to_string(), None),
+                    }
+                }
+            }
             if let Some(p) = path_arg(0) {
                 match executor.read_file(p).await {
                     Ok((content, res)) => {
@@ -1921,6 +1957,26 @@ async fn execute_tool_call(
             }
         }
         "write_file" => {
+            let path_str_opt = args.get(0).map(String::as_str);
+            if let Some(path_str) = path_str_opt {
+                if path_str.starts_with("workspace:/") || path_str.starts_with("workspace:") {
+                    match workspace_store {
+                        Some(ws) => {
+                            let key = path_str
+                                .trim_start_matches("workspace:/")
+                                .trim_start_matches("workspace:")
+                                .trim_start_matches('/')
+                                .to_string();
+                            let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
+                            let mut guard = ws.write().await;
+                            let per_task = guard.entry(task_id).or_default();
+                            per_task.insert(key.clone(), content);
+                            return (true, format!("[write_file workspace:{}] saved.", key), None);
+                        }
+                        None => return (false, "[write_file] workspace paths require a workspace store.".to_string(), None),
+                    }
+                }
+            }
             let path = match path_arg(0) {
                 Some(p) => p,
                 None => return (false, "[write_file] usage: write_file <path> <content>".to_string(), None),
@@ -2463,6 +2519,7 @@ pub(crate) async fn run_message_via_llm(
     agent_profile_cache: Option<AgentProfileCache>,
     task_usage_store: Option<std::sync::Arc<TaskUsageStore>>,
     device_bridge: Option<std::sync::Arc<crate::device_bridge::DeviceBridge>>,
+    workspace_store: Option<TaskWorkspaceStore>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -2538,7 +2595,7 @@ pub(crate) async fn run_message_via_llm(
                     let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
                     let part = format!(" ; Skills (use skill name as tool): {}", skills_desc.join(", "));
                     let rule = format!(
-                        " INSTALLED SKILLS RULE: The following skills ARE installed and available: {}. Do NOT say they are not installed or suggest install_skill for them. For balance/solde/wallet/Base requests, if \"bankr\" is in the list, reply ONLY with TOOL: bankr <args> (e.g. TOOL: bankr check balance on Base). Use the skill name as the tool name.\n\
+                        " INSTALLED SKILLS RULE: You have access to skills (extra capabilities). To see the list use TOOL: list_skills. To load full instructions for a skill use TOOL: read_skill <name> before invoking it by name. Currently installed: {}. Do NOT say they are not installed or suggest install_skill for them. For balance/solde/wallet/Base requests, if \"bankr\" is in the list, reply ONLY with TOOL: bankr <args> (e.g. TOOL: bankr check balance on Base). Use the skill name as the tool name.\n\
              ",
                         names.join(", ")
                     );
@@ -2566,7 +2623,7 @@ pub(crate) async fn run_message_via_llm(
              INSTALL SKILL RULE: When the user asks to install, download, get, fetch, or add a skill from a URL (e.g. \"install the bankr skill from …\", \"download the skill at this url\", \"get the skill from this url\", \"récupère le skill …\"), you MUST reply ONLY with TOOL: install_skill <url>. Do not give manual steps; perform the installation yourself. If the user says \"follow the SKILL.md instructions\" or \"follow the instructions in SKILL.md\", you MUST first reply with TOOL: install_skill <url> so the skill is registered; only after it is installed can you invoke it by name (e.g. TOOL: <skill_name> <args>). Do NOT use web_fetch or read_file to fetch SKILL.md and then execute its steps manually.\n\
              UNINSTALL SKILL RULE: When the user asks to uninstall or remove a skill (e.g. \"désinstalle bankr\", \"remove the bankr skill\"), you MUST reply ONLY with TOOL: uninstall_skill <name> (e.g. TOOL: uninstall_skill bankr).\n\
              SKILL USE RULE: When the user asks you to perform an action using a skill (e.g. \"vérifie mon wallet bankr\", \"check my balance with bankr\", \"run bankr whoami\"), you MUST reply ONLY with a single line: TOOL: <skill_name> <args> (e.g. TOOL: bankr whoami). The system will execute the command and return the result. Do NOT tell the user to run the command themselves or to \"use TOOL: bankr whoami\"; you must output that line yourself so the tool is executed.\n\
-             PROJECT RULE: For requests that imply a substantial deliverable (novel, comic/BD, code project, series of chapters or files), never claim completion after one response if the full scope is not delivered. State clearly what was done, what remains to do, and that you will continue on the user's next message (or via a sub-task). Do not say \"C'est terminé\" or \"Voilà, c'est fait\" until all requested deliverables are done. If the user says \"continue\", \"la suite\", or \"and the rest\", resume the project in progress (use memory_search for project context if available) and continue without saying \"terminé\" until the full scope is delivered. For project-like work, use memory_store to save project state (objective, steps done, deliverables) after each significant progress, with source project:<name> so context is reloaded on the next message.\n\
+             PROJECT RULE: For requests that imply a substantial deliverable (novel, comic/BD, code project, series of chapters or files), never claim completion after one response if the full scope is not delivered. State clearly what was done, what remains to do, and that you will continue on the user's next message (or via a sub-task). Do not say \"C'est terminé\" or \"Voilà, c'est fait\" until all requested deliverables are done. If the user says \"continue\", \"la suite\", or \"and the rest\", resume the project in progress (use memory_search for project context if available) and continue without saying \"terminé\" until the full scope is delivered. For project-like work, use memory_store to save project state (objective, steps done, deliverables) after each significant progress, with source project:<name> so context is reloaded on the next message. For multi-step tasks, you can use TOOL: write_todos to define and track steps (then read_todos/update_todo to mark progress); the UI will show the list.\n\
              {}\
              If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
@@ -3021,7 +3078,15 @@ pub(crate) async fn run_message_via_llm(
                                 "tool_approval": true
                             });
                             let _ = bus.send(
-                                EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload)).with_correlation(task_id),
+                                EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload.clone())).with_correlation(task_id),
+                            );
+                            let approval_payload = serde_json::json!({
+                                "tool": actual_tool,
+                                "args_redacted": args_preview,
+                                "task_id": task_id.to_string()
+                            });
+                            let _ = bus.send(
+                                EventEnvelope::new(EventType::ToolApprovalRequest, Some(approval_payload)).with_correlation(task_id),
                             );
                             let granted = match tokio::time::timeout(
                                 std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS),
@@ -3176,6 +3241,98 @@ pub(crate) async fn run_message_via_llm(
                         }
                         None => (false, "[uninstall_skill] skill registry not available".to_string(), None),
                     }
+                } else if actual_tool == "write_todos" {
+                    let payload = args.join(" ").trim().to_string();
+                    match TaskStore::open(&store_path) {
+                        Ok(store) => {
+                            let todos = parse_todos_from_payload(&payload);
+                            if let Err(e) = store.set_todos(task_id, &todos) {
+                                (false, format!("[write_todos] error: {}", e), None)
+                            } else {
+                                let payload_json = serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "todos": todos.iter().map(|t| serde_json::json!({ "id": t.id, "title": t.title, "status": t.status.as_str() })).collect::<Vec<_>>()
+                                });
+                                let _ = bus.send(
+                                    EventEnvelope::new(EventType::TodoListUpdated, Some(payload_json)).with_correlation(task_id),
+                                );
+                                (true, format!("[write_todos] {} step(s) saved.", todos.len()), None)
+                            }
+                        }
+                        Err(e) => (false, format!("[write_todos] store error: {}", e), None),
+                    }
+                } else if actual_tool == "read_todos" {
+                    match TaskStore::open(&store_path) {
+                        Ok(store) => match store.get_todos(task_id) {
+                            Ok(todos) => {
+                                let summary: Vec<serde_json::Value> = todos.iter().enumerate().map(|(i, t)| {
+                                    serde_json::json!({ "index": i + 1, "title": t.title, "status": t.status.as_str() })
+                                }).collect();
+                                (true, format!("[read_todos] {} step(s): {}", todos.len(), serde_json::to_string(&summary).unwrap_or_default()), None)
+                            }
+                            Err(e) => (false, format!("[read_todos] error: {}", e), None),
+                        },
+                        Err(e) => (false, format!("[read_todos] store error: {}", e), None),
+                    }
+                } else if actual_tool == "update_todo" {
+                    let index_str = args.get(0).map(String::as_str).unwrap_or("").trim();
+                    let status_str = args.get(1).map(String::as_str).unwrap_or("pending").trim();
+                    let index: usize = index_str.parse().unwrap_or(0);
+                    match TaskStore::open(&store_path) {
+                        Ok(store) => match store.get_todos(task_id) {
+                            Ok(mut todos) => {
+                                if index == 0 || index > todos.len() {
+                                    (false, format!("[update_todo] invalid index (1..{}): {}", todos.len(), index_str), None)
+                                } else {
+                                    let status = match status_str.to_lowercase().as_str() {
+                                        "done" => TodoStatus::Done,
+                                        "cancelled" => TodoStatus::Cancelled,
+                                        _ => TodoStatus::Pending,
+                                    };
+                                    todos[index - 1].status = status;
+                                    if let Err(e) = store.set_todos(task_id, &todos) {
+                                        (false, format!("[update_todo] error: {}", e), None)
+                                    } else {
+                                        let payload_json = serde_json::json!({
+                                            "task_id": task_id.to_string(),
+                                            "todos": todos.iter().map(|t| serde_json::json!({ "id": t.id, "title": t.title, "status": t.status.as_str() })).collect::<Vec<_>>()
+                                        });
+                                        let _ = bus.send(
+                                            EventEnvelope::new(EventType::TodoListUpdated, Some(payload_json)).with_correlation(task_id),
+                                        );
+                                        (true, format!("[update_todo] step {} set to {}.", index, status_str), None)
+                                    }
+                                }
+                            }
+                            Err(e) => (false, format!("[update_todo] error: {}", e), None),
+                        },
+                        Err(e) => (false, format!("[update_todo] store error: {}", e), None),
+                    }
+                } else if actual_tool == "list_skills" {
+                    match &skill_registry {
+                        Some(reg) => {
+                            let list = reg.list().await;
+                            let summary: Vec<String> = list.iter().map(|s| format!("{}: {}", s.name, s.description)).collect();
+                            (true, format!("[list_skills] {} skill(s): {}", list.len(), summary.join(" ; ")), None)
+                        }
+                        None => (false, "[list_skills] skill registry not available.".to_string(), None),
+                    }
+                } else if actual_tool == "read_skill" {
+                    let skill_name = args.get(0).map(String::as_str).unwrap_or("").trim();
+                    if skill_name.is_empty() {
+                        (false, "[read_skill] usage: read_skill <name>".to_string(), None)
+                    } else {
+                        match &skill_registry {
+                            Some(reg) => {
+                                if let Some(body) = reg.get_body(skill_name).await {
+                                    (true, format!("[read_skill {}] Instructions:\n{}", skill_name, body), None)
+                                } else {
+                                    (false, format!("[read_skill] skill '{}' not found or has no body.", skill_name), None)
+                                }
+                            }
+                            None => (false, "[read_skill] skill registry not available.".to_string(), None),
+                        }
+                    }
                 } else if actual_tool.is_empty() {
                     // Skill with no tool_ref: if args provided, run as run_command(skill_name, ...args) (e.g. bankr whoami)
                     if !args.is_empty() {
@@ -3191,6 +3348,7 @@ pub(crate) async fn run_message_via_llm(
                             conv_tx.clone(),
                             message_webhook_url.as_deref(),
                             device_bridge.as_ref(),
+                            workspace_store.as_ref(),
                         )
                         .await;
                         (s, r, None)
@@ -3219,6 +3377,7 @@ pub(crate) async fn run_message_via_llm(
                         conv_tx.clone(),
                         message_webhook_url.as_deref(),
                         device_bridge.as_ref(),
+                        workspace_store.as_ref(),
                     )
                     .await
                 };
