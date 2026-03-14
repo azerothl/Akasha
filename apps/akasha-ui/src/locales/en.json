@@ -56,6 +56,7 @@
   "tasks.title": "Tasks (Task Center)",
   "tasks.empty": "No tasks. Send a message in Chat.",
   "tasks.no_events": "No events for this task.",
+  "tasks.model_used": "Model used",
   "tasks.select_task": "Select a task.",
   "tasks.filter_label": "Filter by status",
   "tasks.filter_active": "Active",

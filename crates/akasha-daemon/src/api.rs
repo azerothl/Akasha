@@ -1227,7 +1227,7 @@ const DEVICE_CAMERA_REMINDER: &str = "\n[Rappel: demande de photo webcam/caméra
 const IMAGE_GENERATION_REMINDER: &str = "\n[Rappel: demande de « générer une image », « dessine », « crée une image » (par IA, pas webcam). Tu DOIS utiliser TOOL: generate_image <prompt> (ex. TOOL: generate_image un chat sur un canapé). Spec 42.]\n\n";
 
 /// Reminder when the user asks for GitHub (private repo / API) and mentions the vault (e.g. GITHUB_TOKEN).
-const GITHUB_VAULT_REMINDER: &str = "\n[Rappel: l'utilisateur demande des infos sur un dépôt GitHub (privé ou API). La clé est dans le vault (ex. GITHUB_TOKEN). Tu DOIS utiliser TOOL: run_command avec VAULT:GITHUB_TOKEN=GITHUB_TOKEN puis une commande qui utilise ce token. Exemples: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN gh repo view owner/repo --json name,description,pullRequests,issues ; ou TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sH \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo. Ne réponds pas « je n'ai pas trouvé » sans avoir appelé run_command avec le VAULT:.]\n\n";
+const GITHUB_VAULT_REMINDER: &str = "\n[Rappel GitHub + vault: tu DOIS exécuter toi-même la requête via TOOL: run_command. Format exact: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (ou gh repo view owner/repo). INTERDIT: dire à l'utilisateur de faire GITHUB_TOKEN=VAULT:... ou export GITHUB_TOKEN=... ou de mettre le token en clair — c'est toi qui dois émettre la ligne TOOL: pour que le système injecte le secret. Ne réponds pas « je n'ai pas trouvé » sans avoir appelé run_command avec VAULT:GITHUB_TOKEN=GITHUB_TOKEN.]\n\n";
 
 /// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
 const APP_CONTEXT: &str = concat!(
@@ -1237,7 +1237,7 @@ const APP_CONTEXT: &str = concat!(
     "commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, /skills reload, etc.). ",
     "Pour installer un CLI en global (ex. « installe le CLI bankr », « npm install -g @bankr/cli »), répondre par TOOL: run_command npm install -g <package> (ne pas générer de script à faire exécuter par l'utilisateur). ",
     "Pour utiliser une clé du vault dans une commande : TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (le système injecte la valeur du vault). ",
-    "Pour un dépôt GitHub privé ou l'API GitHub avec une clé dans le vault (ex. GITHUB_TOKEN) : utilise TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN gh repo view owner/repo (ou curl -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo) ; ne dis pas « je n'ai pas trouvé » sans avoir appelé run_command avec VAULT:GITHUB_TOKEN=GITHUB_TOKEN. ",
+    "GitHub + vault: exécuter TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (pas GITHUB_TOKEN=VAULT:... ni export, ni token en clair). ",
     "Skills (capacités supplémentaires) : l'utilisateur peut en ajouter sans modifier le code. Quand l'utilisateur demande d'installer un skill depuis une URL (ex. « installe le skill bankr depuis … »), tu DOIS répondre par TOOL: install_skill <url>. ",
     "Pour désinstaller un skill : TOOL: uninstall_skill <nom> (ex. TOOL: uninstall_skill bankr). ",
     "Quand l'utilisateur te demande d'effectuer une action avec un skill (ex. « vérifie mon wallet bankr », « lance bankr whoami »), tu DOIS répondre UNIQUEMENT par une ligne TOOL: <nom_du_skill> <arguments> (ex. TOOL: bankr whoami) pour que le système exécute la commande ; ne dis pas à l'utilisateur de lancer la commande lui-même. ",
@@ -1447,8 +1447,18 @@ async fn execute_tool_call(
                     Some(vault) => {
                         let mut env = Vec::new();
                         for (vault_key, env_var) in &vault_specs {
-                            match vault.get(vault_key) {
-                                Ok(value) => env.push((env_var.clone(), value)),
+                            let value = vault.get(vault_key).or_else(|_| {
+                                // Fallback: common keys may be stored with different casing (e.g. github_token vs GITHUB_TOKEN)
+                                if vault_key.eq_ignore_ascii_case("GITHUB_TOKEN") && vault_key != "github_token" {
+                                    vault.get("github_token")
+                                } else if vault_key == "github_token" {
+                                    vault.get("GITHUB_TOKEN")
+                                } else {
+                                    Err(akasha_vault::VaultError::NotFound(vault_key.to_string()))
+                                }
+                            });
+                            match value {
+                                Ok(v) => env.push((env_var.clone(), v)),
                                 Err(_) => {
                                     return (
                                         false,
@@ -2548,6 +2558,12 @@ pub(crate) async fn run_message_via_llm(
             }
             None => (String::new(), String::new()),
         };
+        let run_command_os_rule = match std::env::consts::OS {
+            "windows" => "RUN_COMMAND OS: You are on Windows. Prefer cmd, PowerShell, curl.exe; avoid grep, cat, sed (not in default PATH). Use full path or .exe when needed.\n\
+             ",
+            _ => "RUN_COMMAND OS: You are on Linux/macos. Standard Unix commands (curl, grep, etc.) are available.\n\
+             ",
+        };
         format!(
             "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
              Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
@@ -2556,7 +2572,8 @@ pub(crate) async fn run_message_via_llm(
              WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user.\n\
              INSTALL CLI RULE: When the user asks to install a CLI or package globally (e.g. \"install bankr CLI\", \"npm install -g @bankr/cli\", \"install the bankr cli in global\"), you MUST reply ONLY with TOOL: run_command <cmd> <args> (e.g. TOOL: run_command npm install -g @bankr/cli). Do NOT generate a script or ask the user to run commands themselves; run the installation command via the tool.\n\
-             VAULT ENV RULE: When the user asks to use an API key or secret from the vault (e.g. \"use the key in the vault bankr_api_key\", \"utilise la clé bankr_api_key du vault\"), you CAN pass it to a command by adding VAULT:<vault_key>=<ENV_VAR> as first argument(s) of run_command. Example: TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (the system injects the vault value into BANKR_API_KEY for the command). You can chain several: VAULT:key1=VAR1 VAULT:key2=VAR2 cmd args. For a private GitHub repo or GitHub API when the user says the token is in the vault (e.g. GITHUB_TOKEN): use TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN gh repo view owner/repo --json name,pullRequests,issues (or curl -sH \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo). Do NOT reply that you cannot access the repo without having called run_command with VAULT:GITHUB_TOKEN=GITHUB_TOKEN first.\n\
+             VAULT ENV RULE: To use a vault secret in a command you MUST call TOOL: run_command with VAULT:<vault_key>=<ENV_VAR> as the FIRST argument(s), then the command. The system injects the secret value into ENV_VAR for that command only. Example: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo. FORBIDDEN: never tell the user to run GITHUB_TOKEN=VAULT:GITHUB_TOKEN or export GITHUB_TOKEN=... or VAULT:GITHUB_TOKEN=ghp_... — you must output the TOOL: line yourself so the system runs the command and injects the token. For GitHub with token in vault: use TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (or gh repo view owner/repo). The vault key may be GITHUB_TOKEN or github_token; the part after = is the env var name the command uses (e.g. $GITHUB_TOKEN). Do NOT say you cannot access the repo without having called run_command with VAULT:... first.\n\
+             {}\
              INSTALL SKILL RULE: When the user asks to install a skill from a URL (e.g. \"install the bankr skill from https://github.com/BankrBot/skills/tree/main/bankr\"), you MUST reply ONLY with TOOL: install_skill <url>. Do not give manual steps; perform the installation yourself.\n\
              UNINSTALL SKILL RULE: When the user asks to uninstall or remove a skill (e.g. \"désinstalle bankr\", \"remove the bankr skill\"), you MUST reply ONLY with TOOL: uninstall_skill <name> (e.g. TOOL: uninstall_skill bankr).\n\
              SKILL USE RULE: When the user asks you to perform an action using a skill (e.g. \"vérifie mon wallet bankr\", \"check my balance with bankr\", \"run bankr whoami\"), you MUST reply ONLY with a single line: TOOL: <skill_name> <args> (e.g. TOOL: bankr whoami). The system will execute the command and return the result. Do NOT tell the user to run the command themselves or to \"use TOOL: bankr whoami\"; you must output that line yourself so the tool is executed.\n\
@@ -2565,7 +2582,7 @@ pub(crate) async fn run_message_via_llm(
              If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
-            base, skills_part, skills_rule
+            base, skills_part, run_command_os_rule, skills_rule
         )
     } else {
         String::new()
@@ -2575,6 +2592,11 @@ pub(crate) async fn run_message_via_llm(
     // Pre-allocate to reduce reallocations when appending role, memory, and document blocks.
     let mut context_prefix = String::with_capacity(8192);
     context_prefix.push_str(APP_CONTEXT);
+    let os_env_block = match std::env::consts::OS {
+        "windows" => "[Environnement] Le daemon tourne sous : windows. Pour run_command, privilégie cmd, PowerShell, curl.exe ; évite les commandes Unix seules (grep, cat, sed) qui ne sont pas dans le PATH par défaut (sauf WSL).\n\n",
+        _ => "[Environnement] Le daemon tourne sous : linux/macos. Tu peux utiliser les commandes Unix habituelles (curl, grep, etc.).\n\n",
+    };
+    context_prefix.push_str(os_env_block);
     if let Some(role_prompt) = agent_role_system_prompt(&assigned_agent) {
         context_prefix.push_str("[Role]\n");
         context_prefix.push_str(role_prompt);
@@ -2611,14 +2633,23 @@ pub(crate) async fn run_message_via_llm(
         }
     }
 
-    // Long-term: retrieve top-k relevant memories by embedding similarity (current message + optional user-identity for first message)
+    // Long-term: retrieve top-k relevant memories by embedding similarity (current message + optional user-identity for first message).
+    // When short-term is empty (new session or after restart), use no filter so we recall all memories for context.
     if let Some(ref client) = long_term_client {
+        let turns_empty = match &short_term {
+            Some(st) => st.get_turns(&session_id).await.is_empty(),
+            None => true,
+        };
+        let recall_filter = if turns_empty {
+            None
+        } else {
+            Some(akasha_store::MemorySearchFilter {
+                session_id: Some(session_id.clone()),
+                ..Default::default()
+            })
+        };
         let msg = message.clone();
         let client = client.clone();
-        let recall_filter = Some(akasha_store::MemorySearchFilter {
-            session_id: Some(session_id.clone()),
-            ..Default::default()
-        });
         let results = tokio::task::spawn_blocking(move || client.search(msg, 5, recall_filter))
             .await
             .ok()
@@ -2773,12 +2804,13 @@ pub(crate) async fn run_message_via_llm(
         )
     };
     let reply_text;
-    const MAX_TOOL_ROUNDS: u32 = 3;
+    const MAX_TOOL_ROUNDS: u32 = 5;
     let mut round = 0u32;
     let mut tool_loop_history: Vec<(String, String)> = Vec::new();
     let mut last_tool_results_blob: Option<String> = None;
     let mut force_synthesis_attempted = false;
     let mut last_captured_image_base64: Option<String> = None;
+    let mut last_llm_model_used: Option<String> = None;
 
     let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
         .ok()
@@ -2904,6 +2936,7 @@ pub(crate) async fn run_message_via_llm(
         } else {
             match tokio::time::timeout(remaining, stream_join).await {
                 Ok(Ok(Ok(resp))) => {
+                    last_llm_model_used = Some(resp.model_used.clone());
                     if let Some(ref store) = task_usage_store {
                         let tokens = resp.usage.as_ref().map(|u| u.prompt_tokens + u.completion_tokens).unwrap_or(0);
                         let cost = resp.cost_usd.unwrap_or(0.0);
@@ -3608,7 +3641,8 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
             EventType::TaskCompleted,
             Some(serde_json::json!({
                 "task_id": task_id.to_string(),
-                "status": "completed"
+                "status": "completed",
+                "model_used": last_llm_model_used
             })),
         )
         .with_correlation(task_id),
@@ -3934,6 +3968,7 @@ pub async fn handle_api(
     if method == "GET" && path == "/api/doctor" {
         let mut checks: Vec<serde_json::Value> = Vec::new();
         checks.push(serde_json::json!({ "id": "daemon", "ok": true, "description": "Daemon running" }));
+        checks.push(serde_json::json!({ "id": "os", "ok": true, "description": std::env::consts::OS }));
 
         let ollama_ok = if let Some(u) = ollama_base_url {
             let test_url = format!("{}/api/tags", u.trim_end_matches('/'));

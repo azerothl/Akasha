@@ -9,6 +9,7 @@ const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => (
 
 const DAEMON_PORT = 3876;
 const THEME_STORAGE_KEY = "akasha_theme";
+const AKASHA_SESSION_ID_KEY = "akasha_session_id";
 
 export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_latte";
 
@@ -305,7 +306,13 @@ function App() {
   type MemorySubTab = "short" | "long";
   const [memorySubTab, setMemorySubTab] = useState<MemorySubTab>("short");
   const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(AKASHA_SESSION_ID_KEY);
+    } catch {
+      return null;
+    }
+  });
   const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string }>>([]);
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
@@ -467,14 +474,14 @@ function App() {
     return () => clearInterval(id);
   }, [fetchDevicePending]);
 
-  // Load today's conversation history on mount (short-term = current day, so it survives UI restart).
+  // Load conversation history on mount (use persisted session_id so it survives UI restart).
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const data = await invoke<{ session_id?: string; turns?: Array<{ role: string; content: string }> }>(
           "get_memory_short_term",
-          { port: DAEMON_PORT }
+          { sessionId: sessionId ?? undefined, port: DAEMON_PORT }
         );
         if (cancelled) return;
         if (data?.session_id && (data.turns?.length ?? 0) > 0) {
@@ -485,8 +492,18 @@ function App() {
             }))
           );
           setSessionId(data.session_id);
+          try {
+            localStorage.setItem(AKASHA_SESSION_ID_KEY, data.session_id);
+          } catch {
+            /* ignore */
+          }
         } else if (data?.session_id) {
           setSessionId(data.session_id);
+          try {
+            localStorage.setItem(AKASHA_SESSION_ID_KEY, data.session_id);
+          } catch {
+            /* ignore */
+          }
         }
       } catch {
         /* ignore */
@@ -1405,7 +1422,14 @@ function App() {
         port: DAEMON_PORT,
       });
       setLoading(false);
-      if (ack?.session_id) setSessionId(ack.session_id);
+      if (ack?.session_id) {
+        setSessionId(ack.session_id);
+        try {
+          localStorage.setItem(AKASHA_SESSION_ID_KEY, ack.session_id);
+        } catch {
+          /* ignore */
+        }
+      }
       const ackText = ack?.message ?? "Je prends en compte votre demande.";
       setMessages((prev) => [...prev, { role: "assistant", text: ackText + (ack?.task_id ? " Tu peux suivre l'avancement dans Tâches." : "") }]);
       if (ack?.task_id) {
@@ -2190,6 +2214,9 @@ function App() {
                                               {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload ? (
                                                 <span className="chat-subagents-event-agent"> → {String((ev.payload as { agent?: string }).agent ?? "")}</span>
                                               ) : null}
+                                              {ev.payload && typeof ev.payload === "object" && (ev.event_type === "task_completed" || ev.event_type === "task_failed") && "model_used" in ev.payload && (ev.payload as { model_used?: string | null }).model_used ? (
+                                                <span className="chat-subagents-event-model"> — {t("tasks.model_used")}: {(ev.payload as { model_used: string }).model_used}</span>
+                                              ) : null}
                                               {ev.at && <span className="chat-subagents-event-at"> {ev.at.slice(0, 19)}</span>}
                                             </li>
                                           ))}
@@ -2651,6 +2678,9 @@ function App() {
                       {tasksEvents.map((e, i) => (
                         <li key={i}>
                           <strong>{eventLabel(e.event_type)}</strong> @ {e.at}
+                          {e.payload != null && typeof e.payload === "object" && (e.event_type === "task_completed" || e.event_type === "task_failed") && "model_used" in e.payload && (e.payload as { model_used?: string | null }).model_used && (
+                            <p className="event-model-used">{t("tasks.model_used")}: {(e.payload as { model_used: string }).model_used}</p>
+                          )}
                           {e.payload != null && (
                             <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
                           )}

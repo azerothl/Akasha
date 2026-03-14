@@ -56,6 +56,7 @@
   "tasks.title": "Tâches (Task Center)",
   "tasks.empty": "Aucune tâche. Envoyez un message dans le Chat.",
   "tasks.no_events": "Aucun événement pour cette tâche.",
+  "tasks.model_used": "Modèle utilisé",
   "tasks.select_task": "Sélectionnez une tâche.",
   "tasks.filter_label": "Filtrer par statut",
   "tasks.filter_active": "Actives",

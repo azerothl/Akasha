@@ -425,7 +425,8 @@ async fn process_root_task(
                 EventType::TaskCompleted,
                 Some(serde_json::json!({
                     "task_id": root_task_id.to_string(),
-                    "status": "completed"
+                    "status": "completed",
+                    "model_used": Option::<String>::None
                 })),
             )
             .with_correlation(root_task_id),
@@ -552,7 +553,8 @@ async fn process_root_task(
                     Some(serde_json::json!({
                         "task_id": root_task_id.to_string(),
                         "status": "failed",
-                        "subtasks": steps_count
+                        "subtasks": steps_count,
+                        "model_used": Option::<String>::None
                     })),
                 )
                 .with_correlation(root_task_id),
@@ -605,6 +607,7 @@ async fn process_root_task(
             }
         }
         let raw_responses = parts.join("\n\n");
+        let mut synthesis_model_used: Option<String> = None;
         let aggregated = if raw_responses.is_empty() || raw_responses.trim() == "(Aucune réponse)" {
             "Aucune réponse des sous-agents.".to_string()
         } else {
@@ -636,7 +639,10 @@ N'ajoute aucune information qui ne figure pas dans les réponses des agents ci-d
             )
             .await
             {
-                Ok(Ok(resp)) if !resp.text.trim().is_empty() => resp.text.trim().to_string(),
+                Ok(Ok(resp)) if !resp.text.trim().is_empty() => {
+                    synthesis_model_used = Some(resp.model_used.clone());
+                    resp.text.trim().to_string()
+                }
                 _ => {
                     // Fallback: show joined responses if synthesis fails or times out
                     if parts.len() == 1 {
@@ -748,7 +754,8 @@ Tu dois soit : (1) produire une réponse complète et directe à la demande de l
                 Some(serde_json::json!({
                     "task_id": root_task_id.to_string(),
                     "status": status_str,
-                    "subtasks": steps_count
+                    "subtasks": steps_count,
+                    "model_used": synthesis_model_used
                 })),
             )
             .with_correlation(root_task_id),
