@@ -6,6 +6,7 @@ pub mod metrics;
 pub mod pipeline;
 pub mod schedules;
 pub mod tasks;
+pub mod todos;
 
 pub use log::ImmutableLog;
 pub use metrics::{MetricsEvent, MetricsStore, ModelMetricsRow};
@@ -15,3 +16,4 @@ pub use schedules::{
     Schedule, ScheduleException, ScheduleExceptionType, ScheduleStore, TaskRun, TaskRunStatus,
 };
 pub use tasks::{Task, TaskStatus, TaskStore, MAX_PROGRESS_PER_TASK};
+pub use todos::{parse_todos_from_payload, TodoItem, TodoStatus};

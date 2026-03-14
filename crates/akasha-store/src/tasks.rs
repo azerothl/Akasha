@@ -109,7 +109,18 @@ impl TaskStore {
         if has_col == 0 {
             let _ = conn.execute("ALTER TABLE tasks ADD COLUMN initial_message TEXT", []);
         }
+        crate::todos::create_task_todos_table(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// Get the todo list for a task (Deep Agents-style write_todos).
+    pub fn get_todos(&self, task_id: Uuid) -> anyhow::Result<Vec<crate::todos::TodoItem>> {
+        crate::todos::get_todos(&self.conn, task_id)
+    }
+
+    /// Set the todo list for a task (replaces entire list). Emit TodoListUpdated from daemon after this.
+    pub fn set_todos(&self, task_id: Uuid, todos: &[crate::todos::TodoItem]) -> anyhow::Result<()> {
+        crate::todos::set_todos(&self.conn, task_id, todos)
     }
 
     /// Append a progress entry for a task (used by daemon to persist progress for fast GET /api/tasks/:id).
