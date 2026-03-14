@@ -3078,14 +3078,19 @@ function App() {
                                   /* continue */
                                 }
                               }
-                              setSchedules((prev) => prev.filter((s) => !toDelete.has(s.id)));
+                              const cached = getCached<{ schedules: typeof schedules; taskRuns: unknown }>("calendar");
+                              setSchedules((prev) => {
+                                const nextSchedules = prev.filter((s) => !toDelete.has(s.id));
+                                if (cached) {
+                                  setCached("calendar", { ...cached, schedules: nextSchedules });
+                                }
+                                return nextSchedules;
+                              });
                               setCalendarSchedulesSelectedForDelete(new Set());
                               if (calendarSelectedScheduleId && toDelete.has(calendarSelectedScheduleId)) {
                                 setCalendarSelectedScheduleId(null);
                                 setScheduleDetail(null);
                               }
-                              const cached = getCached<{ schedules: typeof schedules; taskRuns: unknown }>("calendar");
-                              if (cached) setCached("calendar", { ...cached, schedules: schedules.filter((s) => !toDelete.has(s.id)) });
                             } finally {
                               setScheduleDeleting(false);
                             }
