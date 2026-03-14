@@ -1429,7 +1429,7 @@ async fn execute_tool_call(
                 match executor.read_file(p).await {
                     Ok((content, res)) => {
                         let msg = if res.success {
-                            format!("[read_file {}] {} chars: {}", p.display(), content.len(), if content.len() <= 500 { content.as_str() } else { &content[..500] })
+                            format!("[read_file {}] {} chars: {}", p.display(), content.len(), if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] })
                         } else {
                             format!("[read_file] denied or error: {}", res.summary)
                         };
@@ -2007,7 +2007,7 @@ async fn execute_tool_call(
                 (Some(a), Some(b)) => match executor.file_diff(a, b).await {
                     Ok((diff, res)) => {
                         let msg = if res.success {
-                            let preview = if diff.len() <= 400 { diff.as_str() } else { &diff[..400] };
+                            let preview = if diff.len() <= 400 { diff.as_str() } else { &diff[..diff.floor_char_boundary(400)] };
                             format!("[file_diff] {} — {}", res.summary, preview)
                         } else {
                             format!("[file_diff] {}", res.summary)
@@ -2027,7 +2027,7 @@ async fn execute_tool_call(
             match executor.web_fetch(url).await {
                 Ok((body, res)) => {
                     let msg = if res.success {
-                        let preview = if body.len() <= 500 { body.as_str() } else { &body[..500] };
+                        let preview = if body.len() <= 500 { body.as_str() } else { &body[..body.floor_char_boundary(500)] };
                         format!("[web_fetch] {} — {}", res.summary, preview)
                     } else {
                         format!("[web_fetch] {}", res.summary)
@@ -2055,7 +2055,7 @@ async fn execute_tool_call(
             match executor.web_search(query.trim(), max_results).await {
                 Ok((body, res)) => {
                     let msg = if res.success {
-                        let preview = if body.len() <= 600 { body.as_str() } else { &body[..600] };
+                        let preview = if body.len() <= 600 { body.as_str() } else { &body[..body.floor_char_boundary(600)] };
                         format!("[web_search] {} — {}", res.summary, preview)
                     } else {
                         format!("[web_search] {}", res.summary)
@@ -2082,8 +2082,8 @@ async fn execute_tool_call(
                     (success, format!(
                         "[run_in_container] exit {} — stdout: {} stderr: {}",
                         exit_code,
-                        if out.len() > 400 { format!("{}...", &out[..400]) } else { out.to_string() },
-                        if err.len() > 200 { format!("{}...", &err[..200]) } else { err.to_string() }
+                        if out.len() > 400 { format!("{}...", &out[..out.floor_char_boundary(400)]) } else { out.to_string() },
+                        if err.len() > 200 { format!("{}...", &err[..err.floor_char_boundary(200)]) } else { err.to_string() }
                     ), None)
                 }
                 Err(e) => (false, format!("[run_in_container] error: {}", e), None),
@@ -2165,7 +2165,7 @@ async fn execute_tool_call(
                     Ok(Ok(result)) => {
                         tracing::info!(request_id = %request_id, success = result.success, "[device_bridge] received result from UI");
                         let msg = if result.success {
-                            let data_preview = result.data.as_deref().map(|d| if d.len() > 200 { format!("{}...", &d[..200]) } else { d.to_string() }).unwrap_or_else(|| "ok".to_string());
+                            let data_preview = result.data.as_deref().map(|d| if d.len() > 200 { format!("{}...", &d[..d.floor_char_boundary(200)]) } else { d.to_string() }).unwrap_or_else(|| "ok".to_string());
                             format!("[device_invoke local_media {}] success — {}", action, data_preview)
                         } else {
                             format!("[device_invoke local_media {}] failed or refused", action)
@@ -2220,7 +2220,7 @@ async fn execute_tool_call(
                 {
                     Ok(Ok(result)) => {
                         let msg = if result.success {
-                            let data_preview = result.data.as_deref().map(|d| if d.len() > 200 { format!("{}...", &d[..200]) } else { d.to_string() }).unwrap_or_else(|| "ok".to_string());
+                            let data_preview = result.data.as_deref().map(|d| if d.len() > 200 { format!("{}...", &d[..d.floor_char_boundary(200)]) } else { d.to_string() }).unwrap_or_else(|| "ok".to_string());
                             format!("[device_invoke synthetic_input {}] success — {}", action, data_preview)
                         } else {
                             format!("[device_invoke synthetic_input {}] failed or refused", action)
@@ -3234,7 +3234,7 @@ pub(crate) async fn run_message_via_llm(
                     args.iter()
                         .map(|arg| {
                             if arg.len() > MAX_ARG_PREVIEW_LEN {
-                                format!("{}...[truncated {} chars]", &arg[..MAX_ARG_PREVIEW_LEN], arg.len().saturating_sub(MAX_ARG_PREVIEW_LEN))
+                                format!("{}...[truncated {} chars]", &arg[..arg.floor_char_boundary(MAX_ARG_PREVIEW_LEN)], arg.len().saturating_sub(MAX_ARG_PREVIEW_LEN))
                             } else {
                                 arg.clone()
                             }
@@ -3246,7 +3246,7 @@ pub(crate) async fn run_message_via_llm(
                     "tool": tool_display,
                     "skill": if &actual_tool != name { Some(name.as_str()) } else { None::<&str> },
                     "args": redacted_args,
-                    "result_preview": if res.len() > 300 { format!("{}...", &res[..300]) } else { res.clone() },
+                    "result_preview": if res.len() > 300 { format!("{}...", &res[..res.floor_char_boundary(300)]) } else { res.clone() },
                     "success": success,
                     "explanation": serde_json::Value::Null
                 });
@@ -4783,7 +4783,7 @@ pub async fn handle_api(
                         "base_url": base_url,
                         "context_length_max": context_length,
                         "num_ctx": num_ctx,
-                        "parameters_preview": if parameters.len() > 200 { format!("{}...", &parameters[..200]) } else { parameters.to_string() }
+                        "parameters_preview": if parameters.len() > 200 { format!("{}...", &parameters[..parameters.floor_char_boundary(200)]) } else { parameters.to_string() }
                     });
                     return json_response("200 OK", &body.to_string());
                 }
