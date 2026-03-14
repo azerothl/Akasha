@@ -161,13 +161,6 @@ where
     use candle_core::IndexOp;
 
     let max_new = max_tokens.unwrap_or(MAX_NEW_TOKENS);
-    // #region agent log
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("debug-eb5167.log") {
-        use std::io::Write;
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-        let _ = writeln!(f, "{{\"sessionId\":\"eb5167\",\"hypothesisId\":\"A\",\"location\":\"baguettotron.rs:stream_start\",\"message\":\"max_tokens\",\"data\":{{\"max_tokens\":{:?},\"max_new\":{}}},\"timestamp\":{}}}", max_tokens, max_new, ts);
-    }
-    // #endregion
     let enc = pipeline
         .tokenizer
         .encode(prompt, true)
@@ -260,13 +253,6 @@ where
     } else {
         decoded.trim().to_string()
     };
-    // #region agent log
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("debug-eb5167.log") {
-        use std::io::Write;
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-        let _ = writeln!(f, "{{\"sessionId\":\"eb5167\",\"hypothesisId\":\"A\",\"location\":\"baguettotron.rs:stream_end\",\"message\":\"stream_done\",\"data\":{{\"out_len\":{},\"stopped_reason\":\"{}\"}},\"timestamp\":{}}}", out.len(), stopped_reason, ts);
-    }
-    // #endregion
     Ok(out)
 }
 

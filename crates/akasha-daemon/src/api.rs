@@ -1,46 +1,5 @@
 //! Simple HTTP API: POST /api/message, GET /api/tasks/:id, GET / (health)
 
-// #region agent log
-#[allow(dead_code)]
-fn debug_log(session_id: &str, hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
-    let line = serde_json::json!({
-        "sessionId": session_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": chrono::Utc::now().timestamp_millis()
-    });
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("debug-68cde2.log")
-        .and_then(|mut f| {
-            use std::io::Write;
-            writeln!(f, "{}", line)
-        });
-}
-#[allow(dead_code)]
-fn debug_log_session(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
-    let line = serde_json::json!({
-        "sessionId": "eb5167",
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": chrono::Utc::now().timestamp_millis()
-    });
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("debug-eb5167.log")
-        .and_then(|mut f| {
-            use std::io::Write;
-            writeln!(f, "{}", line)
-        });
-}
-// #endregion
-
 use akasha_core::{EventEnvelope, EventType};
 use akasha_vault::Vault;
 use akasha_llm::CompletionRequest;
@@ -1311,6 +1270,51 @@ async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: 
     }
 }
 
+/// Split by whitespace but keep double-quoted segments as a single token (e.g. -H "Authorization: Bearer $X" -> [-H, "Authorization: Bearer $X"]).
+fn split_whitespace_respecting_quotes(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = s.trim();
+    while !rest.is_empty() {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        if rest.starts_with('"') {
+            let mut end = 1usize;
+            while end < rest.len() {
+                let b = rest.as_bytes()[end];
+                if b == b'\\' && end + 1 < rest.len() {
+                    end += 2;
+                    continue;
+                }
+                if b == b'"' {
+                    out.push(rest[1..end].replace("\\\"", "\""));
+                    rest = &rest[end + 1..];
+                    break;
+                }
+                end += 1;
+            }
+            if end >= rest.len() {
+                // Unclosed quote: slice only if rest has content after the opening quote (avoid rest[1..] when len==1)
+                let quoted = if rest.len() > 1 { &rest[1..] } else { "" };
+                out.push(quoted.replace("\\\"", "\""));
+                rest = "";
+            }
+        } else {
+            let next_quote = rest.find('"').unwrap_or(rest.len());
+            let word_end = rest[..next_quote]
+                .find(|c: char| c.is_whitespace())
+                .unwrap_or(rest.len());
+            let word = rest[..word_end].trim();
+            if !word.is_empty() {
+                out.push(word.to_string());
+            }
+            rest = &rest[word_end..];
+        }
+    }
+    out
+}
+
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
 fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
@@ -1320,8 +1324,8 @@ fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
         let line = lines[i].trim();
         if let Some(rest) = line.strip_prefix("TOOL:") {
             let rest = rest.trim();
-            // Split the header line by whitespace for tool name + fixed positional args
-            let parts: Vec<String> = rest.split_whitespace().map(String::from).collect();
+            // Split by whitespace, respecting double-quoted args (so run_command -H "Bearer $VAR" works)
+            let parts: Vec<String> = split_whitespace_respecting_quotes(rest);
             if let Some((name, fixed_args)) = parts.split_first() {
                 let mut args = fixed_args.to_vec();
                 // Only certain tools support a multi-line body argument.
@@ -2187,21 +2191,6 @@ async fn execute_tool_call(
                         } else {
                             None
                         };
-                        // #region agent log
-                        if interface == "local_media" && action == "capture" {
-                            debug_log(
-                                "68cde2",
-                                "H1",
-                                "api.rs:device_invoke_capture",
-                                "device_invoke capture result",
-                                serde_json::json!({
-                                    "success": result.success,
-                                    "data_len": result.data.as_ref().map(|d| d.len()).unwrap_or(0),
-                                    "out_image_some": out_image_base64.is_some(),
-                                }),
-                            );
-                        }
-                        // #endregion
                         (result.success, msg, out_image_base64)
                     }
                     Ok(Err(_)) => {
@@ -2559,7 +2548,7 @@ pub(crate) async fn run_message_via_llm(
             None => (String::new(), String::new()),
         };
         let run_command_os_rule = match std::env::consts::OS {
-            "windows" => "RUN_COMMAND OS: You are on Windows. Prefer cmd, PowerShell, curl.exe; avoid grep, cat, sed (not in default PATH). Use full path or .exe when needed.\n\
+            "windows" => "RUN_COMMAND OS: You are on Windows. Prefer cmd, PowerShell, curl.exe; avoid grep, cat, sed (not in default PATH). Use full path or .exe when needed. To test that the vault token works (e.g. GitHub API), use Invoke-WebRequest: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN powershell -NoProfile -Command \"Invoke-WebRequest -Uri 'https://api.github.com/repos/owner/repo' -Headers @{ Authorization = 'Bearer ' + $env:GITHUB_TOKEN } | Select-Object -Expand Content\" (replace owner/repo). Ensure 'powershell' is in allowed_commands in tools_policy.yaml. The system injects the vault value into the environment for the command.\n\
              ",
             _ => "RUN_COMMAND OS: You are on Linux/macos. Standard Unix commands (curl, grep, etc.) are available.\n\
              ",
@@ -2855,9 +2844,6 @@ pub(crate) async fn run_message_via_llm(
                 None
             },
         };
-        // #region agent log
-        debug_log_session("A", "api.rs:stream_request", "request max_tokens for stream", serde_json::json!({ "max_tokens": max_tokens }));
-        // #endregion
         // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
         // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
         let (stream_tx, std_rx) = std::sync::mpsc::channel::<String>();
@@ -2881,7 +2867,6 @@ pub(crate) async fn run_message_via_llm(
         loop {
             // Check the overall deadline before waiting for a chunk to avoid spurious zero-duration timeouts.
             if tokio::time::Instant::now() >= overall_deadline {
-                debug_log_session("A", "api.rs:stream_done", "overall timeout", serde_json::json!({ "stream_exit_reason": "overall_timeout", "accumulated_len": accumulated.len() }));
                 tracing::warn!(timeout_secs = llm_timeout_secs, "Overall LLM timeout exceeded; aborting task");
                 stream_join.abort();
                 reply_text = if accumulated.is_empty() {
@@ -2969,14 +2954,6 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
         };
-        // #region agent log
-        debug_log_session("A", "api.rs:stream_done", "after stream recv loop", serde_json::json!({
-            "stream_exit_reason": stream_exit_reason,
-            "accumulated_len": accumulated.len(),
-            "response_len": response.len(),
-            "response_ends_with_dot": response.trim().ends_with('.'),
-        }));
-        // #endregion
         if !accumulated.is_empty() && response.is_empty() {
             // Stream sent chunks but final response empty; use accumulated
             reply_text = accumulated.trim().to_string();
@@ -3250,19 +3227,6 @@ pub(crate) async fn run_message_via_llm(
                     )
                     .await
                 };
-                // #region agent log
-                debug_log(
-                    "68cde2",
-                    "H2",
-                    "api.rs:after_execute_tool",
-                    "captured_image after tool",
-                    serde_json::json!({
-                        "actual_tool": actual_tool,
-                        "captured_image_some": captured_image.is_some(),
-                        "captured_image_len": captured_image.as_ref().map(|s| s.len()).unwrap_or(0),
-                    }),
-                );
-                // #endregion
                 if let Some(img) = captured_image {
                     last_captured_image_base64 = Some(img);
                 }
@@ -3327,18 +3291,6 @@ pub(crate) async fn run_message_via_llm(
                         build_image_markdown(&label, &url)
                     })
                     .unwrap_or_default();
-                // #region agent log
-                debug_log(
-                    "68cde2",
-                    "H3",
-                    "api.rs:image_md_max_rounds",
-                    "image_md when max rounds",
-                    serde_json::json!({
-                        "last_captured_some": last_captured_image_base64.is_some(),
-                        "image_md_len": image_md.len(),
-                    }),
-                );
-                // #endregion
                 let response_clean = ensure_no_open_code_block(&response_for_user);
                 reply_text = if response_for_user.is_empty() {
                     format!("{}{}", limit_msg, image_md)
@@ -3378,18 +3330,6 @@ pub(crate) async fn run_message_via_llm(
                 build_image_markdown(&label, &url)
             })
             .unwrap_or_default();
-        // #region agent log
-        debug_log(
-            "68cde2",
-            "H3",
-            "api.rs:image_md_normal_break",
-            "image_md when normal break",
-            serde_json::json!({
-                "last_captured_some": last_captured_image_base64.is_some(),
-                "image_md_len": image_md.len(),
-            }),
-        );
-        // #endregion
         let response_clean = ensure_no_open_code_block(&response_for_user);
         reply_text = if response_for_user.is_empty() {
             format!("{}{}", response, image_md)
@@ -3590,19 +3530,6 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
         });
     }
 
-    // #region agent log
-    debug_log(
-        "68cde2",
-        "H4",
-        "api.rs:before_progress_update",
-        "reply_text before ProgressUpdate",
-        serde_json::json!({
-            "reply_text_len": reply_text.len(),
-            "contains_data_image": reply_text.contains("data:image"),
-            "contains_base64": reply_text.contains("base64,"),
-        }),
-    );
-    // #endregion
     let _ = bus.send(
         EventEnvelope::new(
             EventType::ProgressUpdate,
