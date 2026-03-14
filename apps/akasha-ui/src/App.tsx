@@ -3127,7 +3127,7 @@ function App() {
                                   return next;
                                 });
                               }}
-                              aria-label={t("calendar.delete_schedule")}
+                              aria-label={`${t("calendar.select_schedule")} ${s.name || s.id.slice(0, 8)}`}
                             />
                           </label>
                           <span className="calendar-schedule-list-label">
