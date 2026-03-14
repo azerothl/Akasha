@@ -449,6 +449,20 @@ async fn process_root_task(
         return Ok(());
     }
 
+    // Checkpoint for resume (Phase 7): persist steps so we can recover after crash.
+    if execution_mode == Some(ExecutionMode::Orchestrated) {
+        if let Ok(pipeline) = PipelineStore::open(store_path) {
+            let checkpoint = serde_json::json!({
+                "steps": steps.iter().map(|(a, m)| serde_json::json!({ "agent_type": a, "message": m })).collect::<Vec<_>>(),
+                "last_subtask_index": 0usize,
+                "aggregated_so_far": ""
+            });
+            if let Ok(s) = serde_json::to_string(&checkpoint) {
+                let _ = pipeline.set_checkpoint(root_task_id, &s);
+            }
+        }
+    }
+
     // Multiple subtasks: create child tasks and delegate each; aggregator below collects all replies into one response.
     let mut child_notifies: Vec<(Uuid, Arc<tokio::sync::Notify>)> = Vec::new();
     for (agent_type, sub_message) in &steps {

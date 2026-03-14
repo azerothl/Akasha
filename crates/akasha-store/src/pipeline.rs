@@ -66,6 +66,8 @@ pub struct PipelineContext {
     pub updated_at: DateTime<Utc>,
     /// Number of rework/retry attempts (Phase 5: escalation after threshold).
     pub attempt_count: u32,
+    /// Checkpoint for resume: JSON with steps, last_subtask_index, aggregated_so_far (optional).
+    pub checkpoint_json: Option<String>,
 }
 
 pub struct PipelineStore {
@@ -96,12 +98,22 @@ impl PipelineStore {
         if has_col == 0 {
             let _ = conn.execute("ALTER TABLE pipeline_context ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0", []);
         }
+        let has_ck: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('pipeline_context') WHERE name='checkpoint_json'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if has_ck == 0 {
+            let _ = conn.execute("ALTER TABLE pipeline_context ADD COLUMN checkpoint_json TEXT", []);
+        }
         Ok(Self { conn })
     }
 
     pub fn get(&self, root_task_id: Uuid) -> anyhow::Result<Option<PipelineContext>> {
         let mut stmt = self.conn.prepare(
-            "SELECT root_task_id, state, outputs_json, updated_at, COALESCE(attempt_count, 0) FROM pipeline_context WHERE root_task_id = ?1",
+            "SELECT root_task_id, state, outputs_json, updated_at, COALESCE(attempt_count, 0), checkpoint_json FROM pipeline_context WHERE root_task_id = ?1",
         )?;
         let mut rows = stmt.query([root_task_id.to_string()])?;
         if let Some(row) = rows.next()? {
@@ -110,12 +122,14 @@ impl PipelineStore {
             let updated_at: String = row.get(3)?;
             let updated_at = DateTime::parse_from_rfc3339(&updated_at).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
             let attempt_count: i32 = row.get(4).unwrap_or(0);
+            let checkpoint_json: Option<String> = row.get(5).ok();
             return Ok(Some(PipelineContext {
                 root_task_id,
                 state,
                 outputs_json: row.get(2)?,
                 updated_at,
                 attempt_count: attempt_count as u32,
+                checkpoint_json,
             }));
         }
         Ok(None)
@@ -146,6 +160,15 @@ impl PipelineStore {
         if self.get(root_task_id)?.is_none() {
             self.set_state(root_task_id, PipelineState::Cadrage, None)?;
         }
+        Ok(())
+    }
+
+    /// Save checkpoint for resume (steps, last_subtask_index, aggregated_so_far). Overwrites checkpoint_json.
+    pub fn set_checkpoint(&self, root_task_id: Uuid, checkpoint_json: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE pipeline_context SET checkpoint_json = ?1, updated_at = ?2 WHERE root_task_id = ?3",
+            rusqlite::params![checkpoint_json, Utc::now().to_rfc3339(), root_task_id.to_string()],
+        )?;
         Ok(())
     }
 }

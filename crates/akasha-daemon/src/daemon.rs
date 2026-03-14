@@ -1,7 +1,7 @@
 //! Akasha Daemon - Core runtime loop with healthcheck and spec loading
 
 use akasha_core::{load_specs, Specs};
-use akasha_store::{ImmutableLog, MetricsEvent, MetricsStore, TaskStore};
+use akasha_store::{ImmutableLog, MetricsEvent, MetricsStore, PipelineStore, TaskStore};
 use akasha_vault::Vault;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -13,7 +13,7 @@ use futures_util::future::Either;
 use tracing::{error, info, warn, Instrument};
 
 use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask};
-use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
+use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, new_task_workspace_store, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
@@ -300,10 +300,20 @@ impl Daemon {
             info!(chunks = rag_pack.len(), "RAG pack loaded for diagnostic");
         }
 
-        // Initialize store and restore tasks (Phase 1)
+        // Initialize store and restore tasks (Phase 1). Phase 7: mark Running tasks with pipeline checkpoint as failed (interrupted by restart).
         if let Ok(store) = TaskStore::open(&db_path) {
             let tasks = store.get_pending_or_running().unwrap_or_default();
             info!(count = tasks.len(), "Restored tasks from persistence");
+            if let Ok(pipeline) = PipelineStore::open(&db_path) {
+                for t in &tasks {
+                    if t.status == akasha_store::TaskStatus::Running {
+                        if pipeline.get(t.id).ok().flatten().is_some() {
+                            let _ = store.update_status(t.id, akasha_store::TaskStatus::Failed);
+                            info!(task_id = %t.id, "Task marked failed (interrupted by daemon restart)");
+                        }
+                    }
+                }
+            }
         }
         let cluster_enabled = std::env::var("AKASHA_CLUSTER_ENABLED").as_deref() == Ok("1");
         if !cluster_enabled {
@@ -425,6 +435,7 @@ impl Daemon {
             let device_bridge = std::sync::Arc::new(crate::device_bridge::DeviceBridge::new());
             let process_registry = new_process_registry();
             let human_input_store = new_human_input_store();
+            let workspace_store = new_task_workspace_store();
             let task_usage_store = std::sync::Arc::new(crate::api::TaskUsageStore::new());
             let user_rag_store = crate::user_rag::UserRagStore::new_shared(&data_dir);
             let (progress_persistence_tx, progress_persistence_rx) = std::sync::mpsc::channel::<(uuid::Uuid, u8, String)>();
@@ -546,6 +557,7 @@ impl Daemon {
                 let short_term = short_term.clone();
                 let long_term_client = long_term_client.clone();
                 let human_input_store = human_input_store.clone();
+                let workspace_store = workspace_store.clone();
                 let task_completion = task_completion.clone();
                 let agent_profile_cache = agent_profile_cache.clone();
                 let task_usage_store = task_usage_store.clone();
@@ -590,6 +602,7 @@ impl Daemon {
                             Some(agent_profile_cache.clone()),
                             Some(task_usage_store.clone()),
                             Some(device_bridge.clone()),
+                            Some(workspace_store.clone()),
                         )
                         .instrument(span)
                         .await;
