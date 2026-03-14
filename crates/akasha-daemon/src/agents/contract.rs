@@ -27,7 +27,7 @@ pub struct BlockedInfo {
 /// Agent output contract: status, summary, files, criteria, issues, handoff.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentOutputContract {
-    pub status: Option<String>,
+    pub status: Option<ContractStatus>,
     pub summary: Option<String>,
     #[serde(rename = "files_created")]
     pub files_created: Option<Vec<String>>,
@@ -85,7 +85,7 @@ mod tests {
 {"status": "done", "summary": "Done."}
 ```"#;
         let c = parse_contract_from_response(r).unwrap();
-        assert_eq!(c.status.as_deref(), Some("done"));
+        assert_eq!(c.status, Some(ContractStatus::Done));
         assert_eq!(c.summary.as_deref(), Some("Done."));
     }
 }

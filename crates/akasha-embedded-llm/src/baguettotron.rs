@@ -160,7 +160,14 @@ where
 {
     use candle_core::IndexOp;
 
-    let max_new = max_tokens.unwrap_or(MAX_NEW_TOKENS).min(512);
+    let max_new = max_tokens.unwrap_or(MAX_NEW_TOKENS);
+    // #region agent log
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("debug-eb5167.log") {
+        use std::io::Write;
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let _ = writeln!(f, "{{\"sessionId\":\"eb5167\",\"hypothesisId\":\"A\",\"location\":\"baguettotron.rs:stream_start\",\"message\":\"max_tokens\",\"data\":{{\"max_tokens\":{:?},\"max_new\":{}}},\"timestamp\":{}}}", max_tokens, max_new, ts);
+    }
+    // #endregion
     let enc = pipeline
         .tokenizer
         .encode(prompt, true)
@@ -202,6 +209,7 @@ where
     generated.push(next_token);
     let mut prev_decoded_len = 0usize;
     let prompt_byte_len = prompt.len();
+    let mut stopped_reason = "max_new";
 
     for _ in 1..max_new {
         let decoded = pipeline
@@ -237,6 +245,7 @@ where
             .map_err(|e| EmbeddedLlmError::Inference(e.to_string()))?;
         let next_token = sample_next_token(&logits, TEMPERATURE, &mut rng)?;
         if next_token == eos_token_id {
+            stopped_reason = "eos";
             break;
         }
         generated.push(next_token);
@@ -251,6 +260,13 @@ where
     } else {
         decoded.trim().to_string()
     };
+    // #region agent log
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("debug-eb5167.log") {
+        use std::io::Write;
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let _ = writeln!(f, "{{\"sessionId\":\"eb5167\",\"hypothesisId\":\"A\",\"location\":\"baguettotron.rs:stream_end\",\"message\":\"stream_done\",\"data\":{{\"out_len\":{},\"stopped_reason\":\"{}\"}},\"timestamp\":{}}}", out.len(), stopped_reason, ts);
+    }
+    // #endregion
     Ok(out)
 }
 

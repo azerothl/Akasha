@@ -20,6 +20,25 @@ fn debug_log(session_id: &str, hypothesis_id: &str, location: &str, message: &st
             writeln!(f, "{}", line)
         });
 }
+#[allow(dead_code)]
+fn debug_log_session(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    let line = serde_json::json!({
+        "sessionId": "eb5167",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": chrono::Utc::now().timestamp_millis()
+    });
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("debug-eb5167.log")
+        .and_then(|mut f| {
+            use std::io::Write;
+            writeln!(f, "{}", line)
+        });
+}
 // #endregion
 
 use akasha_core::{EventEnvelope, EventType};
@@ -2804,6 +2823,9 @@ pub(crate) async fn run_message_via_llm(
                 None
             },
         };
+        // #region agent log
+        debug_log_session("A", "api.rs:stream_request", "request max_tokens for stream", serde_json::json!({ "max_tokens": max_tokens }));
+        // #endregion
         // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
         // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
         let (stream_tx, std_rx) = std::sync::mpsc::channel::<String>();
@@ -2822,10 +2844,12 @@ pub(crate) async fn run_message_via_llm(
         let stream_join = tokio::spawn(async move { router.complete_stream(&request, stream_tx).await });
         let mut accumulated = String::new();
         let mut first_wait = true;
+        let stream_exit_reason: &str;
         let overall_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(llm_timeout_secs);
         loop {
             // Check the overall deadline before waiting for a chunk to avoid spurious zero-duration timeouts.
             if tokio::time::Instant::now() >= overall_deadline {
+                debug_log_session("A", "api.rs:stream_done", "overall timeout", serde_json::json!({ "stream_exit_reason": "overall_timeout", "accumulated_len": accumulated.len() }));
                 tracing::warn!(timeout_secs = llm_timeout_secs, "Overall LLM timeout exceeded; aborting task");
                 stream_join.abort();
                 reply_text = if accumulated.is_empty() {
@@ -2856,8 +2880,12 @@ pub(crate) async fn run_message_via_llm(
                         .with_correlation(task_id),
                     );
                 }
-                Ok(None) => break, // channel closed (sender dropped)
+                Ok(None) => {
+                    stream_exit_reason = "channel_closed";
+                    break;
+                }
                 Err(_) => {
+                    stream_exit_reason = "idle_timeout";
                     tracing::debug!(idle_secs = idle_timeout_secs, "Stream idle timeout, waiting for final response");
                     break;
                 }
@@ -2908,6 +2936,14 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
         };
+        // #region agent log
+        debug_log_session("A", "api.rs:stream_done", "after stream recv loop", serde_json::json!({
+            "stream_exit_reason": stream_exit_reason,
+            "accumulated_len": accumulated.len(),
+            "response_len": response.len(),
+            "response_ends_with_dot": response.trim().ends_with('.'),
+        }));
+        // #endregion
         if !accumulated.is_empty() && response.is_empty() {
             // Stream sent chunks but final response empty; use accumulated
             reply_text = accumulated.trim().to_string();

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::contract::parse_contract_from_response;
+use super::contract::{ContractStatus, parse_contract_from_response};
 use super::prompts::build_task_prompt;
 use super::{EventBus, ExecutionMode, OrchestratorTask};
 use crate::api::{message_suggests_tool_only_action, ProgressCache, TaskCompletionRegistry};
@@ -568,7 +568,7 @@ async fn process_root_task(
                     Some(ref s) if !s.is_empty() && !GENERIC_MESSAGES.contains(&s.as_str()) => {
                         let mut out = s.clone();
                         if let Some(contract) = parse_contract_from_response(s) {
-                            if contract.status.as_deref() == Some("blocked") {
+                            if contract.status == Some(ContractStatus::Blocked) {
                                 if let Some(ref b) = contract.blocked {
                                     let cause = b.cause.as_deref().unwrap_or("");
                                     let impact = b.impact.as_deref().unwrap_or("");

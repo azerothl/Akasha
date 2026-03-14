@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
+import { preprocessMessagePaths } from "./preprocessMessagePaths";
 
 describe("preprocessDataUrlImages", () => {
   it("converts markdown data URL image to div wrap and img", () => {
@@ -43,5 +44,14 @@ describe("preprocessDataUrlImages", () => {
     const out = preprocessDataUrlImages(input);
     expect(out).toContain('alt="Image"');
     expect(out).toContain('src="data:image/jpeg;base64,X"');
+  });
+
+  it("combined with preprocessMessagePaths does not turn </div> into path link (photo reply)", () => {
+    const message = "Photo captured. It is shown below.\n\n![Photo](<data:image/jpeg;base64,ABC>)";
+    const withDiv = preprocessDataUrlImages(message);
+    const withPaths = preprocessMessagePaths(withDiv);
+    expect(withPaths).toContain('<div class="markdown-data-image-wrap">');
+    expect(withPaths).toContain("</div>");
+    expect(withPaths).not.toMatch(/\]\(path:[^)]*%2F%3E%3C%2Fdiv/);
   });
 });
