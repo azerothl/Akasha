@@ -20,6 +20,7 @@ fn is_custom_route(config: &TaskTypeConfig) -> bool {
 }
 
 /// Agent type -> (primary task_type, fallback task_types for routing when primary has no custom route).
+/// Plan: Architecture agents et pipeline — Phase 2 (new roles).
 fn agent_task_type_and_fallbacks(agent: &str) -> (&'static str, &'static [&'static str]) {
     match agent {
         "financial" => ("financial", &["data_analysis", "conversation"][..]),
@@ -35,6 +36,13 @@ fn agent_task_type_and_fallbacks(agent: &str) -> (&'static str, &'static [&'stat
         "code" => ("code_generation", &["conversation"][..]),
         "search" => ("conversation", &[]),
         "conversation" => ("conversation", &[]),
+        "analyst" => ("conversation", &["creative_writing"][..]),
+        "architect" => ("code_generation", &["system_diagnostic", "conversation"][..]),
+        "frontend" | "backend" | "integration" => ("code_generation", &["conversation"][..]),
+        "database" => ("data_analysis", &["code_generation", "conversation"][..]),
+        "qa" => ("system_diagnostic", &["code_generation", "conversation"][..]),
+        "system" => ("system_diagnostic", &["conversation"][..]),
+        "image_generation" => ("image_generation", &["creative_writing", "conversation"][..]),
         _ => ("conversation", &[]),
     }
 }

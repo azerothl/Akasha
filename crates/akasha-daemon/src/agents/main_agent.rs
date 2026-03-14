@@ -1,4 +1,4 @@
-//! Main Agent — entry point, ack < 500ms, task creation, routing to Orchestrator
+//! Main Agent — entry point, ack < 500ms, task creation, routing to Orchestrator or Direct to conversation (Plan: Architecture agents et pipeline).
 
 use akasha_core::{EventEnvelope, EventType};
 use akasha_store::{Task, TaskStatus, TaskStore};
@@ -7,7 +7,7 @@ use std::path::Path;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::EventBus;
+use super::{classify_execution_mode, EventBus, ExecutionMode};
 
 /// Priority for the task queue: high-priority tasks are processed before normal/scheduled (Phase 4.1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -18,13 +18,15 @@ pub enum TaskPriority {
     Scheduled,
 }
 
-/// Message sent to the orchestrator: root task id, user message, session id (for memory), optional image data URLs for vision.
+/// Message sent to the orchestrator or (when Direct) to the conversation worker: root task id, user message, session id (for memory), optional image data URLs for vision.
 #[derive(Clone, Debug)]
 pub struct OrchestratorTask {
     pub task_id: Uuid,
     pub message: String,
     pub session_id: String,
     pub image_data_urls: Option<Vec<String>>,
+    /// When present, orchestrator may use for lighter (Guided) or full (Orchestrated) pipeline. Absent when sent Direct to conversation.
+    pub execution_mode: Option<ExecutionMode>,
 }
 
 /// Sender that routes tasks to high or normal priority channel (multiplexer feeds orchestrator).
@@ -65,11 +67,23 @@ impl OrchestratorSender {
 pub struct MainAgent {
     bus: EventBus,
     orchestrator: OrchestratorSender,
+    /// When Some, Direct mode tasks are sent here (conversation worker) instead of to the orchestrator.
+    direct_conversation_tx: Option<mpsc::Sender<OrchestratorTask>>,
 }
 
 impl MainAgent {
     pub fn new(bus: EventBus, orchestrator: OrchestratorSender) -> Self {
-        Self { bus, orchestrator }
+        Self {
+            bus,
+            orchestrator,
+            direct_conversation_tx: None,
+        }
+    }
+
+    /// Builder: set the channel for Direct-mode tasks (conversation worker). When set, handle_message will route Direct tasks here.
+    pub fn with_direct_conversation_tx(mut self, tx: mpsc::Sender<OrchestratorTask>) -> Self {
+        self.direct_conversation_tx = Some(tx);
+        self
     }
 
     /// Handle user message: ack immediately, create root task, emit events.
@@ -111,12 +125,31 @@ impl MainAgent {
                 message.to_string()
             })
         };
+
+        let execution_mode = if forward_to_orchestrator {
+            Some(classify_execution_mode(message))
+        } else {
+            None
+        };
+
+        let use_direct = forward_to_orchestrator
+            && execution_mode == Some(ExecutionMode::Direct)
+            && self.direct_conversation_tx.is_some();
+
+        let assigned_agent = if !forward_to_orchestrator {
+            "llm".to_string()
+        } else if use_direct {
+            "conversation".to_string()
+        } else {
+            "orchestrator".to_string()
+        };
+
         let store = TaskStore::open(store_path)?;
         let task = Task {
             id: task_id,
             parent_task_id: None,
             status: TaskStatus::Pending,
-            assigned_agent: if forward_to_orchestrator { "orchestrator" } else { "llm" }.to_string(),
+            assigned_agent: assigned_agent.clone(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             initial_message,
@@ -128,22 +161,47 @@ impl MainAgent {
                 Some(serde_json::json!({
                     "task_id": task_id.to_string(),
                     "parent_task_id": null,
-                    "assigned_agent": task.assigned_agent
+                    "assigned_agent": task.assigned_agent,
+                    "execution_mode": execution_mode.map(|e| e.as_str())
                 })),
             )
             .with_correlation(task_id),
         );
 
         if forward_to_orchestrator {
-            self.orchestrator.send(
-                OrchestratorTask {
+            if use_direct {
+                let tx = self.direct_conversation_tx.as_ref().unwrap().clone();
+                let task_msg = OrchestratorTask {
                     task_id,
                     message: message.to_string(),
                     session_id: session_id.to_string(),
                     image_data_urls,
-                },
-                priority,
-            );
+                    execution_mode: None,
+                };
+                if let Err(e) = tx.try_send(task_msg) {
+                    match e {
+                        mpsc::error::TrySendError::Full(t) => {
+                            tokio::spawn(async move {
+                                let _ = tx.send(t).await;
+                            });
+                        }
+                        mpsc::error::TrySendError::Closed(_) => {
+                            tracing::error!(task_id = %task_id, "direct conversation channel closed; task dropped");
+                        }
+                    }
+                }
+            } else {
+                self.orchestrator.send(
+                    OrchestratorTask {
+                        task_id,
+                        message: message.to_string(),
+                        session_id: session_id.to_string(),
+                        image_data_urls,
+                        execution_mode,
+                    },
+                    priority,
+                );
+            }
         }
         Ok(task_id)
     }

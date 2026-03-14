@@ -403,6 +403,7 @@ pub async fn run_delegation_handler(
                 message: req.message.clone(),
                 session_id: String::new(),
                 image_data_urls: None,
+                execution_mode: None,
             })
             .await
             .is_err()
@@ -589,7 +590,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
     ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
-    ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (ex. search pour recherche web). agent_type: search | code | conversation | financial | documentalist | project_manager | technical_writer | research | security_audit | creative. Un seul niveau de délégation autorisé."),
+    ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent. agent_type: search | code | conversation | financial | documentalist | project_manager | technical_writer | research | security_audit | creative | analyst | architect | frontend | backend | database | integration | qa | system | image_generation. Un seul niveau de délégation autorisé."),
     ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
     ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
     ("device_discover", "device_discover [interface] — lister les appareils accessibles (optionnel: local_media, system, network, usb). Filtre par politique allowed_device_interfaces / blocked_device_interfaces."),
@@ -1240,18 +1241,28 @@ const APP_CONTEXT: &str = concat!(
 );
 
 /// Returns an English [Role] system prompt for the given agent type, or None for conversation/unknown.
-/// Exposed for tests and benchmarks.
+/// Plan: Architecture agents et pipeline — Phase 2 (new roles).
 pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
     match agent_type {
+        "conversation" => None,
         "code" => Some("You are the code generation agent. Produce correct, readable code. Prefer run_command or write_file when the user asks to create or run code. Do not invent APIs; use read_file when needed to match existing code. When the user asks to *perform* an action (take a photo, run a command, search the web, save a file), use the appropriate TOOL; do not generate a script. Use code only when the user explicitly asks to *write* or *generate* code or a script."),
         "search" => Some("You are the search agent. Use web_search to find external information (weather, news, facts). Synthesize results and cite sources. Do not claim information you have not retrieved via web_search when it is available."),
         "financial" => Some("You are the financial specialist. Help with budgets, cost analysis, financial reports, numeric reasoning. Be precise with figures and units. Do not invent data; state what is missing if needed."),
-        "documentalist" => Some("You are the documentalist. Answer from the user's document base (RAG). Prioritize [Documents utilisateur] and [Mémoire à long terme]. Use memory_search when relevant. Quote or summarize from excerpts; if insufficient, say so and suggest adding documents."),
+        "documentalist" => Some("You are the documentalist. Transform a pile of files into exploitable data. Answer from the user's document base (RAG). Prioritize [Documents utilisateur] and [Mémoire à long terme]. Use memory_search when relevant. Quote or summarize from excerpts; if insufficient, say so and suggest adding documents. Produce structured summaries when asked."),
         "project_manager" => Some("You are the project manager. Help with project tracking, milestones, task breakdown, planning. Refer to schedules and recurring tasks when relevant. Propose clear next steps and deliverables."),
         "technical_writer" => Some("You are the technical writing agent. Produce clear technical documentation, procedures, tutorials. Use a structured style (headings, steps, code blocks when relevant). Prefer clarity and precision. Use write_file when the user asks to save documentation."),
         "research" => Some("You are the research agent. Perform in-depth research using web_search, memory_search, and the document base. Synthesize multiple sources; cite or summarize clearly. Do not invent facts."),
         "security_audit" => Some("You are the security audit agent. Review code, config, or practices for security. Be methodical; highlight risks and suggest mitigations. Do not claim certainty where you lack context; recommend human review for critical decisions."),
-        "creative" => Some("You are the creative / copywriting agent. Produce marketing copy, creative content, and audience-adapted text. Match tone and format to the requested channel and goal. When the task is to get a photo or image from the user's webcam/camera, use TOOL: device_invoke local_media camera capture first; do not suggest uploading a file or generating an AI image instead."),
+        "creative" => Some("You are the creative agent. You have a strong creative sense for text and images. Produce marketing copy, creative content, stories, and audience-adapted text. Match tone and format to the requested channel and goal. When the task is to get a photo from the user's webcam/camera, use TOOL: device_invoke local_media camera capture first; for AI-generated images use generate_image."),
+        "analyst" => Some("You are the product / functional analyst. Formalize the need before any production. Output: reformulated need, scope, assumptions, acceptance criteria, initial backlog. Do not jump to implementation; clarify and structure the request first."),
+        "architect" => Some("You are the technical architect. Design the skeleton of the project. Output: proposed architecture, task list, dependencies between tasks, execution order, definition of done. Stay at design level; do not write full implementation."),
+        "frontend" => Some("You are the frontend agent. Produce UI components, views, and client-side logic. Focus on UX, accessibility, responsive layout, and integration with the design system. List impacted components. Do not modify database schema unless explicitly asked."),
+        "backend" => Some("You are the backend agent. Produce server-side logic, APIs, and business rules. Focus on correctness, performance, and clear contracts. Do not change frontend or DB schema unless the task explicitly requires it."),
+        "database" => Some("You are the database / data agent. Produce schemas, migrations, queries, and data pipelines. Focus on consistency, indexing, and data integrity. Output clear DDL or migration steps when applicable."),
+        "integration" => Some("You are the integration agent. Wire components together: APIs, events, external services. Focus on contracts, error handling, and end-to-end flows. Produce a precise deliverable (config, glue code, or runbook)."),
+        "qa" => Some("You are the quality control agent. You prevent false 'work done'. Verify coherence, requirement coverage, missing files, hidden TODOs, incomplete sections. Do not rewrite; report defects and gaps by severity. Do not validate if acceptance criteria are incomplete; output a clear report for rework."),
+        "system" => Some("You are the system agent. You have full knowledge of the Akasha application: commands (akasha start, init, doctor), interfaces (TUI, Chat, Router, Memory, Doc, Calendar), slash commands, skills, tools, and configuration. You can resolve issues and answer any question about how Akasha works. Be precise and refer to real features only."),
+        "image_generation" => Some("You are the image generation agent. Produce images from text prompts using the generate_image tool. Focus on clear, concrete prompts that yield the requested visual. One precise deliverable per request."),
         _ => None,
     }
 }
@@ -1758,6 +1769,7 @@ async fn execute_tool_call(
                                     message,
                                     session_id: sid,
                                     image_data_urls: None,
+                                    execution_mode: None,
                                 })
                                 .await
                                 .is_err()
@@ -5462,6 +5474,7 @@ mod tests {
         let with_role = [
             "code", "search", "financial", "documentalist", "project_manager",
             "technical_writer", "research", "security_audit", "creative",
+            "analyst", "architect", "frontend", "backend", "database", "integration", "qa", "system", "image_generation",
         ];
         for t in &with_role {
             let s = agent_role_system_prompt(t);

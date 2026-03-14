@@ -514,7 +514,7 @@ impl Daemon {
                 }
             });
             let orchestrator_sender = crate::agents::OrchestratorSender::new(high_tx, normal_tx.clone());
-            let main_agent = MainAgent::new(bus.clone(), orchestrator_sender);
+            let main_agent = MainAgent::new(bus.clone(), orchestrator_sender).with_direct_conversation_tx(conv_tx.clone());
             let orchestrator = Arc::new(Orchestrator::new(
                 bus.clone(),
                 db_path.clone(),

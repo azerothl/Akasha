@@ -3,14 +3,16 @@
 
 use akasha_core::{EventEnvelope, EventType};
 use akasha_llm::CompletionRequest;
-use akasha_store::{Schedule, ScheduleStore, Task, TaskStatus, TaskStore};
+use akasha_store::{PipelineState, PipelineStore, Schedule, ScheduleStore, Task, TaskStatus, TaskStore};
 use chrono::Utc;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::{EventBus, OrchestratorTask};
+use super::contract::parse_contract_from_response;
+use super::prompts::build_task_prompt;
+use super::{EventBus, ExecutionMode, OrchestratorTask};
 use crate::api::{message_suggests_tool_only_action, ProgressCache, TaskCompletionRegistry};
 
 /// Outcome of evaluating whether the aggregated sub-agent response satisfies the user request.
@@ -43,13 +45,14 @@ pub(crate) fn apply_decomposition_override(_message: &str, steps: Vec<Subtask>) 
 }
 
 const DECOMPOSER_PROMPT_TEMPLATE: &str = r#"You are a task decomposer. Output one line per subtask: agent_type|message. One line per distinct user action (e.g. one for generating a report, another for creating a file).
-Agent types: conversation (general chat), code (code gen), search (info search), schedule (create recurring task IN THE APP), financial (budget, costs, reports), documentalist (answer from user's document base / RAG), project_manager (project tracking, milestones, planning), technical_writer (technical docs, procedures, tutorials), research (deep research, multi-source synthesis), security_audit (security review of code/config), creative (copywriting, marketing content).
-- Use **conversation** when the user asks to *perform* an action using existing tools: take a photo (camera/webcam), web search, save a file, generate an image (AI), run a command. The conversation agent will use tools (device_invoke, web_search, write_file, generate_image, run_command); do NOT choose "code" for these.
-- Reserve **code** only for *explicit* requests to write or generate code/script (e.g. "écris un script qui…", "génère du code pour…").
-- If the user asks to CREATE a recurring/scheduled task (e.g. "tâche récurrente", "rappel toutes les 2 heures", "crée un rappel"), output exactly ONE line: schedule|interval_seconds|name|message
-  where interval_seconds is in seconds (3600=1h, 7200=2h, 86400=1 day), name is a short title, message is the reminder text shown when the task runs. Example: schedule|7200|Rappel Github|Rappel: regarder l'avancement du projet sur GitHub
-- If the user asks for several distinct deliverables or actions (e.g. "make a report and then create a file", "do X then do Y"), output one line per deliverable/action. Example: first line for the report, second line for creating the file.
-- Otherwise output agent_type|message. Examples: "Prends une photo avec la caméra" → conversation|Prends une photo avec la caméra. "Écris un script Python qui lit un fichier" → code|Écris un script Python qui lit un fichier.
+Agent types: conversation (general chat, tools), code (code gen), search (info search), schedule (create recurring task IN THE APP), financial, documentalist (RAG, turn files into data), project_manager, technical_writer, research, security_audit, creative (text and image), analyst (formalize need, scope, acceptance criteria, backlog), architect (architecture, task list, dependencies, definition of done), frontend (UI, components), backend (APIs, server logic), database (schema, migrations, data), integration (wire components, APIs), qa (quality control, verify coherence and coverage), system (Akasha app knowledge, troubleshooting), image_generation (generate image from prompt).
+- Use **conversation** when the user asks to *perform* an action using existing tools: take a photo, web search, save a file, generate an image (AI), run a command. Do NOT choose "code" for these.
+- Reserve **code** only for *explicit* requests to write or generate code/script.
+- Use **analyst** when the request needs formalization first (scope, criteria, backlog). Use **architect** when technical design or task breakdown is needed.
+- Use **frontend** / **backend** / **database** / **integration** for production deliverables in their domain. Use **qa** for verification and quality checks. Use **system** for questions about Akasha itself.
+- If the user asks to CREATE a recurring/scheduled task, output exactly ONE line: schedule|interval_seconds|name|message (interval in seconds, name short title, message reminder text).
+- If the user asks for several distinct deliverables or actions, output one line per deliverable/action.
+- Otherwise output agent_type|message.
 
 User request:
 
@@ -93,6 +96,7 @@ async fn decompose_request(
                     const RECOGNIZED: &[&str] = &[
                         "code", "search", "schedule", "financial", "documentalist", "project_manager",
                         "technical_writer", "research", "security_audit", "creative",
+                        "analyst", "architect", "frontend", "backend", "database", "integration", "qa", "system", "image_generation",
                     ];
                     let agent_type = if RECOGNIZED.contains(&agent_type.as_str()) {
                         agent_type
@@ -211,6 +215,7 @@ impl Orchestrator {
             let message = task.message;
             let session_id = task.session_id;
             let image_data_urls = task.image_data_urls;
+            let execution_mode = task.execution_mode;
             tokio::spawn(async move {
                 if let Err(e) = process_root_task(
                     bus,
@@ -223,6 +228,7 @@ impl Orchestrator {
                     progress,
                     llm_router,
                     task_completion,
+                    execution_mode,
                 )
                 .await
                 {
@@ -244,9 +250,15 @@ async fn process_root_task(
     progress: ProgressCache,
     llm_router: Arc<akasha_llm::LLMRouter>,
     task_completion: TaskCompletionRegistry,
+    execution_mode: Option<ExecutionMode>,
 ) -> anyhow::Result<()> {
     if !akasha_core::Role::OrchestratorAgent.can_spawn_agents() {
         anyhow::bail!("RBAC: orchestrator not allowed to spawn agents");
+    }
+    if execution_mode == Some(ExecutionMode::Orchestrated) {
+        if let Ok(pipeline) = PipelineStore::open(store_path) {
+            let _ = pipeline.init_if_missing(root_task_id);
+        }
     }
     let store = TaskStore::open(store_path)?;
     store.update_status(root_task_id, TaskStatus::Running)?;
@@ -429,6 +441,7 @@ async fn process_root_task(
                 message: steps[0].1.clone(),
                 session_id,
                 image_data_urls,
+                execution_mode: None,
             })
             .await
             .map_err(|_| anyhow::anyhow!("conversation channel closed"))?;
@@ -473,13 +486,19 @@ async fn process_root_task(
         // Register notifier *before* sending to conv_tx so the worker can fire it immediately.
         let notify = Arc::new(tokio::sync::Notify::new());
         task_completion.write().await.insert(child_id, notify.clone());
-        // Delegate to conversation worker for all types (code/search handled as conversation for now). Pass same session_id for memory. No image attachments for sub-steps.
+        // Delegate to conversation worker; wrap message in task prompt (layer 3) when not a simple conversation/code/search.
+        let child_message = if matches!(agent_type.as_str(), "analyst" | "architect" | "frontend" | "backend" | "database" | "integration" | "qa" | "image_generation") {
+            build_task_prompt(agent_type, sub_message, None, None)
+        } else {
+            sub_message.clone()
+        };
         let _ = conversation_tx
             .send(OrchestratorTask {
                 task_id: child_id,
-                message: sub_message.clone(),
+                message: child_message,
                 session_id: session_id.clone(),
                 image_data_urls: None,
+                execution_mode: None,
             })
             .await;
         child_notifies.push((child_id, notify));
@@ -490,6 +509,7 @@ async fn process_root_task(
     let user_message = message.clone();
     let conversation_tx_aggregator = conversation_tx.clone();
     let session_id_aggregator = session_id.clone();
+    let execution_mode_aggregator = execution_mode;
     const GENERIC_MESSAGES: &[&str] = &["Done.", "Terminé.", "Échec.", "Annulé."];
     // Per-child timeout: mirrors the delegation handler's 5-minute limit.  Children are processed
     // sequentially by the conversation worker, so total wait is bounded by N × PER_CHILD_TIMEOUT.
@@ -545,7 +565,34 @@ async fn process_root_task(
             for child in &children {
                 let content = g.get(&child.id).and_then(|q| q.back().map(|e| e.message.trim().to_string()));
                 let content = match content {
-                    Some(ref s) if !s.is_empty() && !GENERIC_MESSAGES.contains(&s.as_str()) => s.clone(),
+                    Some(ref s) if !s.is_empty() && !GENERIC_MESSAGES.contains(&s.as_str()) => {
+                        let mut out = s.clone();
+                        if let Some(contract) = parse_contract_from_response(s) {
+                            if contract.status.as_deref() == Some("blocked") {
+                                if let Some(ref b) = contract.blocked {
+                                    let cause = b.cause.as_deref().unwrap_or("");
+                                    let impact = b.impact.as_deref().unwrap_or("");
+                                    let workaround = b.workaround_proposal.as_deref().unwrap_or("");
+                                    if !cause.is_empty() || !impact.is_empty() {
+                                        out.push_str("\n[Blocage: ");
+                                        if !cause.is_empty() {
+                                            out.push_str(cause);
+                                        }
+                                        if !impact.is_empty() {
+                                            out.push_str(" | Impact: ");
+                                            out.push_str(impact);
+                                        }
+                                        if !workaround.is_empty() {
+                                            out.push_str(" | Contournement: ");
+                                            out.push_str(workaround);
+                                        }
+                                        out.push(']');
+                                    }
+                                }
+                            }
+                        }
+                        out
+                    }
                     _ => {
                         if child.status == TaskStatus::Failed {
                             "(Sous-tâche en échec)".to_string()
@@ -603,7 +650,19 @@ N'ajoute aucune information qui ne figure pas dans les réponses des agents ci-d
         // Satisfaction check: only complete when response is satisfactory or agents clearly could not do the task.
         let mut final_aggregated = aggregated.clone();
         let satisfaction = check_satisfaction(&llm_router, &user_message, &aggregated).await;
-        if satisfaction == SatisfactionOutcome::NeedsRefinement {
+        const MAX_REFINEMENT_ATTEMPTS: u32 = 3;
+        let attempt_ok = execution_mode_aggregator != Some(ExecutionMode::Orchestrated)
+            || PipelineStore::open(&store_path_buf)
+                .ok()
+                .and_then(|p| p.get(root_task_id).ok().flatten())
+                .map(|c| c.attempt_count < MAX_REFINEMENT_ATTEMPTS)
+                .unwrap_or(true);
+        if satisfaction == SatisfactionOutcome::NeedsRefinement && attempt_ok {
+            if execution_mode_aggregator == Some(ExecutionMode::Orchestrated) {
+                if let Ok(pipeline) = PipelineStore::open(&store_path_buf) {
+                    let _ = pipeline.increment_attempt(root_task_id);
+                }
+            }
             // One refinement round: ask a single conversation agent to produce a complete answer or clearly state what is missing.
             let refinement_prompt = format!(
                 r#"Demande initiale de l'utilisateur : « {} »
@@ -641,6 +700,7 @@ Tu dois soit : (1) produire une réponse complète et directe à la demande de l
                         message: refinement_prompt,
                         session_id: session_id_aggregator.clone(),
                         image_data_urls: None,
+                        execution_mode: None,
                     })
                     .await;
                 if tokio::time::timeout(PER_CHILD_TIMEOUT, notify_refinement.notified())
@@ -675,6 +735,11 @@ Tu dois soit : (1) produire une réponse complète et directe à la demande de l
         let any_failed = children.iter().any(|t| t.status == TaskStatus::Failed);
         let root_status = if any_failed { TaskStatus::Failed } else { TaskStatus::Completed };
         let status_str = root_status.as_str();
+        if root_status == TaskStatus::Completed && execution_mode_aggregator == Some(ExecutionMode::Orchestrated) {
+            if let Ok(pipeline) = PipelineStore::open(&store_path_buf) {
+                let _ = pipeline.set_state(root_task_id, PipelineState::Livraison, Some(final_aggregated.as_str()));
+            }
+        }
         let _ = store.update_status(root_task_id, root_status);
         let event_type = if any_failed { EventType::TaskFailed } else { EventType::TaskCompleted };
         let _ = bus.send(
