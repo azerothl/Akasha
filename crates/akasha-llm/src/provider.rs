@@ -449,6 +449,16 @@ impl LLMProvider for OpenRouterProvider {
             let err_body = resp.text().await.unwrap_or_default();
             return Err(ProviderError::Api(format!("{} {}", status, err_body)));
         }
+        // Reject huge response bodies to avoid OOM (e.g. buggy API returning Content-Length: 31GB).
+        const MAX_RESPONSE_BODY: u64 = 10 * 1024 * 1024; // 10 MiB
+        if let Some(len) = resp.content_length() {
+            if len > MAX_RESPONSE_BODY {
+                return Err(ProviderError::Api(format!(
+                    "LLM response body too large: {} bytes (max {}). Refusing to allocate.",
+                    len, MAX_RESPONSE_BODY
+                )));
+            }
+        }
         let json: serde_json::Value = resp.json().await.map_err(|e| ProviderError::Api(e.to_string()))?;
         let text = json
             .get("choices")

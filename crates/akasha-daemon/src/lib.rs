@@ -4,6 +4,7 @@ pub mod agent_profile;
 pub mod agents;
 pub mod personality;
 pub mod api;
+pub mod debug_log;
 pub mod channels;
 pub mod daemon;
 pub mod replication;

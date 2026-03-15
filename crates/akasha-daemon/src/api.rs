@@ -524,7 +524,14 @@ pub fn parse_request(buf: &[u8]) -> (String, String, Option<Vec<u8>>, std::colle
             headers.insert(name, value);
         }
     }
-    let body = if content_length > 0 && rest.len() >= content_length {
+    const MAX_BODY_PARSE: usize = 10 * 1024 * 1024; // 10 MiB — refuse to allocate larger body (hypothesis B)
+    let will_allocate = content_length > 0 && content_length <= MAX_BODY_PARSE && rest.len() >= content_length;
+    // #region agent log
+    if content_length > 0 {
+        crate::debug_log::log("api.rs:parse_request", "body allocation check", &serde_json::json!({"content_length": content_length, "rest_len": rest.len(), "will_allocate": will_allocate, "max_body_parse": MAX_BODY_PARSE}), "B");
+    }
+    // #endregion
+    let body = if will_allocate {
         Some(rest[..content_length].to_vec())
     } else {
         None
@@ -2813,7 +2820,7 @@ pub(crate) async fn run_message_via_llm(
         )
     } else {
         format!(
-            "{}{}{}{}{}{}{}Utilisateur:\n{}",
+            "{}{}{}{}{}{}Utilisateur:\n{}",
             user_prefix.trim_end(),
             write_reminder,
             web_search_reminder,
@@ -2915,7 +2922,17 @@ pub(crate) async fn run_message_via_llm(
             };
             match tokio::time::timeout(idle, tok_rx.recv()).await {
                 Ok(Some(chunk)) => {
+                    // #region agent log
+                    const MAX_ACCUMULATED: usize = 2 * 1024 * 1024; // 2 MiB cap to prevent unbounded allocation (hypothesis D)
+                    if accumulated.len() + chunk.len() > MAX_ACCUMULATED {
+                        crate::debug_log::log("api.rs:stream_accumulated", "accumulated cap hit", &serde_json::json!({"accumulated_len": accumulated.len(), "chunk_len": chunk.len(), "max": MAX_ACCUMULATED}), "D");
+                        accumulated.truncate(MAX_ACCUMULATED.saturating_sub(chunk.len()));
+                    }
                     accumulated.push_str(&chunk);
+                    if accumulated.len() > 512 * 1024 {
+                        crate::debug_log::log("api.rs:stream_accumulated", "accumulated size", &serde_json::json!({"accumulated_len": accumulated.len(), "chunk_len": chunk.len()}), "D");
+                    }
+                    // #endregion
                     let _ = bus.send(
                         EventEnvelope::new(
                             EventType::ProgressUpdate,
@@ -4752,6 +4769,7 @@ pub async fn handle_api(
             max_tokens: body.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32),
             temperature: body.get("temperature").and_then(|v| v.as_f64()).map(|f| f as f32),
             preferred_task_type: None,
+            system_prompt: None,
             image_data_urls: None,
         };
         match llm_router.complete(&req).await {

@@ -14,6 +14,7 @@ use tracing::{error, info, warn, Instrument};
 
 use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask};
 use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, new_task_workspace_store, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
+use crate::debug_log;
 use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
@@ -793,7 +794,10 @@ impl Daemon {
                                     buf.truncate(n);
                                     let full_buf: Vec<u8> = match parse_content_length(&buf) {
                                         Some((header_end, content_length)) if content_length <= MAX_BODY => {
-                                            let total_needed = header_end + 4 + content_length;
+                                            let total_needed = header_end.saturating_add(4).saturating_add(content_length);
+                                            // #region agent log
+                                            debug_log::log("daemon.rs:body_read", "content_length branch", &serde_json::json!({"header_end": header_end, "content_length": content_length, "total_needed": total_needed, "buf_len": buf.len(), "max_body": MAX_BODY}), "A");
+                                            // #endregion
                                             if buf.len() >= total_needed {
                                                 buf
                                             } else {
@@ -809,8 +813,17 @@ impl Daemon {
                                                 buf
                                             }
                                         }
-                                        _ => buf,
+                                        _ => {
+                                            // #region agent log
+                                            let pc = parse_content_length(&buf);
+                                            debug_log::log("daemon.rs:body_skip", "skip branch (content_length > MAX_BODY or no Content-Length)", &serde_json::json!({"parse_result": pc.map(|(he,cl)| serde_json::json!({"header_end": he, "content_length": cl})), "buf_len": buf.len()}), "A");
+                                            // #endregion
+                                            buf
+                                        }
                                     };
+                                    // #region agent log
+                                    debug_log::log("daemon.rs:before_parse_request", "before parse_request", &serde_json::json!({"full_buf_len": full_buf.len()}), "B");
+                                    // #endregion
                                     let (method, path, body, headers) = parse_request(&full_buf);
                                     if method == "GET" && path == "/api/events" {
                                         let _ = crate::api::stream_sse_events(&bus_clone, &mut stream).await;

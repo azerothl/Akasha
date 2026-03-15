@@ -419,12 +419,15 @@ pub fn build_personality_reminder_line(
         .name
         .as_deref()
         .filter(|s| !s.trim().is_empty())
+        .map(String::from)
         .or_else(|| {
-            load_personality_core(spec_dir)
-                .and_then(|c| c.personality_core.as_ref())
-                .and_then(|c| c.name.as_deref())
+            load_personality_core(spec_dir).and_then(|c| {
+                c.personality_core
+                    .as_ref()
+                    .and_then(|inner| inner.name.as_deref().map(String::from))
+            })
         })
-        .unwrap_or(AgentProfile::DEFAULT_NAME);
+        .unwrap_or_else(|| AgentProfile::DEFAULT_NAME.to_string());
     if let Some(core) = load_personality_core(spec_dir) {
         if let Some(ref c) = core.personality_core {
             if let Some(ref p) = c.posture {

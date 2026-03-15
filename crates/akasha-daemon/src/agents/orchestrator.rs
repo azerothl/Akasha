@@ -152,6 +152,7 @@ Output only: SATISFACTORY, CANNOT_DO, or NEEDS_REFINEMENT"#,
         max_tokens: Some(32),
         temperature: Some(0.0),
         preferred_task_type: Some("system".to_string()),
+        system_prompt: None,
         image_data_urls: None,
     };
     match tokio::time::timeout(
