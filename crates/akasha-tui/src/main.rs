@@ -215,12 +215,22 @@ struct App {
     memory_short_term: Vec<(String, String)>,
     /// Memory tab: long-term entries (id, content, created_at, source).
     memory_long_term: Vec<(String, String, String, String)>,
+    /// Relations per entry id: entry_id -> [(to_id, kind)].
+    memory_lt_related: std::collections::HashMap<String, Vec<(String, String)>>,
     /// Selected index in long-term list (for delete).
     memory_lt_selected: usize,
     /// Line index in Memory tab where each long-term entry starts (set during render).
     memory_lt_line_starts: Vec<usize>,
     /// Whether long-term memory is available (daemon has embeddings).
     memory_long_term_available: bool,
+    /// Memory search: query being typed.
+    memory_search_query: String,
+    /// Memory search: results (id, content) from last search.
+    memory_search_results: Vec<(String, String)>,
+    /// If true, show search bar and results instead of long-term list.
+    memory_search_active: bool,
+    /// If true, show graph view (tree from selected entry) instead of flat list.
+    memory_view_graph: bool,
     /// Current theme (cycle with F2).
     theme: ThemeName,
     port: u16,
@@ -285,9 +295,14 @@ impl App {
             force_new_session: false,
             memory_short_term: Vec::new(),
             memory_long_term: Vec::new(),
+            memory_lt_related: std::collections::HashMap::new(),
             memory_lt_selected: 0,
             memory_lt_line_starts: Vec::new(),
             memory_long_term_available: false,
+            memory_search_query: String::new(),
+            memory_search_results: Vec::new(),
+            memory_search_active: false,
+            memory_view_graph: false,
             theme: ThemeName::default(),
             port,
             tx,
@@ -840,6 +855,7 @@ impl App {
                 if let Ok(json) = resp.json::<serde_json::Value>() {
                     self.memory_long_term_available = json.get("long_term_available").and_then(|v| v.as_bool()).unwrap_or(false);
                     let entries = json.get("entries").and_then(|e| e.as_array()).cloned().unwrap_or_default();
+                    self.memory_lt_related.clear();
                     self.memory_long_term = entries
                         .iter()
                         .filter_map(|e| {
@@ -847,6 +863,22 @@ impl App {
                             let content = e.get("content")?.as_str()?.to_string();
                             let created_at = e.get("created_at")?.as_str()?.to_string();
                             let source = e.get("source")?.as_str()?.to_string();
+                            let related: Vec<(String, String)> = e
+                                .get("related")
+                                .and_then(|r| r.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|r| {
+                                            let to_id = r.get("id")?.as_str()?.to_string();
+                                            let kind = r.get("kind").and_then(|k| k.as_str()).unwrap_or("").to_string();
+                                            Some((to_id, kind))
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            if !related.is_empty() {
+                                self.memory_lt_related.insert(id.clone(), related);
+                            }
                             Some((id, content, created_at, source))
                         })
                         .collect();
@@ -854,10 +886,12 @@ impl App {
                 }
             } else {
                 self.memory_long_term.clear();
+                self.memory_lt_related.clear();
                 self.memory_long_term_available = false;
             }
         } else {
             self.memory_long_term.clear();
+            self.memory_lt_related.clear();
             self.memory_long_term_available = false;
         }
     }
@@ -875,6 +909,46 @@ impl App {
             .unwrap_or_default();
         if client.delete(&url).send().map(|r| r.status().is_success()).unwrap_or(false) {
             self.fetch_memory();
+        }
+    }
+
+    /// Run semantic search in long-term memory (GET /api/memory/search). Fills memory_search_results.
+    fn fetch_memory_search(&mut self) {
+        let query = self.memory_search_query.trim();
+        if query.is_empty() {
+            return;
+        }
+        let url = format!(
+            "{}/api/memory/search?q={}&top_k=20",
+            daemon_base_url(self.port),
+            urlencoding::encode(query)
+        );
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+        if let Ok(resp) = client.get(&url).send() {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>() {
+                    self.memory_search_results = json
+                        .get("results")
+                        .and_then(|r| r.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|e| {
+                                    let id = e.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let content = e.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    Some((id, content))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                }
+            } else {
+                self.memory_search_results.clear();
+            }
+        } else {
+            self.memory_search_results.clear();
         }
     }
 
@@ -2382,18 +2456,73 @@ fn ui(f: &mut Frame, app: &mut App) {
                 lines.push(Line::from(Span::styled(app.i18n.t("memory.no_turn"), Style::default().fg(theme.palette().muted))));
                 lines.push(Line::from(""));
             }
-            let lt_status = if app.memory_long_term_available {
-                app.i18n.t("memory.long_term_on")
+            if app.memory_search_active {
+                lines.push(Line::from(Span::styled(
+                    format!("  Recherche: {}_{}", app.memory_search_query, if app.memory_search_query.is_empty() { " (Entrée pour lancer)" } else { "" }),
+                    Style::default().fg(theme.palette().accent),
+                )));
+                lines.push(Line::from(""));
+                if app.memory_search_results.is_empty() {
+                    if app.memory_search_query.trim().is_empty() {
+                        lines.push(Line::from(Span::styled("  Saisir une requête puis Entrée. Escape ou q pour annuler.", Style::default().fg(theme.palette().muted))));
+                    } else {
+                        lines.push(Line::from(Span::styled("  Aucun résultat.", Style::default().fg(theme.palette().muted))));
+                    }
+                } else {
+                    for (id, content) in &app.memory_search_results {
+                        lines.push(Line::from(Span::styled(
+                            format!("  (id: {}) {}", &id[..id.len().min(8)], content.chars().take(70).collect::<String>()),
+                            Style::default().fg(theme.palette().fg),
+                        )));
+                        if content.chars().count() > 70 {
+                            lines.push(Line::from(Span::styled("    …", Style::default().fg(theme.palette().muted))));
+                        }
+                        lines.push(Line::from(""));
+                    }
+                }
+            } else if app.memory_view_graph {
+                lines.push(Line::from(Span::styled(
+                    "  Vue graphe (g pour revenir à la liste)",
+                    Style::default().fg(theme.palette().muted),
+                )));
+                lines.push(Line::from(""));
+                if let Some((id, content, created_at, source)) = app.memory_long_term.get(app.memory_lt_selected) {
+                    lines.push(Line::from(Span::styled(
+                        format!("  ● [{}] {} — {}", source, &created_at[..created_at.len().min(19)], content.chars().take(60).collect::<String>()),
+                        Style::default().fg(theme.palette().accent),
+                    )));
+                    if !id.is_empty() {
+                        lines.push(Line::from(Span::styled(format!("    (id: {})", &id[..id.len().min(8)]), Style::default().fg(theme.palette().muted))));
+                    }
+                    if let Some(related) = app.memory_lt_related.get(id) {
+                        for (i, (to_id, kind)) in related.iter().enumerate() {
+                            let prefix = if i + 1 == related.len() { "└─" } else { "├─" };
+                            let kind_str = if kind.is_empty() { "related" } else { kind.as_str() };
+                            let content_excerpt = app.memory_long_term.iter().find(|(eid, _, _, _)| eid == to_id).map(|(_, c, _, _)| c.chars().take(50).collect::<String>());
+                            let node_line = if let Some(excerpt) = content_excerpt {
+                                format!("  {} {} ({}): {}", prefix, &to_id[..to_id.len().min(8)], kind_str, excerpt)
+                            } else {
+                                format!("  {} {} ({})", prefix, &to_id[..to_id.len().min(8)], kind_str)
+                            };
+                            lines.push(Line::from(Span::styled(node_line, Style::default().fg(theme.palette().fg))));
+                        }
+                    }
+                } else {
+                    lines.push(Line::from(Span::styled("  Sélectionnez une entrée en vue liste (g pour basculer).", Style::default().fg(theme.palette().muted))));
+                }
             } else {
-                app.i18n.t("memory.long_term_off")
-            };
-            lines.push(Line::from(Span::styled(
-                lt_status,
-                Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD),
-            )));
-            lines.push(Line::from(""));
-            let mut lt_line_starts = Vec::new();
-            for (idx, (id, content, created_at, source)) in app.memory_long_term.iter().enumerate() {
+                let lt_status = if app.memory_long_term_available {
+                    app.i18n.t("memory.long_term_on")
+                } else {
+                    app.i18n.t("memory.long_term_off")
+                };
+                lines.push(Line::from(Span::styled(
+                    lt_status,
+                    Style::default().fg(theme.palette().accent).add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(""));
+                let mut lt_line_starts = Vec::new();
+                for (idx, (id, content, created_at, source)) in app.memory_long_term.iter().enumerate() {
                 lt_line_starts.push(lines.len());
                 let style = if idx == app.memory_lt_selected {
                     Style::default().fg(theme.palette().accent)
@@ -2407,11 +2536,29 @@ fn ui(f: &mut Frame, app: &mut App) {
                 if content.chars().count() > 80 {
                     lines.push(Line::from(Span::styled("    …", Style::default().fg(theme.palette().muted))));
                 }
+                if let Some(related) = app.memory_lt_related.get(id) {
+                    let parts: Vec<String> = related
+                        .iter()
+                        .map(|(to_id, kind)| {
+                            let content_excerpt = app.memory_long_term.iter().find(|(eid, _, _, _)| eid == to_id).map(|(_, c, _, _)| c.chars().take(40).collect::<String>());
+                            if let Some(excerpt) = content_excerpt {
+                                format!("{} ({})", excerpt, if kind.is_empty() { "related" } else { kind })
+                            } else {
+                                format!("{} ({})", &to_id[..to_id.len().min(8)], if kind.is_empty() { "related" } else { kind })
+                            }
+                        })
+                        .collect();
+                    lines.push(Line::from(Span::styled(
+                        format!("    → lié à: {}", parts.join(", ")),
+                        Style::default().fg(theme.palette().muted),
+                    )));
+                }
                 lines.push(Line::from(""));
             }
-            app.memory_lt_line_starts = lt_line_starts;
-            if app.memory_long_term.is_empty() && app.memory_long_term_available {
-                lines.push(Line::from(Span::styled("  (aucune entrée)", Style::default().fg(theme.palette().muted))));
+                app.memory_lt_line_starts = lt_line_starts;
+                if app.memory_long_term.is_empty() && app.memory_long_term_available {
+                    lines.push(Line::from(Span::styled("  (aucune entrée)", Style::default().fg(theme.palette().muted))));
+                }
             }
             let content_height = content_area.height.saturating_sub(2);
             app.last_content_lines = lines.len();
@@ -2664,6 +2811,10 @@ fn run_app(
                     continue;
                 }
                 match (app.mode, key.code, key.modifiers) {
+                    (Mode::Memory, KeyCode::Esc, _) if app.memory_search_active => {
+                        app.memory_search_active = false;
+                        app.memory_search_query.clear();
+                    }
                     (_, KeyCode::Esc, _) | (_, KeyCode::Char('q'), KeyModifiers::CONTROL) => return Ok(()),
                     (Mode::Calendar, KeyCode::Left, _) => {
                         app.calendar_focus_schedules = true;
@@ -2848,7 +2999,29 @@ fn run_app(
                     (Mode::Doc, KeyCode::PageDown, _) => app.scroll_page_down(),
                     (Mode::Doc, KeyCode::Home, _) => app.scroll = 0,
                     (Mode::Doc, KeyCode::End, _) => app.scroll_to_bottom(),
-                    (Mode::Memory, KeyCode::Up, _) => {
+                    (Mode::Memory, KeyCode::Char('/'), _) if !app.memory_search_active => {
+                        app.memory_search_active = true;
+                    }
+                    (Mode::Memory, KeyCode::Char('s'), _) if !app.memory_search_active => {
+                        app.memory_search_active = true;
+                    }
+                    (Mode::Memory, KeyCode::Char('g') | KeyCode::Char('G'), _) if !app.memory_search_active => {
+                        app.memory_view_graph = !app.memory_view_graph;
+                    }
+                    (Mode::Memory, KeyCode::Char('q'), _) if app.memory_search_active => {
+                        app.memory_search_active = false;
+                        app.memory_search_query.clear();
+                    }
+                    (Mode::Memory, KeyCode::Enter, _) if app.memory_search_active => {
+                        app.fetch_memory_search();
+                    }
+                    (Mode::Memory, KeyCode::Backspace, _) if app.memory_search_active => {
+                        app.memory_search_query.pop();
+                    }
+                    (Mode::Memory, KeyCode::Char(c), _) if app.memory_search_active => {
+                        app.memory_search_query.push(c);
+                    }
+                    (Mode::Memory, KeyCode::Up, _) if !app.memory_search_active => {
                         if !app.memory_long_term.is_empty() && app.memory_lt_selected > 0 {
                             app.memory_lt_selected -= 1;
                             if let Some(&line) = app.memory_lt_line_starts.get(app.memory_lt_selected) {
@@ -2858,7 +3031,7 @@ fn run_app(
                             app.scroll_up();
                         }
                     }
-                    (Mode::Memory, KeyCode::Down, _) => {
+                    (Mode::Memory, KeyCode::Down, _) if !app.memory_search_active => {
                         if !app.memory_long_term.is_empty() && app.memory_lt_selected + 1 < app.memory_long_term.len() {
                             app.memory_lt_selected += 1;
                             if let Some(&line) = app.memory_lt_line_starts.get(app.memory_lt_selected) {
@@ -2868,12 +3041,12 @@ fn run_app(
                             app.scroll_down();
                         }
                     }
-                    (Mode::Memory, KeyCode::PageUp, _) => app.scroll_page_up(),
-                    (Mode::Memory, KeyCode::PageDown, _) => app.scroll_page_down(),
-                    (Mode::Memory, KeyCode::Home, _) => app.scroll = 0,
-                    (Mode::Memory, KeyCode::End, _) => app.scroll_to_bottom(),
-                    (Mode::Memory, KeyCode::Char('d') | KeyCode::Char('D'), _) => app.delete_memory_long_term_selected(),
-                    (Mode::Memory, KeyCode::Delete, _) => app.delete_memory_long_term_selected(),
+                    (Mode::Memory, KeyCode::PageUp, _) if !app.memory_search_active => app.scroll_page_up(),
+                    (Mode::Memory, KeyCode::PageDown, _) if !app.memory_search_active => app.scroll_page_down(),
+                    (Mode::Memory, KeyCode::Home, _) if !app.memory_search_active => app.scroll = 0,
+                    (Mode::Memory, KeyCode::End, _) if !app.memory_search_active => app.scroll_to_bottom(),
+                    (Mode::Memory, KeyCode::Char('d') | KeyCode::Char('D'), _) if !app.memory_search_active => app.delete_memory_long_term_selected(),
+                    (Mode::Memory, KeyCode::Delete, _) if !app.memory_search_active => app.delete_memory_long_term_selected(),
                     (Mode::Tasks, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_activity_tasks();
                     }
