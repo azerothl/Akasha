@@ -10,6 +10,48 @@ Toute requête passe par un point d’entrée unique (Main Agent) qui applique u
 
 ---
 
+## Boucle cognitive (7 étapes)
+
+Chaque requête suit une boucle cognitive implicite ; les composants ci-dessous en assurent les étapes.
+
+| Étape | Rôle | Composant actuel |
+|-------|------|------------------|
+| **1. Perceive** | Réception de la demande | Main Agent |
+| **2. Interpret** | Compréhension intention, mode (Direct/Guidé/Orchestré) | Supervisor (classifieur de complexité) ; optionnel : interprétation structurée (intent, entités) |
+| **3. Context** | Récupération mémoire, préférences, historique | Memory Orchestrator, recall dans run_message_via_llm |
+| **4. Plan** | Décomposition en sous-tâches | Orchestrator (decompose_request, mode Guidé/Orchestré) |
+| **5. Decide** | Routage, création de tâche | Main Agent (conversation directe vs orchestrateur) |
+| **6. Act** | Exécution (LLM, outils, délégation) | Worker conversation, Orchestrator + agents spécialisés |
+| **7. Observe** | Vérification satisfaction, agrégation | Orchestrator (satisfaction check) ; côté conversation : réponse finale |
+| **8. Learn** | Mise à jour mémoire (faits, préférences, résultat de tâche) | Extraction + promote + emit_event ; task_outcome après chaque tâche |
+
+**Boucle courte (mode Direct)** : Perceive → Interpret → Context → Decide → Act (conversation) → Observe → Learn. Pas de Plan ni de délégation.
+
+**Boucle longue (mode Guidé ou Orchestré)** : Perceive → Interpret → Context → Plan → Decide → Act (délégation, sous-tâches) → Observe → Learn.
+
+```mermaid
+flowchart TD
+  User[User input]
+  MainAgent[Main Agent]
+  Supervisor[Supervisor]
+  MemOrch[Memory Orchestrator]
+  Direct[Conversation worker]
+  Orch[Orchestrator]
+  Agents[Agents / Tools]
+  Learn[Learn task_outcome]
+  User --> MainAgent
+  MainAgent --> Supervisor
+  Supervisor --> MemOrch
+  MemOrch --> MainAgent
+  MainAgent -->|Direct| Direct
+  MainAgent -->|Guided/Orchestrated| Orch
+  Orch --> Agents
+  Direct --> Learn
+  Orch --> Learn
+```
+
+---
+
 ## 1️⃣ Main Agent (User Interface Agent)
 
 Rôle:
