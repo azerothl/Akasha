@@ -59,6 +59,8 @@ pub struct FusedMemoryContext {
     pub policy_block: String,
     /// Phase 3: structured personality memory (preferred_tone, technical_depth, etc.)
     pub personality_memory_block: String,
+    /// Cognitive loop: recent task outcomes for context (request preview, status, result summary).
+    pub recent_outcomes_block: String,
 }
 
 impl FusedMemoryContext {
@@ -99,6 +101,11 @@ impl FusedMemoryContext {
             out.push_str("[Mémoire de personnalité — préférences utilisateur enregistrées]\n");
             out.push_str(&self.personality_memory_block);
             out.push_str("Use these when relevant; never infer emotional state or sensitive identity without evidence.\n\n");
+        }
+        if !self.recent_outcomes_block.is_empty() {
+            out.push_str("[Résultats de tâches récents]\n");
+            out.push_str(&self.recent_outcomes_block);
+            out.push_str("\n");
         }
         out
     }
@@ -217,6 +224,26 @@ pub async fn recall_context(
             } else {
                 ctx.personality_memory_block.push_str(&e.payload.replace('\n', " "));
                 ctx.personality_memory_block.push_str("\n");
+            }
+        }
+
+        // Cognitive loop: recent task outcomes (request, status, result) for continuity
+        let outcome_filter = EpisodicFilter {
+            event_type: Some("task_outcome".to_string()),
+            session_id: None,
+            ..Default::default()
+        };
+        let outcome_events = client.search_episodic(outcome_filter, 8);
+        for e in &outcome_events {
+            ctx.recent_outcomes_block.push_str("- ");
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&e.payload) {
+                let req = v.get("initial_message_preview").and_then(|x| x.as_str()).unwrap_or("");
+                let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("");
+                let summary = v.get("summary_preview").and_then(|x| x.as_str()).unwrap_or("").replace('\n', " ");
+                ctx.recent_outcomes_block.push_str(&format!("Requête: {} | Statut: {} | Résultat: {}\n", req, status, summary));
+            } else {
+                ctx.recent_outcomes_block.push_str(&e.payload.replace('\n', " "));
+                ctx.recent_outcomes_block.push_str("\n");
             }
         }
 
