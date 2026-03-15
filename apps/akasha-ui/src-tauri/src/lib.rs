@@ -895,12 +895,13 @@ async fn get_memory_short_term(session_id: Option<String>, port: Option<u16>) ->
     Ok(json)
 }
 
-/// Memory long-term: GET /api/memory/long-term?limit=50
+/// Memory long-term: GET /api/memory/long-term?limit=200&offset=0 (paginated)
 #[tauri::command]
-async fn get_memory_long_term(limit: Option<u32>, port: Option<u16>) -> Result<serde_json::Value, String> {
+async fn get_memory_long_term(limit: Option<u32>, offset: Option<u32>, port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
-    let limit = limit.unwrap_or(50).min(200);
-    let url = format!("{}/api/memory/long-term?limit={}", daemon_base_url(port), limit);
+    let limit = limit.unwrap_or(200).min(200);
+    let offset = offset.unwrap_or(0);
+    let url = format!("{}/api/memory/long-term?limit={}&offset={}", daemon_base_url(port), limit, offset);
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {

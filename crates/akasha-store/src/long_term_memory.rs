@@ -568,14 +568,16 @@ impl LongTermStore {
     }
 
     /// List most recent entries (no embedding). For display in UI. Returns (id, content, created_at_rfc3339, source).
+    /// offset: skip this many rows (for pagination).
     pub fn list_recent(
         &self,
         limit: usize,
+        offset: usize,
     ) -> anyhow::Result<Vec<(String, String, String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, content, created_at, source FROM memory_entries ORDER BY created_at DESC LIMIT ?1",
+            "SELECT id, content, created_at, source FROM memory_entries ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
         )?;
-        let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
+        let rows = stmt.query_map(rusqlite::params![limit as i64, offset as i64], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -584,6 +586,11 @@ impl LongTermStore {
             ))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Total number of long-term memory entries (for pagination).
+    pub fn count_entries(&self) -> anyhow::Result<u64> {
+        self.conn.query_row("SELECT COUNT(*) FROM memory_entries", [], |row| row.get::<_, i64>(0).map(|n| n as u64)).map_err(Into::into)
     }
 
     /// Load (id, content, embedding) for given ids (for hybrid rerank, plan moyen terme 2).
@@ -774,7 +781,7 @@ mod tests {
         let store = LongTermStore::open(f.path()).unwrap();
         let emb = embedding_f32_to_bytes(&[1.0, 0.0, 0.0]);
         let id = store.insert("hello world", &emb, "test").unwrap();
-        let list = store.list_recent(10).unwrap();
+        let list = store.list_recent(10, 0).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].0, id.to_string());
         assert_eq!(list[0].1, "hello world");
@@ -854,7 +861,7 @@ mod tests {
         let id = store.insert("to delete", &embedding_f32_to_bytes(&[0.0]), "test").unwrap();
         assert!(store.delete_by_id(id).unwrap());
         assert!(!store.delete_by_id(id).unwrap());
-        assert!(store.list_recent(10).unwrap().is_empty());
+        assert!(store.list_recent(10, 0).unwrap().is_empty());
     }
 
     #[test]

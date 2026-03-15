@@ -4431,25 +4431,35 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
-    // GET /api/memory/long-term?limit=50 — recent long-term entries (content, created_at, source, related)
+    // GET /api/memory/long-term?limit=200&offset=0 — recent long-term entries (content, created_at, source, related), paginated
     if method == "GET" && path.starts_with("/api/memory/long-term") {
-        let limit = path
+        let (limit, offset) = path
             .split('?')
             .nth(1)
-            .and_then(|q| {
-                q.split('&')
-                    .find(|p| p.starts_with("limit="))
-                    .and_then(|p| p.trim_start_matches("limit=").parse::<usize>().ok())
+            .map(|q| {
+                let mut limit = 200usize;
+                let mut offset = 0usize;
+                for part in q.split('&') {
+                    if let Some(v) = part.strip_prefix("limit=") {
+                        if let Ok(n) = v.parse::<usize>() {
+                            limit = n.min(200);
+                        }
+                    } else if let Some(v) = part.strip_prefix("offset=") {
+                        if let Ok(n) = v.parse::<usize>() {
+                            offset = n;
+                        }
+                    }
+                }
+                (limit, offset)
             })
-            .unwrap_or(50)
-            .min(200);
-        let entries = if let Some(ref client) = long_term_client {
+            .unwrap_or((200, 0));
+        let (entries, total) = if let Some(ref client) = long_term_client {
             let client = client.clone();
-            tokio::task::spawn_blocking(move || client.list(limit))
+            tokio::task::spawn_blocking(move || client.list(limit, offset))
                 .await
-                .unwrap_or_default()
+                .unwrap_or((vec![], 0))
         } else {
-            vec![]
+            (vec![], 0)
         };
         let relations = if !entries.is_empty() {
             if let Some(ref client) = long_term_client {
@@ -4480,6 +4490,7 @@ pub async fn handle_api(
             .collect();
         let body_json = serde_json::json!({
             "entries": list,
+            "total": total,
             "long_term_available": long_term_client.is_some()
         });
         return json_response("200 OK", &body_json.to_string());

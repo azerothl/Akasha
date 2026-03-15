@@ -111,6 +111,7 @@
   "memory.detail_link_not_in_list": "Not in loaded list (a line may still connect this node if it is referenced).",
   "memory.detail_click_hint": "Single click: recenter on node. Double click: open this detail.",
   "memory.rebuild_relations": "Rebuild relations",
+  "memory.load_more": "Load more",
   "memory.rebuild_success": "{{count}} relation(s) added.",
   "memory.rebuild_error": "Error rebuilding relations.",
   "settings.title": "Settings",

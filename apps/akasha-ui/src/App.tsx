@@ -419,7 +419,9 @@ function App() {
   const [memoryShortTerm, setMemoryShortTerm] = useState<Array<{ role: string; content: string }>>([]);
   type MemoryLongTermEntry = { id?: string; content: string; created_at: string; source: string; related?: Array<{ id: string; kind?: string }> };
   const [memoryLongTerm, setMemoryLongTerm] = useState<MemoryLongTermEntry[]>([]);
+  const [memoryLongTermTotal, setMemoryLongTermTotal] = useState(0);
   const [memoryLongTermAvailable, setMemoryLongTermAvailable] = useState(false);
+  const [memoryLongTermLoadingMore, setMemoryLongTermLoadingMore] = useState(false);
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
   type MemorySubTab = "short" | "long";
@@ -1099,6 +1101,8 @@ function App() {
     fetchCalendar();
   }, [tab, fetchCalendar]);
 
+  const MEMORY_PAGE_SIZE = 200;
+
   const fetchMemory = useCallback(async () => {
     setMemoryLoading(true);
     setMemoryError(null);
@@ -1108,26 +1112,50 @@ function App() {
           sessionId: sessionId ?? undefined,
           port: DAEMON_PORT,
         }),
-        invoke<{ entries?: MemoryLongTermEntry[]; long_term_available?: boolean }>("get_memory_long_term", {
-          limit: 50,
+        invoke<{ entries?: MemoryLongTermEntry[]; total?: number; long_term_available?: boolean }>("get_memory_long_term", {
+          limit: MEMORY_PAGE_SIZE,
+          offset: 0,
           port: DAEMON_PORT,
         }),
       ]);
       const short = shortRes?.turns ?? [];
       const long = (longRes?.entries ?? []) as MemoryLongTermEntry[];
+      const total = typeof longRes?.total === "number" ? longRes.total : long.length;
       setMemoryShortTerm(short);
       setMemoryLongTerm(long);
+      setMemoryLongTermTotal(total);
       setMemoryLongTermAvailable(longRes?.long_term_available ?? false);
-      setCached("memory", { short, long, longTermAvailable: longRes?.long_term_available ?? false });
+      setCached("memory", { short, long, longTermAvailable: longRes?.long_term_available ?? false, total });
     } catch (e) {
       setMemoryError(String(e));
       setMemoryShortTerm([]);
       setMemoryLongTerm([]);
+      setMemoryLongTermTotal(0);
       setMemoryLongTermAvailable(false);
     } finally {
       setMemoryLoading(false);
     }
   }, [sessionId]);
+
+  const loadMoreMemoryLongTerm = useCallback(async () => {
+    if (memoryLongTermLoadingMore || memoryLongTerm.length >= memoryLongTermTotal) return;
+    setMemoryLongTermLoadingMore(true);
+    try {
+      const res = await invoke<{ entries?: MemoryLongTermEntry[]; total?: number }>("get_memory_long_term", {
+        limit: MEMORY_PAGE_SIZE,
+        offset: memoryLongTerm.length,
+        port: DAEMON_PORT,
+      });
+      const next = (res?.entries ?? []) as MemoryLongTermEntry[];
+      const total = typeof res?.total === "number" ? res.total : memoryLongTermTotal;
+      setMemoryLongTerm((prev) => [...prev, ...next]);
+      setMemoryLongTermTotal(total);
+    } catch {
+      // keep current state
+    } finally {
+      setMemoryLongTermLoadingMore(false);
+    }
+  }, [memoryLongTerm.length, memoryLongTermTotal, memoryLongTermLoadingMore]);
 
   const rebuildMemoryRelations = useCallback(async () => {
     setMemoryRebuildLoading(true);
@@ -1169,10 +1197,11 @@ function App() {
 
   useEffect(() => {
     if (tab !== "memory") return;
-    const cached = getCached<{ short: Array<{ role: string; content: string }>; long: MemoryLongTermEntry[]; longTermAvailable: boolean }>("memory");
+    const cached = getCached<{ short: Array<{ role: string; content: string }>; long: MemoryLongTermEntry[]; longTermAvailable: boolean; total?: number }>("memory");
     if (cached != null) {
       setMemoryShortTerm(cached.short);
       setMemoryLongTerm(cached.long);
+      setMemoryLongTermTotal(cached.total ?? cached.long.length);
       setMemoryLongTermAvailable(cached.longTermAvailable);
       setMemoryLoading(false);
       setMemoryError(null);
@@ -3979,6 +4008,11 @@ function App() {
                           <button type="button" className="btn-secondary" onClick={() => setMemoryViewGraph(false)}>{t("memory.view_list")}</button>
                           <button type="button" className="btn-secondary" onClick={rebuildMemoryRelations} disabled={memoryRebuildLoading}>{memoryRebuildLoading ? t("common.loading") : t("memory.rebuild_relations")}</button>
                           <span className="memory-graph-hint">{t("memory.detail_click_hint")}</span>
+                          {memoryLongTerm.length < memoryLongTermTotal && (
+                            <button type="button" className="btn-secondary memory-load-more-btn" onClick={loadMoreMemoryLongTerm} disabled={memoryLongTermLoadingMore}>
+                              {memoryLongTermLoadingMore ? t("common.loading") : t("memory.load_more")} ({memoryLongTerm.length} / {memoryLongTermTotal})
+                            </button>
+                          )}
                           {memoryRebuildMessage != null && <span className="memory-rebuild-msg">{memoryRebuildMessage}</span>}
                         </div>
                         {memoryLongTerm.length === 0 ? (
@@ -4022,6 +4056,11 @@ function App() {
                           <button type="button" className="btn-secondary" onClick={() => setMemorySearchActive(true)}>{t("memory.search")}</button>
                           <button type="button" className="btn-secondary" onClick={() => setMemoryViewGraph(true)}>{t("memory.view_graph")}</button>
                           <button type="button" className="btn-secondary" onClick={rebuildMemoryRelations} disabled={memoryRebuildLoading}>{memoryRebuildLoading ? t("common.loading") : t("memory.rebuild_relations")}</button>
+                          {memoryLongTerm.length < memoryLongTermTotal && (
+                            <button type="button" className="btn-secondary memory-load-more-btn" onClick={loadMoreMemoryLongTerm} disabled={memoryLongTermLoadingMore}>
+                              {memoryLongTermLoadingMore ? t("common.loading") : t("memory.load_more")} ({memoryLongTerm.length} / {memoryLongTermTotal})
+                            </button>
+                          )}
                           {memoryRebuildMessage != null && <span className="memory-rebuild-msg">{memoryRebuildMessage}</span>}
                         </div>
                         <ul className="memory-long-term-list">

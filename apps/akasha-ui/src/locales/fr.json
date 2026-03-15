@@ -111,6 +111,7 @@
   "memory.detail_link_not_in_list": "Non présent dans la liste chargée (une ligne peut malgré tout relier ce nœud s'il est référencé).",
   "memory.detail_click_hint": "Simple clic : recentrer sur le nœud. Double clic : ouvrir ce détail.",
   "memory.rebuild_relations": "Recalculer les liaisons",
+  "memory.load_more": "Charger plus",
   "memory.rebuild_success": "{{count}} liaison(s) ajoutée(s).",
   "memory.rebuild_error": "Erreur lors du recalcul des liaisons.",
   "settings.title": "Paramètres",

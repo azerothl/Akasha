@@ -24,7 +24,7 @@ pub enum MemoryRequest {
         link_to_ids: Option<Vec<String>>,
         link_kind: Option<String>,
     },
-    List { limit: usize },
+    List { limit: usize, offset: usize },
     Delete { id: String },
     /// Forget by keyword query (plan moyen terme 9).
     ForgetByQuery { query: String },
@@ -65,7 +65,7 @@ pub enum MemoryRequest {
 pub enum MemoryResponse {
     Search(Vec<(String, String)>), // (id, content)
     Promote(Result<(), String>),
-    List(Vec<(String, String, String, String)>), // (id, content, created_at, source)
+    List((Vec<(String, String, String, String)>, u64)), // (entries, total_count)
     Delete(Result<(), String>),
     ForgetByQuery(Result<u64, String>),
     Stats(Result<(u64, u64), String>),
@@ -146,22 +146,23 @@ impl LongTermMemoryClient {
     }
 
     /// List recent long-term entries (id, content, created_at, source). Empty if long-term disabled.
-    pub fn list(&self, limit: usize) -> Vec<(String, String, String, String)> {
+    /// List long-term entries with pagination. Returns (entries, total_count).
+    pub fn list(&self, limit: usize, offset: usize) -> (Vec<(String, String, String, String)>, u64) {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-            if self.tx.send((MemoryRequest::List { limit }, resp_tx)).is_err() {
-                return Vec::new();
+            if self.tx.send((MemoryRequest::List { limit, offset }, resp_tx)).is_err() {
+                return (Vec::new(), 0);
             }
             match resp_rx.blocking_recv() {
-                Ok(MemoryResponse::List(entries)) => entries,
-                _ => Vec::new(),
+                Ok(MemoryResponse::List(pair)) => pair,
+                _ => (Vec::new(), 0),
             }
         }
         #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
         {
-            let _ = limit;
-            Vec::new()
+            let _ = (limit, offset);
+            (Vec::new(), 0)
         }
     }
 
@@ -460,9 +461,10 @@ pub fn start_memory_actor(
             let embedder = Embedder::new(&embedding_cache_dir);
             while let Ok((req, resp_tx)) = rx.recv() {
                 let response = match req {
-                    MemoryRequest::List { limit } => {
-                        let entries = store.list_recent(limit).unwrap_or_default();
-                        MemoryResponse::List(entries)
+                    MemoryRequest::List { limit, offset } => {
+                        let entries = store.list_recent(limit, offset).unwrap_or_default();
+                        let total = store.count_entries().unwrap_or(0);
+                        MemoryResponse::List((entries, total))
                     }
                     MemoryRequest::Search { query_text, top_k, filter } => {
                         let filter_ref = filter.as_ref();
