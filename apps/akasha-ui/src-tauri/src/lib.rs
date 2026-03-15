@@ -949,6 +949,22 @@ async fn delete_memory_long_term(id: String, port: Option<u16>) -> Result<(), St
     Ok(())
 }
 
+/// Memory long-term: POST /api/memory/rebuild-relations — recompute "similar" relations for all entries
+#[tauri::command]
+async fn rebuild_memory_relations(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/memory/rebuild-relations", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+        return Err(err.to_string());
+    }
+    Ok(json)
+}
+
 /// Schedule run reports: GET /api/schedule_run_reports — completed schedule runs with message (for chat).
 #[tauri::command]
 async fn get_schedule_run_reports(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -1285,6 +1301,7 @@ pub fn run() {
             get_memory_long_term,
             get_memory_search,
             delete_memory_long_term,
+            rebuild_memory_relations,
             get_schedule_run_reports,
             get_user_rag_documents,
             add_user_rag_document,

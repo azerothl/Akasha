@@ -49,9 +49,9 @@ const GRAPH_THEME_COLORS: Record<
     defaultShowLineLabel: true,
     checkedLineColor: "#7c8cff",
     nodeType: {
-      entry: { color: "#1e293b", fontColor: "#e4e4e7" },
+      entry: { color: "#1e3a5f", fontColor: "#e4e4e7" },
       related: { color: "#334155", fontColor: "#cbd5e1" },
-      selected: { color: "#1e3a5f", fontColor: "#e4e4e7", borderColor: "#7c8cff" },
+      selected: { color: "#312e81", fontColor: "#e4e4e7", borderColor: "#7c8cff" },
     },
   },
   dark: {
@@ -65,7 +65,7 @@ const GRAPH_THEME_COLORS: Record<
     defaultShowLineLabel: true,
     checkedLineColor: "#6366f1",
     nodeType: {
-      entry: { color: "#27272a", fontColor: "#e4e4e7" },
+      entry: { color: "#1e1b4b", fontColor: "#e4e4e7" },
       related: { color: "#3f3f46", fontColor: "#d4d4d8" },
       selected: { color: "#312e81", fontColor: "#e4e4e7", borderColor: "#6366f1" },
     },
@@ -81,9 +81,9 @@ const GRAPH_THEME_COLORS: Record<
     defaultShowLineLabel: true,
     checkedLineColor: "#88c0d0",
     nodeType: {
-      entry: { color: "#434c5e", fontColor: "#eceff4" },
+      entry: { color: "#3b4252", fontColor: "#eceff4" },
       related: { color: "#4c566a", fontColor: "#d8dee9" },
-      selected: { color: "#3b4a5c", fontColor: "#eceff4", borderColor: "#88c0d0" },
+      selected: { color: "#2e3440", fontColor: "#eceff4", borderColor: "#88c0d0" },
     },
   },
   light: {
@@ -97,8 +97,8 @@ const GRAPH_THEME_COLORS: Record<
     defaultShowLineLabel: true,
     checkedLineColor: "#4f46e5",
     nodeType: {
-      entry: { color: "#ffffff", fontColor: "#18181b" },
-      related: { color: "#f4f4f5", fontColor: "#3f3f46" },
+      entry: { color: "#dbeafe", fontColor: "#1e3a8a" },
+      related: { color: "#f1f5f9", fontColor: "#475569" },
       selected: { color: "#eef2ff", fontColor: "#18181b", borderColor: "#4f46e5" },
     },
   },
@@ -118,6 +118,15 @@ const GRAPH_THEME_COLORS: Record<
       selected: { color: "#e0e0ea", fontColor: "#4c4f69", borderColor: "#8839ef" },
     },
   },
+};
+
+/** Line color for graph edges (visible on all themes). */
+const GRAPH_LINE_COLOR: Record<ThemeId, string> = {
+  dark_akasha: "#94a3b8",
+  dark: "#94a3b8",
+  dark_nord: "#88c0d0",
+  light: "#64748b",
+  light_latte: "#6c6f85",
 };
 
 function loadSavedTheme(): ThemeId {
@@ -421,12 +430,19 @@ function App() {
   const [memorySearchLoading, setMemorySearchLoading] = useState(false);
   const [memoryViewGraph, setMemoryViewGraph] = useState(false);
   const [memoryLongTermSelected, setMemoryLongTermSelected] = useState(0);
+  const [memoryRebuildLoading, setMemoryRebuildLoading] = useState(false);
+  const [memoryRebuildMessage, setMemoryRebuildMessage] = useState<string | null>(null);
+  /** When set, show modal with full entry content and "Voir dans la liste" (index >= 0). */
+  const [memoryGraphDetail, setMemoryGraphDetail] = useState<{ entry: MemoryLongTermEntry; index: number } | null>(null);
   const memoryGraphRef = useRef<RelationGraphComponent | null>(null);
+  /** Track last node click for double-click detection: single = recenter, double = open detail modal. */
+  const memoryGraphLastClickRef = useRef<{ nodeId: string; at: number } | null>(null);
 
   function buildMemoryGraphData(
     entries: MemoryLongTermEntry[],
     selectedIndex: number,
-    nodePalette: typeof GRAPH_THEME_COLORS.dark_akasha.nodeType
+    nodePalette: typeof GRAPH_THEME_COLORS.dark_akasha.nodeType,
+    lineColor: string
   ): RGJsonData | null {
     const idToEntry = new Map<string, MemoryLongTermEntry>();
     for (const e of entries) {
@@ -463,11 +479,19 @@ function App() {
           : {}),
       };
     });
-    const lines: Array<{ from: string; to: string; text?: string }> = [];
+    const lines: Array<{ id: string; from: string; to: string; text?: string; color?: string; lineWidth?: number }> = [];
     for (const e of entries) {
       if (!e.id) continue;
       for (const r of e.related ?? []) {
-        lines.push({ from: e.id, to: r.id, text: r.kind ?? "related" });
+        const kind = r.kind ?? "related";
+        lines.push({
+          id: `${e.id}-${r.id}`,
+          from: e.id,
+          to: r.id,
+          text: kind,
+          color: lineColor,
+          lineWidth: 2,
+        });
       }
     }
     const rootId = selectedId ?? (nodes[0]?.id ?? undefined);
@@ -1045,6 +1069,25 @@ function App() {
     }
   }, [sessionId]);
 
+  const rebuildMemoryRelations = useCallback(async () => {
+    setMemoryRebuildLoading(true);
+    setMemoryRebuildMessage(null);
+    try {
+      const res = await invoke<{ inserted?: number; ok?: boolean; error?: string }>("rebuild_memory_relations", { port: DAEMON_PORT });
+      if (res?.ok && typeof res.inserted === "number") {
+        setMemoryRebuildMessage(t("memory.rebuild_success").replace("{{count}}", String(res.inserted)));
+        fetchMemory();
+      } else {
+        setMemoryRebuildMessage(res?.error ?? t("memory.rebuild_error"));
+      }
+    } catch (e) {
+      setMemoryRebuildMessage(String(e));
+    } finally {
+      setMemoryRebuildLoading(false);
+    }
+    setTimeout(() => setMemoryRebuildMessage(null), 5000);
+  }, [fetchMemory, t]);
+
   const runMemorySearch = useCallback(async () => {
     const q = memorySearchQuery.trim();
     if (!q) return;
@@ -1086,6 +1129,7 @@ function App() {
 
   const memoryGraphOptions = useMemo<RGOptions>(() => {
     const colors = GRAPH_THEME_COLORS[theme];
+    const lineColor = GRAPH_LINE_COLOR[theme];
     return {
       defaultJunctionPoint: "border",
       layout: { layoutName: "force" },
@@ -1095,7 +1139,7 @@ function App() {
       defaultNodeColor: colors.defaultNodeColor,
       defaultNodeFontColor: colors.defaultNodeFontColor,
       defaultNodeBorderColor: colors.defaultNodeBorderColor,
-      defaultLineColor: colors.defaultLineColor,
+      defaultLineColor: lineColor,
       defaultLineWidth: colors.defaultLineWidth,
       defaultLineFontColor: colors.defaultLineFontColor,
       defaultShowLineLabel: colors.defaultShowLineLabel,
@@ -1105,7 +1149,7 @@ function App() {
 
   useEffect(() => {
     if (!memoryViewGraph) return;
-    const data = buildMemoryGraphData(memoryLongTerm, memoryLongTermSelected, GRAPH_THEME_COLORS[theme].nodeType);
+    const data = buildMemoryGraphData(memoryLongTerm, memoryLongTermSelected, GRAPH_THEME_COLORS[theme].nodeType, GRAPH_LINE_COLOR[theme]);
     if (!data) return;
     const t = setTimeout(() => {
       memoryGraphRef.current?.setJsonData(data, true, () => {});
@@ -3769,16 +3813,17 @@ function App() {
                         <div className="memory-search-bar">
                           <input
                             type="text"
+                            className="memory-search-input"
                             value={memorySearchQuery}
                             onChange={(ev) => setMemorySearchQuery(ev.target.value)}
                             onKeyDown={(ev) => ev.key === "Enter" && runMemorySearch()}
                             placeholder={t("memory.search_placeholder")}
                             aria-label={t("memory.search")}
                           />
-                          <button type="button" onClick={runMemorySearch} disabled={memorySearchLoading || !memorySearchQuery.trim()}>
+                          <button type="button" className="btn-primary" onClick={runMemorySearch} disabled={memorySearchLoading || !memorySearchQuery.trim()}>
                             {memorySearchLoading ? t("common.loading") : t("memory.search")}
                           </button>
-                          <button type="button" onClick={() => { setMemorySearchActive(false); setMemorySearchQuery(""); setMemorySearchResults([]); }}>
+                          <button type="button" className="btn-secondary" onClick={() => { setMemorySearchActive(false); setMemorySearchQuery(""); setMemorySearchResults([]); }}>
                             {t("memory.search_back")}
                           </button>
                         </div>
@@ -3799,11 +3844,16 @@ function App() {
                       </div>
                     ) : memoryViewGraph ? (
                       <div className="memory-graph-wrap" role="region" aria-label={t("memory.view_graph")}>
-                        <button type="button" className="btn-secondary" onClick={() => setMemoryViewGraph(false)}>{t("memory.view_list")}</button>
+                        <div className="memory-graph-toolbar">
+                          <button type="button" className="btn-secondary" onClick={() => setMemoryViewGraph(false)}>{t("memory.view_list")}</button>
+                          <button type="button" className="btn-secondary" onClick={rebuildMemoryRelations} disabled={memoryRebuildLoading}>{memoryRebuildLoading ? t("common.loading") : t("memory.rebuild_relations")}</button>
+                          <span className="memory-graph-hint">{t("memory.detail_click_hint")}</span>
+                          {memoryRebuildMessage != null && <span className="memory-rebuild-msg">{memoryRebuildMessage}</span>}
+                        </div>
                         {memoryLongTerm.length === 0 ? (
                           <p className="empty-state">{t("memory.long_empty")}</p>
                         ) : (() => {
-                          const graphData = buildMemoryGraphData(memoryLongTerm, memoryLongTermSelected, GRAPH_THEME_COLORS[theme].nodeType);
+                          const graphData = buildMemoryGraphData(memoryLongTerm, memoryLongTermSelected, GRAPH_THEME_COLORS[theme].nodeType, GRAPH_LINE_COLOR[theme]);
                           if (!graphData) {
                             return <p className="muted">Aucune donnée pour le graphe.</p>;
                           }
@@ -3813,6 +3863,18 @@ function App() {
                                 ref={memoryGraphRef}
                                 options={memoryGraphOptions}
                                 onNodeClick={(node: RGNode) => {
+                                  const now = Date.now();
+                                  const last = memoryGraphLastClickRef.current;
+                                  const isDoubleClick = last && last.nodeId === node.id && now - last.at < 400;
+                                  if (isDoubleClick) {
+                                    memoryGraphLastClickRef.current = null;
+                                    const idx = memoryLongTerm.findIndex((e) => e.id === node.id);
+                                    const entry = idx >= 0 ? memoryLongTerm[idx]! : { id: node.id, content: "", created_at: "", source: "" };
+                                    setMemoryGraphDetail({ entry, index: idx });
+                                    return;
+                                  }
+                                  memoryGraphLastClickRef.current = { nodeId: node.id, at: now };
+                                  memoryGraphRef.current?.getInstance?.()?.focusNodeById(node.id);
                                   const idx = memoryLongTerm.findIndex((e) => e.id === node.id);
                                   if (idx >= 0) setMemoryLongTermSelected(idx);
                                 }}
@@ -3828,6 +3890,8 @@ function App() {
                         <div className="memory-long-toolbar">
                           <button type="button" className="btn-secondary" onClick={() => setMemorySearchActive(true)}>{t("memory.search")}</button>
                           <button type="button" className="btn-secondary" onClick={() => setMemoryViewGraph(true)}>{t("memory.view_graph")}</button>
+                          <button type="button" className="btn-secondary" onClick={rebuildMemoryRelations} disabled={memoryRebuildLoading}>{memoryRebuildLoading ? t("common.loading") : t("memory.rebuild_relations")}</button>
+                          {memoryRebuildMessage != null && <span className="memory-rebuild-msg">{memoryRebuildMessage}</span>}
                         </div>
                         <ul className="memory-long-term-list">
                           {memoryLongTerm.map((e, i) => (
@@ -3879,6 +3943,53 @@ function App() {
               </div>
             )}
           </section>
+        )}
+
+        {tab === "memory" && memoryGraphDetail && (
+          <div className="memory-detail-overlay" role="dialog" aria-modal="true" aria-labelledby="memory-detail-title">
+            <div className="memory-detail-modal">
+              <h2 id="memory-detail-title" className="memory-detail-title">{t("memory.detail_title")}</h2>
+              {memoryGraphDetail.entry.content ? (
+                <>
+                  <div className="memory-detail-meta">{memoryGraphDetail.entry.created_at}{memoryGraphDetail.entry.source ? ` · ${memoryGraphDetail.entry.source}` : ""}</div>
+                  <div className="memory-detail-content">{memoryGraphDetail.entry.content}</div>
+                </>
+              ) : (
+                <p className="muted">ID: {memoryGraphDetail.entry.id}. {t("memory.detail_referenced_only")}</p>
+              )}
+              <div className="memory-detail-links-section">
+                <h3 className="memory-detail-links-title">{t("memory.detail_links_title")}</h3>
+                {memoryGraphDetail.entry.related && memoryGraphDetail.entry.related.length > 0 ? (
+                  <ul className="memory-detail-links-list">
+                    {memoryGraphDetail.entry.related.map((r) => {
+                      const targetInList = memoryLongTerm.find((e) => e.id === r.id);
+                      return (
+                        <li key={r.id} className="memory-detail-link-item">
+                          <span className="memory-detail-link-type">{t("memory.detail_link_type")}: {r.kind ?? "related"}</span>
+                          <span className="memory-detail-link-id">ID: {r.id}</span>
+                          {targetInList ? (
+                            <p className="memory-detail-link-preview">{t("memory.detail_link_in_list")}: {targetInList.content.slice(0, 80)}{targetInList.content.length > 80 ? "…" : ""}</p>
+                          ) : (
+                            <p className="memory-detail-link-missing">{t("memory.detail_link_not_in_list")}</p>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <p className="memory-detail-links-none">{t("memory.detail_links_none")}</p>
+                )}
+              </div>
+              <div className="memory-detail-actions">
+                {memoryGraphDetail.index >= 0 && (
+                  <button type="button" className="btn-primary" onClick={() => { setMemoryLongTermSelected(memoryGraphDetail!.index); setMemoryViewGraph(false); setMemoryGraphDetail(null); }}>
+                    {t("memory.view_in_list")}
+                  </button>
+                )}
+                <button type="button" className="btn-secondary" onClick={() => setMemoryGraphDetail(null)}>{t("memory.close")}</button>
+              </div>
+            </div>
+          </div>
         )}
 
         {tab === "settings" && (

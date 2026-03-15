@@ -3142,10 +3142,18 @@ pre,
   margin-bottom: 1rem;
 }
 
-.memory-graph-wrap > button {
+.memory-graph-toolbar {
   flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
   margin-bottom: 0.5rem;
-  align-self: flex-start;
+}
+
+.memory-graph-hint {
+  font-size: 0.8125rem;
+  color: var(--akasha-text-muted);
 }
 
 .memory-long-toolbar {
@@ -3156,8 +3164,165 @@ pre,
 }
 
 .memory-long-toolbar .btn-secondary,
-.memory-graph-wrap > .btn-secondary {
+.memory-graph-toolbar .btn-secondary {
   flex-shrink: 0;
+}
+
+.memory-rebuild-msg {
+  align-self: center;
+  font-size: 0.875rem;
+  color: var(--akasha-muted);
+}
+
+/* Memory search bar: same style as rest of app */
+.memory-search-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  flex: 1;
+  min-height: 0;
+}
+
+.memory-search-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.memory-search-bar .memory-search-input {
+  flex: 1;
+  min-width: 12rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  border: 1px solid var(--akasha-border);
+  border-radius: 6px;
+  background: var(--akasha-bg-elevated);
+  color: var(--akasha-text);
+}
+
+.memory-search-bar .memory-search-input::placeholder {
+  color: var(--akasha-text-muted);
+}
+
+.memory-search-bar .memory-search-input:focus {
+  outline: none;
+  border-color: var(--akasha-accent);
+}
+
+/* Memory graph node detail modal */
+.memory-detail-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.memory-detail-modal {
+  background: var(--akasha-bg-elevated);
+  border: 1px solid var(--akasha-border);
+  border-radius: 12px;
+  max-width: 32rem;
+  max-height: 85vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+}
+
+.memory-detail-title {
+  margin: 0;
+  padding: 1rem 1.25rem;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--akasha-text);
+  border-bottom: 1px solid var(--akasha-border);
+}
+
+.memory-detail-meta {
+  padding: 0.5rem 1.25rem 0;
+  font-size: 0.8125rem;
+  color: var(--akasha-text-muted);
+}
+
+.memory-detail-content {
+  padding: 1rem 1.25rem;
+  font-size: 0.875rem;
+  color: var(--akasha-text);
+  line-height: 1.5;
+  overflow-y: auto;
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.memory-detail-links-section {
+  padding: 0 1.25rem 1rem;
+  border-top: 1px solid var(--akasha-border);
+}
+
+.memory-detail-links-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--akasha-text-muted);
+}
+
+.memory-detail-links-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.memory-detail-link-item {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--akasha-border);
+  font-size: 0.8125rem;
+}
+
+.memory-detail-link-item:last-child {
+  border-bottom: none;
+}
+
+.memory-detail-link-type {
+  display: inline-block;
+  font-weight: 600;
+  color: var(--akasha-accent);
+  margin-right: 0.5rem;
+}
+
+.memory-detail-link-id {
+  color: var(--akasha-text-dim);
+}
+
+.memory-detail-link-preview,
+.memory-detail-link-missing {
+  margin: 0.25rem 0 0;
+  color: var(--akasha-text-muted);
+  line-height: 1.4;
+}
+
+.memory-detail-link-missing {
+  font-style: italic;
+}
+
+.memory-detail-links-none {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--akasha-text-dim);
+  line-height: 1.4;
+}
+
+.memory-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 1rem 1.25rem;
+  border-top: 1px solid var(--akasha-border);
 }
 
 .memory-graph-canvas {

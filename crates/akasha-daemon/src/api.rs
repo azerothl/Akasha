@@ -4332,6 +4332,30 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
+    // POST /api/memory/rebuild-relations — recompute "similar" relations for all existing entries
+    if method == "POST" && path == "/api/memory/rebuild-relations" {
+        const DEFAULT_MAX_PER_ENTRY: usize = 5;
+        let result = match long_term_client {
+            Some(ref client) => {
+                let client = client.clone();
+                tokio::task::spawn_blocking(move || client.rebuild_similar_relations(DEFAULT_MAX_PER_ENTRY))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("task join error: {}", e)))
+            }
+            None => Err("long-term memory not available".to_string()),
+        };
+        match result {
+            Ok(inserted) => {
+                let body_json = serde_json::json!({ "inserted": inserted, "ok": true });
+                return json_response("200 OK", &body_json.to_string());
+            }
+            Err(e) => {
+                let body_json = serde_json::json!({ "error": e, "ok": false });
+                return json_response("500 Internal Server Error", &body_json.to_string());
+            }
+        }
+    }
+
     // DELETE /api/memory/long-term/:id — delete one long-term memory entry by id
     if method == "DELETE" && path.starts_with("/api/memory/long-term/") {
         let id = path.trim_start_matches("/api/memory/long-term/").split('?').next().unwrap_or("").trim();

@@ -58,6 +58,8 @@ pub enum MemoryRequest {
     GetContentsByIds { ids: Vec<String> },
     /// Graph RAG: get relations for a batch of entry ids (from_id -> [(to_id, kind)]).
     GetRelationsForEntries { ids: Vec<String> },
+    /// Recompute "similar" relations for all existing entries (for graph display).
+    RebuildSimilarRelations { max_per_entry: usize },
 }
 
 pub enum MemoryResponse {
@@ -75,6 +77,7 @@ pub enum MemoryResponse {
     GetRelatedIds(Vec<String>),
     GetContentsByIds(Vec<(String, String)>),
     GetRelationsForEntries(std::collections::HashMap<String, Vec<(String, String)>>),
+    RebuildSimilarRelations(Result<u64, String>),
 }
 
 /// Client handle: Send + Sync, can be used from async code.
@@ -376,6 +379,26 @@ impl LongTermMemoryClient {
         }
     }
 
+    /// Recompute "similar" relations for all existing entries. Returns number of new relations inserted.
+    pub fn rebuild_similar_relations(&self, max_per_entry: usize) -> Result<u64, String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::RebuildSimilarRelations { max_per_entry }, resp_tx)).is_err() {
+                return Err("memory actor unavailable".to_string());
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::RebuildSimilarRelations(r)) => r,
+                _ => Err("memory actor response error".to_string()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = max_per_entry;
+            Err("long-term memory not available".to_string())
+        }
+    }
+
     /// GC: delete entries older than retention_days; protect_sources are never deleted. Returns deleted count (plan moyen terme 9).
     pub fn gc(&self, retention_days: u32, protect_sources: Option<Vec<String>>) -> Result<u64, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
@@ -521,6 +544,21 @@ pub fn start_memory_actor(
                                             }
                                         }
                                     }
+                                    // Auto-link by semantic similarity so the graph has edges even when the agent doesn't pass link_to.
+                                    const AUTO_LINK_TOP_K: usize = 6;
+                                    const AUTO_LINK_MAX: usize = 5;
+                                    if let Ok(similar) = store.search_by_embedding(&vec, AUTO_LINK_TOP_K, None) {
+                                        let mut n = 0;
+                                        for entry in similar {
+                                            if n >= AUTO_LINK_MAX {
+                                                break;
+                                            }
+                                            if entry.id != id {
+                                                let _ = store.insert_relation(id, entry.id, "similar");
+                                                n += 1;
+                                            }
+                                        }
+                                    }
                                     Ok(())
                                 });
                             MemoryResponse::Promote(result)
@@ -591,6 +629,12 @@ pub fn start_memory_actor(
                     MemoryRequest::GetRelationsForEntries { ids } => {
                         let map = store.get_relations_for_entries(&ids).unwrap_or_default();
                         MemoryResponse::GetRelationsForEntries(map)
+                    }
+                    MemoryRequest::RebuildSimilarRelations { max_per_entry } => {
+                        let result = store
+                            .rebuild_similar_relations(max_per_entry)
+                            .map_err(|e| e.to_string());
+                        MemoryResponse::RebuildSimilarRelations(result)
                     }
                 };
                 let _ = resp_tx.send(response);

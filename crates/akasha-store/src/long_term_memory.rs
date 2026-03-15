@@ -314,6 +314,50 @@ impl LongTermStore {
         Ok(out)
     }
 
+    /// Recompute "similar" relations for all entries: for each entry, find up to `max_per_entry`
+    /// most similar other entries by embedding and insert relation (from_id, to_id, "similar").
+    /// Duplicates are ignored (INSERT OR IGNORE). Returns the number of new relations inserted.
+    pub fn rebuild_similar_relations(&self, max_per_entry: usize) -> anyhow::Result<u64> {
+        let rows = self.get_all_with_embedding(None)?;
+        let entries: Vec<(String, Vec<f32>)> = rows
+            .into_iter()
+            .filter_map(|(id, _, emb, _, _, _, _, _)| {
+                let vec = decode_embedding_bytes(&emb);
+                if vec.is_empty() {
+                    None
+                } else {
+                    Some((id, vec))
+                }
+            })
+            .collect();
+        let n_entries = entries.len();
+        if n_entries == 0 {
+            return Ok(0);
+        }
+        let mut inserted: u64 = 0;
+        for (i, (from_id, from_vec)) in entries.iter().enumerate() {
+            let from_uuid = match Uuid::parse_str(from_id) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            let mut scored: Vec<(f32, &str)> = entries
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, (id, vec))| (cosine_similarity(from_vec, vec), id.as_str()))
+                .filter(|(sim, _)| *sim > 0.0)
+                .collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            for (_, to_id) in scored.into_iter().take(max_per_entry) {
+                if let Ok(to_uuid) = Uuid::parse_str(to_id) {
+                    let _ = self.insert_relation(from_uuid, to_uuid, "similar");
+                    inserted += self.conn.changes() as u64;
+                }
+            }
+        }
+        Ok(inserted)
+    }
+
     /// Delete entries matching a keyword query (same logic as search_by_keywords). Returns number of deleted rows (plan moyen terme 9).
     pub fn delete_by_keywords(&self, query: &str) -> anyhow::Result<u64> {
         let words: Vec<String> = query
