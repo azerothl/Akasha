@@ -1,6 +1,6 @@
 # Mémoire long terme : facts et knowledge graph (long terme)
 
-**Statut** : Évolution majeure planifiée (non implémentée). Inspiré du core OpenClaw [openclaw-memory-offline-sqlite](https://github.com/AkashaBot/openclaw-memory-offline-sqlite).
+**Statut** : Phase 1 (table facts) et Phase 2 (APIs graphe) implémentées. Inspiré du core OpenClaw [openclaw-memory-offline-sqlite](https://github.com/AkashaBot/openclaw-memory-offline-sqlite). Intégration dans le Memory Orchestrator et extraction de faits après promote : voir [spec/47_memory_4_layers.md](47_memory_4_layers.md).
 
 ## Objectif
 
