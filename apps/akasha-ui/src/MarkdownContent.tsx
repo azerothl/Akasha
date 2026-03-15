@@ -9,11 +9,10 @@ import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
 
 /** Sanitization schema: extends the safe default to allow the div/img elements
  *  injected by preprocessDataUrlImages, while blocking scripts and other dangerous tags.
- *  Security note: "data" is allowed for `src` because raw-HTML data:image/ URLs originate
- *  exclusively from preprocessDataUrlImages, which validates them against a strict
- *  data:image/<type>;base64,<payload> pattern before injection. Non-image data: URLs
- *  in <img src> are inert (browsers load them as images, not as webpages or scripts).
- *  Event handlers (onerror, onclick, etc.) and <script> tags remain blocked by the schema. */
+ *  Security note: only the default safe protocols (e.g. http/https) are allowed for `src`;
+ *  `data:` URLs are intentionally disallowed here to reduce the XSS surface area from
+ *  SVG-in-image and similar edge cases. Event handlers (onerror, onclick, etc.) and
+ *  <script> tags remain blocked by the schema. */
 const sanitizeSchema = {
   ...defaultSchema,
   tagNames: [...(defaultSchema.tagNames ?? []), "div"],
@@ -24,7 +23,7 @@ const sanitizeSchema = {
   },
   protocols: {
     ...defaultSchema.protocols,
-    src: [...(defaultSchema.protocols?.src ?? ["http", "https"]), "data"],
+    src: [...(defaultSchema.protocols?.src ?? ["http", "https"])],
   },
 };
 
