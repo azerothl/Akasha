@@ -27,6 +27,8 @@ pub struct RecallParams {
     pub policy_summary: Option<String>,
     /// Graph RAG: when true, expand context with 1-hop related entries (AKASHA_GRAPH_EXPAND=1).
     pub expand_by_graph: bool,
+    /// Optional prefix for user identity block (e.g. from user_profile.json: how to address the user).
+    pub user_identity_prefix: Option<String>,
 }
 
 impl RecallParams {
@@ -219,7 +221,12 @@ pub async fn recall_context(
             ctx.episodic_block.push_str(&format!("{}: {}\n", e.event_type, e.payload.replace('\n', " ")));
         }
 
-        // First message: user identity for greeting
+        // User identity: prefix from user_profile (how to call the user) then optional LT search
+        if let Some(ref prefix) = params.user_identity_prefix {
+            if !prefix.is_empty() {
+                ctx.user_identity_block.push_str(prefix);
+            }
+        }
         if params.is_first_message {
             let user_results = client.search("nom prénom utilisateur user name identité".to_string(), 3, None);
             for (_, content) in &user_results {

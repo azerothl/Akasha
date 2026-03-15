@@ -6,6 +6,7 @@ use akasha_llm::CompletionRequest;
 use akasha_store::{parse_todos_from_payload, Schedule, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore, TodoStatus};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use crate::agent_profile::AgentProfile;
+use crate::user_profile::UserProfile;
 use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
@@ -2815,6 +2816,8 @@ pub(crate) async fn run_message_via_llm(
         None => true,
     };
     let expand_by_graph = std::env::var("AKASHA_GRAPH_EXPAND").ok().as_deref() == Some("1");
+    let user_profile = UserProfile::load(data_dir);
+    let user_identity_prefix = user_profile.format_for_prompt();
     let recall_params = crate::memory_orchestrator::RecallParams {
         message: message.clone(),
         session_id: session_id.clone(),
@@ -2822,6 +2825,11 @@ pub(crate) async fn run_message_via_llm(
         suggest_project: message_suggests_project(&message),
         is_first_message: turns_empty,
         expand_by_graph,
+        user_identity_prefix: if user_identity_prefix.is_empty() {
+            None
+        } else {
+            Some(user_identity_prefix)
+        },
         ..Default::default()
     };
     let fused = crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params).await;
@@ -4162,6 +4170,43 @@ pub async fn handle_api(
                 set_agent_profile_cache(agent_profile_cache, profile).await;
                 return json_response("200 OK", r#"{"ok":true,"message":"Profil agent mis à jour"}"#);
             }
+            Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
+        }
+    }
+
+    // GET /api/user-profile — read user profile (first_name, last_name, how_to_call, onboarding_completed)
+    if method == "GET" && path == "/api/user-profile" {
+        let profile = UserProfile::load(data_dir);
+        let body_json = serde_json::json!({
+            "first_name": profile.first_name,
+            "last_name": profile.last_name,
+            "how_to_call": profile.how_to_call,
+            "onboarding_completed": profile.onboarding_completed,
+        });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
+    // POST /api/user-profile — update user profile. Body: { first_name?, last_name?, how_to_call?, onboarding_completed? }
+    if method == "POST" && path == "/api/user-profile" {
+        let mut profile = UserProfile::load(data_dir);
+        if let Some(body) = body.as_deref() {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+                if v.get("first_name").is_some() {
+                    profile.first_name = v.get("first_name").and_then(|x| x.as_str()).map(String::from);
+                }
+                if v.get("last_name").is_some() {
+                    profile.last_name = v.get("last_name").and_then(|x| x.as_str()).map(String::from);
+                }
+                if v.get("how_to_call").is_some() {
+                    profile.how_to_call = v.get("how_to_call").and_then(|x| x.as_str()).map(|s| s.trim().to_string());
+                }
+                if let Some(b) = v.get("onboarding_completed").and_then(|x| x.as_bool()) {
+                    profile.onboarding_completed = b;
+                }
+            }
+        }
+        match profile.save(data_dir) {
+            Ok(()) => return json_response("200 OK", r#"{"ok":true,"message":"Profil utilisateur mis à jour"}"#),
             Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
         }
     }
