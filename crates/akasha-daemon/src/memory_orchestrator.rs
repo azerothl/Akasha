@@ -47,6 +47,7 @@ impl RecallParams {
             filter_by_session: true,
             policy_summary: None,
             expand_by_graph: false,
+            user_identity_prefix: None,
         }
     }
 }

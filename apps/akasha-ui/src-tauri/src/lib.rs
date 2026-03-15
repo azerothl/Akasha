@@ -1092,6 +1092,43 @@ async fn get_agent_profile(port: Option<u16>) -> Result<serde_json::Value, Strin
     Ok(json)
 }
 
+/// User profile: GET /api/user-profile (first_name, last_name, how_to_call, onboarding_completed).
+#[tauri::command]
+async fn get_user_profile(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/user-profile", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// First message (onboarding, daily greeting, proactive): GET /api/first-message?context=...
+#[tauri::command]
+async fn get_first_message(context: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let context = context.trim();
+    let url = if context.is_empty() {
+        format!("{}/api/first-message", daemon_base_url(port))
+    } else {
+        format!(
+            "{}/api/first-message?context={}",
+            daemon_base_url(port),
+            urlencoding::encode(context)
+        )
+    };
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// Parse a key name string to enigo Key (e.g. "Control" -> Key::Control, "a" -> Key::Unicode('a')).
 fn parse_key(s: &str) -> Option<Key> {
     let s = s.trim();
@@ -1310,6 +1347,8 @@ pub fn run() {
             post_device_result,
             get_agent_profile,
             post_agent_profile,
+            get_user_profile,
+            get_first_message,
             execute_synthetic_input,
             get_docs,
             get_config,

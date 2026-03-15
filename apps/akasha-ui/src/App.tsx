@@ -681,6 +681,7 @@ function App() {
   }, [fetchDevicePending]);
 
   // Load conversation history on mount (use persisted session_id so it survives UI restart).
+  // If session is empty, fetch user profile and optionally first-message (onboarding or daily greeting).
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -709,6 +710,29 @@ function App() {
             localStorage.setItem(AKASHA_SESSION_ID_KEY, data.session_id);
           } catch {
             /* ignore */
+          }
+          // Session empty: show onboarding or first-today greeting
+          if ((data.turns?.length ?? 0) === 0) {
+            try {
+              const profile = await invoke<{ how_to_call?: string; onboarding_completed?: boolean }>("get_user_profile", { port: DAEMON_PORT });
+              if (cancelled) return;
+              const needsOnboarding = !profile?.how_to_call?.trim() || !profile?.onboarding_completed;
+              const context = needsOnboarding ? "onboarding" : "first_today";
+              const first = await invoke<{ message?: string; session_id?: string }>("get_first_message", { context, port: DAEMON_PORT });
+              if (cancelled) return;
+              const msg = first?.message?.trim();
+              if (msg && first?.session_id) {
+                setMessages([{ role: "assistant", text: msg }]);
+                setSessionId(first.session_id);
+                try {
+                  localStorage.setItem(AKASHA_SESSION_ID_KEY, first.session_id);
+                } catch {
+                  /* ignore */
+                }
+              }
+            } catch {
+              /* ignore */
+            }
           }
         }
       } catch {

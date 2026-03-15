@@ -2545,6 +2545,41 @@ fn progress_message_for_tool(tool: &str, args: &[String]) -> String {
     }
 }
 
+/// Extract a short name (how to call the user) from a message during onboarding.
+/// Simple heuristic: first word, or first two words if the message is very short. Skips common prefixes.
+fn extract_how_to_call_from_message(msg: &str) -> Option<String> {
+    let msg = msg.trim();
+    if msg.is_empty() || msg.len() > 80 {
+        return None;
+    }
+    let lower = msg.to_lowercase();
+    let skip_prefixes = ["je m'appelle", "je suis", "c'est", "my name is", "i'm", "i am", "call me", "moi c'est"];
+    let mut text = msg;
+    for prefix in skip_prefixes {
+        if lower.starts_with(prefix) {
+            text = msg[prefix.len()..].trim();
+            if text.is_empty() {
+                return None;
+            }
+            break;
+        }
+    }
+    let words: Vec<&str> = text.split_whitespace().take(2).collect();
+    let name = if words.len() == 1 {
+        words[0].trim().to_string()
+    } else if words.len() == 2 && text.len() <= 30 {
+        format!("{} {}", words[0].trim(), words[1].trim())
+    } else {
+        words[0].trim().to_string()
+    };
+    let name = name.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '\'').to_string();
+    if name.is_empty() || name.len() > 50 {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 /// Builds a short, task-specific acknowledgment message so the user sees a real take-over instead of a generic placeholder.
 /// Uses the start of the user message for context; one coherent sentence, same tone (formal "you").
 fn build_ack_message(user_message: &str) -> String {
@@ -4211,6 +4246,44 @@ pub async fn handle_api(
         }
     }
 
+    // GET /api/first-message?context=onboarding|first_today|proactive — agent-initiated first message (onboarding, daily greeting, proactive check-in)
+    if method == "GET" && path.starts_with("/api/first-message") {
+        let context = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| {
+                q.split('&')
+                    .find(|p| p.starts_with("context="))
+                    .map(|p| urlencoding::decode(p.trim_start_matches("context=")).unwrap_or_default().into_owned())
+            })
+            .unwrap_or_default();
+        let session_id = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
+        let user_profile = UserProfile::load(data_dir);
+
+        if context == "onboarding" && !user_profile.has_how_to_call() {
+            let message = "Bonjour ! Pour personnaliser nos échanges, comment dois-je vous appeler ? (prénom ou surnom)";
+            if let Some(ref st) = short_term {
+                st.append(&session_id, "assistant", message.to_string()).await;
+            }
+            let body_json = serde_json::json!({ "message": message, "session_id": session_id });
+            return json_response("200 OK", &body_json.to_string());
+        }
+
+        if context == "first_today" && user_profile.has_how_to_call() {
+            let how = user_profile.how_to_call.as_deref().unwrap_or("").trim();
+            let message = format!("Bonjour {}, quoi de neuf aujourd'hui ?", how);
+            if let Some(ref st) = short_term {
+                st.append(&session_id, "assistant", message.clone()).await;
+            }
+            let body_json = serde_json::json!({ "message": message, "session_id": session_id });
+            return json_response("200 OK", &body_json.to_string());
+        }
+
+        // Proactive and other contexts: return empty so UI does not show a duplicate message
+        let body_json = serde_json::json!({ "message": "", "session_id": session_id });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
     // POST /api/personality-memory — store a structured personality preference (Phase 3). Body: { "key": "preferred_tone"|"technical_depth_preference"|..., "value": "..." }
     if method == "POST" && path == "/api/personality-memory" {
         let Some(client) = long_term_client.clone() else {
@@ -4737,6 +4810,28 @@ pub async fn handle_api(
         if let Err(e) = akasha_core::check_prompt_injection(&message) {
             let body = serde_json::json!({ "error": "prompt_injection_rejected", "detail": e.to_string() });
             return json_response("400 Bad Request", &body.to_string());
+        }
+        // Onboarding: if user profile has no how_to_call, try to extract from message and save
+        let mut message = message;
+        {
+            let mut user_profile = UserProfile::load(data_dir);
+            if !user_profile.has_how_to_call() && !message.trim().is_empty() {
+                let extracted = extract_how_to_call_from_message(message.trim());
+                if let Some(name) = extracted {
+                    user_profile.how_to_call = Some(name.clone());
+                    user_profile.onboarding_completed = true;
+                    if user_profile.first_name.is_none() || user_profile.first_name.as_deref().unwrap_or("").trim().is_empty() {
+                        user_profile.first_name = Some(name.clone());
+                    }
+                    let _ = user_profile.save(data_dir);
+                    message = format!(
+                        "[L'utilisateur vient de vous indiquer son prénom : {}. Accueillez-le chaleureusement (ex. « Ravi de te connaître, {} ! ») puis répondez à son message.]\n\n{}",
+                        name,
+                        name,
+                        message
+                    );
+                }
+            }
         }
         let correlation_id = uuid::Uuid::new_v4();
         let priority = body_json
