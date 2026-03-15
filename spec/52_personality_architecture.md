@@ -18,7 +18,7 @@ Voir aussi [35_configuration_reference.md](35_configuration_reference.md) sectio
 1. **Identité** — Noyau fixe (archetype, mission, posture, relation à l’utilisateur) + nom et genre depuis le profil utilisateur.
 2. **Valeurs** — Hiérarchie des valeurs (clarté, sécurité, transparence, efficacité, continuité, contrôle utilisateur) pour guider les décisions.
 3. **Comportements** — Règles comportementales (YAML) + rules / can_do / cannot_do du profil.
-4. **Modes** — Mode actif (assistant, operator, architect, onboarding) : sélectionné par l’utilisateur (preferred_mode) ou dérivé du contexte.
+4. **Modes** — Mode actif (assistant, operator, architect, onboarding) : sélectionné par l’utilisateur (preferred_mode), dérivé du type de tâche (assigned_agent, Phase 3), ou défaut « assistant ».
 5. **Mémoire de personnalité** — Ce que l’agent doit retenir (ton préféré, niveau technique, etc.) et ce qu’il ne doit pas inférer (état émotionnel, traits sensibles). S’appuie sur la mémoire long terme et le bloc [Contexte utilisateur] du memory orchestrator.
 
 ## Ordre des blocs dans le prompt
@@ -27,14 +27,14 @@ Voir aussi [35_configuration_reference.md](35_configuration_reference.md) sectio
 2. `[Role]` (agent spécialisé : conversation, code, search, etc.)
 3. **Bloc personnalité** : identité (name, mission, posture), valeurs, traits, behavior_rules, maniérismes, mode actif, initiative, social/reasoning
 4. Mémoire court terme
-5. Mémoire orchestrator (long terme, projet, facts, episodic, user_identity_block)
+5. Mémoire orchestrator (long terme, projet, facts, episodic, user_identity_block, personality_memory_block)
 6. RAG documents utilisateur
 7. Turns (historique conversation)
 
 ## Mémoire de personnalité (schéma)
 
-**À mémoriser** (quand stocké en mémoire long terme) : preferred_tone, technical_depth_preference, confirmation_threshold, favorite_channels, recurring_projects, common_workflows.
+**Clés structurées** (à mémoriser) : `preferred_tone`, `technical_depth_preference`, `confirmation_threshold`, `favorite_channels`, `recurring_projects`, `common_workflows`. D'autres clés sont acceptées.
 
 **Ne jamais inférer sans preuve** : emotional state, sensitive identity traits, security permissions.
 
-Une phrase rappelant ce principe est injectée dans le prompt système. L’enrichissement du schéma de mémoire (entités dédiées) et l’écriture/lecture structurée peuvent faire l’objet d’une évolution ultérieure.
+**Stockage** : événements épisodiques `event_type = "personality_memory"`, payload JSON `{"key", "value"}`. Le memory orchestrator injecte le bloc [Mémoire de personnalité]. **Écriture** : `POST /api/personality-memory` body `{ "key": "...", "value": "..." }`, réponse `{ "ok": true, "id": "<uuid>" }`. Une phrase rappelant ce principe est injectée dans le prompt système. L’enrichissement du schéma de mémoire (entités dédiées) et l’écriture/lecture structurée peuvent faire l’objet d’une évolution ultérieure.

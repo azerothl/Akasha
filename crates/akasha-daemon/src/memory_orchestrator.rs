@@ -57,6 +57,8 @@ pub struct FusedMemoryContext {
     pub user_identity_block: String,
     /// Phase 6: rules and learned preferences
     pub policy_block: String,
+    /// Phase 3: structured personality memory (preferred_tone, technical_depth, etc.)
+    pub personality_memory_block: String,
 }
 
 impl FusedMemoryContext {
@@ -92,6 +94,11 @@ impl FusedMemoryContext {
             out.push_str("[Règles et préférences]\n");
             out.push_str(&self.policy_block);
             out.push_str("\n");
+        }
+        if !self.personality_memory_block.is_empty() {
+            out.push_str("[Mémoire de personnalité — préférences utilisateur enregistrées]\n");
+            out.push_str(&self.personality_memory_block);
+            out.push_str("Use these when relevant; never infer emotional state or sensitive identity without evidence.\n\n");
         }
         out
     }
@@ -188,6 +195,29 @@ pub async fn recall_context(
         let prefs = client.search_episodic(pref_filter, 5);
         for e in &prefs {
             ctx.policy_block.push_str(&format!("Préférence enregistrée: {}\n", e.payload.replace('\n', " ")));
+        }
+
+        // Phase 3: Personality memory — structured preferences (preferred_tone, technical_depth_preference, etc.)
+        let personality_filter = EpisodicFilter {
+            event_type: Some("personality_memory".to_string()),
+            session_id: None,
+            ..Default::default()
+        };
+        let personality_events = client.search_episodic(personality_filter, 20);
+        for e in &personality_events {
+            ctx.personality_memory_block.push_str("- ");
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&e.payload) {
+                if let Some(k) = v.get("key").and_then(|x| x.as_str()) {
+                    let val_str = v.get("value").map(|x| x.to_string()).unwrap_or_else(|| "".to_string());
+                    ctx.personality_memory_block.push_str(&format!("{}: {}\n", k, val_str.trim_matches('"')));
+                } else {
+                    ctx.personality_memory_block.push_str(&e.payload.replace('\n', " "));
+                    ctx.personality_memory_block.push_str("\n");
+                }
+            } else {
+                ctx.personality_memory_block.push_str(&e.payload.replace('\n', " "));
+                ctx.personality_memory_block.push_str("\n");
+            }
         }
 
         ctx

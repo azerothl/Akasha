@@ -100,10 +100,27 @@ pub fn load_initiative_policy(spec_dir: &Path) -> Option<InitiativePolicyYaml> {
     serde_yaml::from_str(&data).ok()
 }
 
+/// Derive personality mode from assigned agent type (Phase 3). Used when profile.preferred_mode is not set.
+pub fn mode_from_assigned_agent(assigned_agent: &str) -> &'static str {
+    match assigned_agent.trim().to_lowercase().as_str() {
+        "architect" | "analyst" => "architect",
+        "code" | "frontend" | "backend" | "database" | "integration" | "qa" | "system"
+        | "documentalist" | "project_manager" | "technical_writer" | "research"
+        | "security_audit" | "image_generation" => "operator",
+        "conversation" | "creative" | "search" | "financial" | "" => "assistant",
+        _ => "assistant",
+    }
+}
+
 /// Build the full personality prompt block. Uses profile for name, gender, personality, role, rules, can_do, cannot_do.
 /// If traits_override or preferred_mode are present on profile, they are applied (Phase 2).
+/// When preferred_mode is not set, mode is derived from assigned_agent (Phase 3).
 /// If any YAML is missing, falls back to profile.format_for_prompt().
-pub fn build_personality_prompt(spec_dir: &Path, profile: &AgentProfile) -> String {
+pub fn build_personality_prompt(
+    spec_dir: &Path,
+    profile: &AgentProfile,
+    assigned_agent: Option<&str>,
+) -> String {
     let core = match load_personality_core(spec_dir) {
         Some(c) => c,
         None => return profile.format_for_prompt(),
@@ -243,12 +260,12 @@ pub fn build_personality_prompt(spec_dir: &Path, profile: &AgentProfile) -> Stri
         }
     }
 
-    // Active mode (from profile.preferred_mode or default "assistant")
+    // Active mode: profile.preferred_mode, else derived from assigned_agent (Phase 3), else "assistant"
     let mode_key = profile
         .preferred_mode
         .as_deref()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or("assistant");
+        .unwrap_or_else(|| assigned_agent.map(mode_from_assigned_agent).unwrap_or("assistant"));
     if let Some(mode_def) = mode_def_for(&modes, mode_key) {
         out.push_str(&format!(
             "- Current mode: {} (tone: {}).\n",
@@ -402,7 +419,7 @@ mod tests {
             role: Some("test role".to_string()),
             ..Default::default()
         };
-        let out = build_personality_prompt(empty_dir, &profile);
+        let out = build_personality_prompt(empty_dir, &profile, None);
         assert!(out.contains("[Agent profile and instructions]"));
         assert!(out.contains("TestAgent"));
         assert!(out.contains("test role"));
@@ -418,8 +435,18 @@ mod tests {
             Some(m)
         };
         let empty_dir = std::path::Path::new("/nonexistent_spec_dir_67890");
-        let out = build_personality_prompt(empty_dir, &profile);
+        let out = build_personality_prompt(empty_dir, &profile, None);
         assert!(out.contains("Custom"));
         assert!(out.contains("[Agent profile and instructions]"));
+    }
+
+    #[test]
+    fn mode_from_assigned_agent_mapping() {
+        assert_eq!(mode_from_assigned_agent("conversation"), "assistant");
+        assert_eq!(mode_from_assigned_agent("architect"), "architect");
+        assert_eq!(mode_from_assigned_agent("analyst"), "architect");
+        assert_eq!(mode_from_assigned_agent("code"), "operator");
+        assert_eq!(mode_from_assigned_agent("qa"), "operator");
+        assert_eq!(mode_from_assigned_agent(""), "assistant");
     }
 }

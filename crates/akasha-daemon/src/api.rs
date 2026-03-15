@@ -2664,7 +2664,11 @@ pub(crate) async fn run_message_via_llm(
         Some(cache) => get_or_load_agent_profile(data_dir, cache).await,
         None => AgentProfile::load(data_dir),
     };
-    let profile_block = crate::personality::build_personality_prompt(spec_dir.as_path(), &agent_profile);
+    let profile_block = crate::personality::build_personality_prompt(
+        spec_dir.as_path(),
+        &agent_profile,
+        Some(&assigned_agent),
+    );
     if !profile_block.is_empty() {
         context_prefix.push_str(&profile_block);
     }
@@ -3931,6 +3935,40 @@ pub async fn handle_api(
                 return json_response("200 OK", r#"{"ok":true,"message":"Profil agent mis à jour"}"#);
             }
             Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
+        }
+    }
+
+    // POST /api/personality-memory — store a structured personality preference (Phase 3). Body: { "key": "preferred_tone"|"technical_depth_preference"|..., "value": "..." }
+    if method == "POST" && path == "/api/personality-memory" {
+        let Some(ref client) = long_term_client else {
+            return json_response("503 Service Unavailable", r#"{"error":"long_term_memory_unavailable"}"#);
+        };
+        let Some(body) = body.as_deref() else {
+            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
+        };
+        let v: serde_json::Value = match serde_json::from_slice(body) {
+            Ok(x) => x,
+            Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
+        };
+        let key = match v.get("key").and_then(|x| x.as_str()) {
+            Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+            _ => return json_response("400 Bad Request", r#"{"error":"key_required"}"#),
+        };
+        let value = v.get("value").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let payload = serde_json::json!({ "key": key, "value": value }).to_string();
+        match client.emit_event(
+            "personality_memory".to_string(),
+            payload,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ) {
+            Ok(id) => return json_response("200 OK", &serde_json::json!({ "ok": true, "id": id.to_string() }).to_string()),
+            Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e }).to_string()),
         }
     }
 
