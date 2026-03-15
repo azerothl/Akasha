@@ -141,7 +141,7 @@ function loadSavedTheme(): ThemeId {
 
 type Tab = "chat" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
 
-type SettingsSection = "display" | "system" | "agent" | "data";
+type SettingsSection = "display" | "system" | "agent" | "user" | "data";
 type AgentProfileSubTab = "identity" | "personality" | "traits" | "rules" | "can_do" | "cannot_do";
 
 const TRAIT_KEYS = ["verbosity", "warmth", "pedagogy", "rigor", "humor", "proactivity", "cautiousness", "initiative"] as const;
@@ -547,6 +547,18 @@ function App() {
   const [agentProfileLoading, setAgentProfileLoading] = useState(false);
   const [agentProfileSaving, setAgentProfileSaving] = useState(false);
   const [agentProfileError, setAgentProfileError] = useState<string | null>(null);
+  /** User profile (first name, how to call, proactive check-in) for Settings panel. */
+  const [userProfile, setUserProfile] = useState<{
+    first_name: string;
+    last_name: string;
+    how_to_call: string;
+    onboarding_completed: boolean;
+    proactive_check_in_enabled: boolean;
+    proactive_check_in_interval_days: number;
+  }>({ first_name: "", last_name: "", how_to_call: "", onboarding_completed: false, proactive_check_in_enabled: false, proactive_check_in_interval_days: 0 });
+  const [userProfileLoading, setUserProfileLoading] = useState(false);
+  const [userProfileSaving, setUserProfileSaving] = useState(false);
+  const [userProfileError, setUserProfileError] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("display");
   const [agentProfileSubTab, setAgentProfileSubTab] = useState<AgentProfileSubTab>("identity");
   const [rulesDraft, setRulesDraft] = useState("");
@@ -1284,6 +1296,33 @@ function App() {
     }
   }, []);
 
+  const fetchUserProfile = useCallback(async () => {
+    setUserProfileLoading(true);
+    setUserProfileError(null);
+    try {
+      const data = await invoke<{
+        first_name?: string | null;
+        last_name?: string | null;
+        how_to_call?: string | null;
+        onboarding_completed?: boolean;
+        proactive_check_in_enabled?: boolean;
+        proactive_check_in_interval_days?: number;
+      }>("get_user_profile", { port: DAEMON_PORT });
+      setUserProfile({
+        first_name: data?.first_name ?? "",
+        last_name: data?.last_name ?? "",
+        how_to_call: data?.how_to_call ?? "",
+        onboarding_completed: data?.onboarding_completed ?? false,
+        proactive_check_in_enabled: data?.proactive_check_in_enabled ?? false,
+        proactive_check_in_interval_days: typeof data?.proactive_check_in_interval_days === "number" ? data.proactive_check_in_interval_days : 0,
+      });
+    } catch (e) {
+      setUserProfileError(String(e));
+    } finally {
+      setUserProfileLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (tab !== "settings") return;
     const cached = getCached<Array<{ id: string; name: string; mime_type: string; added_at: string }>>("userRag");
@@ -1299,6 +1338,10 @@ function App() {
   useEffect(() => {
     if (tab === "settings") fetchAgentProfile();
   }, [tab, fetchAgentProfile]);
+
+  useEffect(() => {
+    if (tab === "settings" && settingsSection === "user") fetchUserProfile();
+  }, [tab, settingsSection, fetchUserProfile]);
 
   useEffect(() => {
     if (!calendarSelectedTaskId) {
@@ -4056,6 +4099,7 @@ function App() {
                 <button role="tab" aria-selected={settingsSection === "display"} className={settingsSection === "display" ? "active" : ""} onClick={() => setSettingsSection("display")}>{t("settings.section_display")}</button>
                 <button role="tab" aria-selected={settingsSection === "system"} className={settingsSection === "system" ? "active" : ""} onClick={() => setSettingsSection("system")}>{t("settings.section_system")}</button>
                 <button role="tab" aria-selected={settingsSection === "agent"} className={settingsSection === "agent" ? "active" : ""} onClick={() => setSettingsSection("agent")}>{t("settings.section_agent")}</button>
+                <button role="tab" aria-selected={settingsSection === "user"} className={settingsSection === "user" ? "active" : ""} onClick={() => setSettingsSection("user")}>{t("settings.section_user")}</button>
                 <button role="tab" aria-selected={settingsSection === "data"} className={settingsSection === "data" ? "active" : ""} onClick={() => setSettingsSection("data")}>{t("settings.section_data")}</button>
               </nav>
             </div>
@@ -4456,6 +4500,68 @@ function App() {
                       )}
                     </div>
                     <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { const traits = Object.keys(agentProfile.traits_override).length ? agentProfile.traits_override : undefined; await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role) || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do, traits_override: traits, preferred_mode: agentProfile.preferred_mode.trim() || undefined }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
+                  </>
+                )}
+              </div>
+            )}
+            {settingsSection === "user" && (
+              <div className="settings-section-content">
+                <p className="settings-doc muted">{t("settings.user_profile_desc")}</p>
+                {userProfileError && <p className="error-inline" role="alert">{userProfileError}</p>}
+                {userProfileLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
+                {!userProfileLoading && (
+                  <>
+                    <dl className="settings-list">
+                      <dt>{t("settings.user_profile_first_name")}</dt>
+                      <dd>
+                        <input type="text" aria-label={t("settings.user_profile_first_name")} className="settings-input" maxLength={80} value={userProfile.first_name} onChange={(e) => setUserProfile((p) => ({ ...p, first_name: e.target.value.slice(0, 80) }))} placeholder="Marc" />
+                      </dd>
+                      <dt>{t("settings.user_profile_last_name")}</dt>
+                      <dd>
+                        <input type="text" aria-label={t("settings.user_profile_last_name")} className="settings-input" maxLength={80} value={userProfile.last_name} onChange={(e) => setUserProfile((p) => ({ ...p, last_name: e.target.value.slice(0, 80) }))} placeholder="Dupont" />
+                      </dd>
+                      <dt>{t("settings.user_profile_how_to_call")}</dt>
+                      <dd>
+                        <input type="text" aria-label={t("settings.user_profile_how_to_call")} className="settings-input" maxLength={80} value={userProfile.how_to_call} onChange={(e) => setUserProfile((p) => ({ ...p, how_to_call: e.target.value.slice(0, 80) }))} placeholder="Marc" />
+                        <span className="settings-doc muted">{t("settings.user_profile_how_to_call_hint")}</span>
+                      </dd>
+                    </dl>
+                    <h3 className="settings-subtitle">{t("settings.user_profile_proactive_title")}</h3>
+                    <dl className="settings-list">
+                      <dt>{t("settings.user_profile_proactive_enabled")}</dt>
+                      <dd>
+                        <label className="settings-checkbox-label">
+                          <input type="checkbox" checked={userProfile.proactive_check_in_enabled} onChange={(e) => setUserProfile((p) => ({ ...p, proactive_check_in_enabled: e.target.checked }))} />
+                          {t("settings.user_profile_proactive_enabled_label")}
+                        </label>
+                      </dd>
+                      <dt>{t("settings.user_profile_proactive_interval_days")}</dt>
+                      <dd>
+                        <input type="number" aria-label={t("settings.user_profile_proactive_interval_days")} className="settings-input" min={0} max={365} value={userProfile.proactive_check_in_interval_days || ""} onChange={(e) => setUserProfile((p) => ({ ...p, proactive_check_in_interval_days: Math.max(0, parseInt(e.target.value, 10) || 0) }))} placeholder="1" />
+                        <span className="settings-doc muted">{t("settings.user_profile_proactive_interval_hint")}</span>
+                      </dd>
+                    </dl>
+                    <button type="button" className="refresh-btn" disabled={userProfileSaving} onClick={async () => {
+                      setUserProfileSaving(true);
+                      setUserProfileError(null);
+                      try {
+                        await invoke("post_user_profile", {
+                          body: {
+                            first_name: userProfile.first_name.trim() || undefined,
+                            last_name: userProfile.last_name.trim() || undefined,
+                            how_to_call: userProfile.how_to_call.trim() || undefined,
+                            onboarding_completed: userProfile.onboarding_completed,
+                            proactive_check_in_enabled: userProfile.proactive_check_in_enabled,
+                            proactive_check_in_interval_days: userProfile.proactive_check_in_interval_days,
+                          },
+                          port: DAEMON_PORT,
+                        });
+                      } catch (err) {
+                        setUserProfileError(String(err));
+                      } finally {
+                        setUserProfileSaving(false);
+                      }
+                    }}>{userProfileSaving ? t("common.loading") : t("settings.user_profile_save")}</button>
                   </>
                 )}
               </div>
