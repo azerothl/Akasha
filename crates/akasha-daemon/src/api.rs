@@ -1674,7 +1674,7 @@ async fn execute_tool_call(
                     let client = client.clone();
                     let content = content.to_string();
                     let source = source.to_string();
-                    let out = tokio::task::spawn_blocking(move || client.promote(content, source, None, None, None))
+                    let out = tokio::task::spawn_blocking(move || client.promote(content, source, None, None, None, None, None, None))
                         .await
                         .ok()
                         .and_then(|r| r.ok());
@@ -2390,8 +2390,10 @@ async fn compact_short_term_if_needed(
                     let session_id_attr = session_id.to_string();
                     let client = client.clone();
                     tokio::task::spawn_blocking(move || {
-                        if let Err(e) = client.promote(summary, "compaction".to_string(), None, None, Some(session_id_attr)) {
+                        if let Err(e) = client.promote(summary.clone(), "compaction".to_string(), None, None, Some(session_id_attr.clone()), Some(1), Some("session".to_string()), None) {
                             tracing::warn!(error = %e, "Long-term promote after compaction failed");
+                        } else if let Err(e) = client.emit_event("memory_promoted".to_string(), summary, None, None, Some(session_id_attr), None, Some(1), Some("session".to_string()), Some("compaction".to_string())) {
+                            tracing::debug!(error = %e, "Episodic emit after compaction promote failed");
                         }
                     })
                     .await
@@ -2453,7 +2455,13 @@ Réponse en français, factuelle.\n\n{}",
             if !summary.is_empty() {
                 let content = format!("Résumé du {} : {}", session_id.trim_start_matches("day-"), summary);
                 let client = client.clone();
-                match tokio::task::spawn_blocking(move || client.promote(content, "daily_summary".to_string(), None, None, None)).await {
+                match tokio::task::spawn_blocking(move || {
+                    let res = client.promote(content.clone(), "daily_summary".to_string(), None, None, None, Some(1), None, None);
+                    if res.is_ok() {
+                        let _ = client.emit_event("memory_promoted".to_string(), content, None, None, None, None, Some(1), None, Some("daily_summary".to_string()));
+                    }
+                    res
+                }).await {
                     Ok(Ok(())) => tracing::info!(session_id = %session_id, "Yesterday summarized and stored in long-term memory"),
                     Ok(Err(e)) => tracing::warn!(error = %e, "Daily summary promote to long-term failed"),
                     Err(e) => tracing::warn!(error = %e, "Daily summary task join failed"),
@@ -2679,54 +2687,23 @@ pub(crate) async fn run_message_via_llm(
         }
     }
 
-    // Long-term: retrieve top-k relevant memories by embedding similarity (current message + optional user-identity for first message).
-    // When short-term is empty (new session or after restart), use no filter so we recall all memories for context.
-    if let Some(ref client) = long_term_client {
-        let turns_empty = match &short_term {
-            Some(st) => st.get_turns(&session_id).await.is_empty(),
-            None => true,
-        };
-        let recall_filter = if turns_empty {
-            None
-        } else {
-            Some(akasha_store::MemorySearchFilter {
-                session_id: Some(session_id.clone()),
-                ..Default::default()
-            })
-        };
-        let msg = message.clone();
-        let client = client.clone();
-        let results = tokio::task::spawn_blocking(move || client.search(msg, 5, recall_filter))
-            .await
-            .ok()
-            .unwrap_or_default();
-        if !results.is_empty() {
-            context_prefix.push_str("[Mémoire à long terme]\n");
-            for (_, content) in &results {
-                context_prefix.push_str("- ");
-                context_prefix.push_str(&content.replace('\n', " "));
-                context_prefix.push_str("\n");
-            }
-            context_prefix.push_str("\n");
-        }
-        // Project context (Option A): when the message suggests a project, retrieve project-related memories (stored with source project:<name>) and inject as [Projet en cours]
-        if message_suggests_project(&message) {
-            let query = "projet état livrables objectif étapes fait reste à faire";
-            let client_for_project = long_term_client.as_ref().unwrap().clone();
-            let project_results = tokio::task::spawn_blocking(move || client_for_project.search(query.to_string(), 5, None))
-                .await
-                .ok()
-                .unwrap_or_default();
-            if !project_results.is_empty() {
-                context_prefix.push_str("[Projet en cours — utilise ce contexte pour reprendre ou poursuivre le projet]\n");
-                for (_, content) in &project_results {
-                    context_prefix.push_str("- ");
-                    context_prefix.push_str(&content.replace('\n', " "));
-                    context_prefix.push_str("\n");
-                }
-                context_prefix.push_str("\n");
-            }
-        }
+    // Memory orchestrator (Phase 5): composite retrieval (semantic + graph + episodic + user identity for first message).
+    let turns_empty = match &short_term {
+        Some(st) => st.get_turns(&session_id).await.is_empty(),
+        None => true,
+    };
+    let recall_params = crate::memory_orchestrator::RecallParams {
+        message: message.clone(),
+        session_id: session_id.clone(),
+        filter_by_session: !turns_empty,
+        suggest_project: message_suggests_project(&message),
+        is_first_message: turns_empty,
+        ..Default::default()
+    };
+    let fused = crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params).await;
+    let fused_str = fused.to_context_string();
+    if !fused_str.is_empty() {
+        context_prefix.push_str(&fused_str);
     }
 
     // User RAG: retrieve relevant chunks from user-uploaded documents (keyword match)
@@ -2758,27 +2735,6 @@ pub(crate) async fn run_message_via_llm(
         )
         .await;
         let turns = st.get_turns(&session_id).await;
-        // First message of session: search long-term for user identity (name, etc.) so the agent can greet the user.
-        let is_first_message = turns.is_empty();
-        if is_first_message {
-            if let Some(ref client) = long_term_client {
-                let query = "nom prénom utilisateur user name identité".to_string();
-                let client = client.clone();
-                let user_memories = tokio::task::spawn_blocking(move || client.search(query, 3, None))
-                    .await
-                    .ok()
-                    .unwrap_or_default();
-                if !user_memories.is_empty() {
-                    context_prefix.push_str("[Contexte utilisateur — utilise pour saluer si pertinent]\n");
-                    for (_, content) in &user_memories {
-                        context_prefix.push_str("- ");
-                        context_prefix.push_str(&content.replace('\n', " "));
-                        context_prefix.push_str("\n");
-                    }
-                    context_prefix.push_str("Si c'est le premier échange de la session, salue l'utilisateur avec son prénom si tu le connais.\n\n");
-                }
-            }
-        }
         let short_ctx = ShortTermStore::turns_to_context(&turns);
         if !short_ctx.is_empty() {
             context_prefix.push_str(short_ctx.trim_end());
@@ -3550,7 +3506,13 @@ pub(crate) async fn run_message_via_llm(
         for fact in &heuristic_facts {
             let client = long_term.clone();
             let fact = fact.clone();
-            match tokio::task::spawn_blocking(move || client.promote(fact, "user_fact".to_string(), None, None, None)).await {
+            match tokio::task::spawn_blocking(move || {
+                let res = client.promote(fact.clone(), "user_fact".to_string(), None, None, None, Some(2), Some("global_user".to_string()), None);
+                if res.is_ok() {
+                    let _ = client.emit_event("user_preference".to_string(), fact, None, None, None, None, Some(2), Some("global_user".to_string()), Some("user_fact".to_string()));
+                }
+                res
+            }).await {
                 Ok(Ok(())) => tracing::info!("Personal fact stored in long-term memory (heuristic)"),
                 Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote failed — check that embeddings/tract model loads (see daemon logs)"),
                 Err(e) => tracing::debug!(error = %e, "Promote task join error"),
@@ -3675,7 +3637,7 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
                 let client = client.clone();
                 let c = content.clone();
                 let s = source.clone();
-                match tokio::task::spawn_blocking(move || client.promote(c, s, None, None, None)).await {
+                match tokio::task::spawn_blocking(move || client.promote(c, s, None, None, None, None, None, None)).await {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote failed"),
                     Err(e) => tracing::debug!(error = %e, "Promote task join error"),

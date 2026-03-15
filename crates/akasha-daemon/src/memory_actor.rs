@@ -16,6 +16,10 @@ pub enum MemoryRequest {
         entity_id: Option<String>,
         process_id: Option<String>,
         session_id: Option<String>,
+        /// Phase 1: importance (0-4), scope, expires_at (RFC3339)
+        importance: Option<i64>,
+        scope: Option<String>,
+        expires_at: Option<String>,
     },
     List { limit: usize },
     Delete { id: String },
@@ -29,6 +33,22 @@ pub enum MemoryRequest {
         protect_sources: Option<Vec<String>>,
     },
     HasDailySummary { date: String },
+    /// Phase 2: emit an episodic event.
+    EmitEvent {
+        event_type: String,
+        payload: String,
+        entity_id: Option<String>,
+        process_id: Option<String>,
+        session_id: Option<String>,
+        task_id: Option<String>,
+        importance: Option<i64>,
+        scope: Option<String>,
+        tags: Option<String>,
+    },
+    /// Phase 2: search episodic events.
+    SearchEpisodic { filter: akasha_store::EpisodicFilter, limit: usize },
+    /// Phase 3/5: get facts by entity for graph retriever.
+    GetFactsByEntity { entity_id: String, limit: usize },
 }
 
 pub enum MemoryResponse {
@@ -40,6 +60,9 @@ pub enum MemoryResponse {
     Stats(Result<(u64, u64), String>),
     Gc(Result<u64, String>),
     HasDailySummary(bool),
+    EmitEvent(Result<uuid::Uuid, String>),
+    SearchEpisodic(Vec<akasha_store::EpisodicEvent>),
+    GetFactsByEntity(Vec<akasha_store::Fact>),
 }
 
 /// Client handle: Send + Sync, can be used from async code.
@@ -83,11 +106,14 @@ impl LongTermMemoryClient {
         entity_id: Option<String>,
         process_id: Option<String>,
         session_id: Option<String>,
+        importance: Option<i64>,
+        scope: Option<String>,
+        expires_at: Option<String>,
     ) -> Result<(), String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-            if self.tx.send((MemoryRequest::Promote { content, source, entity_id, process_id, session_id }, resp_tx)).is_err() {
+            if self.tx.send((MemoryRequest::Promote { content, source, entity_id, process_id, session_id, importance, scope, expires_at }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
             match resp_rx.blocking_recv() {
@@ -97,7 +123,7 @@ impl LongTermMemoryClient {
         }
         #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
         {
-            let _ = (content, source, entity_id, process_id, session_id);
+            let _ = (content, source, entity_id, process_id, session_id, importance, scope, expires_at);
             Ok(())
         }
     }
@@ -199,6 +225,77 @@ impl LongTermMemoryClient {
         Err("long-term memory disabled".into())
     }
 
+    /// Phase 2: emit an episodic event. Returns event id or error.
+    pub fn emit_event(
+        &self,
+        event_type: String,
+        payload: String,
+        entity_id: Option<String>,
+        process_id: Option<String>,
+        session_id: Option<String>,
+        task_id: Option<String>,
+        importance: Option<i64>,
+        scope: Option<String>,
+        tags: Option<String>,
+    ) -> Result<uuid::Uuid, String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::EmitEvent { event_type, payload, entity_id, process_id, session_id, task_id, importance, scope, tags }, resp_tx)).is_err() {
+                return Err("memory actor disconnected".into());
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::EmitEvent(r)) => r,
+                _ => Err("no response".into()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = (event_type, payload, entity_id, process_id, session_id, task_id, importance, scope, tags);
+            Err("long-term memory disabled".into())
+        }
+    }
+
+    /// Phase 2: search episodic events.
+    pub fn search_episodic(&self, filter: akasha_store::EpisodicFilter, limit: usize) -> Vec<akasha_store::EpisodicEvent> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::SearchEpisodic { filter, limit }, resp_tx)).is_err() {
+                return Vec::new();
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::SearchEpisodic(events)) => events,
+                _ => Vec::new(),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = (filter, limit);
+            Vec::new()
+        }
+    }
+
+    /// Phase 3/5: get facts by entity (graph retriever).
+    pub fn get_facts_by_entity(&self, entity_id: String, limit: usize) -> Vec<akasha_store::Fact> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::GetFactsByEntity { entity_id, limit }, resp_tx)).is_err() {
+                return Vec::new();
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::GetFactsByEntity(facts)) => facts,
+                _ => Vec::new(),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = (entity_id, limit);
+            Vec::new()
+        }
+    }
+
     /// GC: delete entries older than retention_days; protect_sources are never deleted. Returns deleted count (plan moyen terme 9).
     pub fn gc(&self, retention_days: u32, protect_sources: Option<Vec<String>>) -> Result<u64, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
@@ -232,7 +329,7 @@ pub fn start_memory_actor(
         use tokio::sync::oneshot;
         use uuid::Uuid;
         use akasha_embeddings::{embedding_to_bytes, Embedder};
-        use akasha_store::{cosine_similarity, decode_embedding_bytes, LongTermStore};
+        use akasha_store::{cosine_similarity, decode_embedding_bytes, extract_facts_simple, EpisodicStore, FactsStore, LongTermStore};
 
         let (tx, rx) = mpsc::channel::<(MemoryRequest, oneshot::Sender<MemoryResponse>)>();
         let memory_db_path = _memory_db_path.to_path_buf();
@@ -248,6 +345,17 @@ pub fn start_memory_actor(
                     return;
                 }
             };
+            let episodic_store = match EpisodicStore::open(&memory_db_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "Episodic store open failed");
+                    while let Ok((_, resp_tx)) = rx.recv() {
+                        let _ = resp_tx.send(MemoryResponse::EmitEvent(Err(e.to_string())));
+                    }
+                    return;
+                }
+            };
+            let facts_store = FactsStore::open(&memory_db_path).ok();
             let embedder = Embedder::new(&embedding_cache_dir);
             while let Ok((req, resp_tx)) = rx.recv() {
                 let response = match req {
@@ -288,18 +396,23 @@ pub fn start_memory_actor(
                         };
                         MemoryResponse::Search(contents)
                     }
-                    MemoryRequest::Promote { content, source, entity_id, process_id, session_id } => {
+                    MemoryRequest::Promote { content, source, entity_id, process_id, session_id, importance, scope, expires_at } => {
                         let already_exists = store.content_exists(&content).unwrap_or(false);
                         if already_exists {
                             tracing::debug!(content = %content.chars().take(60).collect::<String>(), "Skipping duplicate long-term memory entry");
                             MemoryResponse::Promote(Ok(()))
                         } else {
+                            use chrono::DateTime;
+                            let expires_at_dt = expires_at
+                                .as_ref()
+                                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                                .map(|dt| dt.with_timezone(&chrono::Utc));
                             let result = embedder
                                 .embed_one(&content)
                                 .map_err(|e| e.to_string())
                                 .and_then(|vec| {
                                     let bytes = embedding_to_bytes(&vec);
-                                    store
+                                    let id = store
                                         .insert_with_attribution(
                                             &content,
                                             &bytes,
@@ -309,8 +422,16 @@ pub fn start_memory_actor(
                                             session_id.as_deref(),
                                             None,
                                             None,
+                                            importance,
+                                            scope.as_deref(),
+                                            expires_at_dt.as_ref(),
                                         )
                                         .map_err(|e| e.to_string())?;
+                                    if let Some(ref fs) = facts_store {
+                                        for (s, p, o) in extract_facts_simple(&content) {
+                                            let _ = fs.insert_fact(&s, &p, &o, Some(id));
+                                        }
+                                    }
                                     Ok(())
                                 });
                             MemoryResponse::Promote(result)
@@ -340,6 +461,33 @@ pub fn start_memory_actor(
                     MemoryRequest::HasDailySummary { date } => {
                         let exists = store.has_daily_summary_for_date(&date).unwrap_or(false);
                         MemoryResponse::HasDailySummary(exists)
+                    }
+                    MemoryRequest::EmitEvent { event_type, payload, entity_id, process_id, session_id, task_id, importance, scope, tags } => {
+                        let result = episodic_store
+                            .insert_event(
+                                &event_type,
+                                &payload,
+                                entity_id.as_deref(),
+                                process_id.as_deref(),
+                                session_id.as_deref(),
+                                task_id.as_deref(),
+                                importance,
+                                scope.as_deref(),
+                                tags.as_deref(),
+                            )
+                            .map_err(|e| e.to_string());
+                        MemoryResponse::EmitEvent(result.map(|u| u))
+                    }
+                    MemoryRequest::SearchEpisodic { filter, limit } => {
+                        let events = episodic_store.get_events_filtered(&filter, limit).unwrap_or_default();
+                        MemoryResponse::SearchEpisodic(events)
+                    }
+                    MemoryRequest::GetFactsByEntity { entity_id, limit } => {
+                        let facts = facts_store
+                            .as_ref()
+                            .and_then(|fs| fs.get_facts_by_entity(&entity_id, limit).ok())
+                            .unwrap_or_default();
+                        MemoryResponse::GetFactsByEntity(facts)
                     }
                 };
                 let _ = resp_tx.send(response);
