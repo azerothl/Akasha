@@ -2,6 +2,8 @@
 
 Ce dossier contient la documentation technique et fonctionnelle du projet. Les documents sont regroupés par thème pour faciliter la navigation.
 
+**Documentation publique (binaires uniquement)** : le guide utilisateur sans référence au code est [docs/user_guide_final.md](../docs/user_guide_final.md) ; il est livré dans le zip des releases sous `docs/user_guide.md` et affiché dans l'onglet Doc des interfaces.
+
 ---
 
 ## Sommaire
