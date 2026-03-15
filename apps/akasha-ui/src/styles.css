@@ -3134,6 +3134,30 @@ pre,
   margin-bottom: 1rem;
 }
 
+.memory-graph-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  margin-bottom: 1rem;
+}
+
+.memory-graph-wrap > button {
+  flex-shrink: 0;
+  margin-bottom: 0.5rem;
+}
+
+.memory-graph-canvas {
+  flex: 1;
+  min-height: 350px;
+  position: relative;
+}
+
+.memory-graph-canvas > div {
+  width: 100%;
+  height: 100%;
+}
+
 .memory-panel .memory-section-title {
   margin: 1.5rem 0 0.5rem;
   font-size: 1rem;

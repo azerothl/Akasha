@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import RelationGraph from "relation-graph/react";
+import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
 import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
 import { preprocessMessagePaths } from "./preprocessMessagePaths";
 import { getCached, setCached } from "./useTabCache";
@@ -315,6 +317,41 @@ function App() {
   const [memorySearchLoading, setMemorySearchLoading] = useState(false);
   const [memoryViewGraph, setMemoryViewGraph] = useState(false);
   const [memoryLongTermSelected, setMemoryLongTermSelected] = useState(0);
+  const memoryGraphRef = useRef<RelationGraphComponent | null>(null);
+
+  function buildMemoryGraphData(entries: MemoryLongTermEntry[], selectedIndex: number): RGJsonData | null {
+    const idToEntry = new Map<string, MemoryLongTermEntry>();
+    for (const e of entries) {
+      if (e.id) idToEntry.set(e.id, e);
+    }
+    const nodeIds = new Set<string>(idToEntry.keys());
+    for (const e of entries) {
+      for (const r of e.related ?? []) {
+        nodeIds.add(r.id);
+      }
+    }
+    if (nodeIds.size === 0) return null;
+    const nodes = Array.from(nodeIds).map((id) => {
+      const entry = idToEntry.get(id);
+      const text = entry
+        ? `${entry.content.slice(0, 40)}${entry.content.length > 40 ? "…" : ""}`
+        : id.slice(0, 8);
+      return { id, text };
+    });
+    const lines: Array<{ from: string; to: string; text?: string }> = [];
+    for (const e of entries) {
+      if (!e.id) continue;
+      for (const r of e.related ?? []) {
+        lines.push({ from: e.id, to: r.id, text: r.kind ?? "related" });
+      }
+    }
+    const selectedEntry = entries[selectedIndex];
+    const rootId = (selectedEntry?.id && nodeIds.has(selectedEntry.id))
+      ? selectedEntry.id
+      : (nodes[0]?.id ?? undefined);
+    return { nodes, lines, rootId };
+  }
+
   const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
   const [sessionId, setSessionId] = useState<string | null>(() => {
     try {
@@ -924,6 +961,23 @@ function App() {
       setMemoryLongTermSelected(memoryLongTerm.length - 1);
     }
   }, [memoryLongTerm.length, memoryLongTermSelected]);
+
+  const memoryGraphOptions = useMemo<RGOptions>(() => ({
+    defaultJunctionPoint: "border",
+    layout: { layoutName: "force" },
+    disableZoom: false,
+    disableDragNode: false,
+  }), []);
+
+  useEffect(() => {
+    if (!memoryViewGraph) return;
+    const data = buildMemoryGraphData(memoryLongTerm, memoryLongTermSelected);
+    if (!data) return;
+    const t = setTimeout(() => {
+      memoryGraphRef.current?.setJsonData(data, true, () => {});
+    }, 0);
+    return () => clearTimeout(t);
+  }, [memoryViewGraph, memoryLongTerm, memoryLongTermSelected]);
 
   const fetchScheduleReports = useCallback(async () => {
     try {
@@ -3572,30 +3626,25 @@ function App() {
                         )}
                       </div>
                     ) : memoryViewGraph ? (
-                      <div className="memory-graph-wrap">
+                      <div className="memory-graph-wrap" role="region" aria-label={t("memory.view_graph")}>
                         <button type="button" onClick={() => setMemoryViewGraph(false)}>{t("memory.view_list")}</button>
                         {memoryLongTerm.length === 0 ? (
                           <p className="empty-state">{t("memory.long_empty")}</p>
                         ) : (() => {
-                          const root = memoryLongTerm[memoryLongTermSelected];
-                          if (!root) return <p className="muted">Sélectionnez une entrée en vue liste.</p>;
-                          const related = root.related ?? [];
-                          const idToContent = new Map(memoryLongTerm.filter((e): e is MemoryLongTermEntry & { id: string } => e.id != null).map((e) => [e.id!, e]));
+                          const graphData = buildMemoryGraphData(memoryLongTerm, memoryLongTermSelected);
+                          if (!graphData) {
+                            return <p className="muted">Aucune donnée pour le graphe.</p>;
+                          }
                           return (
-                            <div className="memory-graph-tree">
-                              <div className="memory-graph-root">
-                                <strong>●</strong> [{root.source}] {root.created_at} — {root.content.slice(0, 80)}{root.content.length > 80 ? "…" : ""}
-                                {root.id && <span className="memory-graph-id"> (id: {root.id.slice(0, 8)})</span>}
-                              </div>
-                              {related.map((rel) => {
-                                const content = idToContent.get(rel.id);
-                                return (
-                                  <div key={rel.id} className="memory-graph-child">
-                                    └─ {rel.id.slice(0, 8)} ({rel.kind || "related"})
-                                    {content && `: ${content.content.slice(0, 50)}${content.content.length > 50 ? "…" : ""}`}
-                                  </div>
-                                );
-                              })}
+                            <div className="memory-graph-canvas">
+                              <RelationGraph
+                                ref={memoryGraphRef}
+                                options={memoryGraphOptions}
+                                onNodeClick={(node: RGNode) => {
+                                  const idx = memoryLongTerm.findIndex((e) => e.id === node.id);
+                                  if (idx >= 0) setMemoryLongTermSelected(idx);
+                                }}
+                              />
                             </div>
                           );
                         })()}
