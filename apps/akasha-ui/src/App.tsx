@@ -557,6 +557,8 @@ function App() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatInlineReplyRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
+  /** True when we loaded with existing messages (reconnect during the day); send once then clear. */
+  const firstMessageSinceLoadRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Tasks for which we already auto-opened the human-input modal (avoid re-opening every poll). */
   const humanInputAutoOpenedRef = useRef<Set<string>>(new Set());
@@ -699,6 +701,7 @@ function App() {
             }))
           );
           setSessionId(data.session_id);
+          firstMessageSinceLoadRef.current = true;
           try {
             localStorage.setItem(AKASHA_SESSION_ID_KEY, data.session_id);
           } catch {
@@ -1742,11 +1745,14 @@ function App() {
     setAttachments([]);
     setLoading(true);
     try {
+      const reconnect = firstMessageSinceLoadRef.current;
+      firstMessageSinceLoadRef.current = false;
       const ack = await invoke<{ task_id: string; session_id: string; message: string }>("send_message_ack", {
         message: userMessage,
         session_id: sessionId,
         attachments: attachmentsPayload,
         port: DAEMON_PORT,
+        reconnect: reconnect || undefined,
       });
       setLoading(false);
       if (ack?.session_id) {

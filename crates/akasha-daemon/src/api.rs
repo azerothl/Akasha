@@ -4833,6 +4833,19 @@ pub async fn handle_api(
                 }
             }
         }
+        // Reconnect: if UI says user just reconnected and there is already history today, ask agent to briefly recap then answer
+        let reconnect = body_json.as_ref().and_then(|v| v.get("reconnect")).and_then(|v| v.as_bool()).unwrap_or(false);
+        if reconnect {
+            if let Some(ref st) = short_term {
+                let turns = st.get_turns(&session_id).await;
+                if !turns.is_empty() {
+                    message = format!(
+                        "[L'utilisateur vient de se reconnecter. Rappelez-lui brièvement ce que vous avez fait ensemble jusqu'ici aujourd'hui, puis répondez à son message.]\n\n{}",
+                        message
+                    );
+                }
+            }
+        }
         let correlation_id = uuid::Uuid::new_v4();
         let priority = body_json
             .as_ref()
