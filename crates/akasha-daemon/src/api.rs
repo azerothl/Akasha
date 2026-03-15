@@ -3,10 +3,11 @@
 use akasha_core::{EventEnvelope, EventType};
 use akasha_vault::Vault;
 use akasha_llm::CompletionRequest;
-use akasha_store::{Schedule, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore};
+use akasha_store::{parse_todos_from_payload, Schedule, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore, TodoStatus};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use crate::agent_profile::AgentProfile;
-use crate::agents::{EventBus, OrchestratorTask, TaskPriority};
+use crate::user_profile::UserProfile;
+use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use std::path::{Path, PathBuf};
@@ -21,6 +22,13 @@ use tracing::Instrument;
 
 /// In-memory cache for AgentProfile to avoid repeated disk reads (invalidated on POST /api/agent-profile and after profile save in run_message_via_llm).
 pub type AgentProfileCache = Arc<RwLock<Option<AgentProfile>>>;
+
+/// Virtual workspace per task (Deep Agents-style). Paths prefixed with "workspace:/" or "workspace:" are read/written here instead of disk.
+pub type TaskWorkspaceStore = Arc<RwLock<std::collections::HashMap<Uuid, std::collections::HashMap<String, String>>>>;
+
+pub fn new_task_workspace_store() -> TaskWorkspaceStore {
+    Arc::new(RwLock::new(std::collections::HashMap::new()))
+}
 
 pub fn new_agent_profile_cache() -> AgentProfileCache {
     Arc::new(RwLock::new(None))
@@ -381,6 +389,7 @@ pub async fn run_delegation_handler(
                 message: req.message.clone(),
                 session_id: String::new(),
                 image_data_urls: None,
+                execution_mode: None,
             })
             .await
             .is_err()
@@ -516,7 +525,14 @@ pub fn parse_request(buf: &[u8]) -> (String, String, Option<Vec<u8>>, std::colle
             headers.insert(name, value);
         }
     }
-    let body = if content_length > 0 && rest.len() >= content_length {
+    const MAX_BODY_PARSE: usize = 10 * 1024 * 1024; // 10 MiB — refuse to allocate larger body (hypothesis B)
+    let will_allocate = content_length > 0 && content_length <= MAX_BODY_PARSE && rest.len() >= content_length;
+    // #region agent log
+    if content_length > 0 {
+        crate::debug_log::log("api.rs:parse_request", "body allocation check", &serde_json::json!({"content_length": content_length, "rest_len": rest.len(), "will_allocate": will_allocate, "max_body_parse": MAX_BODY_PARSE}), "B");
+    }
+    // #endregion
+    let body = if will_allocate {
         Some(rest[..content_length].to_vec())
     } else {
         None
@@ -537,8 +553,8 @@ pub fn json_response(status: &str, body: &str) -> String {
 /// Format: une ligne par outil "nom — usage".
 /// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
-    ("read_file", "read_file <path> — lire le contenu d'un fichier texte"),
-    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier. À UTILISER dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier (ex. « enregistre dans … », « sauvegarde … ») ; ne jamais refuser ni proposer de copier-coller. Path Windows (C:\\...) ou Unix."),
+    ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
+    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier. Path réel (Windows/Unix) ou workspace:/<path> pour le workspace virtuel (temporaire). À UTILISER dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier ; ne jamais refuser ni proposer de copier-coller."),
     ("search_files", "search_files <dir> <pattern> — chercher des fichiers (glob) sous un répertoire"),
     ("grep_content", "grep_content <dir> <pattern> [file_glob] — chercher le motif dans le contenu des fichiers (ex. grep_content . \"fn \" \"*.rs\")"),
     ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
@@ -554,8 +570,11 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("web_search", "web_search <query> [max_results] — rechercher sur le web (Brave API; BRAVE_API_KEY, web_search_enabled)"),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
     ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
-    ("memory_store", "memory_store <content> <source> — stocker/promouvoir un contenu en mémoire long terme"),
+    ("memory_store", "memory_store <content> <source> [link_to: id1,id2...] [link_kind: spouse|child|birth_date|residence|same_person|...] — stocker en mémoire long terme ; optionnellement lier à des entrées (UUIDs) avec un type de relation."),
     ("memory_delete", "memory_delete <id> — supprimer une entrée de la mémoire long terme par son id (UUID)"),
+    ("memory_forget", "memory_forget <query> — supprimer les entrées dont le contenu correspond aux mots-clés (plan moyen terme 9)"),
+    ("memory_stats", "memory_stats — nombre d'entrées et taille approximative de la mémoire long terme"),
+    ("memory_gc", "memory_gc [retention_days] [protect_sources...] — supprimer les entrées plus anciennes que N jours (sources protégées optionnelles, ex. user_fact project)"),
     ("sessions_list", "sessions_list [limit] — lister les tâches/sessions récentes"),
     ("sessions_spawn", "sessions_spawn <message> [session_id] — créer une sous-tâche et la lancer"),
     ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
@@ -564,12 +583,17 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
     ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
-    ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (ex. search pour recherche web). agent_type: search | code | conversation | financial | documentalist | project_manager | technical_writer | research | security_audit | creative. Un seul niveau de délégation autorisé."),
+    ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent. agent_type: search | code | conversation | financial | documentalist | project_manager | technical_writer | research | security_audit | creative | analyst | architect | frontend | backend | database | integration | qa | system | image_generation. Un seul niveau de délégation autorisé."),
     ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
     ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
     ("device_discover", "device_discover [interface] — lister les appareils accessibles (optionnel: local_media, system, network, usb). Filtre par politique allowed_device_interfaces / blocked_device_interfaces."),
     ("device_invoke", "device_invoke <interface> <device_id> <action> [params] — exécuter une action sur un appareil. local_media: caméra (device_id camera, action capture), micro (device_id microphone, action record). Appelle directement ; une fenêtre d'autorisation s'affichera dans l'UI. Ne pas demander à l'utilisateur d'« ouvrir l'UI » — utiliser l'outil. synthetic_input: device_id keyboard|mouse, action shortcut|key|type|mouse_move|mouse_click|..."),
     ("generate_image", "generate_image <prompt> [size] — générer une image par IA (ex. OpenAI DALL·E). Prompt en texte libre ; size optionnel (1024x1024, 512x512). Retourne l'image en data URL dans la réponse (spec 42)."),
+    ("write_todos", "write_todos <payload> — définir la liste d'étapes (todo) de la tâche. Payload: JSON array [{\"title\":\"...\", \"status\":\"pending\"|\"done\"|\"cancelled\"}] ou une ligne par étape. Remplace toute la liste. Utiliser pour décomposer une tâche complexe et suivre la progression."),
+    ("read_todos", "read_todos — retourne la liste des étapes (todos) de la tâche courante."),
+    ("update_todo", "update_todo <index> <status> — marquer l'étape à l'index (1-based) comme status (done, cancelled)."),
+    ("list_skills", "list_skills — retourne la liste des skills installés (nom et description). Utiliser avant read_skill pour charger le détail d'un skill."),
+    ("read_skill", "read_skill <name> — charge le contenu (instructions, usage) du skill. À utiliser quand tu as besoin du détail d'un skill avant de l'invoquer par son nom."),
 ];
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -578,7 +602,7 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
             AVAILABLE_TOOLS
                 .iter()
                 .filter(move |(name, _)| {
-                    *name == "ask_user" || *name == "install_skill" || *name == "uninstall_skill" || allowed.iter().any(|a| a == *name)
+                    *name == "ask_user" || *name == "install_skill" || *name == "uninstall_skill" || *name == "write_todos" || *name == "read_todos" || *name == "update_todo" || *name == "list_skills" || *name == "read_skill" || allowed.iter().any(|a| a == *name)
                 }),
         )
     } else {
@@ -589,55 +613,133 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
         .join(" ; ")
 }
 
-/// True if the user message suggests they want to save/write a file to disk.
-fn message_suggests_save_file(message: &str) -> bool {
-    let m = message.to_lowercase();
-    let keywords = [
-        "enregistre", "enregistrer", "sauvegarde", "sauvegarder", "écris dans", "ecris dans",
-        "write to file", "save to", "save the file", "write the file", "dans le dossier",
-        "dans le fichier", "dans un fichier", "sur le disque", "to disk", "to the file",
-    ];
-    keywords.iter().any(|k| m.contains(k))
+/// Single-pass intent flags for a message (one to_lowercase() shared by all checks).
+struct MessageIntentFlags {
+    save_file: bool,
+    external_info: bool,
+    camera_or_mic: bool,
+    image_generation: bool,
+    code_generation: bool,
+    /// User asks for GitHub repo/API info and mentions vault or GITHUB_TOKEN.
+    github_with_vault: bool,
 }
 
-/// True if the user message suggests they want external/live information (weather, news, etc.).
-fn message_suggests_external_info(message: &str) -> bool {
+fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
     let m = message.to_lowercase();
-    let keywords = [
-        "météo", "meteo", "weather", "prévisions", "previsions", "actualités", "actualites",
-        "horaires", "trafic", "prix", "cours ", "bourse", "news", "nouvelle", "semaine à",
-        "aujourd'hui", "demain", "connaître la", "connaitre la", "quelle est la météo",
-        "quel temps", "prévision", "prevision",
-    ];
-    keywords.iter().any(|k| m.contains(k))
+    MessageIntentFlags {
+        save_file: [
+            "enregistre", "enregistrer", "sauvegarde", "sauvegarder", "écris dans", "ecris dans",
+            "write to file", "save to", "save the file", "write the file", "dans le dossier",
+            "dans le fichier", "dans un fichier", "sur le disque", "to disk", "to the file",
+        ]
+        .iter()
+        .any(|k| m.contains(k)),
+        external_info: [
+            "météo", "meteo", "weather", "prévisions", "previsions", "actualités", "actualites",
+            "horaires", "trafic", "prix", "cours ", "bourse", "news", "nouvelle", "semaine à",
+            "aujourd'hui", "demain", "connaître la", "connaitre la", "quelle est la météo",
+            "quel temps", "prévision", "prevision",
+        ]
+        .iter()
+        .any(|k| m.contains(k)),
+        camera_or_mic: [
+            "webcam", "caméra", "camera", "prend une photo", "prends une photo", "prendre une photo",
+            "take a photo", "take a picture", "prends moi en photo", "photo avec la webcam",
+            "accède à la webcam", "accede a la webcam", "utilise la caméra", "utilise la camera",
+            "affiche-la dans le chat", "afficher dans le chat", "display in the chat", "show in the chat",
+            "micro", "microphone", "enregistre avec le micro", "enregistrer avec le micro",
+            "obtenir une image", "get an image", "image avec la webcam", "image avec la caméra",
+            "continuer pour obtenir une image", "proceed to get an image",
+        ]
+        .iter()
+        .any(|k| m.contains(k)),
+        image_generation: [
+            "génère une image", "genere une image", "générer une image", "génère moi une image",
+            "generate an image", "generate a picture", "draw", "dessine", "dessiner",
+            "crée une image", "cree une image", "créer une image", "create an image",
+            "image par ia", "ai image", "dall-e", "dalle",
+        ]
+        .iter()
+        .any(|k| m.contains(k)),
+        code_generation: [
+            "écris un script", "ecris un script", "écrire un script", "ecrire un script",
+            "write a script", "write the script", "génère du code", "genere du code",
+            "generate code", "génère le code", "code python", "python script",
+            "un programme qui", "a program that", "fonction qui", "function that",
+            "snippet", "extrait de code", "piece of code", "exemple de code",
+        ]
+        .iter()
+        .any(|k| m.contains(k)),
+        github_with_vault: {
+            let github = ["github", "dépôt privé", "depot prive", "private repo", "api.github.com"].iter().any(|k| m.contains(k));
+            let vault = ["vault", "github_token", "clé du vault", "cle du vault", "key in the vault", "token dans le vault", "clef dans le vault"].iter().any(|k| m.contains(k));
+            github && vault
+        },
+    }
 }
 
-/// True if the user message suggests using the camera/webcam to take a photo or the microphone.
-fn message_suggests_camera_or_mic(message: &str) -> bool {
-    let m = message.to_lowercase();
-    let keywords = [
-        "webcam", "caméra", "camera", "prend une photo", "prends une photo", "prendre une photo",
-        "take a photo", "take a picture", "prends moi en photo", "photo avec la webcam",
-        "accède à la webcam", "accede a la webcam", "utilise la caméra", "utilise la camera",
-        "micro", "microphone", "enregistre avec le micro", "enregistrer avec le micro",
-        "obtenir une image", "get an image", "image avec la webcam", "image avec la caméra",
-        "continuer pour obtenir une image", "proceed to get an image",
-    ];
-    keywords.iter().any(|k| m.contains(k))
-}
-
-fn message_suggests_image_generation(message: &str) -> bool {
-    let m = message.to_lowercase();
-    let keywords = [
-        "génère une image", "genere une image", "générer une image", "génère moi une image",
-        "generate an image", "generate a picture", "draw", "dessine", "dessiner",
-        "crée une image", "cree une image", "créer une image", "create an image",
-        "image par ia", "image par ia", "ai image", "dall-e", "dalle",
-    ];
-    keywords.iter().any(|k| m.contains(k))
+/// True if the user message suggests a tool-only action (camera, web search, save file, image gen) without asking for code generation. Used by the orchestrator to override mistaken "code" decomposition.
+pub fn message_suggests_tool_only_action(message: &str) -> bool {
+    let flags = compute_message_intent_flags(message);
+    (flags.camera_or_mic || flags.save_file || flags.external_info || flags.image_generation)
+        && !flags.code_generation
 }
 
 /// True if the user message suggests a long-running project (novel, comic, code project) or continuing one.
+/// Capture limits for post-reply memory promotion (plan court terme 7, inspired by OpenClaw plugin).
+const CAPTURE_MIN_CHARS: usize = 16;
+const CAPTURE_MAX_CHARS: usize = 4000;
+const CAPTURE_MAX_PER_TURN: usize = 20;
+
+/// Short acknowledgments that should not be stored in long-term memory.
+static CAPTURE_ACK_PATTERNS: &[&str] = &[
+    "ok", "okay", "oui", "non", "merci", "thanks", "thank you", "d'accord", "daccord",
+    "👍", "👌", "ok.", "parfait", "super", "cool", "noted", "compris", "c'est noté",
+];
+
+/// If the text ends with an unclosed fenced code block (odd number of ```), appends "\n```\n" so that
+/// content appended after (e.g. image markdown) is not rendered inside a code block.
+pub(crate) fn ensure_no_open_code_block(text: &str) -> String {
+    let count = text.matches("```").count();
+    if count % 2 == 1 {
+        format!("{}\n```\n", text.trim_end())
+    } else {
+        text.to_string()
+    }
+}
+
+/// Build markdown image snippet: `\n\n![label](<url>)`. Angle brackets around URL allow parens in data URLs.
+pub(crate) fn build_image_markdown(label: &str, url: &str) -> String {
+    format!("\n\n![{}](<{}>)", label, url)
+}
+
+/// Returns true if content should be skipped when capturing to long-term memory (noise, loop risk, or too short/long).
+fn should_skip_capture_content(content: &str) -> bool {
+    let t = content.trim();
+    if t.is_empty() {
+        return true;
+    }
+    if t.len() < CAPTURE_MIN_CHARS {
+        return true;
+    }
+    if t.len() > CAPTURE_MAX_CHARS {
+        return true;
+    }
+    // Avoid storing the injected memory block (would cause recall loops).
+    if t.contains("[Mémoire à long terme]")
+        || t.contains("<relevant-memories>")
+        || t.contains("[Projet en cours")
+    {
+        return true;
+    }
+    let lower = t.to_lowercase();
+    let lower_trim = lower.trim();
+    if CAPTURE_ACK_PATTERNS.iter().any(|p| lower_trim == *p || lower_trim.starts_with(&format!("{} ", p))) {
+        return true;
+    }
+    false
+}
+
 fn message_suggests_project(message: &str) -> bool {
     let m = message.to_lowercase();
     let keywords = [
@@ -1096,54 +1198,69 @@ async fn do_uninstall_skill(
     }
 }
 
-const WRITE_FILE_REMINDER: &str = "\n[Rappel: l'utilisateur demande d'enregistrer un fichier. Tu DOIS répondre UNIQUEMENT par la ligne TOOL: write_file <chemin_complet> puis le contenu du fichier sur les lignes suivantes. Ne dis jamais que tu ne peux pas écrire sur le disque.]\n\n";
+const WRITE_FILE_REMINDER: &str = "\n[Reminder: the user is asking to save a file. You MUST reply ONLY with the line TOOL: write_file <full_path> then the file content on the following lines. Never say you cannot write to disk.]\n\n";
 
-const WEB_SEARCH_REMINDER: &str = "\n[Rappel: l'utilisateur demande des informations externes (météo, actualités, etc.). Tu DOIS utiliser TOOL: web_search <requête> pour chercher toi-même puis répondre avec les résultats. Ne propose pas d'aller sur un site sans avoir d'abord utilisé web_search.]\n\n";
+const WEB_SEARCH_REMINDER: &str = "\n[Reminder: the user is asking for external information (weather/météo, news, etc.). You MUST use TOOL: web_search <query> to search — do NOT use bankr or portfolio for weather. Then reply with the results. Do not suggest visiting a site without having used web_search first.]\n\n";
 
-const DEVICE_CAMERA_REMINDER: &str = "\n[Rappel: demande de photo webcam/caméra. Tu DOIS enchaîner directement : TOOL: device_discover local_media puis TOOL: device_invoke local_media camera capture. Ne demande PAS à l'utilisateur « quelle action appareil ? » ou « which device action ? » avec ask_user — il a déjà dit qu'il veut une photo, appelle device_invoke camera capture. Ne propose PAS : upload fichier, ouvrir l'UI, image IA.]\n\n";
-const IMAGE_GENERATION_REMINDER: &str = "\n[Rappel: demande de « générer une image », « dessine », « crée une image » (par IA, pas webcam). Tu DOIS utiliser TOOL: generate_image <prompt> (ex. TOOL: generate_image un chat sur un canapé). Spec 42.]\n\n";
+const DEVICE_CAMERA_REMINDER: &str = "\n[Reminder: webcam/camera photo request. You MUST chain directly: TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture. Do NOT ask the user \"which device action?\" with ask_user — they already said they want a photo; call device_invoke camera capture. Do NOT suggest: file upload, open UI, AI image. Do NOT mention tools_policy.yaml or allowed_write_paths for this request: the user wants a camera photo, not to configure file writing. If the user asked to \"display the photo in the chat\", after capture reply ONLY with a short confirmation in their language (e.g. \"Photo captured. It is shown below.\"): do NOT suggest \"save to file\", \"get a description\", \"take another photo\" or \"What would you like to do next?\" — the image is added automatically below your reply. Reply in the same language as the user.]\n\n";
+const IMAGE_GENERATION_REMINDER: &str = "\n[Reminder: request to \"generate an image\", \"draw\", \"create an image\" (by AI, not webcam). You MUST use TOOL: generate_image <prompt> (e.g. TOOL: generate_image a cat on a sofa). Spec 42.]\n\n";
 
-/// Contexte applicatif injecté dans le prompt : l'agent sait qu'il tourne dans Akasha et peut en parler.
+/// Reminder when the user asks for GitHub (private repo / API) and mentions the vault (e.g. GITHUB_TOKEN).
+const GITHUB_VAULT_REMINDER: &str = "\n[Reminder GitHub + vault: you MUST run the request yourself via TOOL: run_command. Exact format: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (or gh repo view owner/repo). FORBIDDEN: telling the user to do GITHUB_TOKEN=VAULT:... or export GITHUB_TOKEN=... or to put the token in plain text — you must emit the TOOL: line so the system injects the secret. Do not reply \"I did not find\" without having called run_command with VAULT:GITHUB_TOKEN=GITHUB_TOKEN.]\n\n";
+
+/// Application context injected into the prompt: the agent knows it runs inside Akasha and can talk about it.
 const APP_CONTEXT: &str = concat!(
-    "[Contexte Akasha] Tu es l'assistant intégré à Akasha. Akasha est l'application dans laquelle tu tournes actuellement. ",
-    "Si l'utilisateur te parle d'Akasha, du programme, de l'appli ou de comment ça marche, tu peux expliquer : ",
-    "commandes (akasha start, akasha init, akasha doctor), interfaces (TUI avec onglets Chat/Routeur/Mémoire/Doc/Activité), ",
-    "commandes slash dans le Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, /skills reload, etc.). ",
-    "Pour installer un CLI en global (ex. « installe le CLI bankr », « npm install -g @bankr/cli »), répondre par TOOL: run_command npm install -g <package> (ne pas générer de script à faire exécuter par l'utilisateur). ",
-    "Pour utiliser une clé du vault dans une commande : TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (le système injecte la valeur du vault). ",
-    "Skills (capacités supplémentaires) : l'utilisateur peut en ajouter sans modifier le code. Quand l'utilisateur demande d'installer un skill depuis une URL (ex. « installe le skill bankr depuis … »), tu DOIS répondre par TOOL: install_skill <url>. ",
-    "Pour désinstaller un skill : TOOL: uninstall_skill <nom> (ex. TOOL: uninstall_skill bankr). ",
-    "Quand l'utilisateur te demande d'effectuer une action avec un skill (ex. « vérifie mon wallet bankr », « lance bankr whoami »), tu DOIS répondre UNIQUEMENT par une ligne TOOL: <nom_du_skill> <arguments> (ex. TOOL: bankr whoami) pour que le système exécute la commande ; ne dis pas à l'utilisateur de lancer la commande lui-même. ",
-    "Sinon, l'utilisateur peut placer les fichiers dans le dossier skills et exécuter /skills reload. ",
-    "La documentation complète est disponible dans l'onglet Doc de l'interface. ",
-    "Réponds en français sauf si l'utilisateur utilise une autre langue. ",
-    "Ne jamais inventer de données. Si tu n'as pas l'information pour répondre, dis-le clairement (ex. « Je n'ai pas trouvé d'information »). ",
-    "Pour les questions sur des informations que tu n'as pas (météo, prévisions, actualités, horaires, etc.), tu dois utiliser l'outil web_search pour chercher toi-même puis répondre avec les résultats. ",
-    "Ne propose pas à l'utilisateur d'aller sur un site sans avoir d'abord utilisé web_search si tu as accès à cet outil. ",
-    "Si web_search renvoie une erreur (ex. non activé), tu peux alors suggérer des sites et indiquer comment activer la recherche web (tools_policy.yaml, web_search_enabled, BRAVE_API_KEY). ",
-    "Tu as accès à l'outil write_file : tu DOIS l'utiliser dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier (ex. « enregistre le code dans … », « sauvegarde dans ce dossier », « write to file »). ",
-    "Réponds UNIQUEMENT par une ligne TOOL: write_file <chemin_complet> puis le contenu du fichier sur les lignes suivantes. ",
-    "Ne dis JAMAIS « je ne peux pas écrire sur le disque » ou « copie-colle le code toi-même » — si le chemin est refusé par la politique, l'outil renverra une erreur et tu expliqueras alors comment ajouter le préfixe dans tools_policy.yaml (allowed_write_paths). Les chemins peuvent être Windows (C:\\Users\\...) ou Unix. ",
-    "Règle importante : dès que tu dois demander à l'utilisateur un choix, une confirmation ou une information (options à choisir, chemin, identifiants, etc.) puis enchaîner dans la même tâche, tu DOIS utiliser l'outil ask_user (TOOL: ask_user puis JSON avec question/context/choices). ",
-    "Ne pose pas la question en texte libre, sinon la réponse ouvrira une nouvelle tâche et tu ne pourras pas continuer. ",
-    "Pour un accès à un service externe (GitHub, API, etc.), ne réponds pas « je ne peux pas » ; utilise ask_user pour demander le token ou explique comment configurer. ",
-    "Si l'utilisateur a déjà confirmé (ex. « clé dans le vault », « c'est configuré »), n'envoie pas une deuxième fois ask_user ; enchaîne. ",
-    "Tu as accès à la caméra et au micro via device_discover et device_invoke (interface local_media). Quand l'utilisateur demande une photo avec la caméra / webcam / « prendre une photo » / « obtenir une image » (photo), tu DOIS enchaîner : TOOL: device_discover local_media puis TOOL: device_invoke local_media camera capture, sans demander avec ask_user « quelle action ? » ou « which device ? » — l'utilisateur a déjà dit qu'il veut une photo. La fenêtre d'autorisation s'affichera automatiquement ; ne dis pas « sans UI active ». Ne propose pas upload fichier, ouvrir l'UI, ou image IA : utilise device_invoke directement. ",
-    "Ne invente pas de commandes (ex. /status repo:... n'existe pas) ; les commandes sont dans /help.\n\n",
+    "[Akasha context] You are the assistant embedded in Akasha. Akasha is the application you are currently running in. ",
+    "If the user talks about Akasha, the program, the app or how it works, you can explain: ",
+    "commands (akasha start, akasha init, akasha doctor), interfaces (TUI with Chat/Router/Memory/Doc/Activity tabs), ",
+    "slash commands in Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, /skills reload, etc.). ",
+    "To install a CLI globally (e.g. \"install the bankr CLI\", \"npm install -g @bankr/cli\"), reply with TOOL: run_command npm install -g <package> (do not generate a script for the user to run). ",
+    "To use a vault key in a command: TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (the system injects the vault value). ",
+    "GitHub + vault: run TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (not GITHUB_TOKEN=VAULT:... or export or plain token). ",
+    "Skills (extra capabilities): the user can add them without changing code. When the user asks to install, download, fetch or add a skill from a URL (e.g. \"install the bankr skill from …\", \"download the skill at this url\"), you MUST reply with TOOL: install_skill <url>. If the user says \"follow the SKILL.md instructions\", you must first do TOOL: install_skill <url> (the system registers the skill); then the skill is available and can be invoked by name (e.g. TOOL: security-audit <args>). Do not fetch SKILL.md with web_fetch to execute its content manually. ",
+    "To uninstall a skill: TOOL: uninstall_skill <name> (e.g. TOOL: uninstall_skill bankr). ",
+    "When the user asks you to perform an action with a skill (e.g. \"check my bankr wallet\", \"run bankr whoami\"), you MUST reply ONLY with one line TOOL: <skill_name> <arguments> (e.g. TOOL: bankr whoami) so the system runs the command; do not tell the user to run the command themselves. ",
+    "Otherwise the user can place files in the skills folder and run /skills reload. ",
+    "Full documentation is available in the Doc tab of the interface. ",
+    "Language: ALWAYS reply in the same language as the user's last message (French → French, English → English, etc.). Do not switch language even if tool results or context are in another language. ",
+    "Never invent data. If you do not have the information to answer, say so clearly (e.g. \"I did not find that information\"). ",
+    "For questions about information you do not have (weather, forecasts, news, schedules, etc.), you must use the web_search tool to search yourself then reply with the results. When you have just received tool results (e.g. web_search, web_fetch), you must answer immediately with the synthesized result — do not reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"); the task ends after your message, so give the actual answer. ",
+    "Do not suggest the user visit a site without having used web_search first if you have access to that tool. ",
+    "If web_search returns an error (e.g. not enabled), you can then suggest sites and explain how to enable web search (tools_policy.yaml, web_search_enabled, BRAVE_API_KEY). ",
+    "You have access to the write_file tool: you MUST use it whenever the user asks to save, store or write a file (e.g. \"save the code to …\", \"write to file\"). ",
+    "Reply ONLY with one line TOOL: write_file <full_path> then the file content on the following lines. ",
+    "Never say \"I cannot write to disk\" or \"copy-paste the code yourself\" — if the path is denied by policy, the tool will return an error and you then explain how to add the prefix in tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...) or Unix. ",
+    "Important rule: whenever you need to ask the user for a choice, confirmation or information (options to choose, path, credentials, etc.) and then continue in the same task, you MUST use the ask_user tool (TOOL: ask_user then JSON with question/context/choices). ",
+    "Do not ask the question in free text, or the reply will open a new task and you will not be able to continue. ",
+    "For access to an external service (GitHub, API, etc.), do not reply \"I cannot\"; use ask_user to ask for the token or explain how to configure. ",
+    "If the user has already confirmed (e.g. \"key in the vault\", \"it's configured\"), do not send ask_user again; continue. ",
+    "You have access to the camera and microphone via device_discover and device_invoke (local_media interface). When the user asks for a photo with the camera/webcam / \"take a photo\" / \"display in the chat\", you MUST chain: TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture, without asking with ask_user. After capture, if the user asked to display the photo in the chat, reply ONLY with a short confirmation in their language (e.g. \"Photo captured. It is shown below.\"); do NOT suggest \"save to file\", \"scene description\", \"take another photo\" or \"What would you like to do next?\" — the image is added automatically below your reply. Always reply in the user's language. Never mention tools_policy.yaml for a simple webcam photo request. ",
+    "Do not invent commands (e.g. /status repo:... does not exist); commands are in /help.\n\n",
 );
 
 /// Returns an English [Role] system prompt for the given agent type, or None for conversation/unknown.
-fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
+/// Plan: Architecture agents et pipeline — Phase 2 (new roles).
+pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
     match agent_type {
-        "code" => Some("You are the code generation agent. Produce correct, readable code. Prefer run_command or write_file when the user asks to create or run code. Do not invent APIs; use read_file when needed to match existing code."),
+        "conversation" => None,
+        "code" => Some("You are the code generation agent. Produce correct, readable code. Prefer run_command or write_file when the user asks to create or run code. Do not invent APIs; use read_file when needed to match existing code. When the user asks to *perform* an action (take a photo, run a command, search the web, save a file), use the appropriate TOOL; do not generate a script. Use code only when the user explicitly asks to *write* or *generate* code or a script."),
         "search" => Some("You are the search agent. Use web_search to find external information (weather, news, facts). Synthesize results and cite sources. Do not claim information you have not retrieved via web_search when it is available."),
         "financial" => Some("You are the financial specialist. Help with budgets, cost analysis, financial reports, numeric reasoning. Be precise with figures and units. Do not invent data; state what is missing if needed."),
-        "documentalist" => Some("You are the documentalist. Answer from the user's document base (RAG). Prioritize [Documents utilisateur] and [Mémoire à long terme]. Use memory_search when relevant. Quote or summarize from excerpts; if insufficient, say so and suggest adding documents."),
+        "documentalist" => Some("You are the documentalist. Transform a pile of files into exploitable data. Answer from the user's document base (RAG). Prioritize [User documents] and [Long-term memory]. Use memory_search when relevant. Quote or summarize from excerpts; if insufficient, say so and suggest adding documents. Produce structured summaries when asked."),
         "project_manager" => Some("You are the project manager. Help with project tracking, milestones, task breakdown, planning. Refer to schedules and recurring tasks when relevant. Propose clear next steps and deliverables."),
         "technical_writer" => Some("You are the technical writing agent. Produce clear technical documentation, procedures, tutorials. Use a structured style (headings, steps, code blocks when relevant). Prefer clarity and precision. Use write_file when the user asks to save documentation."),
         "research" => Some("You are the research agent. Perform in-depth research using web_search, memory_search, and the document base. Synthesize multiple sources; cite or summarize clearly. Do not invent facts."),
         "security_audit" => Some("You are the security audit agent. Review code, config, or practices for security. Be methodical; highlight risks and suggest mitigations. Do not claim certainty where you lack context; recommend human review for critical decisions."),
-        "creative" => Some("You are the creative / copywriting agent. Produce marketing copy, creative content, and audience-adapted text. Match tone and format to the requested channel and goal. When the task is to get a photo or image from the user's webcam/camera, use TOOL: device_invoke local_media camera capture first; do not suggest uploading a file or generating an AI image instead."),
+        "creative" => Some("You are the creative agent. You have a strong creative sense for text and images. Produce marketing copy, creative content, stories, and audience-adapted text. Match tone and format to the requested channel and goal. When the task is to get a photo from the user's webcam/camera, use TOOL: device_invoke local_media camera capture first; for AI-generated images use generate_image."),
+        "analyst" => Some("You are the product / functional analyst. Formalize the need before any production. Output: reformulated need, scope, assumptions, acceptance criteria, initial backlog. Do not jump to implementation; clarify and structure the request first."),
+        "architect" => Some("You are the technical architect. Design the skeleton of the project. Output: proposed architecture, task list, dependencies between tasks, execution order, definition of done. Stay at design level; do not write full implementation."),
+        "frontend" => Some("You are the frontend agent. Produce UI components, views, and client-side logic. Focus on UX, accessibility, responsive layout, and integration with the design system. List impacted components. Do not modify database schema unless explicitly asked."),
+        "backend" => Some("You are the backend agent. Produce server-side logic, APIs, and business rules. Focus on correctness, performance, and clear contracts. Do not change frontend or DB schema unless the task explicitly requires it."),
+        "database" => Some("You are the database / data agent. Produce schemas, migrations, queries, and data pipelines. Focus on consistency, indexing, and data integrity. Output clear DDL or migration steps when applicable."),
+        "integration" => Some("You are the integration agent. Wire components together: APIs, events, external services. Focus on contracts, error handling, and end-to-end flows. Produce a precise deliverable (config, glue code, or runbook)."),
+        "qa" => Some("You are the quality control agent. You prevent false 'work done'. Verify coherence, requirement coverage, missing files, hidden TODOs, incomplete sections. Do not rewrite; report defects and gaps by severity. Do not validate if acceptance criteria are incomplete; output a clear report for rework."),
+        "system" => Some("You are the system agent. You have full knowledge of the Akasha application: commands (akasha start, init, doctor), interfaces (TUI, Chat, Router, Memory, Doc, Calendar), slash commands, skills, tools, and configuration. You can resolve issues and answer any question about how Akasha works. Be precise and refer to real features only."),
+        "image_generation" => Some("You are the image generation agent. Produce images from text prompts using the generate_image tool. Focus on clear, concrete prompts that yield the requested visual. One precise deliverable per request."),
         _ => None,
     }
 }
@@ -1173,6 +1290,51 @@ async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: 
     }
 }
 
+/// Split by whitespace but keep double-quoted segments as a single token (e.g. -H "Authorization: Bearer $X" -> [-H, "Authorization: Bearer $X"]).
+fn split_whitespace_respecting_quotes(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = s.trim();
+    while !rest.is_empty() {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        if rest.starts_with('"') {
+            let mut end = 1usize;
+            while end < rest.len() {
+                let b = rest.as_bytes()[end];
+                if b == b'\\' && end + 1 < rest.len() {
+                    end += 2;
+                    continue;
+                }
+                if b == b'"' {
+                    out.push(rest[1..end].replace("\\\"", "\""));
+                    rest = &rest[end + 1..];
+                    break;
+                }
+                end += 1;
+            }
+            if end >= rest.len() {
+                // Unclosed quote: slice only if rest has content after the opening quote (avoid rest[1..] when len==1)
+                let quoted = if rest.len() > 1 { &rest[1..] } else { "" };
+                out.push(quoted.replace("\\\"", "\""));
+                rest = "";
+            }
+        } else {
+            let next_quote = rest.find('"').unwrap_or(rest.len());
+            let word_end = rest[..next_quote]
+                .find(|c: char| c.is_whitespace())
+                .unwrap_or(rest.len());
+            let word = rest[..word_end].trim();
+            if !word.is_empty() {
+                out.push(word.to_string());
+            }
+            rest = &rest[word_end..];
+        }
+    }
+    out
+}
+
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
 fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
@@ -1182,8 +1344,8 @@ fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
         let line = lines[i].trim();
         if let Some(rest) = line.strip_prefix("TOOL:") {
             let rest = rest.trim();
-            // Split the header line by whitespace for tool name + fixed positional args
-            let parts: Vec<String> = rest.split_whitespace().map(String::from).collect();
+            // Split by whitespace, respecting double-quoted args (so run_command -H "Bearer $VAR" works)
+            let parts: Vec<String> = split_whitespace_respecting_quotes(rest);
             if let Some((name, fixed_args)) = parts.split_first() {
                 let mut args = fixed_args.to_vec();
                 // Only certain tools support a multi-line body argument.
@@ -1275,6 +1437,7 @@ async fn execute_tool_call(
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     message_webhook_url: Option<&str>,
     device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
+    workspace_store: Option<&TaskWorkspaceStore>,
 ) -> (bool, String, Option<String>) {
     use std::path::Path;
     if !executor.policy.can_use_tool(tool_name) {
@@ -1283,11 +1446,34 @@ async fn execute_tool_call(
     let path_arg = |i: usize| args.get(i).map(|s| Path::new(s.as_str()));
     let result = match tool_name {
         "read_file" => {
+            if let Some(path_str) = args.get(0) {
+                let path_str = path_str.as_str();
+                if path_str.starts_with("workspace:/") || path_str.starts_with("workspace:") {
+                    match workspace_store {
+                        Some(ws) => {
+                            let key = path_str
+                                .trim_start_matches("workspace:/")
+                                .trim_start_matches("workspace:")
+                                .trim_start_matches('/')
+                                .to_string();
+                            let guard = ws.read().await;
+                            if let Some(map) = guard.get(&task_id) {
+                                if let Some(content) = map.get(&key) {
+                                    let preview = if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] };
+                                    return (true, format!("[read_file workspace:{}] {} chars: {}", key, content.len(), preview), None);
+                                }
+                            }
+                            return (false, format!("[read_file workspace] path not found: {}", key), None);
+                        }
+                        None => return (false, "[read_file] workspace paths require a workspace store.".to_string(), None),
+                    }
+                }
+            }
             if let Some(p) = path_arg(0) {
                 match executor.read_file(p).await {
                     Ok((content, res)) => {
                         let msg = if res.success {
-                            format!("[read_file {}] {} chars: {}", p.display(), content.len(), if content.len() <= 500 { content.as_str() } else { &content[..500] })
+                            format!("[read_file {}] {} chars: {}", p.display(), content.len(), if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] })
                         } else {
                             format!("[read_file] denied or error: {}", res.summary)
                         };
@@ -1309,8 +1495,18 @@ async fn execute_tool_call(
                     Some(vault) => {
                         let mut env = Vec::new();
                         for (vault_key, env_var) in &vault_specs {
-                            match vault.get(vault_key) {
-                                Ok(value) => env.push((env_var.clone(), value)),
+                            let value = vault.get(vault_key).or_else(|_| {
+                                // Fallback: common keys may be stored with different casing (e.g. github_token vs GITHUB_TOKEN)
+                                if vault_key.eq_ignore_ascii_case("GITHUB_TOKEN") && vault_key != "github_token" {
+                                    vault.get("github_token")
+                                } else if vault_key == "github_token" {
+                                    vault.get("GITHUB_TOKEN")
+                                } else {
+                                    Err(akasha_vault::VaultError::NotFound(vault_key.to_string()))
+                                }
+                            });
+                            match value {
+                                Ok(v) => env.push((env_var.clone(), v)),
                                 Err(_) => {
                                     return (
                                         false,
@@ -1461,7 +1657,7 @@ async fn execute_tool_call(
                 Some(client) => {
                     let client = client.clone();
                     let query = query_str.to_string();
-                    let results = tokio::task::spawn_blocking(move || client.search(query, top_k))
+                    let results = tokio::task::spawn_blocking(move || client.search(query, top_k, None))
                         .await
                         .ok()
                         .unwrap_or_default();
@@ -1479,14 +1675,34 @@ async fn execute_tool_call(
             let content = args.get(0).map(|a| a.as_str()).unwrap_or("");
             let source = args.get(1).map(|a| a.as_str()).unwrap_or("agent");
             if content.is_empty() {
-                return (false, "[memory_store] usage: memory_store <content> <source>".to_string(), None);
+                return (false, "[memory_store] usage: memory_store <content> <source> [link_to: id1,id2...] [link_kind: spouse|child|birth_date|residence|...]".to_string(), None);
+            }
+            let mut link_to_ids: Option<Vec<String>> = None;
+            let mut link_kind: Option<String> = None;
+            for arg in args.get(2..).unwrap_or(&[]).iter().map(|a| a.as_str()) {
+                if let Some(rest) = arg.strip_prefix("link_to:") {
+                    let ids: Vec<String> = rest
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .collect();
+                    if !ids.is_empty() {
+                        link_to_ids = Some(ids);
+                    }
+                } else if let Some(rest) = arg.strip_prefix("link_kind:") {
+                    let k = rest.trim();
+                    if !k.is_empty() {
+                        link_kind = Some(k.to_string());
+                    }
+                }
             }
             match long_term_client {
                 Some(client) => {
                     let client = client.clone();
                     let content = content.to_string();
                     let source = source.to_string();
-                    let out = tokio::task::spawn_blocking(move || client.promote(content, source))
+                    let out = tokio::task::spawn_blocking(move || client.promote(content, source, None, None, None, None, None, None, link_to_ids, link_kind))
                         .await
                         .ok()
                         .and_then(|r| r.ok());
@@ -1517,6 +1733,53 @@ async fn execute_tool_call(
                     }
                 }
                 None => (false, "[memory_delete] long-term memory not available".to_string(), None),
+            }
+        }
+        "memory_forget" => {
+            let query = args.get(0).map(|a| a.as_str()).unwrap_or("").trim();
+            if query.is_empty() {
+                return (false, "[memory_forget] usage: memory_forget <query> (mots-clés)".to_string(), None);
+            }
+            match long_term_client {
+                Some(client) => {
+                    let client = client.clone();
+                    let q = query.to_string();
+                    let out = tokio::task::spawn_blocking(move || client.forget_by_query(q)).await.ok().and_then(|r| r.ok());
+                    match out {
+                        Some(n) => (true, format!("[memory_forget] {} entrée(s) supprimée(s)", n), None),
+                        None => (false, "[memory_forget] failed or long-term memory not available".to_string(), None),
+                    }
+                }
+                None => (false, "[memory_forget] long-term memory not available".to_string(), None),
+            }
+        }
+        "memory_stats" => {
+            match long_term_client {
+                Some(client) => {
+                    let client = client.clone();
+                    let out = tokio::task::spawn_blocking(move || client.stats()).await.ok().and_then(|r| r.ok());
+                    match out {
+                        Some((count, size)) => (true, format!("[memory_stats] {} entrée(s), ~{} octets", count, size), None),
+                        None => (false, "[memory_stats] failed or long-term memory not available".to_string(), None),
+                    }
+                }
+                None => (false, "[memory_stats] long-term memory not available".to_string(), None),
+            }
+        }
+        "memory_gc" => {
+            let retention_days = args.get(0).and_then(|s| s.parse::<u32>().ok()).unwrap_or(90);
+            let protect_sources: Vec<String> = args.iter().skip(1).map(|a| a.as_str().trim().to_string()).filter(|s| !s.is_empty()).collect();
+            let protect = if protect_sources.is_empty() { None } else { Some(protect_sources) };
+            match long_term_client {
+                Some(client) => {
+                    let client = client.clone();
+                    let out = tokio::task::spawn_blocking(move || client.gc(retention_days, protect)).await.ok().and_then(|r| r.ok());
+                    match out {
+                        Some(n) => (true, format!("[memory_gc] {} entrée(s) supprimée(s) (rétention {} j)", n, retention_days), None),
+                        None => (false, "[memory_gc] failed or long-term memory not available".to_string(), None),
+                    }
+                }
+                None => (false, "[memory_gc] long-term memory not available".to_string(), None),
             }
         }
         "sessions_list" => {
@@ -1603,6 +1866,7 @@ async fn execute_tool_call(
                                     message,
                                     session_id: sid,
                                     image_data_urls: None,
+                                    execution_mode: None,
                                 })
                                 .await
                                 .is_err()
@@ -1721,6 +1985,26 @@ async fn execute_tool_call(
             }
         }
         "write_file" => {
+            let path_str_opt = args.get(0).map(String::as_str);
+            if let Some(path_str) = path_str_opt {
+                if path_str.starts_with("workspace:/") || path_str.starts_with("workspace:") {
+                    match workspace_store {
+                        Some(ws) => {
+                            let key = path_str
+                                .trim_start_matches("workspace:/")
+                                .trim_start_matches("workspace:")
+                                .trim_start_matches('/')
+                                .to_string();
+                            let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
+                            let mut guard = ws.write().await;
+                            let per_task = guard.entry(task_id).or_default();
+                            per_task.insert(key.clone(), content);
+                            return (true, format!("[write_file workspace:{}] saved.", key), None);
+                        }
+                        None => return (false, "[write_file] workspace paths require a workspace store.".to_string(), None),
+                    }
+                }
+            }
             let path = match path_arg(0) {
                 Some(p) => p,
                 None => return (false, "[write_file] usage: write_file <path> <content>".to_string(), None),
@@ -1807,7 +2091,7 @@ async fn execute_tool_call(
                 (Some(a), Some(b)) => match executor.file_diff(a, b).await {
                     Ok((diff, res)) => {
                         let msg = if res.success {
-                            let preview = if diff.len() <= 400 { diff.as_str() } else { &diff[..400] };
+                            let preview = if diff.len() <= 400 { diff.as_str() } else { &diff[..diff.floor_char_boundary(400)] };
                             format!("[file_diff] {} — {}", res.summary, preview)
                         } else {
                             format!("[file_diff] {}", res.summary)
@@ -1827,7 +2111,7 @@ async fn execute_tool_call(
             match executor.web_fetch(url).await {
                 Ok((body, res)) => {
                     let msg = if res.success {
-                        let preview = if body.len() <= 500 { body.as_str() } else { &body[..500] };
+                        let preview = if body.len() <= 500 { body.as_str() } else { &body[..body.floor_char_boundary(500)] };
                         format!("[web_fetch] {} — {}", res.summary, preview)
                     } else {
                         format!("[web_fetch] {}", res.summary)
@@ -1855,7 +2139,7 @@ async fn execute_tool_call(
             match executor.web_search(query.trim(), max_results).await {
                 Ok((body, res)) => {
                     let msg = if res.success {
-                        let preview = if body.len() <= 600 { body.as_str() } else { &body[..600] };
+                        let preview = if body.len() <= 600 { body.as_str() } else { &body[..body.floor_char_boundary(600)] };
                         format!("[web_search] {} — {}", res.summary, preview)
                     } else {
                         format!("[web_search] {}", res.summary)
@@ -1882,8 +2166,8 @@ async fn execute_tool_call(
                     (success, format!(
                         "[run_in_container] exit {} — stdout: {} stderr: {}",
                         exit_code,
-                        if out.len() > 400 { format!("{}...", &out[..400]) } else { out.to_string() },
-                        if err.len() > 200 { format!("{}...", &err[..200]) } else { err.to_string() }
+                        if out.len() > 400 { format!("{}...", &out[..out.floor_char_boundary(400)]) } else { out.to_string() },
+                        if err.len() > 200 { format!("{}...", &err[..err.floor_char_boundary(200)]) } else { err.to_string() }
                     ), None)
                 }
                 Err(e) => (false, format!("[run_in_container] error: {}", e), None),
@@ -1965,7 +2249,7 @@ async fn execute_tool_call(
                     Ok(Ok(result)) => {
                         tracing::info!(request_id = %request_id, success = result.success, "[device_bridge] received result from UI");
                         let msg = if result.success {
-                            let data_preview = result.data.as_deref().map(|d| if d.len() > 200 { format!("{}...", &d[..200]) } else { d.to_string() }).unwrap_or_else(|| "ok".to_string());
+                            let data_preview = result.data.as_deref().map(|d| if d.len() > 200 { format!("{}...", &d[..d.floor_char_boundary(200)]) } else { d.to_string() }).unwrap_or_else(|| "ok".to_string());
                             format!("[device_invoke local_media {}] success — {}", action, data_preview)
                         } else {
                             format!("[device_invoke local_media {}] failed or refused", action)
@@ -2020,7 +2304,7 @@ async fn execute_tool_call(
                 {
                     Ok(Ok(result)) => {
                         let msg = if result.success {
-                            let data_preview = result.data.as_deref().map(|d| if d.len() > 200 { format!("{}...", &d[..200]) } else { d.to_string() }).unwrap_or_else(|| "ok".to_string());
+                            let data_preview = result.data.as_deref().map(|d| if d.len() > 200 { format!("{}...", &d[..d.floor_char_boundary(200)]) } else { d.to_string() }).unwrap_or_else(|| "ok".to_string());
                             format!("[device_invoke synthetic_input {}] success — {}", action, data_preview)
                         } else {
                             format!("[device_invoke synthetic_input {}] failed or refused", action)
@@ -2044,8 +2328,12 @@ async fn execute_tool_call(
             if prompt.is_empty() {
                 (false, "[generate_image] usage: generate_image <prompt> [size]".to_string(), None)
             } else {
-                // Spec 42: call image API (e.g. OpenAI Images); for now stub — returns message asking to configure.
-                (false, "[generate_image] Génération d'image non configurée : configurer image_generation (provider openai, api_key dans vault) — spec 42_image_generation.md.".to_string(), None)
+                let size = args.get(1).map(String::as_str).filter(|s| !s.is_empty());
+                let data_dir = store_path.and_then(|p| p.parent()).unwrap_or_else(|| Path::new("."));
+                match crate::image_generation::generate_image_impl(data_dir, prompt, size).await {
+                    Ok((msg, data_url)) => (true, msg, Some(data_url)),
+                    Err(e) => (false, e, None),
+                }
             }
         }
         _ => {
@@ -2103,7 +2391,7 @@ async fn compact_short_term_if_needed(
     let old_turns: Vec<_> = turns.into_iter().take(to_summarize).collect();
     let blob = ShortTermStore::turns_to_context(&old_turns);
     let summary_prompt = format!(
-        "Résume en un court paragraphe en français, en gardant les faits importants et décisions:\n\n{}",
+        "Summarize in a short paragraph in English, keeping important facts and decisions:\n\n{}",
         blob
     );
     let summary_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
@@ -2115,6 +2403,7 @@ async fn compact_short_term_if_needed(
         max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
         preferred_task_type: None,
+        system_prompt: None,
         image_data_urls: None,
     };
     match llm_router.complete(&req).await {
@@ -2127,10 +2416,13 @@ async fn compact_short_term_if_needed(
                 // Promote summary to long-term memory (spec 06)
                 if let Some(client) = long_term_client {
                     let summary = summary.to_string();
+                    let session_id_attr = session_id.to_string();
                     let client = client.clone();
                     tokio::task::spawn_blocking(move || {
-                        if let Err(e) = client.promote(summary, "compaction".to_string()) {
+                        if let Err(e) = client.promote(summary.clone(), "compaction".to_string(), None, None, Some(session_id_attr.clone()), Some(1), Some("session".to_string()), None, None, None) {
                             tracing::warn!(error = %e, "Long-term promote after compaction failed");
+                        } else if let Err(e) = client.emit_event("memory_promoted".to_string(), summary, None, None, Some(session_id_attr), None, Some(1), Some("session".to_string()), Some("compaction".to_string())) {
+                            tracing::debug!(error = %e, "Episodic emit after compaction promote failed");
                         }
                     })
                     .await
@@ -2170,8 +2462,8 @@ pub async fn summarize_yesterday_and_promote(
     }
     let blob = ShortTermStore::turns_to_context(&turns);
     let summary_prompt = format!(
-        "Résume en un court paragraphe synthétique (5 à 10 lignes) la journée du {} : sujets abordés, décisions, projets ou informations importantes. \
-Réponse en français, factuelle.\n\n{}",
+        "Summarize in a short synthetic paragraph (5 to 10 lines) the day of {}: topics covered, decisions, projects or important information. \
+Factual response in English.\n\n{}",
         session_id.trim_start_matches("day-"),
         blob
     );
@@ -2184,15 +2476,22 @@ Réponse en français, factuelle.\n\n{}",
         max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
         preferred_task_type: Some("system".to_string()),
+        system_prompt: None,
         image_data_urls: None,
     };
     match llm_router.complete(&req).await {
         Ok(resp) => {
             let summary = resp.text.trim();
             if !summary.is_empty() {
-                let content = format!("Résumé du {} : {}", session_id.trim_start_matches("day-"), summary);
+                let content = format!("Summary for {}: {}", session_id.trim_start_matches("day-"), summary);
                 let client = client.clone();
-                match tokio::task::spawn_blocking(move || client.promote(content, "daily_summary".to_string())).await {
+                match tokio::task::spawn_blocking(move || {
+                    let res = client.promote(content.clone(), "daily_summary".to_string(), None, None, None, Some(1), None, None, None, None);
+                    if res.is_ok() {
+                        let _ = client.emit_event("memory_promoted".to_string(), content, None, None, None, None, Some(1), None, Some("daily_summary".to_string()));
+                    }
+                    res
+                }).await {
                     Ok(Ok(())) => tracing::info!(session_id = %session_id, "Yesterday summarized and stored in long-term memory"),
                     Ok(Err(e)) => tracing::warn!(error = %e, "Daily summary promote to long-term failed"),
                     Err(e) => tracing::warn!(error = %e, "Daily summary task join failed"),
@@ -2201,6 +2500,146 @@ Réponse en français, factuelle.\n\n{}",
         }
         Err(e) => tracing::debug!(error = %e, "Daily summary LLM call failed"),
     }
+}
+
+/// Returns a short, user-friendly progress message for a tool invocation (for key steps).
+fn progress_message_for_tool(tool: &str, args: &[String]) -> String {
+    let first_arg = args.first().map(|s| s.as_str()).unwrap_or("");
+    let second_arg = args.get(1).map(|s| s.as_str()).unwrap_or("");
+    let lower = tool.to_lowercase();
+    if lower.contains("web_search") || lower == "search" {
+        let query_preview = first_arg.chars().take(40).collect::<String>();
+        if query_preview.is_empty() {
+            "Searching the web…".to_string()
+        } else {
+            format!("Searching the web for “{}”…", query_preview.trim())
+        }
+    } else if lower.contains("web_fetch") || lower == "fetch" {
+        "Fetching the page…".to_string()
+    } else if lower == "bankr" || first_arg.eq_ignore_ascii_case("bankr") {
+        if second_arg.eq_ignore_ascii_case("portfolio") {
+            "Checking your portfolio…".to_string()
+        } else {
+            "Running Bankr…".to_string()
+        }
+    } else if lower.contains("run_command") && first_arg.eq_ignore_ascii_case("bankr") {
+        if second_arg.eq_ignore_ascii_case("portfolio") {
+            "Checking your portfolio…".to_string()
+        } else {
+            "Running Bankr…".to_string()
+        }
+    } else if lower.contains("write_file") || lower.contains("search_replace") || lower.contains("edit_file") {
+        "Writing the file…".to_string()
+    } else if lower.contains("read_file") {
+        "Reading the file…".to_string()
+    } else if lower.contains("generate_image") {
+        "Generating the image…".to_string()
+    } else if lower.contains("device_invoke") && first_arg.to_lowercase().contains("camera") {
+        "Capturing with camera…".to_string()
+    } else if lower.contains("run_command") {
+        "Running the command…".to_string()
+    } else if lower == "ask_user" {
+        "Waiting for your input…".to_string()
+    } else {
+        format!("Running {}…", tool)
+    }
+}
+
+/// Extract a short name (how to call the user) from a message during onboarding.
+/// Simple heuristic: first word, or first two words if the message is very short. Skips common prefixes.
+fn extract_how_to_call_from_message(msg: &str) -> Option<String> {
+    let msg = msg.trim();
+    if msg.is_empty() || msg.len() > 80 {
+        return None;
+    }
+    let lower = msg.to_lowercase();
+    let skip_prefixes = ["je m'appelle", "je suis", "c'est", "my name is", "i'm", "i am", "call me", "moi c'est"];
+    let mut text = msg;
+    for prefix in skip_prefixes {
+        if lower.starts_with(prefix) {
+            text = msg[prefix.len()..].trim();
+            if text.is_empty() {
+                return None;
+            }
+            break;
+        }
+    }
+    let words: Vec<&str> = text.split_whitespace().take(2).collect();
+    let name = if words.len() == 1 {
+        words[0].trim().to_string()
+    } else if words.len() == 2 && text.len() <= 30 {
+        format!("{} {}", words[0].trim(), words[1].trim())
+    } else {
+        words[0].trim().to_string()
+    };
+    let name = name.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '\'').to_string();
+    if name.is_empty() || name.len() > 50 {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// Builds a short, task-specific acknowledgment message so the user sees a real take-over instead of a generic placeholder.
+/// Uses the start of the user message for context; one coherent sentence, same tone (formal "you").
+fn build_ack_message(user_message: &str) -> String {
+    let trimmed = user_message.trim();
+    let preview = if trimmed.is_empty() {
+        "your request".to_string()
+    } else {
+        let max_len = 50;
+        let truncated: String = trimmed.chars().take(max_len).collect();
+        if truncated.chars().count() >= max_len {
+            format!("« {}… »", truncated.trim_end())
+        } else {
+            format!("« {} »", truncated)
+        }
+    };
+    format!("On it — looking into {}. You can follow progress in the Tasks tab.", preview)
+}
+
+/// Returns true if the text looks like a placeholder / promise ("I'll do it", "one second") rather than an actual answer.
+/// Used after tool calls to avoid completing the task with "I will fetch…" instead of the real result.
+fn looks_like_placeholder_after_tools(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    let placeholder_phrases = [
+        "une seconde",
+        "one second",
+        "one moment",
+        "un instant",
+        "je vais ",
+        "i'll ",
+        "i will ",
+        "i'm fetching",
+        "i'm retrieving",
+        "i'm getting",
+        "i'm checking",
+        "let me fetch",
+        "let me get",
+        "let me check",
+        "let me find",
+        "je vais récupérer",
+        "je vais chercher",
+        "je vais consulter",
+        "génération",
+        "récupération",
+        "attendez",
+        "wait ",
+        "action en cours",
+        "en cours",
+        "puis te les résumer",
+        "puis vous les",
+        "then i'll ",
+        "then i will ",
+        "and then give you",
+        "and then summarize",
+        "will summarize",
+        "will give you",
+    ];
+    placeholder_phrases.iter().any(|p| lower.contains(p))
 }
 
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
@@ -2227,6 +2666,7 @@ pub(crate) async fn run_message_via_llm(
     agent_profile_cache: Option<AgentProfileCache>,
     task_usage_store: Option<std::sync::Arc<TaskUsageStore>>,
     device_bridge: Option<std::sync::Arc<crate::device_bridge::DeviceBridge>>,
+    workspace_store: Option<TaskWorkspaceStore>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -2237,6 +2677,7 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
+    let structured = interpret_message(&message);
     let assigned_agent = store
         .get(task_id)
         .ok()
@@ -2260,14 +2701,14 @@ pub(crate) async fn run_message_via_llm(
         .with_correlation(task_id),
     );
 
-    // Progress pour indiquer que la génération a démarré (modèle local peut charger au premier appel).
+    // Progress to show we have started (model may be loading on first call).
     let _ = bus.send(
         EventEnvelope::new(
             EventType::ProgressUpdate,
             Some(serde_json::json!({
                 "task_id": task_id.to_string(),
                 "progress_pct": 10,
-                "message": "Génération de la réponse…"
+                "message": "Analyzing your request…"
             })),
         )
         .with_correlation(task_id),
@@ -2302,7 +2743,7 @@ pub(crate) async fn run_message_via_llm(
                     let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
                     let part = format!(" ; Skills (use skill name as tool): {}", skills_desc.join(", "));
                     let rule = format!(
-                        " INSTALLED SKILLS RULE: The following skills ARE installed and available: {}. Do NOT say they are not installed or suggest install_skill for them. For balance/solde/wallet/Base requests, if \"bankr\" is in the list, reply ONLY with TOOL: bankr <args> (e.g. TOOL: bankr check balance on Base). Use the skill name as the tool name.\n\
+                        " INSTALLED SKILLS RULE: You have access to skills (extra capabilities). To see the list use TOOL: list_skills. To load full instructions for a skill use TOOL: read_skill <name> before invoking it by name. Currently installed: {}. Do NOT say they are not installed or suggest install_skill for them. Use bankr ONLY for balance/solde/wallet/portfolio/Base — never for weather, météo, or news (use web_search for those). For balance/solde/wallet/Base requests, if \"bankr\" is in the list, reply ONLY with TOOL: bankr <args> (e.g. TOOL: bankr portfolio 7d). Use the skill name as the tool name.\n\
              ",
                         names.join(", ")
                     );
@@ -2311,86 +2752,126 @@ pub(crate) async fn run_message_via_llm(
             }
             None => (String::new(), String::new()),
         };
+        let run_command_os_rule = match std::env::consts::OS {
+            "windows" => "RUN_COMMAND OS: You are on Windows. Prefer cmd, PowerShell, curl.exe; avoid grep, cat, sed (not in default PATH). Use full path or .exe when needed. To test that the vault token works (e.g. GitHub API), use Invoke-WebRequest: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN powershell -NoProfile -Command \"Invoke-WebRequest -Uri 'https://api.github.com/repos/owner/repo' -Headers @{ Authorization = 'Bearer ' + $env:GITHUB_TOKEN } | Select-Object -Expand Content\" (replace owner/repo). Ensure 'powershell' is in allowed_commands in tools_policy.yaml. The system injects the vault value into the environment for the command.\n\
+             ",
+            _ => "RUN_COMMAND OS: You are on Linux/macos. Standard Unix commands (curl, grep, etc.) are available.\n\
+             ",
+        };
         format!(
             "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
              Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
-             WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix.\n\
+             CAMERA RULE (PRIORITAIRE sur WRITE): When the user asks for a webcam/camera photo (e.g. \"prends une photo\", \"take a photo\", \"photo depuis la webcam\", \"affiche-la dans le chat\", \"display it in the chat\"), you MUST reply ONLY with TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture. Do NOT mention tools_policy.yaml, allowed_write_paths, or file writing. After the tool returns, if the user asked to \"display in the chat\" / \"affiche-la dans le chat\" / \"show it in the chat\", reply with ONLY a short confirmation in the user's language (e.g. in French: \"Photo prise. Elle s'affiche ci-dessous.\"; in English: \"Photo captured. It is shown below.\"). Do NOT offer \"save to file\", \"get a description\", \"take another photo\", or \"What would you like to do next?\" — the image is appended automatically below your message. Use the same language as the user (French if they wrote in French).\n\
+             WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
+             WEATHER/MÉTEO RULE (PRIORITY): When the user asks for weather, météo, or forecasts (e.g. \"quel temps\", \"météo demain\", \"weather in X\"), you MUST use TOOL: web_search <query> (and optionally web_fetch) to get the forecast. Do NOT use bankr, portfolio, or any other skill for weather — only web_search and web_fetch.\n\
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user.\n\
              INSTALL CLI RULE: When the user asks to install a CLI or package globally (e.g. \"install bankr CLI\", \"npm install -g @bankr/cli\", \"install the bankr cli in global\"), you MUST reply ONLY with TOOL: run_command <cmd> <args> (e.g. TOOL: run_command npm install -g @bankr/cli). Do NOT generate a script or ask the user to run commands themselves; run the installation command via the tool.\n\
-             VAULT ENV RULE: When the user asks to use an API key or secret from the vault (e.g. \"use the key in the vault bankr_api_key\", \"utilise la clé bankr_api_key du vault\"), you CAN pass it to a command by adding VAULT:<vault_key>=<ENV_VAR> as first argument(s) of run_command. Example: TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (the system injects the vault value into BANKR_API_KEY for the command). You can chain several: VAULT:key1=VAR1 VAULT:key2=VAR2 cmd args.\n\
-             INSTALL SKILL RULE: When the user asks to install a skill from a URL (e.g. \"install the bankr skill from https://github.com/BankrBot/skills/tree/main/bankr\"), you MUST reply ONLY with TOOL: install_skill <url>. Do not give manual steps; perform the installation yourself.\n\
+             VAULT ENV RULE: To use a vault secret in a command you MUST call TOOL: run_command with VAULT:<vault_key>=<ENV_VAR> as the FIRST argument(s), then the command. The system injects the secret value into ENV_VAR for that command only. Example: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo. FORBIDDEN: never tell the user to run GITHUB_TOKEN=VAULT:GITHUB_TOKEN or export GITHUB_TOKEN=... or VAULT:GITHUB_TOKEN=ghp_... — you must output the TOOL: line yourself so the system runs the command and injects the token. For GitHub with token in vault: use TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (or gh repo view owner/repo). The vault key may be GITHUB_TOKEN or github_token; the part after = is the env var name the command uses (e.g. $GITHUB_TOKEN). Do NOT say you cannot access the repo without having called run_command with VAULT:... first.\n\
+             {}\
+             INSTALL SKILL RULE: When the user asks to install, download, get, fetch, or add a skill from a URL (e.g. \"install the bankr skill from …\", \"download the skill at this url\", \"get the skill from this url\", \"récupère le skill …\"), you MUST reply ONLY with TOOL: install_skill <url>. Do not give manual steps; perform the installation yourself. If the user says \"follow the SKILL.md instructions\" or \"follow the instructions in SKILL.md\", you MUST first reply with TOOL: install_skill <url> so the skill is registered; only after it is installed can you invoke it by name (e.g. TOOL: <skill_name> <args>). Do NOT use web_fetch or read_file to fetch SKILL.md and then execute its steps manually.\n\
              UNINSTALL SKILL RULE: When the user asks to uninstall or remove a skill (e.g. \"désinstalle bankr\", \"remove the bankr skill\"), you MUST reply ONLY with TOOL: uninstall_skill <name> (e.g. TOOL: uninstall_skill bankr).\n\
              SKILL USE RULE: When the user asks you to perform an action using a skill (e.g. \"vérifie mon wallet bankr\", \"check my balance with bankr\", \"run bankr whoami\"), you MUST reply ONLY with a single line: TOOL: <skill_name> <args> (e.g. TOOL: bankr whoami). The system will execute the command and return the result. Do NOT tell the user to run the command themselves or to \"use TOOL: bankr whoami\"; you must output that line yourself so the tool is executed.\n\
-             PROJECT RULE: For requests that imply a substantial deliverable (novel, comic/BD, code project, series of chapters or files), never claim completion after one response if the full scope is not delivered. State clearly what was done, what remains to do, and that you will continue on the user's next message (or via a sub-task). Do not say \"C'est terminé\" or \"Voilà, c'est fait\" until all requested deliverables are done. If the user says \"continue\", \"la suite\", or \"and the rest\", resume the project in progress (use memory_search for project context if available) and continue without saying \"terminé\" until the full scope is delivered. For project-like work, use memory_store to save project state (objective, steps done, deliverables) after each significant progress, with source project:<name> so context is reloaded on the next message.\n\
+             PROJECT RULE: For requests that imply a substantial deliverable (novel, comic/BD, code project, series of chapters or files), never claim completion after one response if the full scope is not delivered. State clearly what was done, what remains to do, and that you will continue on the user's next message (or via a sub-task). Do not say \"C'est terminé\" or \"Voilà, c'est fait\" until all requested deliverables are done. If the user says \"continue\", \"la suite\", or \"and the rest\", resume the project in progress (use memory_search for project context if available) and continue without saying \"terminé\" until the full scope is delivered. For project-like work, use memory_store to save project state (objective, steps done, deliverables) after each significant progress, with source project:<name> so context is reloaded on the next message. For multi-step tasks, you can use TOOL: write_todos to define and track steps (then read_todos/update_todo to mark progress); the UI will show the list.\n\
              {}\
              If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
-            base, skills_part, skills_rule
+            base, skills_part, run_command_os_rule, skills_rule
         )
     } else {
         String::new()
     };
 
-    // Build prompt with short-term + long-term memory (spec 06)
-    let mut context_prefix = String::new();
-    context_prefix.push_str(APP_CONTEXT);
-    if let Some(role_prompt) = agent_role_system_prompt(&assigned_agent) {
-        context_prefix.push_str("[Role]\n");
-        context_prefix.push_str(role_prompt);
-        context_prefix.push_str("\n\n");
-    }
-
-    // Agent profile: name, personality, rules, can/cannot (persisted in data_dir/agent_profile.json)
+    // Build prompt: system (rules + role + personality) vs user (reminder + memory + turns + message).
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
     let agent_profile = match &agent_profile_cache {
         Some(cache) => get_or_load_agent_profile(data_dir, cache).await,
         None => AgentProfile::load(data_dir),
     };
-    let profile_block = agent_profile.format_for_prompt();
+    let profile_block = crate::personality::build_personality_prompt(
+        spec_dir.as_path(),
+        &agent_profile,
+        Some(&assigned_agent),
+    );
+    let os_env_block = match std::env::consts::OS {
+        "windows" => "[Environment] The daemon runs on Windows. For run_command, prefer cmd, PowerShell, curl.exe; avoid Unix-only commands (grep, cat, sed) that are not in the default PATH (except WSL).\n\n",
+        _ => "[Environment] The daemon runs on Linux/macOS. You can use usual Unix commands (curl, grep, etc.).\n\n",
+    };
+    let mut system_prompt = String::with_capacity(8192);
+    system_prompt.push_str(APP_CONTEXT);
+    system_prompt.push_str(os_env_block);
+    if let Some(role_prompt) = agent_role_system_prompt(&assigned_agent) {
+        system_prompt.push_str("[Role]\n");
+        system_prompt.push_str(role_prompt);
+        system_prompt.push_str("\n\n");
+    }
     if !profile_block.is_empty() {
-        context_prefix.push_str(&profile_block);
+        system_prompt.push_str(&profile_block);
     }
+    // Enforce language and personality so the model does not switch language (e.g. when tool output is in English).
+    system_prompt.push_str(
+        "\n\n[Response]\n\
+        - Language: reply ONLY in the same language as the user's message. If the user writes in French, reply entirely in French; in English, in English. Do not adopt the language of tool results or context.\n\
+        - Personality: always apply your identity (name), tone and form of address (formal/informal as configured).\n\n",
+    );
+    let system_prompt: Option<String> = if system_prompt.trim().is_empty() {
+        None
+    } else {
+        Some(system_prompt.trim_end().to_string())
+    };
 
-    // Long-term: retrieve top-k relevant memories by embedding similarity (current message + optional user-identity for first message)
-    if let Some(ref client) = long_term_client {
-        let msg = message.clone();
-        let client = client.clone();
-        let results = tokio::task::spawn_blocking(move || client.search(msg, 5))
-            .await
-            .ok()
-            .unwrap_or_default();
-        if !results.is_empty() {
-            context_prefix.push_str("[Mémoire à long terme]\n");
-            for (_, content) in &results {
-                context_prefix.push_str("- ");
-                context_prefix.push_str(&content.replace('\n', " "));
-                context_prefix.push_str("\n");
-            }
-            context_prefix.push_str("\n");
-        }
-        // Project context (Option A): when the message suggests a project, retrieve project-related memories (stored with source project:<name>) and inject as [Projet en cours]
-        if message_suggests_project(&message) {
-            let query = "projet état livrables objectif étapes fait reste à faire";
-            let client_for_project = long_term_client.as_ref().unwrap().clone();
-            let project_results = tokio::task::spawn_blocking(move || client_for_project.search(query.to_string(), 5))
-                .await
-                .ok()
-                .unwrap_or_default();
-            if !project_results.is_empty() {
-                context_prefix.push_str("[Projet en cours — utilise ce contexte pour reprendre ou poursuivre le projet]\n");
-                for (_, content) in &project_results {
-                    context_prefix.push_str("- ");
-                    context_prefix.push_str(&content.replace('\n', " "));
-                    context_prefix.push_str("\n");
-                }
-                context_prefix.push_str("\n");
+    let personality_reminder = crate::personality::build_personality_reminder_line(
+        spec_dir.as_path(),
+        &agent_profile,
+        Some(&assigned_agent),
+    );
+    let mut user_prefix = String::with_capacity(8192);
+    user_prefix.push_str(&personality_reminder);
+    user_prefix.push_str("Reply in the same language as the user message below (French, English, etc.).\n\n");
+    if let Some(ref st) = short_term {
+        let turns = st.get_turns(&session_id).await;
+        let last_15: Vec<_> = turns.iter().rev().take(15).cloned().rev().collect();
+        if !last_15.is_empty() {
+            let short_ctx = ShortTermStore::turns_to_context(&last_15);
+            let capped = if short_ctx.chars().count() > 2000 {
+                short_ctx.chars().take(2000).collect::<String>() + "…"
+            } else {
+                short_ctx
+            };
+            if !capped.is_empty() {
+                user_prefix.push_str("[Recent context (this session)]\n");
+                user_prefix.push_str(&capped);
+                user_prefix.push_str("\n\n");
             }
         }
     }
-
-    // User RAG: retrieve relevant chunks from user-uploaded documents (keyword match)
+    let turns_empty = match &short_term {
+        Some(st) => st.get_turns(&session_id).await.is_empty(),
+        None => true,
+    };
+    let expand_by_graph = std::env::var("AKASHA_GRAPH_EXPAND").ok().as_deref() == Some("1");
+    let user_profile = UserProfile::load(data_dir);
+    let user_identity_prefix = user_profile.format_for_prompt();
+    let recall_params = crate::memory_orchestrator::RecallParams {
+        message: message.clone(),
+        session_id: session_id.clone(),
+        filter_by_session: !turns_empty,
+        suggest_project: message_suggests_project(&message),
+        is_first_message: turns_empty,
+        expand_by_graph,
+        user_identity_prefix: if user_identity_prefix.is_empty() {
+            None
+        } else {
+            Some(user_identity_prefix)
+        },
+        ..Default::default()
+    };
+    let fused = crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params).await;
+    let fused_str = fused.to_context_string();
+    if !fused_str.is_empty() {
+        user_prefix.push_str(&fused_str);
+    }
     let user_rag_store = crate::user_rag::UserRagStore::new(data_dir);
     let rag_query = message.clone();
     let chunks = tokio::task::spawn_blocking(move || user_rag_store.retrieve(&rag_query, 5))
@@ -2399,15 +2880,14 @@ pub(crate) async fn run_message_via_llm(
         .and_then(|res| res.ok())
         .unwrap_or_default();
     if !chunks.is_empty() {
-        context_prefix.push_str("[Documents utilisateur — utilise ces extraits si pertinent pour répondre]\n");
+        user_prefix.push_str("[User documents — use these excerpts if relevant to answer]\n");
         for c in &chunks {
-            context_prefix.push_str("- ");
-            context_prefix.push_str(&c.replace('\n', " "));
-            context_prefix.push_str("\n");
+            user_prefix.push_str("- ");
+            user_prefix.push_str(&c.replace('\n', " "));
+            user_prefix.push_str("\n");
         }
-        context_prefix.push_str("\n");
+        user_prefix.push_str("\n");
     }
-
     if let Some(ref st) = short_term {
         let new_msg_tokens = ShortTermStore::estimate_tokens(&message);
         compact_short_term_if_needed(
@@ -2419,39 +2899,19 @@ pub(crate) async fn run_message_via_llm(
         )
         .await;
         let turns = st.get_turns(&session_id).await;
-        // First message of session: search long-term for user identity (name, etc.) so the agent can greet the user.
-        let is_first_message = turns.is_empty();
-        if is_first_message {
-            if let Some(ref client) = long_term_client {
-                let query = "nom prénom utilisateur user name identité".to_string();
-                let client = client.clone();
-                let user_memories = tokio::task::spawn_blocking(move || client.search(query, 3))
-                    .await
-                    .ok()
-                    .unwrap_or_default();
-                if !user_memories.is_empty() {
-                    context_prefix.push_str("[Contexte utilisateur — utilise pour saluer si pertinent]\n");
-                    for (_, content) in &user_memories {
-                        context_prefix.push_str("- ");
-                        context_prefix.push_str(&content.replace('\n', " "));
-                        context_prefix.push_str("\n");
-                    }
-                    context_prefix.push_str("Si c'est le premier échange de la session, salue l'utilisateur avec son prénom si tu le connais.\n\n");
-                }
-            }
-        }
         let short_ctx = ShortTermStore::turns_to_context(&turns);
         if !short_ctx.is_empty() {
-            context_prefix.push_str(short_ctx.trim_end());
-            context_prefix.push_str("\n\n");
+            user_prefix.push_str(short_ctx.trim_end());
+            user_prefix.push_str("\n\n");
         }
     }
-    let write_reminder = if message_suggests_save_file(&message) {
+    let intent_flags = compute_message_intent_flags(&message);
+    let write_reminder = if intent_flags.save_file {
         WRITE_FILE_REMINDER
     } else {
         ""
     };
-    let web_search_reminder = if message_suggests_external_info(&message)
+    let web_search_reminder = if intent_flags.external_info
         && tools_executor_snapshot
             .as_ref()
             .map(|e| e.policy.can_use_tool("web_search"))
@@ -2461,7 +2921,7 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let device_camera_reminder = if message_suggests_camera_or_mic(&message)
+    let device_camera_reminder = if intent_flags.camera_or_mic
         && tools_executor_snapshot
             .as_ref()
             .map(|e| e.policy.can_use_device_interface("local_media"))
@@ -2471,8 +2931,18 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let image_generation_reminder = if message_suggests_image_generation(&message) {
+    let image_generation_reminder = if intent_flags.image_generation {
         IMAGE_GENERATION_REMINDER
+    } else {
+        ""
+    };
+    let github_vault_reminder = if intent_flags.github_with_vault
+        && tools_executor_snapshot
+            .as_ref()
+            .map(|e| e.policy.can_use_tool("run_command"))
+            .unwrap_or(false)
+    {
+        GITHUB_VAULT_REMINDER
     } else {
         ""
     };
@@ -2485,23 +2955,36 @@ pub(crate) async fn run_message_via_llm(
     } else {
         message.clone()
     };
-    let mut current_prompt = if context_prefix.is_empty() {
-        user_message.clone()
-    } else {
+    let mut current_prompt = if user_prefix.trim().is_empty() {
         format!(
-            "{}{}{}{}{}Utilisateur:\n{}",
-            context_prefix.trim_end(),
+            "{}{}{}{}{}User:\n{}",
             write_reminder,
             web_search_reminder,
             device_camera_reminder,
             image_generation_reminder,
+            github_vault_reminder,
+            user_message
+        )
+    } else {
+        format!(
+            "{}{}{}{}{}{}User:\n{}",
+            user_prefix.trim_end(),
+            write_reminder,
+            web_search_reminder,
+            device_camera_reminder,
+            image_generation_reminder,
+            github_vault_reminder,
             user_message
         )
     };
     let reply_text;
-    const MAX_TOOL_ROUNDS: u32 = 3;
+    const MAX_TOOL_ROUNDS: u32 = 5;
     let mut round = 0u32;
     let mut tool_loop_history: Vec<(String, String)> = Vec::new();
+    let mut last_tool_results_blob: Option<String> = None;
+    let mut force_synthesis_attempted = false;
+    let mut last_captured_image_base64: Option<String> = None;
+    let mut last_llm_model_used: Option<String> = None;
 
     let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
         .ok()
@@ -2540,6 +3023,7 @@ pub(crate) async fn run_message_via_llm(
             max_tokens: Some(max_tokens),
             temperature: Some(0.7),
             preferred_task_type,
+            system_prompt: system_prompt.clone(),
             image_data_urls: if tool_loop_history.is_empty() {
                 image_data_urls.clone()
             } else {
@@ -2585,7 +3069,17 @@ pub(crate) async fn run_message_via_llm(
             };
             match tokio::time::timeout(idle, tok_rx.recv()).await {
                 Ok(Some(chunk)) => {
+                    // #region agent log
+                    const MAX_ACCUMULATED: usize = 2 * 1024 * 1024; // 2 MiB cap to prevent unbounded allocation (hypothesis D)
+                    if accumulated.len() + chunk.len() > MAX_ACCUMULATED {
+                        crate::debug_log::log("api.rs:stream_accumulated", "accumulated cap hit", &serde_json::json!({"accumulated_len": accumulated.len(), "chunk_len": chunk.len(), "max": MAX_ACCUMULATED}), "D");
+                        accumulated.truncate(MAX_ACCUMULATED.saturating_sub(chunk.len()));
+                    }
                     accumulated.push_str(&chunk);
+                    if accumulated.len() > 512 * 1024 {
+                        crate::debug_log::log("api.rs:stream_accumulated", "accumulated size", &serde_json::json!({"accumulated_len": accumulated.len(), "chunk_len": chunk.len()}), "D");
+                    }
+                    // #endregion
                     let _ = bus.send(
                         EventEnvelope::new(
                             EventType::ProgressUpdate,
@@ -2598,7 +3092,7 @@ pub(crate) async fn run_message_via_llm(
                         .with_correlation(task_id),
                     );
                 }
-                Ok(None) => break, // channel closed (sender dropped)
+                Ok(None) => break,
                 Err(_) => {
                     tracing::debug!(idle_secs = idle_timeout_secs, "Stream idle timeout, waiting for final response");
                     break;
@@ -2618,6 +3112,7 @@ pub(crate) async fn run_message_via_llm(
         } else {
             match tokio::time::timeout(remaining, stream_join).await {
                 Ok(Ok(Ok(resp))) => {
+                    last_llm_model_used = Some(resp.model_used.clone());
                     if let Some(ref store) = task_usage_store {
                         let tokens = resp.usage.as_ref().map(|u| u.prompt_tokens + u.completion_tokens).unwrap_or(0);
                         let cost = resp.cost_usd.unwrap_or(0.0);
@@ -2664,7 +3159,6 @@ pub(crate) async fn run_message_via_llm(
         if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), tool_calls) {
             round += 1;
             let mut tool_results = Vec::new();
-            let mut last_captured_image_base64: Option<String> = None;
             for (name, args) in &calls {
                 // Phase D: resolve skill name to tool_ref (spec 33)
                 let actual_tool = match &skill_registry {
@@ -2681,6 +3175,20 @@ pub(crate) async fn run_message_via_llm(
                         break 'tool_rounds;
                     }
                 }
+                // User-friendly progress at key step: what we are doing right now (use skill name when actual_tool is empty, e.g. bankr skill).
+                let display_tool = if actual_tool.is_empty() { name.as_str() } else { &actual_tool };
+                let progress_msg = progress_message_for_tool(display_tool, args);
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 50,
+                            "message": progress_msg
+                        })),
+                    )
+                    .with_correlation(task_id),
+                );
                 // Phase 3.1: tools in require_approval need user confirmation before execution.
                 if exec.policy.requires_approval(&actual_tool) {
                     match &human_input_store {
@@ -2723,7 +3231,15 @@ pub(crate) async fn run_message_via_llm(
                                 "tool_approval": true
                             });
                             let _ = bus.send(
-                                EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload)).with_correlation(task_id),
+                                EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload.clone())).with_correlation(task_id),
+                            );
+                            let approval_payload = serde_json::json!({
+                                "tool": actual_tool,
+                                "args_redacted": args_preview,
+                                "task_id": task_id.to_string()
+                            });
+                            let _ = bus.send(
+                                EventEnvelope::new(EventType::ToolApprovalRequest, Some(approval_payload)).with_correlation(task_id),
                             );
                             let granted = match tokio::time::timeout(
                                 std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS),
@@ -2878,6 +3394,98 @@ pub(crate) async fn run_message_via_llm(
                         }
                         None => (false, "[uninstall_skill] skill registry not available".to_string(), None),
                     }
+                } else if actual_tool == "write_todos" {
+                    let payload = args.join(" ").trim().to_string();
+                    match TaskStore::open(&store_path) {
+                        Ok(store) => {
+                            let todos = parse_todos_from_payload(&payload);
+                            if let Err(e) = store.set_todos(task_id, &todos) {
+                                (false, format!("[write_todos] error: {}", e), None)
+                            } else {
+                                let payload_json = serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "todos": todos.iter().map(|t| serde_json::json!({ "id": t.id, "title": t.title, "status": t.status.as_str() })).collect::<Vec<_>>()
+                                });
+                                let _ = bus.send(
+                                    EventEnvelope::new(EventType::TodoListUpdated, Some(payload_json)).with_correlation(task_id),
+                                );
+                                (true, format!("[write_todos] {} step(s) saved.", todos.len()), None)
+                            }
+                        }
+                        Err(e) => (false, format!("[write_todos] store error: {}", e), None),
+                    }
+                } else if actual_tool == "read_todos" {
+                    match TaskStore::open(&store_path) {
+                        Ok(store) => match store.get_todos(task_id) {
+                            Ok(todos) => {
+                                let summary: Vec<serde_json::Value> = todos.iter().enumerate().map(|(i, t)| {
+                                    serde_json::json!({ "index": i + 1, "title": t.title, "status": t.status.as_str() })
+                                }).collect();
+                                (true, format!("[read_todos] {} step(s): {}", todos.len(), serde_json::to_string(&summary).unwrap_or_default()), None)
+                            }
+                            Err(e) => (false, format!("[read_todos] error: {}", e), None),
+                        },
+                        Err(e) => (false, format!("[read_todos] store error: {}", e), None),
+                    }
+                } else if actual_tool == "update_todo" {
+                    let index_str = args.get(0).map(String::as_str).unwrap_or("").trim();
+                    let status_str = args.get(1).map(String::as_str).unwrap_or("pending").trim();
+                    let index: usize = index_str.parse().unwrap_or(0);
+                    match TaskStore::open(&store_path) {
+                        Ok(store) => match store.get_todos(task_id) {
+                            Ok(mut todos) => {
+                                if index == 0 || index > todos.len() {
+                                    (false, format!("[update_todo] invalid index (1..{}): {}", todos.len(), index_str), None)
+                                } else {
+                                    let status = match status_str.to_lowercase().as_str() {
+                                        "done" => TodoStatus::Done,
+                                        "cancelled" => TodoStatus::Cancelled,
+                                        _ => TodoStatus::Pending,
+                                    };
+                                    todos[index - 1].status = status;
+                                    if let Err(e) = store.set_todos(task_id, &todos) {
+                                        (false, format!("[update_todo] error: {}", e), None)
+                                    } else {
+                                        let payload_json = serde_json::json!({
+                                            "task_id": task_id.to_string(),
+                                            "todos": todos.iter().map(|t| serde_json::json!({ "id": t.id, "title": t.title, "status": t.status.as_str() })).collect::<Vec<_>>()
+                                        });
+                                        let _ = bus.send(
+                                            EventEnvelope::new(EventType::TodoListUpdated, Some(payload_json)).with_correlation(task_id),
+                                        );
+                                        (true, format!("[update_todo] step {} set to {}.", index, status_str), None)
+                                    }
+                                }
+                            }
+                            Err(e) => (false, format!("[update_todo] error: {}", e), None),
+                        },
+                        Err(e) => (false, format!("[update_todo] store error: {}", e), None),
+                    }
+                } else if actual_tool == "list_skills" {
+                    match &skill_registry {
+                        Some(reg) => {
+                            let list = reg.list().await;
+                            let summary: Vec<String> = list.iter().map(|s| format!("{}: {}", s.name, s.description)).collect();
+                            (true, format!("[list_skills] {} skill(s): {}", list.len(), summary.join(" ; ")), None)
+                        }
+                        None => (false, "[list_skills] skill registry not available.".to_string(), None),
+                    }
+                } else if actual_tool == "read_skill" {
+                    let skill_name = args.get(0).map(String::as_str).unwrap_or("").trim();
+                    if skill_name.is_empty() {
+                        (false, "[read_skill] usage: read_skill <name>".to_string(), None)
+                    } else {
+                        match &skill_registry {
+                            Some(reg) => {
+                                if let Some(body) = reg.get_body(skill_name).await {
+                                    (true, format!("[read_skill {}] Instructions:\n{}", skill_name, body), None)
+                                } else {
+                                    (false, format!("[read_skill] skill '{}' not found or has no body.", skill_name), None)
+                                }
+                            }
+                            None => (false, "[read_skill] skill registry not available.".to_string(), None),
+                        }
+                    }
                 } else if actual_tool.is_empty() {
                     // Skill with no tool_ref: if args provided, run as run_command(skill_name, ...args) (e.g. bankr whoami)
                     if !args.is_empty() {
@@ -2893,6 +3501,7 @@ pub(crate) async fn run_message_via_llm(
                             conv_tx.clone(),
                             message_webhook_url.as_deref(),
                             device_bridge.as_ref(),
+                            workspace_store.as_ref(),
                         )
                         .await;
                         (s, r, None)
@@ -2921,6 +3530,7 @@ pub(crate) async fn run_message_via_llm(
                         conv_tx.clone(),
                         message_webhook_url.as_deref(),
                         device_bridge.as_ref(),
+                        workspace_store.as_ref(),
                     )
                     .await
                 };
@@ -2936,7 +3546,7 @@ pub(crate) async fn run_message_via_llm(
                     args.iter()
                         .map(|arg| {
                             if arg.len() > MAX_ARG_PREVIEW_LEN {
-                                format!("{}...[truncated {} chars]", &arg[..MAX_ARG_PREVIEW_LEN], arg.len().saturating_sub(MAX_ARG_PREVIEW_LEN))
+                                format!("{}...[truncated {} chars]", &arg[..arg.floor_char_boundary(MAX_ARG_PREVIEW_LEN)], arg.len().saturating_sub(MAX_ARG_PREVIEW_LEN))
                             } else {
                                 arg.clone()
                             }
@@ -2948,7 +3558,7 @@ pub(crate) async fn run_message_via_llm(
                     "tool": tool_display,
                     "skill": if &actual_tool != name { Some(name.as_str()) } else { None::<&str> },
                     "args": redacted_args,
-                    "result_preview": if res.len() > 300 { format!("{}...", &res[..300]) } else { res.clone() },
+                    "result_preview": if res.len() > 300 { format!("{}...", &res[..res.floor_char_boundary(300)]) } else { res.clone() },
                     "success": success,
                     "explanation": serde_json::Value::Null
                 });
@@ -2961,7 +3571,12 @@ pub(crate) async fn run_message_via_llm(
                 tool_results.push(res);
             }
             let results_blob = tool_results.join("\n");
-            current_prompt = format!("{}\n\nTool results:\n{}\n\nProvide your final answer to the user (no more TOOL: lines).", response, results_blob);
+            last_tool_results_blob = Some(results_blob.clone());
+            // Re-inject the user's request so the model always knows what to answer (avoids treating another demand or losing context).
+            current_prompt = format!(
+                "User request: {}\n\nYour previous reply:\n{}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, answer the user's request now. Do NOT reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"). The task ends after this message — give the actual answer (e.g. weather forecast, search summary). No TOOL: lines.",
+                user_message, response, results_blob
+            );
             if round >= MAX_TOOL_ROUNDS {
                 let response_for_user = response
                     .lines()
@@ -2972,6 +3587,8 @@ pub(crate) async fn run_message_via_llm(
                     .to_string();
                 let limit_msg = if tool_results.iter().any(|r| r.contains("device_invoke") && (r.contains("timeout") || r.contains("refused"))) {
                     "L'accès à l'appareil (caméra/micro) a expiré ou a été refusé. Vous pouvez réessayer en renvoyant votre demande."
+                } else if tool_results.iter().any(|r| r.contains("generate_image") && r.contains("générée")) {
+                    "Image générée."
                 } else if tool_results.iter().any(|r| r.contains("device_invoke") && r.contains("success")) {
                     "Photo reçue."
                 } else {
@@ -2979,12 +3596,17 @@ pub(crate) async fn run_message_via_llm(
                 };
                 let image_md = last_captured_image_base64.as_ref()
                     .filter(|b| !b.is_empty())
-                    .map(|b| format!("\n\n![Photo capturée](data:image/jpeg;base64,{})", b))
+                    .map(|b| {
+                        let url = if b.starts_with("data:") { b.clone() } else { format!("data:image/jpeg;base64,{}", b) };
+                        let label = if b.starts_with("data:") { "Image générée" } else { "Photo capturée" };
+                        build_image_markdown(&label, &url)
+                    })
                     .unwrap_or_default();
+                let response_clean = ensure_no_open_code_block(&response_for_user);
                 reply_text = if response_for_user.is_empty() {
                     format!("{}{}", limit_msg, image_md)
                 } else {
-                    format!("{}\n\n[{}]{}", response_for_user, limit_msg, image_md)
+                    format!("{}\n\n[{}]{}", response_clean, limit_msg, image_md)
                 };
                 break;
             }
@@ -2998,7 +3620,34 @@ pub(crate) async fn run_message_via_llm(
             .join("\n")
             .trim()
             .to_string();
-        reply_text = if response_for_user.is_empty() { response } else { response_for_user };
+        // If we already ran tools but the model returned a placeholder ("Je vais… Une seconde."), force one more round to get the actual answer.
+        if !tool_loop_history.is_empty()
+            && last_tool_results_blob.as_ref().map_or(false, |b| !b.is_empty())
+            && looks_like_placeholder_after_tools(&response_for_user)
+            && !force_synthesis_attempted
+        {
+            force_synthesis_attempted = true;
+            current_prompt = format!(
+                "User request: {}\n\nTool results:\n{}\n\nThe user is waiting for the actual answer. Your previous message was a promise — the task is about to close, so you must answer NOW. Using the tool results above, write ONLY the final answer to the user's request. No TOOL: lines, no \"action in progress\".",
+                user_message,
+                last_tool_results_blob.as_deref().unwrap_or("")
+            );
+            continue;
+        }
+        let image_md = last_captured_image_base64.as_ref()
+            .filter(|b| !b.is_empty())
+            .map(|b| {
+                let url = if b.starts_with("data:") { b.clone() } else { format!("data:image/jpeg;base64,{}", b) };
+                let label = if b.starts_with("data:") { "Image générée" } else { "Photo capturée" };
+                build_image_markdown(&label, &url)
+            })
+            .unwrap_or_default();
+        let response_clean = ensure_no_open_code_block(&response_for_user);
+        reply_text = if response_for_user.is_empty() {
+            format!("{}{}", response, image_md)
+        } else {
+            format!("{}{}", response_clean, image_md)
+        };
         break;
     }
 
@@ -3059,7 +3708,13 @@ pub(crate) async fn run_message_via_llm(
         for fact in &heuristic_facts {
             let client = long_term.clone();
             let fact = fact.clone();
-            match tokio::task::spawn_blocking(move || client.promote(fact, "user_fact".to_string())).await {
+            match tokio::task::spawn_blocking(move || {
+                let res = client.promote(fact.clone(), "user_fact".to_string(), None, None, None, Some(2), Some("global_user".to_string()), None, None, None);
+                if res.is_ok() {
+                    let _ = client.emit_event("user_preference".to_string(), fact, None, None, None, None, Some(2), Some("global_user".to_string()), Some("user_fact".to_string()));
+                }
+                res
+            }).await {
                 Ok(Ok(())) => tracing::info!("Personal fact stored in long-term memory (heuristic)"),
                 Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote failed — check that embeddings/tract model loads (see daemon logs)"),
                 Err(e) => tracing::debug!(error = %e, "Promote task join error"),
@@ -3084,18 +3739,18 @@ pub(crate) async fn run_message_via_llm(
                 }
             };
             let extract_prompt = format!(
-                "Extrais les éléments à retenir. Une ligne par élément, chaque ligne commence par exactement un des préfixes suivants :\n\
-FACT: faits personnels (nom, prénom, préférences, décisions)\n\
-PROJECT: projets créés ou mentionnés\n\
-INTEREST: centres d'intérêt\n\
-IMPORTANT: informations importantes à retenir\n\
-AGENT_NAME: le nom que l'utilisateur donne à l'agent (ex: Tu t'appelles X)\n\
-AGENT_PERSONALITY: personnalité ou ton demandé pour l'agent\n\
-AGENT_RULE: une règle que l'agent doit respecter\n\
-AGENT_CAN: ce que l'agent peut faire (autorisé)\n\
-AGENT_CANNOT: ce que l'agent ne doit pas faire (interdit)\n\
-N'écris que des lignes avec ces préfixes, ou NOTHING si rien. Pas d'autre texte.\n\
-N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assistant). N'invente rien.\n\nUtilisateur: {}\n\nAssistant: {}",
+                "Extract items to remember. One line per item, each line starts with exactly one of these prefixes:\n\
+FACT: personal facts (name, preferences, decisions)\n\
+PROJECT: projects created or mentioned\n\
+INTEREST: interests\n\
+IMPORTANT: important information to remember\n\
+AGENT_NAME: the name the user gives the agent (e.g. You are called X)\n\
+AGENT_PERSONALITY: personality or tone requested for the agent\n\
+AGENT_RULE: a rule the agent must follow\n\
+AGENT_CAN: what the agent can do (allowed)\n\
+AGENT_CANNOT: what the agent must not do (forbidden)\n\
+Write only lines with these prefixes, or NOTHING if none. No other text.\n\
+Extract only facts explicitly mentioned (by the user or the assistant). Do not invent anything.\n\nUser: {}\n\nAssistant: {}",
                 msg.trim(),
                 reply.trim()
             );
@@ -3108,6 +3763,7 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
                 max_tokens: Some(extract_max_tokens),
                 temperature: Some(0.1),
                 preferred_task_type: Some("system".to_string()),
+                system_prompt: None,
                 image_data_urls: None,
             };
             let mut to_promote: Vec<(String, String)> = Vec::new();
@@ -3140,11 +3796,23 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
                         } else {
                             continue;
                         };
-                        if !content.is_empty() && !heuristic_set.contains(&content) {
-                            to_promote.push((content, source));
+                        if !content.is_empty()
+                            && !heuristic_set.contains(&content)
+                            && !should_skip_capture_content(&content)
+                        {
+                            let content_trimmed = if content.len() > CAPTURE_MAX_CHARS {
+                                content.chars().take(CAPTURE_MAX_CHARS).collect::<String>()
+                            } else {
+                                content
+                            };
+                            to_promote.push((content_trimmed, source));
                         }
                     }
                 }
+            }
+            // Cap number of items promoted per turn (plan court terme 7).
+            if to_promote.len() > CAPTURE_MAX_PER_TURN {
+                to_promote.truncate(CAPTURE_MAX_PER_TURN);
             }
             if !agent_updates.is_empty() {
                 let data_dir_extract = data_dir_for_extract.clone();
@@ -3172,7 +3840,7 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
                 let client = client.clone();
                 let c = content.clone();
                 let s = source.clone();
-                match tokio::task::spawn_blocking(move || client.promote(c, s)).await {
+                match tokio::task::spawn_blocking(move || client.promote(c, s, None, None, None, None, None, None, None, None)).await {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote failed"),
                     Err(e) => tracing::debug!(error = %e, "Promote task join error"),
@@ -3219,13 +3887,25 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
             EventType::TaskCompleted,
             Some(serde_json::json!({
                 "task_id": task_id.to_string(),
-                "status": "completed"
+                "status": "completed",
+                "model_used": last_llm_model_used
             })),
         )
         .with_correlation(task_id),
     );
     let _ = store.update_status(task_id, TaskStatus::Completed);
     notify_task_completion(&task_completion_registry, task_id).await;
+    let summary_preview: String = reply_text.chars().take(300).collect();
+    learn_from_task_outcome_async(
+        long_term_client.clone(),
+        task_id,
+        message.clone(),
+        "completed".to_string(),
+        summary_preview,
+        Some(session_id.clone()),
+        structured.intent_slug.clone(),
+    )
+    .await;
 }
 
 /// Notify any waiter in the TaskCompletionRegistry that `task_id` has finished.
@@ -3235,6 +3915,68 @@ async fn notify_task_completion(registry: &Option<TaskCompletionRegistry>, task_
             notify.notify_one();
         }
     }
+}
+
+/// Learn step: emit a `task_outcome` episodic event after a task completes (conversation or orchestrator).
+/// Payload: task_id, initial_message_preview (200 chars), status, summary_preview (300 chars), optional intent.
+/// Synchronous; must not be called from a tokio runtime thread (use learn_from_task_outcome_async from async code).
+pub(crate) fn learn_from_task_outcome(
+    client: Option<&LongTermMemoryClient>,
+    task_id: Uuid,
+    initial_message: &str,
+    status: &str,
+    summary: &str,
+    session_id: Option<&str>,
+    intent: Option<&str>,
+) {
+    let Some(client) = client else { return };
+    let initial_preview: String = initial_message.chars().take(200).collect();
+    let summary_preview: String = summary.chars().take(300).collect();
+    let payload = serde_json::json!({
+        "task_id": task_id.to_string(),
+        "initial_message_preview": initial_preview,
+        "status": status,
+        "summary_preview": summary_preview,
+        "intent": intent,
+    });
+    if let Err(e) = client.emit_event(
+        "task_outcome".to_string(),
+        payload.to_string(),
+        None,
+        None,
+        session_id.map(String::from),
+        Some(task_id.to_string()),
+        None,
+        None,
+        None,
+    ) {
+        tracing::debug!(task_id = %task_id, error = %e, "task_outcome emit failed");
+    }
+}
+
+/// Async wrapper: runs learn_from_task_outcome in spawn_blocking so it is safe to call from async (avoids blocking the runtime).
+pub(crate) async fn learn_from_task_outcome_async(
+    client: Option<LongTermMemoryClient>,
+    task_id: Uuid,
+    initial_message: String,
+    status: String,
+    summary: String,
+    session_id: Option<String>,
+    intent: Option<String>,
+) {
+    let Some(client) = client else { return };
+    let _ = tokio::task::spawn_blocking(move || {
+        learn_from_task_outcome(
+            Some(&client),
+            task_id,
+            &initial_message,
+            &status,
+            &summary,
+            session_id.as_deref(),
+            intent.as_deref(),
+        );
+    })
+    .await;
 }
 
 /// Optional channel to trigger daemon shutdown (for POST /api/restart).
@@ -3393,7 +4135,7 @@ pub async fn handle_api(
         }
     }
 
-    // GET /api/agent-profile — read agent profile (name, personality, role, gender, avatar, rules, can_do, cannot_do)
+    // GET /api/agent-profile — read agent profile (name, personality, role, gender, avatar, rules, can_do, cannot_do, traits_override, preferred_mode)
     if method == "GET" && path == "/api/agent-profile" {
         let profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         let body_json = serde_json::json!({
@@ -3404,12 +4146,14 @@ pub async fn handle_api(
             "avatar": profile.avatar,
             "rules": profile.rules,
             "can_do": profile.can_do,
-            "cannot_do": profile.cannot_do
+            "cannot_do": profile.cannot_do,
+            "traits_override": profile.traits_override,
+            "preferred_mode": profile.preferred_mode
         });
         return json_response("200 OK", &body_json.to_string());
     }
 
-    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, role?, gender?, avatar?, rules?, can_do?, cannot_do? }
+    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, role?, gender?, avatar?, rules?, can_do?, cannot_do?, traits_override?, preferred_mode? }
     if method == "POST" && path == "/api/agent-profile" {
         let mut profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         if let Some(body) = body.as_deref() {
@@ -3438,6 +4182,18 @@ pub async fn handle_api(
                 if let Some(arr) = v.get("cannot_do").and_then(|x| x.as_array()) {
                     profile.cannot_do = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
                 }
+                if let Some(obj) = v.get("traits_override").and_then(|x| x.as_object()) {
+                    let mut map = std::collections::HashMap::new();
+                    for (k, val) in obj {
+                        if let Some(n) = val.as_f64() {
+                            map.insert(k.clone(), n);
+                        }
+                    }
+                    profile.traits_override = if map.is_empty() { None } else { Some(map) };
+                }
+                if v.get("preferred_mode").is_some() {
+                    profile.preferred_mode = v.get("preferred_mode").and_then(|x| x.as_str()).map(String::from);
+                }
             }
         }
         // Persist default name if none or empty so the agent always has an identity on disk
@@ -3449,6 +4205,151 @@ pub async fn handle_api(
                 set_agent_profile_cache(agent_profile_cache, profile).await;
                 return json_response("200 OK", r#"{"ok":true,"message":"Profil agent mis à jour"}"#);
             }
+            Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
+        }
+    }
+
+    // GET /api/user-profile — read user profile (first_name, last_name, how_to_call, onboarding_completed)
+    if method == "GET" && path == "/api/user-profile" {
+        let profile = UserProfile::load(data_dir);
+        let body_json = serde_json::json!({
+            "first_name": profile.first_name,
+            "last_name": profile.last_name,
+            "how_to_call": profile.how_to_call,
+            "onboarding_completed": profile.onboarding_completed,
+            "proactive_check_in_enabled": profile.proactive_check_in_enabled,
+            "proactive_check_in_interval_days": profile.proactive_check_in_interval_days,
+        });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
+    // POST /api/user-profile — update user profile. Body: { first_name?, last_name?, how_to_call?, onboarding_completed?, proactive_check_in_enabled?, proactive_check_in_interval_days? }
+    if method == "POST" && path == "/api/user-profile" {
+        let mut profile = UserProfile::load(data_dir);
+        if let Some(body) = body.as_deref() {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+                if v.get("first_name").is_some() {
+                    profile.first_name = v.get("first_name").and_then(|x| x.as_str()).map(String::from);
+                }
+                if v.get("last_name").is_some() {
+                    profile.last_name = v.get("last_name").and_then(|x| x.as_str()).map(String::from);
+                }
+                if v.get("how_to_call").is_some() {
+                    profile.how_to_call = v.get("how_to_call").and_then(|x| x.as_str()).map(|s| s.trim().to_string());
+                }
+                if let Some(b) = v.get("onboarding_completed").and_then(|x| x.as_bool()) {
+                    profile.onboarding_completed = b;
+                }
+                if v.get("proactive_check_in_enabled").is_some() {
+                    profile.proactive_check_in_enabled = v.get("proactive_check_in_enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+                }
+                if v.get("proactive_check_in_interval_days").is_some() {
+                    profile.proactive_check_in_interval_days = v.get("proactive_check_in_interval_days").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                }
+            }
+        }
+        match profile.save(data_dir) {
+            Ok(()) => return json_response("200 OK", r#"{"ok":true,"message":"Profil utilisateur mis à jour"}"#),
+            Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
+        }
+    }
+
+    // GET /api/first-message?context=onboarding|first_today|proactive — agent-initiated first message (onboarding, daily greeting, proactive check-in)
+    if method == "GET" && path.starts_with("/api/first-message") {
+        let context = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| {
+                q.split('&')
+                    .find(|p| p.starts_with("context="))
+                    .map(|p| urlencoding::decode(p.trim_start_matches("context=")).unwrap_or_default().into_owned())
+            })
+            .unwrap_or_default();
+        let session_id = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
+        let user_profile = UserProfile::load(data_dir);
+
+        if context == "onboarding" && !user_profile.has_how_to_call() {
+            let message = "Bonjour ! Pour personnaliser nos échanges, comment dois-je vous appeler ? (prénom ou surnom)";
+            if let Some(ref st) = short_term {
+                st.append(&session_id, "assistant", message.to_string()).await;
+            }
+            let body_json = serde_json::json!({ "message": message, "session_id": session_id });
+            return json_response("200 OK", &body_json.to_string());
+        }
+
+        if context == "proactive"
+            && user_profile.has_how_to_call()
+            && user_profile.proactive_check_in_enabled
+            && user_profile.proactive_check_in_interval_days > 0
+        {
+            let now = chrono::Utc::now();
+            let last = UserProfile::load_last_activity(data_dir);
+            let interval_days = user_profile.proactive_check_in_interval_days as i64;
+            let show = match last {
+                None => true,
+                Some(t) => (now - t).num_days() >= interval_days,
+            };
+            if show {
+                let how = user_profile.how_to_call.as_deref().unwrap_or("").trim();
+                let message = format!("Ça fait un moment, {} ! Tu veux qu'on travaille sur quelque chose ?", how);
+                if let Some(ref st) = short_term {
+                    st.append(&session_id, "assistant", message.clone()).await;
+                }
+                let body_json = serde_json::json!({ "message": message, "session_id": session_id });
+                return json_response("200 OK", &body_json.to_string());
+            }
+        }
+
+        if context == "first_today" && user_profile.has_how_to_call() {
+            let how = user_profile.how_to_call.as_deref().unwrap_or("").trim();
+            let message = format!("Bonjour {}, quoi de neuf aujourd'hui ?", how);
+            if let Some(ref st) = short_term {
+                st.append(&session_id, "assistant", message.clone()).await;
+            }
+            let body_json = serde_json::json!({ "message": message, "session_id": session_id });
+            return json_response("200 OK", &body_json.to_string());
+        }
+
+        // Other contexts: return empty so UI does not show a duplicate message
+        let body_json = serde_json::json!({ "message": "", "session_id": session_id });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
+    // POST /api/personality-memory — store a structured personality preference (Phase 3). Body: { "key": "preferred_tone"|"technical_depth_preference"|..., "value": "..." }
+    if method == "POST" && path == "/api/personality-memory" {
+        let Some(client) = long_term_client.clone() else {
+            return json_response("503 Service Unavailable", r#"{"error":"long_term_memory_unavailable"}"#);
+        };
+        let Some(body) = body.as_deref() else {
+            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
+        };
+        let v: serde_json::Value = match serde_json::from_slice(body) {
+            Ok(x) => x,
+            Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
+        };
+        let key = match v.get("key").and_then(|x| x.as_str()) {
+            Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+            _ => return json_response("400 Bad Request", r#"{"error":"key_required"}"#),
+        };
+        let value = v.get("value").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let payload = serde_json::json!({ "key": key, "value": value }).to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            client.emit_event(
+                "personality_memory".to_string(),
+                payload,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        })
+        .await;
+        match result {
+            Ok(Ok(id)) => return json_response("200 OK", &serde_json::json!({ "ok": true, "id": id.to_string() }).to_string()),
+            Ok(Err(e)) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e }).to_string()),
             Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
         }
     }
@@ -3478,37 +4379,145 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
-    // GET /api/memory/long-term?limit=50 — recent long-term entries (content, created_at, source)
-    if method == "GET" && path.starts_with("/api/memory/long-term") {
-        let limit = path
+    // GET /api/memory/search?q=...&top_k=... — semantic search in long-term memory
+    if method == "GET" && path.starts_with("/api/memory/search") {
+        let (q, top_k) = path
             .split('?')
             .nth(1)
-            .and_then(|q| {
-                q.split('&')
-                    .find(|p| p.starts_with("limit="))
-                    .and_then(|p| p.trim_start_matches("limit=").parse::<usize>().ok())
+            .map(|query_str| {
+                let mut q = None;
+                let mut top_k = 10u32;
+                for part in query_str.split('&') {
+                    if let Some(v) = part.strip_prefix("q=") {
+                        let decoded = urlencoding::decode(v).unwrap_or_else(|_| std::borrow::Cow::Borrowed(v));
+                        q = Some(decoded.trim().to_string());
+                    } else if let Some(v) = part.strip_prefix("top_k=") {
+                        if let Ok(n) = v.parse::<u32>() {
+                            top_k = n.min(20);
+                        }
+                    }
+                }
+                (q, top_k)
             })
-            .unwrap_or(50)
-            .min(200);
-        let entries = if let Some(ref client) = long_term_client {
+            .unwrap_or((None, 10));
+        let query = q.as_deref().map(|s| s.trim()).unwrap_or("");
+        if query.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing or empty q"}"#);
+        }
+        let result = match long_term_client {
+            Some(ref client) => {
+                let client = client.clone();
+                let query = query.to_string();
+                let top_k = top_k as usize;
+                tokio::task::spawn_blocking(move || client.search(query, top_k, None))
+                    .await
+                    .unwrap_or_default()
+            }
+            None => {
+                return json_response(
+                    "503 Service Unavailable",
+                    r#"{"error":"long-term memory not available","long_term_available":false}"#,
+                );
+            }
+        };
+        let results: Vec<serde_json::Value> = result
+            .iter()
+            .map(|(id, content)| serde_json::json!({ "id": id, "content": content }))
+            .collect();
+        let body_json = serde_json::json!({
+            "results": results,
+            "long_term_available": true
+        });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
+    // GET /api/memory/long-term?limit=200&offset=0 — recent long-term entries (content, created_at, source, related), paginated
+    if method == "GET" && path.starts_with("/api/memory/long-term") {
+        let (limit, offset) = path
+            .split('?')
+            .nth(1)
+            .map(|q| {
+                let mut limit = 200usize;
+                let mut offset = 0usize;
+                for part in q.split('&') {
+                    if let Some(v) = part.strip_prefix("limit=") {
+                        if let Ok(n) = v.parse::<usize>() {
+                            limit = n.min(200);
+                        }
+                    } else if let Some(v) = part.strip_prefix("offset=") {
+                        if let Ok(n) = v.parse::<usize>() {
+                            offset = n;
+                        }
+                    }
+                }
+                (limit, offset)
+            })
+            .unwrap_or((200, 0));
+        let (entries, total) = if let Some(ref client) = long_term_client {
             let client = client.clone();
-            tokio::task::spawn_blocking(move || client.list(limit))
+            tokio::task::spawn_blocking(move || client.list(limit, offset))
                 .await
-                .unwrap_or_default()
+                .unwrap_or((vec![], 0))
         } else {
-            vec![]
+            (vec![], 0)
+        };
+        let relations = if !entries.is_empty() {
+            if let Some(ref client) = long_term_client {
+                let ids: Vec<String> = entries.iter().map(|(id, _, _, _)| id.clone()).collect();
+                let client = client.clone();
+                tokio::task::spawn_blocking(move || client.get_relations_for_entries(ids))
+                    .await
+                    .unwrap_or_default()
+            } else {
+                std::collections::HashMap::new()
+            }
+        } else {
+            std::collections::HashMap::new()
         };
         let list: Vec<serde_json::Value> = entries
             .iter()
             .map(|(id, content, created_at, source)| {
-                serde_json::json!({ "id": id, "content": content, "created_at": created_at, "source": source })
+                let related = relations
+                    .get(id)
+                    .map(|v| {
+                        v.iter()
+                            .map(|(to_id, kind)| serde_json::json!({ "id": to_id, "kind": kind }))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                serde_json::json!({ "id": id, "content": content, "created_at": created_at, "source": source, "related": related })
             })
             .collect();
         let body_json = serde_json::json!({
             "entries": list,
+            "total": total,
             "long_term_available": long_term_client.is_some()
         });
         return json_response("200 OK", &body_json.to_string());
+    }
+
+    // POST /api/memory/rebuild-relations — recompute "similar" relations for all existing entries
+    if method == "POST" && path == "/api/memory/rebuild-relations" {
+        const DEFAULT_MAX_PER_ENTRY: usize = 5;
+        let result = match long_term_client {
+            Some(ref client) => {
+                let client = client.clone();
+                tokio::task::spawn_blocking(move || client.rebuild_similar_relations(DEFAULT_MAX_PER_ENTRY))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("task join error: {}", e)))
+            }
+            None => Err("long-term memory not available".to_string()),
+        };
+        match result {
+            Ok(inserted) => {
+                let body_json = serde_json::json!({ "inserted": inserted, "ok": true });
+                return json_response("200 OK", &body_json.to_string());
+            }
+            Err(e) => {
+                let body_json = serde_json::json!({ "error": e, "ok": false });
+                return json_response("500 Internal Server Error", &body_json.to_string());
+            }
+        }
     }
 
     // DELETE /api/memory/long-term/:id — delete one long-term memory entry by id
@@ -3545,6 +4554,7 @@ pub async fn handle_api(
     if method == "GET" && path == "/api/doctor" {
         let mut checks: Vec<serde_json::Value> = Vec::new();
         checks.push(serde_json::json!({ "id": "daemon", "ok": true, "description": "Daemon running" }));
+        checks.push(serde_json::json!({ "id": "os", "ok": true, "description": std::env::consts::OS }));
 
         let ollama_ok = if let Some(u) = ollama_base_url {
             let test_url = format!("{}/api/tags", u.trim_end_matches('/'));
@@ -3843,6 +4853,43 @@ pub async fn handle_api(
             let body = serde_json::json!({ "error": "prompt_injection_rejected", "detail": e.to_string() });
             return json_response("400 Bad Request", &body.to_string());
         }
+        // Onboarding: if user profile has no how_to_call, try to extract from message and save
+        let mut message = message;
+        {
+            let mut user_profile = UserProfile::load(data_dir);
+            if !user_profile.has_how_to_call() && !message.trim().is_empty() {
+                let extracted = extract_how_to_call_from_message(message.trim());
+                if let Some(name) = extracted {
+                    user_profile.how_to_call = Some(name.clone());
+                    user_profile.onboarding_completed = true;
+                    if user_profile.first_name.is_none() || user_profile.first_name.as_deref().unwrap_or("").trim().is_empty() {
+                        user_profile.first_name = Some(name.clone());
+                    }
+                    let _ = user_profile.save(data_dir);
+                    message = format!(
+                        "[L'utilisateur vient de vous indiquer son prénom : {}. Accueillez-le chaleureusement (ex. « Ravi de te connaître, {} ! ») puis répondez à son message.]\n\n{}",
+                        name,
+                        name,
+                        message
+                    );
+                }
+            }
+        }
+        // Reconnect: if UI says user just reconnected and there is already history today, ask agent to briefly recap then answer
+        let reconnect = body_json.as_ref().and_then(|v| v.get("reconnect")).and_then(|v| v.as_bool()).unwrap_or(false);
+        if reconnect {
+            if let Some(ref st) = short_term {
+                let turns = st.get_turns(&session_id).await;
+                if !turns.is_empty() {
+                    message = format!(
+                        "[L'utilisateur vient de se reconnecter. Rappelez-lui brièvement ce que vous avez fait ensemble jusqu'ici aujourd'hui, puis répondez à son message.]\n\n{}",
+                        message
+                    );
+                }
+            }
+        }
+        // Update last user activity for proactive check-in
+        let _ = UserProfile::save_last_activity(data_dir, chrono::Utc::now());
         let correlation_id = uuid::Uuid::new_v4();
         let priority = body_json
             .as_ref()
@@ -3852,11 +4899,12 @@ pub async fn handle_api(
         // User talks only to orchestrator: ack immediately, delegate to conversation worker in background (non-blocking). session_id used for short-term memory.
         match main_agent.handle_message(store_path, &message, correlation_id, true, &session_id, image_data_urls, priority) {
             Ok(task_id) => {
+                let ack_message = build_ack_message(&message);
                 let body = serde_json::json!({
                     "ack": true,
                     "task_id": task_id.to_string(),
                     "session_id": session_id,
-                    "message": "Je prends en compte votre demande."
+                    "message": ack_message
                 });
                 return json_response("200 OK", &body.to_string());
             }
@@ -4139,6 +5187,7 @@ pub async fn handle_api(
             max_tokens: body.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32),
             temperature: body.get("temperature").and_then(|v| v.as_f64()).map(|f| f as f32),
             preferred_task_type: None,
+            system_prompt: None,
             image_data_urls: None,
         };
         match llm_router.complete(&req).await {
@@ -4437,7 +5486,7 @@ pub async fn handle_api(
                         "base_url": base_url,
                         "context_length_max": context_length,
                         "num_ctx": num_ctx,
-                        "parameters_preview": if parameters.len() > 200 { format!("{}...", &parameters[..200]) } else { parameters.to_string() }
+                        "parameters_preview": if parameters.len() > 200 { format!("{}...", &parameters[..parameters.floor_char_boundary(200)]) } else { parameters.to_string() }
                     });
                     return json_response("200 OK", &body.to_string());
                 }
@@ -4503,6 +5552,7 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
             max_tokens: Some(512),
             temperature: Some(0.3),
             preferred_task_type: None,
+            system_prompt: None,
             image_data_urls: None,
         };
         let advice_timeout = std::time::Duration::from_secs(120);
@@ -5021,7 +6071,10 @@ async fn get_schedule_run_reports(store_path: &Path, progress: &ProgressCache) -
 
 #[cfg(test)]
 mod tests {
-    use super::parse_content_length;
+    use super::{
+        agent_role_system_prompt, build_image_markdown, ensure_no_open_code_block,
+        message_suggests_tool_only_action, parse_content_length, parse_device_invoke_params,
+    };
 
     #[test]
     fn parse_content_length_returns_header_end_and_content_length() {
@@ -5074,5 +6127,95 @@ mod tests {
         let args = vec![s("synthetic_input"), s("keyboard"), s("type"), s("hello"), s("world")];
         let p = parse_device_invoke_params(&args);
         assert_eq!(p, serde_json::json!(["hello", "world"]));
+    }
+
+    // --- message_suggests_tool_only_action ---
+
+    #[test]
+    fn tool_only_action_true_for_camera() {
+        assert!(message_suggests_tool_only_action("Prends une photo avec la caméra"));
+        assert!(message_suggests_tool_only_action("Take a photo from the webcam"));
+    }
+
+    #[test]
+    fn tool_only_action_true_for_weather() {
+        assert!(message_suggests_tool_only_action("Quelle est la météo à Paris ?"));
+    }
+
+    #[test]
+    fn tool_only_action_true_for_save_file() {
+        assert!(message_suggests_tool_only_action("Sauvegarde ce code dans /tmp/foo.py"));
+    }
+
+    #[test]
+    fn tool_only_action_true_for_image_generation() {
+        assert!(message_suggests_tool_only_action("Génère une image d'un lapin"));
+    }
+
+    #[test]
+    fn tool_only_action_false_for_code_generation() {
+        assert!(!message_suggests_tool_only_action("Écris un script Python qui lit un fichier"));
+        assert!(!message_suggests_tool_only_action("Génère du code pour trier une liste"));
+    }
+
+    #[test]
+    fn tool_only_action_false_when_code_intent_dominates() {
+        // Explicit code request even if it mentions photo → do not override to conversation
+        assert!(!message_suggests_tool_only_action("écris un script qui prend une photo"));
+    }
+
+    // --- agent_role_system_prompt ---
+
+    #[test]
+    fn agent_role_prompt_some_for_recognized_types() {
+        let with_role = [
+            "code", "search", "financial", "documentalist", "project_manager",
+            "technical_writer", "research", "security_audit", "creative",
+            "analyst", "architect", "frontend", "backend", "database", "integration", "qa", "system", "image_generation",
+        ];
+        for t in &with_role {
+            let s = agent_role_system_prompt(t);
+            assert!(s.is_some(), "agent_type {:?} should have a role prompt", t);
+            assert!(!s.unwrap().is_empty(), "agent_type {:?} role prompt must be non-empty", t);
+        }
+    }
+
+    #[test]
+    fn agent_role_prompt_none_for_conversation_and_unknown() {
+        assert!(agent_role_system_prompt("conversation").is_none());
+        assert!(agent_role_system_prompt("").is_none());
+        // schedule is handled specially (recurring task), no role prompt
+        assert!(agent_role_system_prompt("schedule").is_none());
+    }
+
+    // --- ensure_no_open_code_block ---
+
+    #[test]
+    fn ensure_no_open_code_block_zero_backticks() {
+        let s = "hello";
+        assert_eq!(ensure_no_open_code_block(s), "hello");
+    }
+
+    #[test]
+    fn ensure_no_open_code_block_one_backtick_open() {
+        let s = "code:\n```";
+        assert_eq!(ensure_no_open_code_block(s), "code:\n```\n```\n");
+    }
+
+    #[test]
+    fn ensure_no_open_code_block_two_backticks_closed() {
+        let s = "```\nfn x() {}\n```";
+        assert_eq!(ensure_no_open_code_block(s), "```\nfn x() {}\n```");
+    }
+
+    // --- build_image_markdown ---
+
+    #[test]
+    fn build_image_markdown_data_url() {
+        let url = "data:image/jpeg;base64,ABC";
+        let out = build_image_markdown("Photo", url);
+        assert!(out.contains("](<data:image/"), "output should contain ](<data:image/: {:?}", out);
+        assert!(out.ends_with(">)"), "output should end with >): {:?}", out);
+        assert_eq!(out, "\n\n![Photo](<data:image/jpeg;base64,ABC>)");
     }
 }

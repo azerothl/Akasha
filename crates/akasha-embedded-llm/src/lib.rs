@@ -276,4 +276,18 @@ mod tests {
             assert!(r.is_err());
         }
     }
+
+    #[test]
+    fn embedded_llm_unload_sets_loaded_false() {
+        EmbeddedLlm::unload();
+        assert!(
+            !EmbeddedLlm::is_loaded(),
+            "after unload(), is_loaded() should be false"
+        );
+    }
+
+    #[test]
+    fn embedded_llm_default_constructs() {
+        let _ = EmbeddedLlm::default();
+    }
 }

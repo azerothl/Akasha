@@ -13,6 +13,9 @@ pub struct CompletionRequest {
     /// When set, router uses this task type instead of classifying from the prompt (e.g. "system" for memory extraction, decomposition).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_task_type: Option<String>,
+    /// Optional system message (identity, personality, rules). When set, providers that support it send it as system role; others concatenate with prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
     /// Optional image data URLs (data:image/png;base64,...) for vision-capable providers; appended to user message content.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_data_urls: Option<Vec<String>>,
@@ -103,9 +106,13 @@ impl OllamaProvider {
     ) -> Result<CompletionResponse, ProviderError> {
         let client = reqwest::Client::new();
         let url = format!("{}/api/generate", self.base_url);
+        let prompt = match &request.system_prompt {
+            Some(s) if !s.is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
+            _ => request.prompt.clone(),
+        };
         let body = serde_json::json!({
             "model": model,
-            "prompt": request.prompt,
+            "prompt": prompt,
             "stream": false,
             "options": {
                 "num_predict": request.max_tokens.unwrap_or(1024),
@@ -211,7 +218,7 @@ impl OpenAIProvider {
         }
         let client = reqwest::Client::new();
         let url = format!("{}/chat/completions", self.base_url);
-        let messages = match &request.image_data_urls {
+        let user_content = match &request.image_data_urls {
             Some(urls) if !urls.is_empty() => {
                 let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
                 for url in urls {
@@ -220,9 +227,16 @@ impl OpenAIProvider {
                         "image_url": { "url": url }
                     }));
                 }
-                serde_json::json!([{ "role": "user", "content": content }])
+                serde_json::Value::Array(content)
             }
-            _ => serde_json::json!([{ "role": "user", "content": request.prompt }]),
+            _ => serde_json::json!(request.prompt),
+        };
+        let messages = match &request.system_prompt {
+            Some(s) if !s.trim().is_empty() => serde_json::json!([
+                { "role": "system", "content": s.trim_end() },
+                { "role": "user", "content": user_content }
+            ]),
+            _ => serde_json::json!([{ "role": "user", "content": user_content }]),
         };
         let body = serde_json::json!({
             "model": model,
@@ -377,7 +391,7 @@ impl LLMProvider for OpenRouterProvider {
         let model = model_override.unwrap_or("openai/gpt-4o-mini");
         let client = reqwest::Client::new();
         let url = format!("{}/chat/completions", self.base_url);
-        let messages = match &request.image_data_urls {
+        let user_content = match &request.image_data_urls {
             Some(urls) if !urls.is_empty() => {
                 let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
                 for url in urls {
@@ -386,9 +400,16 @@ impl LLMProvider for OpenRouterProvider {
                         "image_url": { "url": url }
                     }));
                 }
-                serde_json::json!([{ "role": "user", "content": content }])
+                serde_json::Value::Array(content)
             }
-            _ => serde_json::json!([{ "role": "user", "content": request.prompt }]),
+            _ => serde_json::json!(request.prompt),
+        };
+        let messages = match &request.system_prompt {
+            Some(s) if !s.trim().is_empty() => serde_json::json!([
+                { "role": "system", "content": s.trim_end() },
+                { "role": "user", "content": user_content }
+            ]),
+            _ => serde_json::json!([{ "role": "user", "content": user_content }]),
         };
         let body = serde_json::json!({
             "model": model,
@@ -427,6 +448,16 @@ impl LLMProvider for OpenRouterProvider {
             let status = resp.status();
             let err_body = resp.text().await.unwrap_or_default();
             return Err(ProviderError::Api(format!("{} {}", status, err_body)));
+        }
+        // Reject huge response bodies to avoid OOM (e.g. buggy API returning Content-Length: 31GB).
+        const MAX_RESPONSE_BODY: u64 = 10 * 1024 * 1024; // 10 MiB
+        if let Some(len) = resp.content_length() {
+            if len > MAX_RESPONSE_BODY {
+                return Err(ProviderError::Api(format!(
+                    "LLM response body too large: {} bytes (max {}). Refusing to allocate.",
+                    len, MAX_RESPONSE_BODY
+                )));
+            }
         }
         let json: serde_json::Value = resp.json().await.map_err(|e| ProviderError::Api(e.to_string()))?;
         let text = json
@@ -493,10 +524,14 @@ impl LLMProvider for AnthropicProvider {
         let model = model_override.unwrap_or("claude-3-5-sonnet-20241022");
         let client = reqwest::Client::new();
         let url = format!("{}/v1/messages", self.base_url);
+        let prompt = match &request.system_prompt {
+            Some(s) if !s.trim().is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
+            _ => request.prompt.clone(),
+        };
         let body = serde_json::json!({
             "model": model,
             "max_tokens": request.max_tokens.unwrap_or(1024),
-            "messages": [{ "role": "user", "content": request.prompt }]
+            "messages": [{ "role": "user", "content": prompt }]
         });
         let resp = client
             .post(&url)
@@ -587,7 +622,13 @@ impl LLMProvider for AzureOpenAIProvider {
             self.base_url.trim_end_matches('/'),
             deployment
         );
-        let messages = serde_json::json!([{ "role": "user", "content": request.prompt }]);
+        let messages = match &request.system_prompt {
+            Some(s) if !s.trim().is_empty() => serde_json::json!([
+                { "role": "system", "content": s.trim_end() },
+                { "role": "user", "content": request.prompt }
+            ]),
+            _ => serde_json::json!([{ "role": "user", "content": request.prompt }]),
+        };
         let body = serde_json::json!({
             "messages": messages,
             "max_tokens": request.max_tokens.unwrap_or(1024),
@@ -677,8 +718,12 @@ impl LLMProvider for GoogleAIProvider {
         let model = model_override.unwrap_or("gemini-1.5-flash");
         let client = reqwest::Client::new();
         let url = format!("{}/v1beta/models/{}:generateContent?key={}", self.base_url, model, self.api_key);
+        let prompt = match &request.system_prompt {
+            Some(s) if !s.trim().is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
+            _ => request.prompt.clone(),
+        };
         let body = serde_json::json!({
-            "contents": [{ "parts": [{ "text": request.prompt }] }],
+            "contents": [{ "parts": [{ "text": prompt }] }],
             "generationConfig": {
                 "maxOutputTokens": request.max_tokens.unwrap_or(1024),
                 "temperature": request.temperature.unwrap_or(0.7)
@@ -757,7 +802,7 @@ impl BitNetProvider {
     ) -> Result<CompletionResponse, ProviderError> {
         let client = reqwest::Client::new();
         let url = self.chat_completions_url();
-        let messages = match &request.image_data_urls {
+        let user_content = match &request.image_data_urls {
             Some(urls) if !urls.is_empty() => {
                 let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
                 for u in urls {
@@ -766,9 +811,16 @@ impl BitNetProvider {
                         "image_url": { "url": u }
                     }));
                 }
-                serde_json::json!([{ "role": "user", "content": content }])
+                serde_json::Value::Array(content)
             }
-            _ => serde_json::json!([{ "role": "user", "content": request.prompt }]),
+            _ => serde_json::json!(request.prompt),
+        };
+        let messages = match &request.system_prompt {
+            Some(s) if !s.trim().is_empty() => serde_json::json!([
+                { "role": "system", "content": s.trim_end() },
+                { "role": "user", "content": user_content }
+            ]),
+            _ => serde_json::json!([{ "role": "user", "content": user_content }]),
         };
         let body = serde_json::json!({
             "model": model,
@@ -920,7 +972,10 @@ impl LLMProvider for AkashaCoreProvider {
         #[cfg(feature = "embedded")]
         {
             if akasha_embedded_llm::EmbeddedLlm::is_available() {
-                let prompt = request.prompt.clone();
+                let prompt = match &request.system_prompt {
+                    Some(s) if !s.is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
+                    _ => request.prompt.clone(),
+                };
                 let max_tokens = request.max_tokens.map(|u| u as usize);
                 let temperature = request.temperature.map(|f| f as f64);
                 match tokio::task::spawn_blocking(move || {
@@ -997,7 +1052,10 @@ impl LLMProvider for AkashaEmbeddedProvider {
         #[cfg(feature = "embedded")]
         {
             if akasha_embedded_llm::EmbeddedLlm::is_available() {
-                let prompt = request.prompt.clone();
+                let prompt = match &request.system_prompt {
+                    Some(s) if !s.is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
+                    _ => request.prompt.clone(),
+                };
                 let max_tokens = request.max_tokens.map(|u| u as usize);
                 let temperature = request.temperature.map(|f| f as f64);
                 match tokio::task::spawn_blocking(move || {
@@ -1039,7 +1097,10 @@ impl LLMProvider for AkashaEmbeddedProvider {
             if !akasha_embedded_llm::EmbeddedLlm::is_available() {
                 return Err(ProviderError::Unavailable);
             }
-            let prompt = request.prompt.clone();
+            let prompt = match &request.system_prompt {
+                Some(s) if !s.is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
+                _ => request.prompt.clone(),
+            };
             let max_tokens = request.max_tokens.map(|u| u as usize);
             let temperature = request.temperature.map(|f| f as f64);
             match tokio::task::spawn_blocking(move || {
@@ -1071,5 +1132,63 @@ impl LLMProvider for AkashaEmbeddedProvider {
             let _ = (request, chunk_tx);
             Err(ProviderError::Unavailable)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn ollama_provider_name_and_local() {
+        let p = OllamaProvider::new(None);
+        assert_eq!(p.name(), "ollama");
+        assert!(p.is_local());
+    }
+
+    #[test]
+    fn ollama_provider_is_available_no_panic() {
+        let p = OllamaProvider::new(None);
+        let _ = p.is_available();
+    }
+
+    #[test]
+    fn akasha_embedded_provider_name_and_local() {
+        let p = AkashaEmbeddedProvider::new();
+        assert_eq!(p.name(), "akasha_embedded");
+        assert!(p.is_local());
+    }
+
+    #[test]
+    fn akasha_embedded_provider_availability_matches_embedded_llm_when_feature_enabled() {
+        let p = AkashaEmbeddedProvider::new();
+        #[cfg(feature = "embedded")]
+        assert_eq!(
+            p.is_available(),
+            akasha_embedded_llm::EmbeddedLlm::is_available(),
+            "AkashaEmbeddedProvider.is_available() should match EmbeddedLlm::is_available() when feature embedded is on"
+        );
+        #[cfg(not(feature = "embedded"))]
+        assert!(!p.is_available());
+    }
+
+    #[tokio::test]
+    async fn akasha_embedded_provider_complete_when_unavailable_returns_unavailable() {
+        let p = AkashaEmbeddedProvider::new();
+        if p.is_available() {
+            return;
+        }
+        let req = CompletionRequest {
+            prompt: "Hi".into(),
+            max_tokens: Some(10),
+            temperature: Some(0.0),
+            preferred_task_type: None,
+            system_prompt: None,
+            image_data_urls: None,
+        };
+        let r = p.complete(&req, Duration::from_secs(5), None).await;
+        assert!(r.is_err());
+        assert!(matches!(r.unwrap_err(), ProviderError::Unavailable));
     }
 }

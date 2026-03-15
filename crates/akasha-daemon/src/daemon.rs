@@ -1,7 +1,7 @@
 //! Akasha Daemon - Core runtime loop with healthcheck and spec loading
 
 use akasha_core::{load_specs, Specs};
-use akasha_store::{ImmutableLog, MetricsEvent, MetricsStore, TaskStore};
+use akasha_store::{ImmutableLog, MetricsEvent, MetricsStore, PipelineStore, TaskStore};
 use akasha_vault::Vault;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -13,7 +13,8 @@ use futures_util::future::Either;
 use tracing::{error, info, warn, Instrument};
 
 use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask};
-use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
+use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, new_task_workspace_store, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
+use crate::debug_log;
 use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
@@ -300,10 +301,24 @@ impl Daemon {
             info!(chunks = rag_pack.len(), "RAG pack loaded for diagnostic");
         }
 
-        // Initialize store and restore tasks (Phase 1)
+        // Initialize store and restore tasks (Phase 1). Phase 7: mark Running tasks with a pipeline checkpoint as failed (interrupted by restart).
         if let Ok(store) = TaskStore::open(&db_path) {
             let tasks = store.get_pending_or_running().unwrap_or_default();
             info!(count = tasks.len(), "Restored tasks from persistence");
+            if let Ok(pipeline) = PipelineStore::open(&db_path) {
+                for t in &tasks {
+                    if t.status == akasha_store::TaskStatus::Running {
+                        let has_checkpoint = match pipeline.get(t.id) {
+                            Ok(Some(ctx)) => ctx.checkpoint_json.is_some(),
+                            _ => false,
+                        };
+                        if has_checkpoint {
+                            let _ = store.update_status(t.id, akasha_store::TaskStatus::Failed);
+                            info!(task_id = %t.id, "Task marked failed (interrupted by daemon restart)");
+                        }
+                    }
+                }
+            }
         }
         let cluster_enabled = std::env::var("AKASHA_CLUSTER_ENABLED").as_deref() == Ok("1");
         if !cluster_enabled {
@@ -425,6 +440,7 @@ impl Daemon {
             let device_bridge = std::sync::Arc::new(crate::device_bridge::DeviceBridge::new());
             let process_registry = new_process_registry();
             let human_input_store = new_human_input_store();
+            let workspace_store = new_task_workspace_store();
             let task_usage_store = std::sync::Arc::new(crate::api::TaskUsageStore::new());
             let user_rag_store = crate::user_rag::UserRagStore::new_shared(&data_dir);
             let (progress_persistence_tx, progress_persistence_rx) = std::sync::mpsc::channel::<(uuid::Uuid, u8, String)>();
@@ -514,14 +530,17 @@ impl Daemon {
                 }
             });
             let orchestrator_sender = crate::agents::OrchestratorSender::new(high_tx, normal_tx.clone());
-            let main_agent = MainAgent::new(bus.clone(), orchestrator_sender);
+            let main_agent = MainAgent::new(bus.clone(), orchestrator_sender).with_direct_conversation_tx(conv_tx.clone());
             let orchestrator = Arc::new(Orchestrator::new(
                 bus.clone(),
                 db_path.clone(),
+                self.spec_dir.clone(),
+                self.data_dir.clone(),
                 conv_tx.clone(),
                 progress.clone(),
                 llm_router.clone(),
                 task_completion.clone(),
+                long_term_client.clone(),
             ));
             tokio::spawn({
                 let orch = orchestrator.clone();
@@ -546,6 +565,7 @@ impl Daemon {
                 let short_term = short_term.clone();
                 let long_term_client = long_term_client.clone();
                 let human_input_store = human_input_store.clone();
+                let workspace_store = workspace_store.clone();
                 let task_completion = task_completion.clone();
                 let agent_profile_cache = agent_profile_cache.clone();
                 let task_usage_store = task_usage_store.clone();
@@ -590,6 +610,7 @@ impl Daemon {
                             Some(agent_profile_cache.clone()),
                             Some(task_usage_store.clone()),
                             Some(device_bridge.clone()),
+                            Some(workspace_store.clone()),
                         )
                         .instrument(span)
                         .await;
@@ -779,7 +800,23 @@ impl Daemon {
                                     buf.truncate(n);
                                     let full_buf: Vec<u8> = match parse_content_length(&buf) {
                                         Some((header_end, content_length)) if content_length <= MAX_BODY => {
-                                            let total_needed = header_end + 4 + content_length;
+                                            let total_needed = header_end.saturating_add(4).saturating_add(content_length);
+                                            // #region agent log
+                                            if std::env::var("AKASHA_AGENT_DEBUG").map(|v| v == "1").unwrap_or(false) {
+                                                debug_log::log(
+                                                    "daemon.rs:body_read",
+                                                    "content_length branch",
+                                                    &serde_json::json!({
+                                                        "header_end": header_end,
+                                                        "content_length": content_length,
+                                                        "total_needed": total_needed,
+                                                        "buf_len": buf.len(),
+                                                        "max_body": MAX_BODY
+                                                    }),
+                                                    "A",
+                                                );
+                                            }
+                                            // #endregion
                                             if buf.len() >= total_needed {
                                                 buf
                                             } else {
@@ -795,8 +832,39 @@ impl Daemon {
                                                 buf
                                             }
                                         }
-                                        _ => buf,
+                                        _ => {
+                                            // #region agent log
+                                            let pc = parse_content_length(&buf);
+                                            if std::env::var("AKASHA_AGENT_DEBUG").map(|v| v == "1").unwrap_or(false) {
+                                                debug_log::log(
+                                                    "daemon.rs:body_skip",
+                                                    "skip branch (content_length > MAX_BODY or no Content-Length)",
+                                                    &serde_json::json!({
+                                                        "parse_result": pc.map(|(he, cl)| serde_json::json!({
+                                                            "header_end": he,
+                                                            "content_length": cl
+                                                        })),
+                                                        "buf_len": buf.len()
+                                                    }),
+                                                    "A",
+                                                );
+                                            }
+                                            // #endregion
+                                            buf
+                                        }
                                     };
+                                    // #region agent log
+                                    if std::env::var("AKASHA_AGENT_DEBUG").map(|v| v == "1").unwrap_or(false) {
+                                        debug_log::log(
+                                            "daemon.rs:before_parse_request",
+                                            "before parse_request",
+                                            &serde_json::json!({
+                                                "full_buf_len": full_buf.len()
+                                            }),
+                                            "B",
+                                        );
+                                    }
+                                    // #endregion
                                     let (method, path, body, headers) = parse_request(&full_buf);
                                     if method == "GET" && path == "/api/events" {
                                         let _ = crate::api::stream_sse_events(&bus_clone, &mut stream).await;

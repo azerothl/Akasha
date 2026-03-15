@@ -129,3 +129,82 @@ impl Default for DeviceBridge {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn get_pending_empty() {
+        let bridge = DeviceBridge::new();
+        assert!(bridge.get_pending().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn submit_get_pending_fulfill() {
+        let bridge = DeviceBridge::new();
+        let (request_id, rx) = bridge
+            .submit_request(
+                "local_media".to_string(),
+                "camera".to_string(),
+                "capture".to_string(),
+                serde_json::json!({"format": "jpeg"}),
+            )
+            .await;
+        let pending = bridge.get_pending().await;
+        assert!(pending.is_some());
+        let (id, interface, device_id, action, params) = pending.unwrap();
+        assert_eq!(id, request_id);
+        assert_eq!(interface, "local_media");
+        assert_eq!(device_id, "camera");
+        assert_eq!(action, "capture");
+        assert_eq!(params.get("format").and_then(|v| v.as_str()), Some("jpeg"));
+
+        let ok = bridge
+            .fulfill(
+                &request_id,
+                DeviceResult {
+                    success: true,
+                    data: Some("data:image/jpeg;base64,ABC".to_string()),
+                },
+            )
+            .await;
+        assert!(ok);
+        let result = rx.await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.data.as_deref(), Some("data:image/jpeg;base64,ABC"));
+    }
+
+    #[tokio::test]
+    async fn fulfill_wrong_request_id() {
+        let bridge = DeviceBridge::new();
+        let (request_id, _rx) = bridge
+            .submit_request("a".into(), "b".into(), "c".into(), serde_json::Value::Null)
+            .await;
+        let _ = bridge.get_pending().await;
+        let ok = bridge
+            .fulfill(
+                "wrong-id",
+                DeviceResult {
+                    success: false,
+                    data: None,
+                },
+            )
+            .await;
+        assert!(!ok);
+        let ok2 = bridge.fulfill(&request_id, DeviceResult { success: true, data: None }).await;
+        assert!(ok2);
+    }
+
+    #[tokio::test]
+    async fn cancel_drops_receiver() {
+        let bridge = DeviceBridge::new();
+        let (request_id, rx) = bridge
+            .submit_request("x".into(), "y".into(), "z".into(), serde_json::Value::Null)
+            .await;
+        let _ = bridge.get_pending().await;
+        bridge.cancel(&request_id).await;
+        let res = rx.await;
+        assert!(res.is_err());
+    }
+}

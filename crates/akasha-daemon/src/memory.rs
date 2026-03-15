@@ -1,9 +1,18 @@
-//! Memory model (spec 06): short-term (session), persisted per day when persistence_dir is set; compaction when over context, optional long-term.
+//! Memory model (spec 06): short-term (session), persisted per session when persistence_dir is set; compaction when over context, optional long-term.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::RwLock;
+
+/// Validate that `session_id` is safe to use as a filename component.
+/// Allows only alphanumeric characters, `-` and `_` to prevent path traversal.
+fn is_safe_session_id(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
 
 /// One turn in the conversation (user or assistant).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,7 +25,7 @@ pub struct ConversationTurn {
 pub const MAX_COMPACTIONS_PER_SESSION: u32 = 5;
 
 /// In-memory short-term store: session_id -> last N turns.
-/// When persistence_dir is set, sessions whose id starts with "day-" are persisted to JSON and reloaded on startup.
+/// When persistence_dir is set, all sessions are persisted to JSON; day-* is loaded at startup, others on demand in get_turns.
 pub struct ShortTermStore {
     /// session_id -> list of turns (oldest first)
     sessions: RwLock<HashMap<String, Vec<ConversationTurn>>>,
@@ -25,7 +34,7 @@ pub struct ShortTermStore {
     pub max_turns_per_session: usize,
     /// When estimated tokens exceed this ratio of max_context_tokens, compact.
     pub compaction_trigger_ratio: f64,
-    /// If set, day-* sessions are saved to this dir as day-YYYY-MM-DD.json and loaded at startup.
+    /// If set, all sessions are saved to this dir as {session_id}.json; day-* is loaded at startup, others on demand.
     persistence_dir: Option<PathBuf>,
 }
 
@@ -73,6 +82,11 @@ impl ShortTermStore {
     }
 
     pub async fn get_turns(&self, session_id: &str) -> Vec<ConversationTurn> {
+        if !self.sessions.read().await.contains_key(session_id) {
+            if self.persistence_dir.is_some() {
+                self.load_session_from_disk(session_id).await;
+            }
+        }
         let g = self.sessions.read().await;
         g.get(session_id)
             .cloned()
@@ -80,7 +94,7 @@ impl ShortTermStore {
     }
 
     /// Append a turn and trim if over max_turns_per_session.
-    /// When persistence_dir is set and session_id starts with "day-", the session is persisted to disk.
+    /// When persistence_dir is set, the session is persisted to disk.
     pub async fn append(&self, session_id: &str, role: &str, content: String) {
         let to_persist = {
             let mut g = self.sessions.write().await;
@@ -92,7 +106,7 @@ impl ShortTermStore {
             if turns.len() > self.max_turns_per_session {
                 turns.drain(0..(turns.len() - self.max_turns_per_session));
             }
-            if self.persistence_dir.as_ref().is_some_and(|_| session_id.starts_with("day-")) {
+            if self.persistence_dir.is_some() {
                 turns.clone()
             } else {
                 Vec::new()
@@ -100,17 +114,19 @@ impl ShortTermStore {
         };
         if !to_persist.is_empty() {
             if let Some(ref dir) = self.persistence_dir {
-                let path = dir.join(format!("{}.json", session_id));
-                let _ = std::fs::create_dir_all(dir);
-                if let Ok(json) = serde_json::to_string(&to_persist) {
-                    let _ = std::fs::write(&path, json);
+                if is_safe_session_id(session_id) {
+                    let path = dir.join(format!("{}.json", session_id));
+                    if let Ok(json) = serde_json::to_string(&to_persist) {
+                        let _ = tokio::fs::create_dir_all(dir).await;
+                        let _ = tokio::fs::write(&path, json).await;
+                    }
                 }
             }
         }
     }
 
     /// Replace the oldest `count` turns with a single "system" summary turn.
-    /// Persists day-* sessions to disk when persistence_dir is set.
+    /// Persists to disk when persistence_dir is set.
     pub async fn replace_oldest_with_summary(&self, session_id: &str, summary: String, count: usize) {
         let to_persist = {
             let mut g = self.sessions.write().await;
@@ -130,11 +146,11 @@ impl ShortTermStore {
                     0,
                     ConversationTurn {
                         role: "system".to_string(),
-                        content: format!("Résumé de la conversation précédente: {}", summary),
+                        content: format!("Summary of previous conversation: {}", summary),
                     },
                 );
             }
-            if self.persistence_dir.as_ref().is_some_and(|_| session_id.starts_with("day-")) {
+            if self.persistence_dir.is_some() {
                 turns.clone()
             } else {
                 Vec::new()
@@ -142,10 +158,12 @@ impl ShortTermStore {
         };
         if !to_persist.is_empty() {
             if let Some(ref dir) = self.persistence_dir {
-                let path = dir.join(format!("{}.json", session_id));
-                let _ = std::fs::create_dir_all(dir);
-                if let Ok(json) = serde_json::to_string(&to_persist) {
-                    let _ = std::fs::write(&path, json);
+                if is_safe_session_id(session_id) {
+                    let path = dir.join(format!("{}.json", session_id));
+                    if let Ok(json) = serde_json::to_string(&to_persist) {
+                        let _ = tokio::fs::create_dir_all(dir).await;
+                        let _ = tokio::fs::write(&path, json).await;
+                    }
                 }
             }
         }
@@ -161,9 +179,9 @@ impl ShortTermStore {
         let mut out = String::new();
         for t in turns {
             let prefix = match t.role.as_str() {
-                "user" => "Utilisateur:",
+                "user" => "User:",
                 "assistant" => "Assistant:",
-                "system" => "[Contexte]",
+                "system" => "[Context]",
                 _ => "",
             };
             out.push_str(prefix);
@@ -174,17 +192,17 @@ impl ShortTermStore {
         out
     }
 
-    /// Load a day session from disk (day-YYYY-MM-DD.json). Called at daemon startup to restore today's conversation.
-    pub async fn load_day_from_disk(&self, session_id: &str) {
+    /// Load a session from disk ({session_id}.json). Used on demand in get_turns for any session; day-* can also be loaded at startup via load_day_from_disk.
+    pub async fn load_session_from_disk(&self, session_id: &str) {
+        if !is_safe_session_id(session_id) {
+            return;
+        }
         let dir = match &self.persistence_dir {
             Some(d) => d,
             None => return,
         };
-        if !session_id.starts_with("day-") {
-            return;
-        }
         let path = dir.join(format!("{}.json", session_id));
-        let Ok(data) = std::fs::read_to_string(&path) else {
+        let Ok(data) = tokio::fs::read_to_string(&path).await else {
             return;
         };
         let turns: Vec<ConversationTurn> = match serde_json::from_str(&data) {
@@ -198,9 +216,17 @@ impl ShortTermStore {
         g.insert(session_id.to_string(), turns);
     }
 
+    /// Load a day session from disk (day-YYYY-MM-DD.json). Called at daemon startup to restore today's conversation.
+    pub async fn load_day_from_disk(&self, session_id: &str) {
+        if !session_id.starts_with("day-") {
+            return;
+        }
+        self.load_session_from_disk(session_id).await;
+    }
+
     /// Read turns for a day session from disk without loading into the store (e.g. to summarize yesterday).
     pub fn read_day_from_disk(session_id: &str, persistence_dir: &std::path::Path) -> Option<Vec<ConversationTurn>> {
-        if !session_id.starts_with("day-") {
+        if !session_id.starts_with("day-") || !is_safe_session_id(session_id) {
             return None;
         }
         let path = persistence_dir.join(format!("{}.json", session_id));

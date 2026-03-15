@@ -87,6 +87,9 @@ Voir [llm_router.example.yaml](llm_router.example.yaml).
 | `allowed_web_domains`         | liste de strings | Non (défaut : [])                | Domaines autorisés pour `web_fetch` (feature « web »). Utiliser `["*"]` pour tout autoriser (sous réserve de `blocked_web_domains`).                                                                |
 | `blocked_web_domains`         | liste de strings | Non (défaut : [])                | Domaines interdits pour `web_fetch` ; prioritaire sur `allowed_web_domains`.                                                                                                                        |
 | `web_search_enabled`          | booléen          | Non (défaut : false)             | Activer la recherche web (Brave API). Clé : vault `brave_api_key` ou env `BRAVE_API_KEY`.                                                                                                           |
+| `web_crawl_enabled`          | booléen          | Non (défaut : false)            | Activer le crawl de sites via Cloudflare Browser Rendering (/crawl). Nécessite `cloudflare_account_id` et une clé API (vault ou env).                                                              |
+| `cloudflare_account_id`      | string           | Non                             | Identifiant du compte Cloudflare (pour l’URL d’appel à l’API Browser Rendering).                                                                                                                    |
+| `cloudflare_api_key_ref`     | string           | Non                             | Référence de la clé API Cloudflare : `vault://cloudflare_api_token` ou nom de variable d’environnement (ex. `CLOUDFLARE_API_TOKEN`).                                                                |
 | `tool_profiles`               | objet            | Non                              | Profils d’outils : clé = nom du profil, valeur = liste de noms d’outils (ex. `coding: [read_file, write_file, run_command]`).                                                                       |
 | `default_profile`             | string           | Non                              | Nom du profil actif ; si défini, seuls les outils listés dans `tool_profiles[default_profile]` sont autorisés.                                                                                      |
 | `allowed_skill_install_hosts` | liste de strings | Non (défaut : GitHub uniquement) | Hôtes autorisés pour `install_skill` (ex. `github.com`, `gitlab.com`, `raw.githubusercontent.com`, `mon-site.com`). Utiliser `["*"]` pour autoriser tout hôte HTTPS. Par défaut : GitHub seulement. |
@@ -108,6 +111,7 @@ Voir [tools_policy.example.yaml](tools_policy.example.yaml).
 - **Restreindre l’écriture** : n’ajouter que des répertoires précis dans `allowed_write_paths`.
 - **Projets longs (roman, BD, projet de code)** : pour que le projet n'impacte pas le reste du système, créer un **répertoire dédié** par projet (ex. `~/akasha_projects/mon_roman`, `~/projets/code/ma_app`) et l'ajouter seul dans `allowed_read_paths` et `allowed_write_paths`. Ne pas autoriser `"."` ou un répertoire parent large si l'on veut isoler. Voir [projects_long_running.md](projects_long_running.md).
 - **Initiative recherche web (météo, actualités)** : pour que l'agent utilise spontanément `web_search` pour répondre aux demandes d'information externes (météo, prévisions, actualités, horaires, etc.) au lieu de suggérer des sites à l'utilisateur, définir `web_search_enabled: true` et configurer une clé Brave (variable d'environnement `BRAVE_API_KEY` ou vault `brave_api_key`). Sans cela, l'agent pourra au mieux suggérer des sites ou expliquer comment activer la recherche web.
+- **Crawl web optionnel (Cloudflare)** : pour permettre à l'agent de lancer un crawl sur un site entier (ex. documentation, blog) et d'en récupérer le contenu (HTML, Markdown ou JSON), définir `web_crawl_enabled: true`, `cloudflare_account_id` et une clé API (vault ou `CLOUDFLARE_API_TOKEN`). Les domaines crawlables restent limités par `allowed_web_domains` et `blocked_web_domains`. Voir [53_web_crawl_cloudflare.md](53_web_crawl_cloudflare.md).
 - **Interfaces appareil (device)** : pour autoriser la découverte et l’invocation d’appareils (caméra, micro, imprimantes, etc.) via `device_discover` et `device_invoke`, définir `allowed_device_interfaces`. Ex. `["*"]` pour tout autoriser (avec `blocked_device_interfaces: [usb]` pour exclure l’USB) ; ou `[local_media, system]` pour uniquement média local et imprimantes ; ou `[local_media, synthetic_input]` pour ajouter les entrées synthétiques (raccourcis clavier, clics/déplacements souris — jeux, logiciels de dessin). Pour `synthetic_input`, il est recommandé d’ajouter `device_invoke` dans `require_approval` afin que l’utilisateur confirme chaque action (human-in-the-loop). Voir [tools_policy.example.yaml](tools_policy.example.yaml).
 
 ---
@@ -118,7 +122,7 @@ Voir [tools_policy.example.yaml](tools_policy.example.yaml).
 **Format** : JSON.  
 **Utilisé par** : daemon (contexte injecté en tête du prompt LLM), CLI (`akasha init` pour les templates), UI (Paramètres → Profil de l'agent).
 
-Définit l’**identité et la personnalité** de l’agent : nom, ton, règles et contraintes. Ce bloc est formaté par `format_for_prompt()` et injecté en tête du contexte à chaque tour de conversation, afin que l’agent adopte ce profil de façon stable.
+Définit l’**identité et la personnalité** de l’agent : nom, ton, règles et contraintes. Ce bloc est formaté par `format_for_prompt()` (ou par la couche personnalité 5 niveaux quand les YAML sont présents) et injecté en tête du contexte à chaque tour de conversation, afin que l’agent adopte ce profil de façon stable. Voir [52_personality_architecture.md](52_personality_architecture.md) pour l'architecture en 5 niveaux et les fichiers spec/personality_core.yaml, spec/personality_modes.yaml, spec/initiative_policy.yaml.
 
 ### Structure et types
 
@@ -132,6 +136,8 @@ Définit l’**identité et la personnalité** de l’agent : nom, ton, règles 
 | `rules`      | liste de strings | Non         | Règles à respecter (une par ligne).                                        |
 | `can_do`     | liste de strings | Non         | Comportements autorisés.                                                    |
 | `cannot_do`   | liste de strings | Non         | Comportements interdits.                                                    |
+| `traits_override` | objet (clé → nombre 0–1) | Non | Surcharge des traits (verbosity, warmth, pedagogy, rigor, humor, proactivity, cautiousness, initiative). Vide = valeurs par défaut du personality_core. |
+| `preferred_mode` | string | Non | Mode par défaut : `"assistant"`, `"operator"`, `"architect"`, `"onboarding"`. |
 
 ### Limites (UI)
 

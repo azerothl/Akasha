@@ -507,8 +507,78 @@ fn windows_spawn(
     }))
 }
 
+/// Substitute $VAR, ${VAR}, and $$ (escape) patterns in a string with values from env pairs.
+/// Uses full-identifier matching for $VAR to avoid prefix collisions (e.g. $PATH won't expand
+/// inside $PATHOLOGY). $$ is an escape sequence that produces a literal $.
+fn substitute_env_vars(s: &str, env: &[(String, String)]) -> String {
+    let map: std::collections::HashMap<&str, &str> =
+        env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+    let mut result = String::with_capacity(s.len());
+    let mut remaining = s;
+
+    while !remaining.is_empty() {
+        let Some(dollar_pos) = remaining.find('$') else {
+            result.push_str(remaining);
+            break;
+        };
+        result.push_str(&remaining[..dollar_pos]);
+        remaining = &remaining[dollar_pos..];
+        let rest = &remaining[1..]; // after '$'
+
+        if rest.starts_with('$') {
+            // $$ -> literal $
+            result.push('$');
+            remaining = &remaining[2..];
+        } else if rest.starts_with('{') {
+            // ${VAR} form: find the closing '}'
+            let inner = &rest[1..];
+            if let Some(close) = inner.find('}') {
+                let var_name = &inner[..close];
+                if let Some(val) = map.get(var_name) {
+                    result.push_str(val);
+                } else {
+                    result.push_str("${");
+                    result.push_str(var_name);
+                    result.push('}');
+                }
+                remaining = &rest[1 + close + 1..];
+            } else {
+                // Unclosed ${, emit as-is
+                result.push('$');
+                remaining = rest;
+            }
+        } else {
+            // $VAR form: only valid if first char is a letter or underscore (POSIX identifier rules)
+            let first = rest.chars().next();
+            if first.map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false) {
+                // Collect the full identifier (alphanumeric + underscore)
+                let ident_end = rest
+                    .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .unwrap_or(rest.len());
+                let var_name = &rest[..ident_end];
+                if let Some(val) = map.get(var_name) {
+                    result.push_str(val);
+                } else {
+                    result.push('$');
+                    result.push_str(var_name);
+                }
+                remaining = &rest[ident_end..];
+            } else {
+                // '$' not followed by a valid identifier start, keep as-is
+                result.push('$');
+                remaining = rest;
+            }
+        }
+    }
+
+    result
+}
+
 /// Run a command with timeout. Command name must be allowed by policy.
 /// `extra_env`: optional env vars (e.g. from vault) to inject into the child process.
+/// When extra_env is set, $VAR and ${VAR} patterns in args are substituted in-process,
+/// and the command is spawned directly (no shell) with env vars passed via Command::env.
 pub async fn run_command(
     command: &str,
     args: &[String],
@@ -535,19 +605,30 @@ pub async fn run_command(
     let timeout_secs = policy.command_timeout_secs;
     let cwd = cwd.unwrap_or_else(|| Path::new("."));
     let env_slice = extra_env.unwrap_or(&[]);
-    #[cfg(windows)]
-    let child = windows_spawn(command, args, cwd, env_slice).with_context(|| format!("run_command {}", command))?;
-    #[cfg(not(windows))]
+
+    // Substitute $VAR/${VAR} patterns in args in-process, then spawn directly (no shell).
+    // Env vars are also passed via Command::env so child processes inherit them.
+    let substituted_args: Vec<String> = args.iter().map(|a| substitute_env_vars(a, env_slice)).collect();
+
     let child = {
-        let mut cmd = tokio::process::Command::new(command);
-        cmd.args(args).current_dir(cwd)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        for (k, v) in env_slice {
-            cmd.env(k, v);
+        #[cfg(windows)]
+        {
+            windows_spawn(command, &substituted_args, cwd, env_slice)
+                .with_context(|| format!("run_command {}", command))?
         }
-        cmd.spawn().with_context(|| format!("run_command {}", command))?
+        #[cfg(not(windows))]
+        {
+            let mut cmd = tokio::process::Command::new(command);
+            cmd.args(&substituted_args).current_dir(cwd)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            for (k, v) in env_slice {
+                cmd.env(k, v);
+            }
+            cmd.spawn().with_context(|| format!("run_command {}", command))?
+        }
     };
+
     let timeout = Duration::from_secs(if timeout_secs == 0 { 60 } else { timeout_secs });
     let output: std::process::Output = tokio::time::timeout(timeout, child.wait_with_output())
         .await

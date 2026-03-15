@@ -84,6 +84,7 @@ async fn send_message_ack(
     session_id: Option<String>,
     attachments: Option<Vec<AttachmentPayload>>,
     port: Option<u16>,
+    reconnect: Option<bool>,
 ) -> Result<SendMessageAckResult, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let base = daemon_base_url(port);
@@ -98,6 +99,9 @@ async fn send_message_ack(
         Some(s) if !s.is_empty() => serde_json::json!({ "message": message_for_body, "session_id": s }),
         _ => serde_json::json!({ "message": message_for_body }),
     };
+    if reconnect == Some(true) {
+        body["reconnect"] = serde_json::json!(true);
+    }
     if let Some(ref atts) = attachments {
         if !atts.is_empty() {
             let arr: Vec<serde_json::Value> = atts
@@ -128,7 +132,7 @@ async fn send_message_ack(
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let task_id = json.get("task_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let session_id = json.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let message = json.get("message").and_then(|v| v.as_str()).unwrap_or("Je prends en compte votre demande.").to_string();
+    let message = json.get("message").and_then(|v| v.as_str()).unwrap_or("Request received. You can follow progress in the Tasks tab.").to_string();
     Ok(SendMessageAckResult {
         ack: true,
         task_id,
@@ -891,12 +895,37 @@ async fn get_memory_short_term(session_id: Option<String>, port: Option<u16>) ->
     Ok(json)
 }
 
-/// Memory long-term: GET /api/memory/long-term?limit=50
+/// Memory long-term: GET /api/memory/long-term?limit=200&offset=0 (paginated)
 #[tauri::command]
-async fn get_memory_long_term(limit: Option<u32>, port: Option<u16>) -> Result<serde_json::Value, String> {
+async fn get_memory_long_term(limit: Option<u32>, offset: Option<u32>, port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
-    let limit = limit.unwrap_or(50).min(200);
-    let url = format!("{}/api/memory/long-term?limit={}", daemon_base_url(port), limit);
+    let limit = limit.unwrap_or(200).min(200);
+    let offset = offset.unwrap_or(0);
+    let url = format!("{}/api/memory/long-term?limit={}&offset={}", daemon_base_url(port), limit, offset);
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Memory search: GET /api/memory/search?q=...&top_k=...
+#[tauri::command]
+async fn get_memory_search(q: String, top_k: Option<u32>, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let q = q.trim();
+    if q.is_empty() {
+        return Err("missing or empty q".to_string());
+    }
+    let top_k = top_k.unwrap_or(10).min(20);
+    let url = format!(
+        "{}/api/memory/search?q={}&top_k={}",
+        daemon_base_url(port),
+        urlencoding::encode(q),
+        top_k
+    );
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
@@ -923,6 +952,22 @@ async fn delete_memory_long_term(id: String, port: Option<u16>) -> Result<(), St
         return Err(format!("{} {}", status, body));
     }
     Ok(())
+}
+
+/// Memory long-term: POST /api/memory/rebuild-relations — recompute "similar" relations for all entries
+#[tauri::command]
+async fn rebuild_memory_relations(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/memory/rebuild-relations", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+        return Err(err.to_string());
+    }
+    Ok(json)
 }
 
 /// Schedule run reports: GET /api/schedule_run_reports — completed schedule runs with message (for chat).
@@ -1043,6 +1088,62 @@ async fn post_device_result(
 async fn get_agent_profile(port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let url = format!("{}/api/agent-profile", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// User profile: GET /api/user-profile (first_name, last_name, how_to_call, onboarding_completed).
+#[tauri::command]
+async fn get_user_profile(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/user-profile", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// User profile: POST /api/user-profile (first_name?, last_name?, how_to_call?, onboarding_completed?, proactive_check_in_enabled?, proactive_check_in_interval_days?).
+#[tauri::command]
+async fn post_user_profile(body: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/user-profile", daemon_base_url(port));
+    let client = http_client();
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// First message (onboarding, daily greeting, proactive): GET /api/first-message?context=...
+#[tauri::command]
+async fn get_first_message(context: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let context = context.trim();
+    let url = if context.is_empty() {
+        format!("{}/api/first-message", daemon_base_url(port))
+    } else {
+        format!(
+            "{}/api/first-message?context={}",
+            daemon_base_url(port),
+            urlencoding::encode(context)
+        )
+    };
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
@@ -1259,7 +1360,9 @@ pub fn run() {
             get_task_runs,
             get_memory_short_term,
             get_memory_long_term,
+            get_memory_search,
             delete_memory_long_term,
+            rebuild_memory_relations,
             get_schedule_run_reports,
             get_user_rag_documents,
             add_user_rag_document,
@@ -1268,6 +1371,9 @@ pub fn run() {
             post_device_result,
             get_agent_profile,
             post_agent_profile,
+            get_user_profile,
+            post_user_profile,
+            get_first_message,
             execute_synthetic_input,
             get_docs,
             get_config,

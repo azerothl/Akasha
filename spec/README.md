@@ -2,6 +2,8 @@
 
 Ce dossier contient la documentation technique et fonctionnelle du projet. Les documents sont regroupés par thème pour faciliter la navigation.
 
+**Documentation publique (binaires uniquement)** : le guide utilisateur sans référence au code est [docs/user_guide_final.md](../docs/user_guide_final.md) ; il est livré dans le zip des releases sous `docs/user_guide.md` et affiché dans l'onglet Doc des interfaces.
+
 ---
 
 ## Sommaire
@@ -92,6 +94,7 @@ Voir aussi les documents listés en [§1](#1-vision-et-périmètre) (scope, FR, 
 | Document | Description |
 |----------|-------------|
 | [33_agents_tools_orchestrator_skills.md](33_agents_tools_orchestrator_skills.md) | **Feuille de route** : outils machine, politique, conteneur, skills chargeables, orchestrateur seul point d’entrée, sous-agents, onglets UI Agents/Actions. État d’implémentation. |
+| [53_web_crawl_cloudflare.md](53_web_crawl_cloudflare.md) | **Crawl web optionnel (Cloudflare)** : intégration optionnelle de l'endpoint /crawl (Browser Rendering) pour crawler un site entier ; config dans tools_policy, outils web_crawl / web_crawl_status. |
 
 ### UI et Scheduler
 

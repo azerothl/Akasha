@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import RelationGraph from "relation-graph/react";
+import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
+import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
 import { preprocessMessagePaths } from "./preprocessMessagePaths";
 import { getCached, setCached } from "./useTabCache";
 import { useI18n } from "./useI18n";
@@ -8,10 +11,123 @@ const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => (
 
 const DAEMON_PORT = 3876;
 const THEME_STORAGE_KEY = "akasha_theme";
+const AKASHA_SESSION_ID_KEY = "akasha_session_id";
 
 export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_latte";
 
 const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "light_latte"];
+
+/** Graph colors per theme (aligned with styles.css [data-theme]) so the memory graph respects dark/light. */
+const GRAPH_THEME_COLORS: Record<
+  ThemeId,
+  {
+    backgroundColor: string;
+    defaultNodeColor: string;
+    defaultNodeFontColor: string;
+    defaultNodeBorderColor: string;
+    defaultLineColor: string;
+    defaultLineWidth: number;
+    defaultLineFontColor: string;
+    defaultShowLineLabel: boolean;
+    checkedLineColor: string;
+    /** Per-type node colors for better contrast and distinction (entry, related, selected). */
+    nodeType: {
+      entry: { color: string; fontColor: string };
+      related: { color: string; fontColor: string };
+      selected: { color: string; fontColor: string; borderColor: string };
+    };
+  }
+> = {
+  dark_akasha: {
+    backgroundColor: "#0b0f17",
+    defaultNodeColor: "#1a2233",
+    defaultNodeFontColor: "#e4e4e7",
+    defaultNodeBorderColor: "#2a3448",
+    defaultLineColor: "#6b7280",
+    defaultLineWidth: 2,
+    defaultLineFontColor: "#a1a1aa",
+    defaultShowLineLabel: true,
+    checkedLineColor: "#7c8cff",
+    nodeType: {
+      entry: { color: "#1e3a5f", fontColor: "#e4e4e7" },
+      related: { color: "#334155", fontColor: "#cbd5e1" },
+      selected: { color: "#312e81", fontColor: "#e4e4e7", borderColor: "#7c8cff" },
+    },
+  },
+  dark: {
+    backgroundColor: "#0f0f12",
+    defaultNodeColor: "#27272a",
+    defaultNodeFontColor: "#e4e4e7",
+    defaultNodeBorderColor: "#27272a",
+    defaultLineColor: "#71717a",
+    defaultLineWidth: 2,
+    defaultLineFontColor: "#a1a1aa",
+    defaultShowLineLabel: true,
+    checkedLineColor: "#6366f1",
+    nodeType: {
+      entry: { color: "#1e1b4b", fontColor: "#e4e4e7" },
+      related: { color: "#3f3f46", fontColor: "#d4d4d8" },
+      selected: { color: "#312e81", fontColor: "#e4e4e7", borderColor: "#6366f1" },
+    },
+  },
+  dark_nord: {
+    backgroundColor: "#2e3440",
+    defaultNodeColor: "#434c5e",
+    defaultNodeFontColor: "#eceff4",
+    defaultNodeBorderColor: "#434c5e",
+    defaultLineColor: "#5e6778",
+    defaultLineWidth: 2,
+    defaultLineFontColor: "#d8dee9",
+    defaultShowLineLabel: true,
+    checkedLineColor: "#88c0d0",
+    nodeType: {
+      entry: { color: "#3b4252", fontColor: "#eceff4" },
+      related: { color: "#4c566a", fontColor: "#d8dee9" },
+      selected: { color: "#2e3440", fontColor: "#eceff4", borderColor: "#88c0d0" },
+    },
+  },
+  light: {
+    backgroundColor: "#f4f4f5",
+    defaultNodeColor: "#ffffff",
+    defaultNodeFontColor: "#18181b",
+    defaultNodeBorderColor: "#d4d4d8",
+    defaultLineColor: "#71717a",
+    defaultLineWidth: 2,
+    defaultLineFontColor: "#52525b",
+    defaultShowLineLabel: true,
+    checkedLineColor: "#4f46e5",
+    nodeType: {
+      entry: { color: "#dbeafe", fontColor: "#1e3a8a" },
+      related: { color: "#f1f5f9", fontColor: "#475569" },
+      selected: { color: "#eef2ff", fontColor: "#18181b", borderColor: "#4f46e5" },
+    },
+  },
+  light_latte: {
+    backgroundColor: "#eff1f5",
+    defaultNodeColor: "#e6e9ef",
+    defaultNodeFontColor: "#4c4f69",
+    defaultNodeBorderColor: "#bcc0cc",
+    defaultLineColor: "#8c8fa1",
+    defaultLineWidth: 2,
+    defaultLineFontColor: "#6c6f85",
+    defaultShowLineLabel: true,
+    checkedLineColor: "#8839ef",
+    nodeType: {
+      entry: { color: "#e6e9ef", fontColor: "#4c4f69" },
+      related: { color: "#ccd0da", fontColor: "#5c5f77" },
+      selected: { color: "#e0e0ea", fontColor: "#4c4f69", borderColor: "#8839ef" },
+    },
+  },
+};
+
+/** Line color for graph edges (visible on all themes). */
+const GRAPH_LINE_COLOR: Record<ThemeId, string> = {
+  dark_akasha: "#94a3b8",
+  dark: "#94a3b8",
+  dark_nord: "#88c0d0",
+  light: "#64748b",
+  light_latte: "#6c6f85",
+};
 
 function loadSavedTheme(): ThemeId {
   try {
@@ -23,10 +139,13 @@ function loadSavedTheme(): ThemeId {
   return "dark_akasha";
 }
 
-type Tab = "chat" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
+type Tab = "chat" | "scheduled" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
 
-type SettingsSection = "display" | "system" | "agent" | "data";
-type AgentProfileSubTab = "identity" | "personality" | "rules" | "can_do" | "cannot_do";
+type SettingsSection = "display" | "system" | "agent" | "user" | "data";
+type AgentProfileSubTab = "identity" | "personality" | "traits" | "rules" | "can_do" | "cannot_do";
+
+const TRAIT_KEYS = ["verbosity", "warmth", "pedagogy", "rigor", "humor", "proactivity", "cautiousness", "initiative"] as const;
+const PREFERRED_MODES = ["assistant", "operator", "architect", "onboarding"] as const;
 
 const AGENT_PROFILE_LIMITS = {
   name: 128,
@@ -217,6 +336,7 @@ function App() {
     updated_at?: string;
     progress?: Array<{ progress_pct?: number; message?: string }>;
   } | null>(null);
+  const [calendarTaskDetailError, setCalendarTaskDetailError] = useState<string | null>(null);
   const [calendarSelectedScheduleId, setCalendarSelectedScheduleId] = useState<string | null>(null);
   const [scheduleDetail, setScheduleDetail] = useState<{
     id: string;
@@ -231,7 +351,9 @@ function App() {
   const [scheduleDetailError, setScheduleDetailError] = useState<string | null>(null);
   const [scheduleEditPrompt, setScheduleEditPrompt] = useState("");
   const [schedulePromptSaving, setSchedulePromptSaving] = useState(false);
-  const [_calendarRunsCollapsed, _setCalendarRunsCollapsed] = useState(false);
+    const [calendarSchedulesSelectedForDelete, setCalendarSchedulesSelectedForDelete] = useState<Set<string>>(new Set());
+    const [scheduleDeleting, setScheduleDeleting] = useState(false);
+    const [_calendarRunsCollapsed, _setCalendarRunsCollapsed] = useState(false);
   type CalendarGridView = "day" | "week" | "month";
   const [calendarGridView, setCalendarGridView] = useState<CalendarGridView>("week");
   type CalendarGridEvent = { at: string; task_id: string; type: string; status: string; label?: string; schedule_id?: string | null };
@@ -295,22 +417,116 @@ function App() {
     return { byHour, byDate };
   }, [calendarGridEvents]);
   const [memoryShortTerm, setMemoryShortTerm] = useState<Array<{ role: string; content: string }>>([]);
-  const [memoryLongTerm, setMemoryLongTerm] = useState<Array<{ id?: string; content: string; created_at: string; source: string }>>([]);
+  type MemoryLongTermEntry = { id?: string; content: string; created_at: string; source: string; related?: Array<{ id: string; kind?: string }> };
+  const [memoryLongTerm, setMemoryLongTerm] = useState<MemoryLongTermEntry[]>([]);
+  const [memoryLongTermTotal, setMemoryLongTermTotal] = useState(0);
   const [memoryLongTermAvailable, setMemoryLongTermAvailable] = useState(false);
+  const [memoryLongTermLoadingMore, setMemoryLongTermLoadingMore] = useState(false);
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
   type MemorySubTab = "short" | "long";
   const [memorySubTab, setMemorySubTab] = useState<MemorySubTab>("short");
+  const [memorySearchQuery, setMemorySearchQuery] = useState("");
+  const [memorySearchResults, setMemorySearchResults] = useState<Array<{ id: string; content: string }>>([]);
+  const [memorySearchActive, setMemorySearchActive] = useState(false);
+  const [memorySearchLoading, setMemorySearchLoading] = useState(false);
+  const [memoryViewGraph, setMemoryViewGraph] = useState(false);
+  const [memoryLongTermSelected, setMemoryLongTermSelected] = useState(0);
+  const [memoryRebuildLoading, setMemoryRebuildLoading] = useState(false);
+  const [memoryRebuildMessage, setMemoryRebuildMessage] = useState<string | null>(null);
+  /** When set, show modal with full entry content and "Voir dans la liste" (index >= 0). */
+  const [memoryGraphDetail, setMemoryGraphDetail] = useState<{ entry: MemoryLongTermEntry; index: number } | null>(null);
+  const memoryGraphRef = useRef<RelationGraphComponent | null>(null);
+  /** Track last node click for double-click detection: single = recenter, double = open detail modal. */
+  const memoryGraphLastClickRef = useRef<{ nodeId: string; at: number } | null>(null);
+
+  function buildMemoryGraphData(
+    entries: MemoryLongTermEntry[],
+    selectedIndex: number,
+    nodePalette: typeof GRAPH_THEME_COLORS.dark_akasha.nodeType,
+    lineColor: string
+  ): RGJsonData | null {
+    const idToEntry = new Map<string, MemoryLongTermEntry>();
+    for (const e of entries) {
+      if (e.id) idToEntry.set(e.id, e);
+    }
+    const nodeIds = new Set<string>(idToEntry.keys());
+    for (const e of entries) {
+      for (const r of e.related ?? []) {
+        nodeIds.add(r.id);
+      }
+    }
+    if (nodeIds.size === 0) return null;
+    const selectedEntry = entries[selectedIndex];
+    const selectedId = selectedEntry?.id && nodeIds.has(selectedEntry.id) ? selectedEntry.id : null;
+    const nodes = Array.from(nodeIds).map((id) => {
+      const entry = idToEntry.get(id);
+      const text = entry
+        ? `${entry.content.slice(0, 40)}${entry.content.length > 40 ? "…" : ""}`
+        : id.slice(0, 8);
+      const isSelected = id === selectedId;
+      const isEntry = !!entry;
+      const style = isSelected
+        ? nodePalette.selected
+        : isEntry
+          ? nodePalette.entry
+          : nodePalette.related;
+      return {
+        id,
+        text,
+        color: style.color,
+        fontColor: style.fontColor,
+        ...(isSelected && "borderColor" in style
+          ? { borderColor: (style as { borderColor: string }).borderColor, borderWidth: 2 }
+          : {}),
+      };
+    });
+    const lines: Array<{ id: string; from: string; to: string; text?: string; color?: string; lineWidth?: number }> = [];
+    for (const e of entries) {
+      if (!e.id) continue;
+      for (const r of e.related ?? []) {
+        const kind = r.kind ?? "related";
+        lines.push({
+          id: `${e.id}-${r.id}`,
+          from: e.id,
+          to: r.id,
+          text: kind,
+          color: lineColor,
+          lineWidth: 2,
+        });
+      }
+    }
+    const rootId = selectedId ?? (nodes[0]?.id ?? undefined);
+    return { nodes, lines, rootId };
+  }
+
   const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(AKASHA_SESSION_ID_KEY);
+    } catch {
+      return null;
+    }
+  });
   const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string }>>([]);
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
   const userRagFileInputRef = useRef<HTMLInputElement>(null);
   const agentAvatarFileInputRef = useRef<HTMLInputElement>(null);
   const userAvatarFileInputRef = useRef<HTMLInputElement>(null);
-  /** Agent profile (name, role, gender, avatar, personality, rules, can_do, cannot_do) for Settings panel. */
-  const [agentProfile, setAgentProfile] = useState<{ name: string; role: string; gender: string; avatar: string; personality: string; rules: string[]; can_do: string[]; cannot_do: string[] }>({
+  /** Agent profile (name, role, gender, avatar, personality, rules, can_do, cannot_do, traits_override, preferred_mode) for Settings panel. */
+  const [agentProfile, setAgentProfile] = useState<{
+    name: string;
+    role: string;
+    gender: string;
+    avatar: string;
+    personality: string;
+    rules: string[];
+    can_do: string[];
+    cannot_do: string[];
+    traits_override: Record<string, number>;
+    preferred_mode: string;
+  }>({
     name: "",
     role: "",
     gender: "",
@@ -319,6 +535,8 @@ function App() {
     rules: [],
     can_do: [],
     cannot_do: [],
+    traits_override: {},
+    preferred_mode: "",
   });
   /** User avatar (data URL) for chat display. Stored in localStorage. */
   const [userAvatar, setUserAvatar] = useState<string>(() => {
@@ -331,6 +549,18 @@ function App() {
   const [agentProfileLoading, setAgentProfileLoading] = useState(false);
   const [agentProfileSaving, setAgentProfileSaving] = useState(false);
   const [agentProfileError, setAgentProfileError] = useState<string | null>(null);
+  /** User profile (first name, how to call, proactive check-in) for Settings panel. */
+  const [userProfile, setUserProfile] = useState<{
+    first_name: string;
+    last_name: string;
+    how_to_call: string;
+    onboarding_completed: boolean;
+    proactive_check_in_enabled: boolean;
+    proactive_check_in_interval_days: number;
+  }>({ first_name: "", last_name: "", how_to_call: "", onboarding_completed: false, proactive_check_in_enabled: false, proactive_check_in_interval_days: 0 });
+  const [userProfileLoading, setUserProfileLoading] = useState(false);
+  const [userProfileSaving, setUserProfileSaving] = useState(false);
+  const [userProfileError, setUserProfileError] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("display");
   const [agentProfileSubTab, setAgentProfileSubTab] = useState<AgentProfileSubTab>("identity");
   const [rulesDraft, setRulesDraft] = useState("");
@@ -341,6 +571,8 @@ function App() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatInlineReplyRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
+  /** True when we loaded with existing messages (reconnect during the day); send once then clear. */
+  const firstMessageSinceLoadRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Tasks for which we already auto-opened the human-input modal (avoid re-opening every poll). */
   const humanInputAutoOpenedRef = useRef<Set<string>>(new Set());
@@ -464,14 +696,15 @@ function App() {
     return () => clearInterval(id);
   }, [fetchDevicePending]);
 
-  // Load today's conversation history on mount (short-term = current day, so it survives UI restart).
+  // Load conversation history on mount (use persisted session_id so it survives UI restart).
+  // If session is empty, fetch user profile and optionally first-message (onboarding or daily greeting).
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const data = await invoke<{ session_id?: string; turns?: Array<{ role: string; content: string }> }>(
           "get_memory_short_term",
-          { port: DAEMON_PORT }
+          { sessionId: sessionId ?? undefined, port: DAEMON_PORT }
         );
         if (cancelled) return;
         if (data?.session_id && (data.turns?.length ?? 0) > 0) {
@@ -482,8 +715,63 @@ function App() {
             }))
           );
           setSessionId(data.session_id);
+          firstMessageSinceLoadRef.current = true;
+          try {
+            localStorage.setItem(AKASHA_SESSION_ID_KEY, data.session_id);
+          } catch {
+            /* ignore */
+          }
         } else if (data?.session_id) {
           setSessionId(data.session_id);
+          try {
+            localStorage.setItem(AKASHA_SESSION_ID_KEY, data.session_id);
+          } catch {
+            /* ignore */
+          }
+          // Session empty: show onboarding, or proactive check-in, or first-today greeting
+          if ((data.turns?.length ?? 0) === 0) {
+            try {
+              const profile = await invoke<{ how_to_call?: string; onboarding_completed?: boolean }>("get_user_profile", { port: DAEMON_PORT });
+              if (cancelled) return;
+              const needsOnboarding = !profile?.how_to_call?.trim() || !profile?.onboarding_completed;
+              if (needsOnboarding) {
+                const first = await invoke<{ message?: string; session_id?: string }>("get_first_message", { context: "onboarding", port: DAEMON_PORT });
+                if (cancelled) return;
+                const msg = first?.message?.trim();
+                if (msg && first?.session_id) {
+                  setMessages([{ role: "assistant", text: msg }]);
+                  setSessionId(first.session_id);
+                  try {
+                    localStorage.setItem(AKASHA_SESSION_ID_KEY, first.session_id);
+                  } catch {
+                    /* ignore */
+                  }
+                }
+              } else {
+                const proactive = await invoke<{ message?: string; session_id?: string }>("get_first_message", { context: "proactive", port: DAEMON_PORT });
+                if (cancelled) return;
+                let msg = proactive?.message?.trim();
+                let sid = proactive?.session_id;
+                if (!msg && sid) {
+                  const firstToday = await invoke<{ message?: string; session_id?: string }>("get_first_message", { context: "first_today", port: DAEMON_PORT });
+                  if (cancelled) return;
+                  msg = firstToday?.message?.trim();
+                  sid = firstToday?.session_id;
+                }
+                if (msg && sid) {
+                  setMessages([{ role: "assistant", text: msg }]);
+                  setSessionId(sid);
+                  try {
+                    localStorage.setItem(AKASHA_SESSION_ID_KEY, sid);
+                  } catch {
+                    /* ignore */
+                  }
+                }
+              }
+            } catch {
+              /* ignore */
+            }
+          }
         }
       } catch {
         /* ignore */
@@ -553,14 +841,14 @@ function App() {
   }, [pendingNotifOpen]);
 
   // Global keyboard shortcuts: 1–7 = switch tab (when not in a modal or input)
-  const tabsByIndex: Tab[] = ["chat", "router", "docs", "tasks", "calendar", "memory", "settings"];
+  const tabsByIndex: Tab[] = ["chat", "scheduled", "router", "docs", "tasks", "calendar", "memory", "settings"];
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (humanInputModalTaskId != null) return;
       const target = e.target as HTMLElement;
       if (target?.closest("input") || target?.closest("textarea") || target?.closest("[role='dialog']")) return;
-      const n = e.key === "1" ? 1 : e.key === "2" ? 2 : e.key === "3" ? 3 : e.key === "4" ? 4 : e.key === "5" ? 5 : e.key === "6" ? 6 : e.key === "7" ? 7 : 0;
-      if (n >= 1 && n <= 7) {
+      const n = e.key === "1" ? 1 : e.key === "2" ? 2 : e.key === "3" ? 3 : e.key === "4" ? 4 : e.key === "5" ? 5 : e.key === "6" ? 6 : e.key === "7" ? 7 : e.key === "8" ? 8 : 0;
+      if (n >= 1 && n <= 8) {
         e.preventDefault();
         setTab(tabsByIndex[n - 1]);
       }
@@ -813,6 +1101,8 @@ function App() {
     fetchCalendar();
   }, [tab, fetchCalendar]);
 
+  const MEMORY_PAGE_SIZE = 200;
+
   const fetchMemory = useCallback(async () => {
     setMemoryLoading(true);
     setMemoryError(null);
@@ -822,33 +1112,96 @@ function App() {
           sessionId: sessionId ?? undefined,
           port: DAEMON_PORT,
         }),
-        invoke<{ entries?: Array<{ id?: string; content: string; created_at: string; source: string }>; long_term_available?: boolean }>("get_memory_long_term", {
-          limit: 50,
+        invoke<{ entries?: MemoryLongTermEntry[]; total?: number; long_term_available?: boolean }>("get_memory_long_term", {
+          limit: MEMORY_PAGE_SIZE,
+          offset: 0,
           port: DAEMON_PORT,
         }),
       ]);
       const short = shortRes?.turns ?? [];
-      const long = longRes?.entries ?? [];
+      const long = (longRes?.entries ?? []) as MemoryLongTermEntry[];
+      const total = typeof longRes?.total === "number" ? longRes.total : long.length;
       setMemoryShortTerm(short);
       setMemoryLongTerm(long);
+      setMemoryLongTermTotal(total);
       setMemoryLongTermAvailable(longRes?.long_term_available ?? false);
-      setCached("memory", { short, long, longTermAvailable: longRes?.long_term_available ?? false });
+      setCached("memory", { short, long, longTermAvailable: longRes?.long_term_available ?? false, total });
     } catch (e) {
       setMemoryError(String(e));
       setMemoryShortTerm([]);
       setMemoryLongTerm([]);
+      setMemoryLongTermTotal(0);
       setMemoryLongTermAvailable(false);
     } finally {
       setMemoryLoading(false);
     }
   }, [sessionId]);
 
+  const loadMoreMemoryLongTerm = useCallback(async () => {
+    if (memoryLongTermLoadingMore || memoryLongTerm.length >= memoryLongTermTotal) return;
+    setMemoryLongTermLoadingMore(true);
+    try {
+      const res = await invoke<{ entries?: MemoryLongTermEntry[]; total?: number }>("get_memory_long_term", {
+        limit: MEMORY_PAGE_SIZE,
+        offset: memoryLongTerm.length,
+        port: DAEMON_PORT,
+      });
+      const next = (res?.entries ?? []) as MemoryLongTermEntry[];
+      const total = typeof res?.total === "number" ? res.total : memoryLongTermTotal;
+      setMemoryLongTerm((prev) => [...prev, ...next]);
+      setMemoryLongTermTotal(total);
+    } catch {
+      // keep current state
+    } finally {
+      setMemoryLongTermLoadingMore(false);
+    }
+  }, [memoryLongTerm.length, memoryLongTermTotal, memoryLongTermLoadingMore]);
+
+  const rebuildMemoryRelations = useCallback(async () => {
+    setMemoryRebuildLoading(true);
+    setMemoryRebuildMessage(null);
+    try {
+      const res = await invoke<{ inserted?: number; ok?: boolean; error?: string }>("rebuild_memory_relations", { port: DAEMON_PORT });
+      if (res?.ok && typeof res.inserted === "number") {
+        setMemoryRebuildMessage(t("memory.rebuild_success").replace("{{count}}", String(res.inserted)));
+        fetchMemory();
+      } else {
+        setMemoryRebuildMessage(res?.error ?? t("memory.rebuild_error"));
+      }
+    } catch (e) {
+      setMemoryRebuildMessage(String(e));
+    } finally {
+      setMemoryRebuildLoading(false);
+    }
+    setTimeout(() => setMemoryRebuildMessage(null), 5000);
+  }, [fetchMemory, t]);
+
+  const runMemorySearch = useCallback(async () => {
+    const q = memorySearchQuery.trim();
+    if (!q) return;
+    setMemorySearchLoading(true);
+    try {
+      const res = await invoke<{ results?: Array<{ id: string; content: string }>; long_term_available?: boolean }>("get_memory_search", {
+        q,
+        top_k: 20,
+        port: DAEMON_PORT,
+      });
+      setMemorySearchResults(res?.results ?? []);
+    } catch (e) {
+      setMemoryError(String(e));
+      setMemorySearchResults([]);
+    } finally {
+      setMemorySearchLoading(false);
+    }
+  }, [memorySearchQuery]);
+
   useEffect(() => {
     if (tab !== "memory") return;
-    const cached = getCached<{ short: Array<{ role: string; content: string }>; long: Array<{ id?: string; content: string; created_at: string; source: string }>; longTermAvailable: boolean }>("memory");
+    const cached = getCached<{ short: Array<{ role: string; content: string }>; long: MemoryLongTermEntry[]; longTermAvailable: boolean; total?: number }>("memory");
     if (cached != null) {
       setMemoryShortTerm(cached.short);
       setMemoryLongTerm(cached.long);
+      setMemoryLongTermTotal(cached.total ?? cached.long.length);
       setMemoryLongTermAvailable(cached.longTermAvailable);
       setMemoryLoading(false);
       setMemoryError(null);
@@ -856,6 +1209,48 @@ function App() {
     }
     fetchMemory();
   }, [tab, fetchMemory]);
+
+  useEffect(() => {
+    if (memoryLongTerm.length > 0 && memoryLongTermSelected >= memoryLongTerm.length) {
+      setMemoryLongTermSelected(memoryLongTerm.length - 1);
+    }
+  }, [memoryLongTerm.length, memoryLongTermSelected]);
+
+  const memoryGraphOptions = useMemo<RGOptions>(() => {
+    const colors = GRAPH_THEME_COLORS[theme];
+    const lineColor = GRAPH_LINE_COLOR[theme];
+    return {
+      defaultJunctionPoint: "border",
+      layout: { layoutName: "force" },
+      disableZoom: false,
+      disableDragNode: false,
+      backgroundColor: colors.backgroundColor,
+      defaultNodeColor: colors.defaultNodeColor,
+      defaultNodeFontColor: colors.defaultNodeFontColor,
+      defaultNodeBorderColor: colors.defaultNodeBorderColor,
+      defaultLineColor: lineColor,
+      defaultLineWidth: colors.defaultLineWidth,
+      defaultLineFontColor: colors.defaultLineFontColor,
+      defaultShowLineLabel: colors.defaultShowLineLabel,
+      checkedLineColor: colors.checkedLineColor,
+    };
+  }, [theme]);
+
+  useEffect(() => {
+    if (!memoryViewGraph) return;
+    const data = buildMemoryGraphData(memoryLongTerm, memoryLongTermSelected, GRAPH_THEME_COLORS[theme].nodeType, GRAPH_LINE_COLOR[theme]);
+    if (!data) return;
+    const t = setTimeout(() => {
+      memoryGraphRef.current?.setJsonData(data, true, () => {});
+    }, 0);
+    return () => clearTimeout(t);
+  }, [memoryViewGraph, memoryLongTerm, memoryLongTermSelected, theme]);
+
+  // Re-apply graph options when theme changes so canvas/edges/nodes use the new colors
+  useEffect(() => {
+    if (!memoryViewGraph || !memoryGraphRef.current) return;
+    memoryGraphRef.current.setOptions(memoryGraphOptions, () => {});
+  }, [theme, memoryViewGraph, memoryGraphOptions]);
 
   const fetchScheduleReports = useCallback(async () => {
     try {
@@ -867,7 +1262,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (tab === "chat") fetchScheduleReports();
+    if (tab === "scheduled") fetchScheduleReports();
   }, [tab, fetchScheduleReports]);
 
   const fetchUserRagDocuments = useCallback(async () => {
@@ -898,10 +1293,19 @@ function App() {
     setAgentProfileLoading(true);
     setAgentProfileError(null);
     try {
-      const data = await invoke<{ name?: string | null; personality?: string | null; role?: string | null; gender?: string | null; avatar?: string | null; rules?: string[]; can_do?: string[]; cannot_do?: string[] }>(
-        "get_agent_profile",
-        { port: DAEMON_PORT }
-      );
+      const data = await invoke<{
+        name?: string | null;
+        personality?: string | null;
+        role?: string | null;
+        gender?: string | null;
+        avatar?: string | null;
+        rules?: string[];
+        can_do?: string[];
+        cannot_do?: string[];
+        traits_override?: Record<string, number> | null;
+        preferred_mode?: string | null;
+      }>("get_agent_profile", { port: DAEMON_PORT });
+      const to = data?.traits_override;
       setAgentProfile({
         name: data?.name ?? "",
         personality: data?.personality ?? "",
@@ -911,11 +1315,40 @@ function App() {
         rules: Array.isArray(data?.rules) ? data.rules : [],
         can_do: Array.isArray(data?.can_do) ? data.can_do : [],
         cannot_do: Array.isArray(data?.cannot_do) ? data.cannot_do : [],
+        traits_override: to && typeof to === "object" ? { ...to } : {},
+        preferred_mode: data?.preferred_mode ?? "",
       });
     } catch (e) {
       setAgentProfileError(String(e));
     } finally {
       setAgentProfileLoading(false);
+    }
+  }, []);
+
+  const fetchUserProfile = useCallback(async () => {
+    setUserProfileLoading(true);
+    setUserProfileError(null);
+    try {
+      const data = await invoke<{
+        first_name?: string | null;
+        last_name?: string | null;
+        how_to_call?: string | null;
+        onboarding_completed?: boolean;
+        proactive_check_in_enabled?: boolean;
+        proactive_check_in_interval_days?: number;
+      }>("get_user_profile", { port: DAEMON_PORT });
+      setUserProfile({
+        first_name: data?.first_name ?? "",
+        last_name: data?.last_name ?? "",
+        how_to_call: data?.how_to_call ?? "",
+        onboarding_completed: data?.onboarding_completed ?? false,
+        proactive_check_in_enabled: data?.proactive_check_in_enabled ?? false,
+        proactive_check_in_interval_days: typeof data?.proactive_check_in_interval_days === "number" ? data.proactive_check_in_interval_days : 0,
+      });
+    } catch (e) {
+      setUserProfileError(String(e));
+    } finally {
+      setUserProfileLoading(false);
     }
   }, []);
 
@@ -936,10 +1369,16 @@ function App() {
   }, [tab, fetchAgentProfile]);
 
   useEffect(() => {
+    if (tab === "settings" && settingsSection === "user") fetchUserProfile();
+  }, [tab, settingsSection, fetchUserProfile]);
+
+  useEffect(() => {
     if (!calendarSelectedTaskId) {
       setCalendarTaskDetail(null);
+      setCalendarTaskDetailError(null);
       return;
     }
+    setCalendarTaskDetailError(null);
     let cancelled = false;
     (async () => {
       try {
@@ -952,8 +1391,12 @@ function App() {
           updated_at: st?.updated_at,
           progress: st?.progress,
         });
-      } catch {
-        if (!cancelled) setCalendarTaskDetail(null);
+        setCalendarTaskDetailError(null);
+      } catch (e) {
+        if (!cancelled) {
+          setCalendarTaskDetail(null);
+          setCalendarTaskDetailError(typeof e === "string" ? e : (e instanceof Error ? e.message : "Impossible de charger le détail de la tâche."));
+        }
       }
     })();
     return () => { cancelled = true; };
@@ -1395,16 +1838,26 @@ function App() {
     setAttachments([]);
     setLoading(true);
     try {
+      const reconnect = firstMessageSinceLoadRef.current;
+      firstMessageSinceLoadRef.current = false;
       const ack = await invoke<{ task_id: string; session_id: string; message: string }>("send_message_ack", {
         message: userMessage,
         session_id: sessionId,
         attachments: attachmentsPayload,
         port: DAEMON_PORT,
+        reconnect: reconnect || undefined,
       });
       setLoading(false);
-      if (ack?.session_id) setSessionId(ack.session_id);
-      const ackText = ack?.message ?? "Je prends en compte votre demande.";
-      setMessages((prev) => [...prev, { role: "assistant", text: ackText + (ack?.task_id ? " Tu peux suivre l'avancement dans Tâches." : "") }]);
+      if (ack?.session_id) {
+        setSessionId(ack.session_id);
+        try {
+          localStorage.setItem(AKASHA_SESSION_ID_KEY, ack.session_id);
+        } catch {
+          /* ignore */
+        }
+      }
+      const ackText = ack?.message ?? "Request received. You can follow progress in the Tasks tab.";
+      setMessages((prev) => [...prev, { role: "assistant", text: ackText }]);
       if (ack?.task_id) {
         setRunningTaskChips((prev) => ({ ...prev, [ack.task_id]: { pct: 0, message: "en cours…" } }));
         setRunningTaskEvents((prev) => ({ ...prev, [ack.task_id]: [] }));
@@ -1570,6 +2023,16 @@ function App() {
               onClick={() => setTab("chat")}
             >
               {t("tabs.chat")}
+            </button>
+            <button
+              role="tab"
+              aria-selected={tab === "scheduled"}
+              aria-controls="panel-scheduled"
+              id="tab-scheduled"
+              className={tab === "scheduled" ? "active" : ""}
+              onClick={() => setTab("scheduled")}
+            >
+              {t("tabs.scheduled")}
             </button>
             <button
               role="tab"
@@ -2004,16 +2467,6 @@ function App() {
                 </div>
               ) : (
                 <>
-                  {scheduleReports.map((r, i) => (
-                    <div key={`report-${i}`} className="message system report">
-                      <span className="role" aria-hidden>Rappel exécuté</span>
-                      <div className="text markdown-rendered">
-                        <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
-                          {`**« ${r.schedule_name} »** — ${r.message}`}
-                        </LazyMarkdownContent></Suspense>
-                      </div>
-                    </div>
-                  ))}
                   {messages.map((m, i) => {
                     const askUserData = m.role === "assistant" ? parseAskUserMessage(m.text) : null;
                     return (
@@ -2073,7 +2526,7 @@ function App() {
                         ) : (
                           <div className="text markdown-rendered">
                             <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent onPathClick={handlePathClick}>
-                              {preprocessMessagePaths(m.text)}
+                              {preprocessMessagePaths(preprocessDataUrlImages(m.text))}
                             </LazyMarkdownContent></Suspense>
                           </div>
                         )}
@@ -2186,6 +2639,9 @@ function App() {
                                               <span className="chat-subagents-event-type">{eventLabel(ev.event_type)}</span>
                                               {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload ? (
                                                 <span className="chat-subagents-event-agent"> → {String((ev.payload as { agent?: string }).agent ?? "")}</span>
+                                              ) : null}
+                                              {ev.payload && typeof ev.payload === "object" && (ev.event_type === "task_completed" || ev.event_type === "task_failed") && "model_used" in ev.payload && (ev.payload as { model_used?: string | null }).model_used ? (
+                                                <span className="chat-subagents-event-model"> — {t("tasks.model_used")}: {(ev.payload as { model_used: string }).model_used}</span>
                                               ) : null}
                                               {ev.at && <span className="chat-subagents-event-at"> {ev.at.slice(0, 19)}</span>}
                                             </li>
@@ -2329,6 +2785,43 @@ function App() {
             <p id="send-hint" className="hint sr-only">
               Entrée pour envoyer
             </p>
+          </section>
+        )}
+
+        {tab === "scheduled" && (
+          <section
+            id="panel-scheduled"
+            role="tabpanel"
+            aria-labelledby="tab-scheduled"
+            className="panel scheduled-panel"
+          >
+            <h2 className="panel-title">{t("tabs.scheduled")}</h2>
+            <p className="panel-description">{t("scheduled.description")}</p>
+            <div className="scheduled-scroll" role="region" aria-label={t("tabs.scheduled")}>
+            {scheduleReports.length === 0 ? (
+              <p className="scheduled-empty">{t("scheduled.empty")}</p>
+            ) : (
+              <div className="scheduled-reports">
+                {scheduleReports.map((r, i) => (
+                  <div key={`report-${i}`} className="message system report scheduled-report">
+                    <span className="role" aria-hidden>{t("scheduled.role")}</span>
+                    {r.ended_at && (
+                      <time className="scheduled-report-time" dateTime={r.ended_at}>
+                        {new Date(r.ended_at).toLocaleString()}
+                      </time>
+                    )}
+                    <div className="text markdown-rendered">
+                      <Suspense fallback={<span className="markdown-rendered">…</span>}>
+                        <LazyMarkdownContent>
+                          {`**« ${r.schedule_name} »** — ${r.message}`}
+                        </LazyMarkdownContent>
+                      </Suspense>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            </div>
           </section>
         )}
 
@@ -2648,6 +3141,9 @@ function App() {
                       {tasksEvents.map((e, i) => (
                         <li key={i}>
                           <strong>{eventLabel(e.event_type)}</strong> @ {e.at}
+                          {e.payload != null && typeof e.payload === "object" && (e.event_type === "task_completed" || e.event_type === "task_failed") && "model_used" in e.payload && (e.payload as { model_used?: string | null }).model_used && (
+                            <p className="event-model-used">{t("tasks.model_used")}: {(e.payload as { model_used: string }).model_used}</p>
+                          )}
                           {e.payload != null && (
                             <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
                           )}
@@ -3025,26 +3521,116 @@ function App() {
                 {schedules.length === 0 ? (
                   <p className="empty-state">{t("calendar.no_schedules")}</p>
                 ) : (
-                  <ul className="calendar-schedule-list" role="list">
-                    {schedules.map((s) => (
-                      <li
-                        key={s.id}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => setCalendarSelectedScheduleId(s.id)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            setCalendarSelectedScheduleId(s.id);
-                          }
-                        }}
-                      >
-                        <strong>{s.name || s.id.slice(0, 8)}</strong>{" "}
-                        {s.enabled ? "(activée)" : "(en pause)"}
-                        {s.interval_seconds != null && ` — toutes les ${s.interval_seconds}s`}
-                      </li>
-                    ))}
-                  </ul>
+                  <>
+                    {calendarSchedulesSelectedForDelete.size > 0 && (
+                      <div className="calendar-schedules-toolbar">
+                        <button
+                          type="button"
+                          className="calendar-schedule-delete-selection"
+                          disabled={scheduleDeleting}
+                          onClick={async () => {
+                            const ids = Array.from(calendarSchedulesSelectedForDelete);
+                            if (ids.length === 0) return;
+                            setScheduleDeleting(true);
+                            const toDelete = new Set(ids);
+                            try {
+                              for (const id of ids) {
+                                try {
+                                  await invoke("delete_schedule", { scheduleId: id, port: DAEMON_PORT });
+                                } catch {
+                                  /* continue */
+                                }
+                              }
+                              const cached = getCached<{ schedules: typeof schedules; taskRuns: unknown }>("calendar");
+                              setSchedules((prev) => {
+                                const nextSchedules = prev.filter((s) => !toDelete.has(s.id));
+                                if (cached) {
+                                  setCached("calendar", { ...cached, schedules: nextSchedules });
+                                }
+                                return nextSchedules;
+                              });
+                              setCalendarSchedulesSelectedForDelete(new Set());
+                              if (calendarSelectedScheduleId && toDelete.has(calendarSelectedScheduleId)) {
+                                setCalendarSelectedScheduleId(null);
+                                setScheduleDetail(null);
+                              }
+                            } finally {
+                              setScheduleDeleting(false);
+                            }
+                          }}
+                        >
+                          {scheduleDeleting ? "…" : t("calendar.delete_selection")} ({calendarSchedulesSelectedForDelete.size})
+                        </button>
+                      </div>
+                    )}
+                    <ul className="calendar-schedule-list" role="list">
+                      {schedules.map((s) => (
+                        <li
+                          key={s.id}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => setCalendarSelectedScheduleId(s.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              setCalendarSelectedScheduleId(s.id);
+                            }
+                          }}
+                          className="calendar-schedule-list-item"
+                        >
+                          <label className="calendar-schedule-checkbox" onClick={(e) => e.stopPropagation()} title={t("calendar.delete_selection")}>
+                            <input
+                              type="checkbox"
+                              checked={calendarSchedulesSelectedForDelete.has(s.id)}
+                              onChange={(e) => {
+                                setCalendarSchedulesSelectedForDelete((prev) => {
+                                  const next = new Set(prev);
+                                  if (e.target.checked) next.add(s.id);
+                                  else next.delete(s.id);
+                                  return next;
+                                });
+                              }}
+                              aria-label={`${t("calendar.select_schedule")} ${s.name || s.id.slice(0, 8)}`}
+                            />
+                          </label>
+                          <span className="calendar-schedule-list-label">
+                            <strong>{s.name || s.id.slice(0, 8)}</strong>{" "}
+                            {s.enabled ? "(activée)" : "(en pause)"}
+                            {s.interval_seconds != null && ` — toutes les ${s.interval_seconds}s`}
+                          </span>
+                          <button
+                            type="button"
+                            className="calendar-schedule-delete-one"
+                            title={t("calendar.delete_schedule")}
+                            aria-label={t("calendar.delete_schedule")}
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              try {
+                                await invoke("delete_schedule", { scheduleId: s.id, port: DAEMON_PORT });
+                                setSchedules((prev) => prev.filter((x) => x.id !== s.id));
+                                setCalendarSchedulesSelectedForDelete((prev) => { const n = new Set(prev); n.delete(s.id); return n; });
+                                if (calendarSelectedScheduleId === s.id) {
+                                  setCalendarSelectedScheduleId(null);
+                                  setScheduleDetail(null);
+                                }
+                                const cached = getCached<{ schedules: typeof schedules; taskRuns: unknown }>("calendar");
+                                if (cached) {
+                                  setCached("calendar", {
+                                    ...cached,
+                                    schedules: cached.schedules.filter((x) => x.id !== s.id),
+                                  });
+                                }
+                              } catch {
+                                /* toast or leave list as-is */
+                              }
+                            }}
+                          >
+                            {t("settings.delete")}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
                 )}
               </div>
             )}
@@ -3072,7 +3658,13 @@ function App() {
                         </button>
                       </div>
                       <div className="calendar-detail-modal-body">
-                        {calendarTaskDetail ? (
+                        {calendarTaskDetailError ? (
+                          <p className="error-inline" role="alert">
+                            {calendarTaskDetailError}
+                            <br />
+                            <small className="muted">Vérifiez que le daemon tourne (port {DAEMON_PORT}).</small>
+                          </p>
+                        ) : calendarTaskDetail ? (
                           <>
                             {(() => {
                               const run = taskRuns.find((r) => r.task_id === calendarSelectedTaskId);
@@ -3086,6 +3678,11 @@ function App() {
                                   {runDone && taskStatus === "running" && (
                                     <p className="task-detail-hint">
                                       Le run est marqué « {statusLabel} » mais la tâche côté orchestrateur affiche encore « running ». Cela peut indiquer un décalage de mise à jour ou une tâche bloquée.
+                                    </p>
+                                  )}
+                                  {(runStatus === "failed" || taskStatus === "failed") && (
+                                    <p className="task-detail-hint">
+                                      Cette tâche a échoué ou a expiré (timeout LLM ou sous-tâche).
                                     </p>
                                   )}
                                   <p><strong>Statut tâche (orchestrateur):</strong> {taskStatus}</p>
@@ -3143,6 +3740,21 @@ function App() {
                                 </ul>
                               </div>
                             )}
+                            {calendarTaskDetail.progress == null || calendarTaskDetail.progress.length === 0 ? (
+                              (() => {
+                                const run = taskRuns.find((r) => r.task_id === calendarSelectedTaskId);
+                                const runStatus = run?.status ?? "?";
+                                const taskStatus = calendarTaskDetail.status;
+                                if (taskStatus === "failed" || runStatus === "failed" || (taskStatus === "running" && runStatus !== "running" && runStatus !== "queued")) {
+                                  return (
+                                    <p className="muted">
+                                      Aucune progression enregistrée. La tâche a peut-être expiré ou échoué avant d’envoyer du contenu.
+                                    </p>
+                                  );
+                                }
+                                return null;
+                              })()
+                            ) : null}
                           </>
                         ) : (
                           <p className="loading-inline">{t("common.loading")}</p>
@@ -3231,6 +3843,31 @@ function App() {
                             {scheduleDetail.rrule && (
                               <p className="schedule-rrule"><strong>Règle:</strong> <code>{scheduleDetail.rrule}</code></p>
                             )}
+                            <div className="schedule-detail-actions">
+                              <button
+                                type="button"
+                                className="calendar-schedule-delete-one schedule-detail-delete"
+                                disabled={scheduleDeleting}
+                                onClick={async () => {
+                                  const id = calendarSelectedScheduleId;
+                                  if (!id) return;
+                                  setScheduleDeleting(true);
+                                  try {
+                                    await invoke("delete_schedule", { scheduleId: id, port: DAEMON_PORT });
+                                    setSchedules((prev) => prev.filter((s) => s.id !== id));
+                                    setCalendarSchedulesSelectedForDelete((prev) => { const n = new Set(prev); n.delete(id); return n; });
+                                    setCalendarSelectedScheduleId(null);
+                                    setScheduleDetail(null);
+                                    const cached = getCached<{ schedules: { id: string }[]; taskRuns: unknown }>("calendar");
+                                    if (cached) setCached("calendar", { ...cached, schedules: cached.schedules.filter((s) => s.id !== id) });
+                                  } finally {
+                                    setScheduleDeleting(false);
+                                  }
+                                }}
+                              >
+                                {scheduleDeleting ? "…" : t("calendar.delete_schedule")}
+                              </button>
+                            </div>
                           </>
                         ) : (
                           <p className="loading-inline">{t("common.loading")}</p>
@@ -3331,38 +3968,142 @@ function App() {
                   >
                     {!memoryLongTermAvailable ? (
                       <p className="muted">{t("memory.long_unavailable")}</p>
+                    ) : memorySearchActive ? (
+                      <div className="memory-search-wrap">
+                        <div className="memory-search-bar">
+                          <input
+                            type="text"
+                            className="memory-search-input"
+                            value={memorySearchQuery}
+                            onChange={(ev) => setMemorySearchQuery(ev.target.value)}
+                            onKeyDown={(ev) => ev.key === "Enter" && runMemorySearch()}
+                            placeholder={t("memory.search_placeholder")}
+                            aria-label={t("memory.search")}
+                          />
+                          <button type="button" className="btn-primary" onClick={runMemorySearch} disabled={memorySearchLoading || !memorySearchQuery.trim()}>
+                            {memorySearchLoading ? t("common.loading") : t("memory.search")}
+                          </button>
+                          <button type="button" className="btn-secondary" onClick={() => { setMemorySearchActive(false); setMemorySearchQuery(""); setMemorySearchResults([]); }}>
+                            {t("memory.search_back")}
+                          </button>
+                        </div>
+                        {memorySearchResults.length === 0 ? (
+                          <p className="muted">Saisir une requête puis Rechercher. Aucun résultat pour l’instant.</p>
+                        ) : (
+                          <ul className="memory-long-term-list">
+                            {memorySearchResults.map((r, i) => (
+                              <li key={r.id ?? i} className="memory-long-term-item">
+                                <div className="memory-long-term-body">
+                                  <div className="memory-long-term-content">{r.content}</div>
+                                  <div className="memory-long-term-meta">id: {r.id}</div>
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    ) : memoryViewGraph ? (
+                      <div className="memory-graph-wrap" role="region" aria-label={t("memory.view_graph")}>
+                        <div className="memory-graph-toolbar">
+                          <button type="button" className="btn-secondary" onClick={() => setMemoryViewGraph(false)}>{t("memory.view_list")}</button>
+                          <button type="button" className="btn-secondary" onClick={rebuildMemoryRelations} disabled={memoryRebuildLoading}>{memoryRebuildLoading ? t("common.loading") : t("memory.rebuild_relations")}</button>
+                          <span className="memory-graph-hint">{t("memory.detail_click_hint")}</span>
+                          {memoryLongTerm.length < memoryLongTermTotal && (
+                            <button type="button" className="btn-secondary memory-load-more-btn" onClick={loadMoreMemoryLongTerm} disabled={memoryLongTermLoadingMore}>
+                              {memoryLongTermLoadingMore ? t("common.loading") : t("memory.load_more")} ({memoryLongTerm.length} / {memoryLongTermTotal})
+                            </button>
+                          )}
+                          {memoryRebuildMessage != null && <span className="memory-rebuild-msg">{memoryRebuildMessage}</span>}
+                        </div>
+                        {memoryLongTerm.length === 0 ? (
+                          <p className="empty-state">{t("memory.long_empty")}</p>
+                        ) : (() => {
+                          const graphData = buildMemoryGraphData(memoryLongTerm, memoryLongTermSelected, GRAPH_THEME_COLORS[theme].nodeType, GRAPH_LINE_COLOR[theme]);
+                          if (!graphData) {
+                            return <p className="muted">Aucune donnée pour le graphe.</p>;
+                          }
+                          return (
+                            <div className="memory-graph-canvas">
+                              <RelationGraph
+                                ref={memoryGraphRef}
+                                options={memoryGraphOptions}
+                                onNodeClick={(node: RGNode) => {
+                                  const now = Date.now();
+                                  const last = memoryGraphLastClickRef.current;
+                                  const isDoubleClick = last && last.nodeId === node.id && now - last.at < 400;
+                                  if (isDoubleClick) {
+                                    memoryGraphLastClickRef.current = null;
+                                    const idx = memoryLongTerm.findIndex((e) => e.id === node.id);
+                                    const entry = idx >= 0 ? memoryLongTerm[idx]! : { id: node.id, content: "", created_at: "", source: "" };
+                                    setMemoryGraphDetail({ entry, index: idx });
+                                    return;
+                                  }
+                                  memoryGraphLastClickRef.current = { nodeId: node.id, at: now };
+                                  memoryGraphRef.current?.getInstance?.()?.focusNodeById(node.id);
+                                  const idx = memoryLongTerm.findIndex((e) => e.id === node.id);
+                                  if (idx >= 0) setMemoryLongTermSelected(idx);
+                                }}
+                              />
+                            </div>
+                          );
+                        })()}
+                      </div>
                     ) : memoryLongTerm.length === 0 ? (
                       <p className="empty-state">{t("memory.long_empty")}</p>
                     ) : (
                       <div className="memory-list-scroll">
+                        <div className="memory-long-toolbar">
+                          <button type="button" className="btn-secondary" onClick={() => setMemorySearchActive(true)}>{t("memory.search")}</button>
+                          <button type="button" className="btn-secondary" onClick={() => setMemoryViewGraph(true)}>{t("memory.view_graph")}</button>
+                          <button type="button" className="btn-secondary" onClick={rebuildMemoryRelations} disabled={memoryRebuildLoading}>{memoryRebuildLoading ? t("common.loading") : t("memory.rebuild_relations")}</button>
+                          {memoryLongTerm.length < memoryLongTermTotal && (
+                            <button type="button" className="btn-secondary memory-load-more-btn" onClick={loadMoreMemoryLongTerm} disabled={memoryLongTermLoadingMore}>
+                              {memoryLongTermLoadingMore ? t("common.loading") : t("memory.load_more")} ({memoryLongTerm.length} / {memoryLongTermTotal})
+                            </button>
+                          )}
+                          {memoryRebuildMessage != null && <span className="memory-rebuild-msg">{memoryRebuildMessage}</span>}
+                        </div>
                         <ul className="memory-long-term-list">
                           {memoryLongTerm.map((e, i) => (
-                      <li key={e.id ?? `entry-${i}`} className="memory-long-term-item">
-                        <div className="memory-long-term-body">
-                          <div className="memory-long-term-content">{e.content}</div>
-                          <div className="memory-long-term-meta">
-                            {e.created_at} {e.source ? ` · ${e.source}` : ""}
-                          </div>
-                        </div>
-                        {e.id != null && (
-                          <button
-                            type="button"
-                            className="memory-long-term-delete"
-                            onClick={async () => {
-                              try {
-                                await invoke("delete_memory_long_term", { id: e.id, port: DAEMON_PORT });
-                                fetchMemory();
-                              } catch (err) {
-                                setMemoryError(String(err));
-                              }
-                            }}
-                            aria-label="Supprimer cette entrée"
-                            title="Supprimer de la mémoire long terme"
-                          >
-                            Supprimer
-                          </button>
-                        )}
-                          </li>
+                            <li
+                              key={e.id ?? `entry-${i}`}
+                              className={"memory-long-term-item" + (i === memoryLongTermSelected ? " selected" : "")}
+                              onClick={() => setMemoryLongTermSelected(i)}
+                            >
+                              <div className="memory-long-term-body">
+                                <div className="memory-long-term-content">{e.content}</div>
+                                <div className="memory-long-term-meta">
+                                  {e.created_at} {e.source ? ` · ${e.source}` : ""}
+                                </div>
+                                {e.related && e.related.length > 0 && (
+                                  <div className="memory-long-term-related">
+                                    → {t("memory.related")}: {e.related.map((r) => {
+                                      const content = memoryLongTerm.find((x) => x.id === r.id);
+                                      return content ? `${content.content.slice(0, 30)}… (${r.kind || "related"})` : `${r.id.slice(0, 8)} (${r.kind || "related"})`;
+                                    }).join(", ")}
+                                  </div>
+                                )}
+                              </div>
+                              {e.id != null && (
+                                <button
+                                  type="button"
+                                  className="memory-long-term-delete"
+                                  onClick={async (ev) => {
+                                    ev.stopPropagation();
+                                    try {
+                                      await invoke("delete_memory_long_term", { id: e.id, port: DAEMON_PORT });
+                                      fetchMemory();
+                                    } catch (err) {
+                                      setMemoryError(String(err));
+                                    }
+                                  }}
+                                  aria-label="Supprimer cette entrée"
+                                  title="Supprimer de la mémoire long terme"
+                                >
+                                  Supprimer
+                                </button>
+                              )}
+                            </li>
                           ))}
                         </ul>
                       </div>
@@ -3372,6 +4113,53 @@ function App() {
               </div>
             )}
           </section>
+        )}
+
+        {tab === "memory" && memoryGraphDetail && (
+          <div className="memory-detail-overlay" role="dialog" aria-modal="true" aria-labelledby="memory-detail-title">
+            <div className="memory-detail-modal">
+              <h2 id="memory-detail-title" className="memory-detail-title">{t("memory.detail_title")}</h2>
+              {memoryGraphDetail.entry.content ? (
+                <>
+                  <div className="memory-detail-meta">{memoryGraphDetail.entry.created_at}{memoryGraphDetail.entry.source ? ` · ${memoryGraphDetail.entry.source}` : ""}</div>
+                  <div className="memory-detail-content">{memoryGraphDetail.entry.content}</div>
+                </>
+              ) : (
+                <p className="muted">ID: {memoryGraphDetail.entry.id}. {t("memory.detail_referenced_only")}</p>
+              )}
+              <div className="memory-detail-links-section">
+                <h3 className="memory-detail-links-title">{t("memory.detail_links_title")}</h3>
+                {memoryGraphDetail.entry.related && memoryGraphDetail.entry.related.length > 0 ? (
+                  <ul className="memory-detail-links-list">
+                    {memoryGraphDetail.entry.related.map((r) => {
+                      const targetInList = memoryLongTerm.find((e) => e.id === r.id);
+                      return (
+                        <li key={r.id} className="memory-detail-link-item">
+                          <span className="memory-detail-link-type">{t("memory.detail_link_type")}: {r.kind ?? "related"}</span>
+                          <span className="memory-detail-link-id">ID: {r.id}</span>
+                          {targetInList ? (
+                            <p className="memory-detail-link-preview">{t("memory.detail_link_in_list")}: {targetInList.content.slice(0, 80)}{targetInList.content.length > 80 ? "…" : ""}</p>
+                          ) : (
+                            <p className="memory-detail-link-missing">{t("memory.detail_link_not_in_list")}</p>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <p className="memory-detail-links-none">{t("memory.detail_links_none")}</p>
+                )}
+              </div>
+              <div className="memory-detail-actions">
+                {memoryGraphDetail.index >= 0 && (
+                  <button type="button" className="btn-primary" onClick={() => { setMemoryLongTermSelected(memoryGraphDetail!.index); setMemoryViewGraph(false); setMemoryGraphDetail(null); }}>
+                    {t("memory.view_in_list")}
+                  </button>
+                )}
+                <button type="button" className="btn-secondary" onClick={() => setMemoryGraphDetail(null)}>{t("memory.close")}</button>
+              </div>
+            </div>
+          </div>
         )}
 
         {tab === "settings" && (
@@ -3387,6 +4175,7 @@ function App() {
                 <button role="tab" aria-selected={settingsSection === "display"} className={settingsSection === "display" ? "active" : ""} onClick={() => setSettingsSection("display")}>{t("settings.section_display")}</button>
                 <button role="tab" aria-selected={settingsSection === "system"} className={settingsSection === "system" ? "active" : ""} onClick={() => setSettingsSection("system")}>{t("settings.section_system")}</button>
                 <button role="tab" aria-selected={settingsSection === "agent"} className={settingsSection === "agent" ? "active" : ""} onClick={() => setSettingsSection("agent")}>{t("settings.section_agent")}</button>
+                <button role="tab" aria-selected={settingsSection === "user"} className={settingsSection === "user" ? "active" : ""} onClick={() => setSettingsSection("user")}>{t("settings.section_user")}</button>
                 <button role="tab" aria-selected={settingsSection === "data"} className={settingsSection === "data" ? "active" : ""} onClick={() => setSettingsSection("data")}>{t("settings.section_data")}</button>
               </nav>
             </div>
@@ -3488,7 +4277,7 @@ function App() {
                 {!agentProfileLoading && (
                   <>
                     <div className="settings-agent-subtabs" role="tablist" aria-label={t("settings.agent_profile_title")}>
-                      {(["identity", "personality", "rules", "can_do", "cannot_do"] as const).map((st) => (
+                      {(["identity", "personality", "traits", "rules", "can_do", "cannot_do"] as const).map((st) => (
                         <button key={st} role="tab" aria-selected={agentProfileSubTab === st} className={agentProfileSubTab === st ? "active" : ""} onClick={() => setAgentProfileSubTab(st)}>{t(`settings.agent_subtab_${st}`)}</button>
                       ))}
                     </div>
@@ -3556,6 +4345,57 @@ function App() {
                             <span className="settings-char-count">{agentProfile.personality.length} / {AGENT_PROFILE_LIMITS.personality}</span>
                           </dd>
                         </dl>
+                      )}
+                      {agentProfileSubTab === "traits" && (
+                        <div className="settings-list">
+                          <p className="settings-doc muted">{t("settings.agent_traits_desc")}</p>
+                          <dl className="settings-list">
+                            <dt>{t("settings.agent_preferred_mode")}</dt>
+                            <dd>
+                              <select
+                                aria-label={t("settings.agent_preferred_mode")}
+                                className="settings-theme-select"
+                                value={agentProfile.preferred_mode || "assistant"}
+                                onChange={(e) => setAgentProfile((p) => ({ ...p, preferred_mode: e.target.value || "" }))}
+                              >
+                                <option value="">—</option>
+                                {PREFERRED_MODES.map((m) => (
+                                  <option key={m} value={m}>{t(`settings.agent_preferred_mode_${m}`)}</option>
+                                ))}
+                              </select>
+                            </dd>
+                          </dl>
+                          {TRAIT_KEYS.map((key) => (
+                            <dl key={key} className="settings-list">
+                              <dt>{t(`settings.trait_${key}`)}</dt>
+                              <dd className="settings-trait-row">
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={1}
+                                  step={0.05}
+                                  aria-label={t(`settings.trait_${key}`)}
+                                  value={agentProfile.traits_override[key] ?? 0.5}
+                                  onChange={(e) => {
+                                    const v = parseFloat(e.target.value);
+                                    setAgentProfile((p) => ({
+                                      ...p,
+                                      traits_override: { ...p.traits_override, [key]: v },
+                                    }));
+                                  }}
+                                />
+                                <span className="settings-trait-value">{(agentProfile.traits_override[key] ?? 0.5).toFixed(2)}</span>
+                              </dd>
+                            </dl>
+                          ))}
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            onClick={() => setAgentProfile((p) => ({ ...p, traits_override: {}, preferred_mode: "" }))}
+                          >
+                            {t("settings.traits_reset")}
+                          </button>
+                        </div>
                       )}
                       {agentProfileSubTab === "rules" && (
                         <div className="settings-list-two-cols">
@@ -3735,7 +4575,69 @@ function App() {
                         </div>
                       )}
                     </div>
-                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role) || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
+                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { const traits = Object.keys(agentProfile.traits_override).length ? agentProfile.traits_override : undefined; await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role) || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do, traits_override: traits, preferred_mode: agentProfile.preferred_mode.trim() || undefined }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
+                  </>
+                )}
+              </div>
+            )}
+            {settingsSection === "user" && (
+              <div className="settings-section-content">
+                <p className="settings-doc muted">{t("settings.user_profile_desc")}</p>
+                {userProfileError && <p className="error-inline" role="alert">{userProfileError}</p>}
+                {userProfileLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
+                {!userProfileLoading && (
+                  <>
+                    <dl className="settings-list">
+                      <dt>{t("settings.user_profile_first_name")}</dt>
+                      <dd>
+                        <input type="text" aria-label={t("settings.user_profile_first_name")} className="settings-input" maxLength={80} value={userProfile.first_name} onChange={(e) => setUserProfile((p) => ({ ...p, first_name: e.target.value.slice(0, 80) }))} placeholder="Marc" />
+                      </dd>
+                      <dt>{t("settings.user_profile_last_name")}</dt>
+                      <dd>
+                        <input type="text" aria-label={t("settings.user_profile_last_name")} className="settings-input" maxLength={80} value={userProfile.last_name} onChange={(e) => setUserProfile((p) => ({ ...p, last_name: e.target.value.slice(0, 80) }))} placeholder="Dupont" />
+                      </dd>
+                      <dt>{t("settings.user_profile_how_to_call")}</dt>
+                      <dd>
+                        <input type="text" aria-label={t("settings.user_profile_how_to_call")} className="settings-input" maxLength={80} value={userProfile.how_to_call} onChange={(e) => setUserProfile((p) => ({ ...p, how_to_call: e.target.value.slice(0, 80) }))} placeholder="Marc" />
+                        <span className="settings-doc muted">{t("settings.user_profile_how_to_call_hint")}</span>
+                      </dd>
+                    </dl>
+                    <h3 className="settings-subtitle">{t("settings.user_profile_proactive_title")}</h3>
+                    <dl className="settings-list">
+                      <dt>{t("settings.user_profile_proactive_enabled")}</dt>
+                      <dd>
+                        <label className="settings-checkbox-label">
+                          <input type="checkbox" checked={userProfile.proactive_check_in_enabled} onChange={(e) => setUserProfile((p) => ({ ...p, proactive_check_in_enabled: e.target.checked }))} />
+                          {t("settings.user_profile_proactive_enabled_label")}
+                        </label>
+                      </dd>
+                      <dt>{t("settings.user_profile_proactive_interval_days")}</dt>
+                      <dd>
+                        <input type="number" aria-label={t("settings.user_profile_proactive_interval_days")} className="settings-input" min={0} max={365} value={userProfile.proactive_check_in_interval_days || ""} onChange={(e) => setUserProfile((p) => ({ ...p, proactive_check_in_interval_days: Math.max(0, parseInt(e.target.value, 10) || 0) }))} placeholder="1" />
+                        <span className="settings-doc muted">{t("settings.user_profile_proactive_interval_hint")}</span>
+                      </dd>
+                    </dl>
+                    <button type="button" className="refresh-btn" disabled={userProfileSaving} onClick={async () => {
+                      setUserProfileSaving(true);
+                      setUserProfileError(null);
+                      try {
+                        await invoke("post_user_profile", {
+                          body: {
+                            first_name: userProfile.first_name.trim() || undefined,
+                            last_name: userProfile.last_name.trim() || undefined,
+                            how_to_call: userProfile.how_to_call.trim() || undefined,
+                            onboarding_completed: userProfile.onboarding_completed,
+                            proactive_check_in_enabled: userProfile.proactive_check_in_enabled,
+                            proactive_check_in_interval_days: userProfile.proactive_check_in_interval_days,
+                          },
+                          port: DAEMON_PORT,
+                        });
+                      } catch (err) {
+                        setUserProfileError(String(err));
+                      } finally {
+                        setUserProfileSaving(false);
+                      }
+                    }}>{userProfileSaving ? t("common.loading") : t("settings.user_profile_save")}</button>
                   </>
                 )}
               </div>

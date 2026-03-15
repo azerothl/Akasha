@@ -2,6 +2,7 @@
 //! Persisted in data_dir/agent_profile.json and injected into the LLM context so the agent follows it.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -30,6 +31,12 @@ pub struct AgentProfile {
     /// What the agent cannot do (restrictions).
     #[serde(default)]
     pub cannot_do: Vec<String>,
+    /// Override traits from personality_core (e.g. verbosity, warmth). Keys match personality_core.yaml trait names; values 0.0–1.0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traits_override: Option<HashMap<String, f64>>,
+    /// Preferred personality mode: "assistant" | "operator" | "architect" | "onboarding".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_mode: Option<String>,
 }
 
 const FILENAME: &str = "agent_profile.json";
@@ -44,6 +51,8 @@ impl AgentProfile {
             && self.rules.is_empty()
             && self.can_do.is_empty()
             && self.cannot_do.is_empty()
+            && self.traits_override.as_ref().map_or(true, |m| m.is_empty())
+            && self.preferred_mode.is_none()
     }
 
     /// Load profile from data_dir/agent_profile.json. Returns default empty profile if file missing or invalid.

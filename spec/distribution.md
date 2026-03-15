@@ -16,6 +16,23 @@ Ce document décrit comment **obtenir et utiliser Akasha sans installer Rust ni 
    - **App desktop (Tauri)** : installateurs dans les pièces jointes (`.msi`/`.exe`, `.dmg`, `.deb`/`.AppImage`) ou inclus dans le zip « full ».
 4. Décompressez l’archive dans un dossier (ex. `C:\Akasha` ou `~/Akasha`).
 
+### Installation en une commande (depuis azerothl/Akasha_app)
+
+Sans télécharger le zip à la main : collez une des lignes suivantes dans votre terminal. Le script télécharge le zip **full** depuis [azerothl/Akasha_app](https://github.com/azerothl/Akasha_app/releases), le décompresse, lance l’installateur (init, daemon au démarrage) et propose l’assistant de configuration.
+
+- **Windows** (PowerShell 5+) :
+  ```powershell
+  powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/azerothl/Akasha_app/main/scripts/get-akasha.ps1 | iex"
+  ```
+- **Linux / macOS** (curl ou wget) :
+  ```bash
+  curl -sSL https://raw.githubusercontent.com/azerothl/Akasha_app/main/scripts/get-akasha.sh | bash
+  ```
+
+Prérequis : PowerShell 5+ (Windows), curl ou wget (Linux/macOS). Les binaires et le zip sont hébergés sur le dépôt public **Akasha_app** (releases).
+
+**Si vous avez déjà le zip full** : sous Windows, double-cliquez sur **INSTALL.cmd** à la racine du zip (évite les blocages des scripts .ps1). Sous Linux/macOS : `chmod +x scripts/setup.sh && ./scripts/setup.sh`.
+
 **Installation avec installeur unifié (recommandé)** : après extraction du zip **full**, exécutez le script de setup. Il vous demandera : installer l’application desktop ? Démarrer le daemon à chaque connexion ? Puis il installe les binaires, lance `akasha init --defaults`, démarre le daemon une fois et, si vous le souhaitez, enregistre le daemon au démarrage et installe l’app Tauri. En cas de crash du daemon, il est relancé automatiquement (superviseur sous Windows, systemd/launchd sous Linux/macOS).
 - **Windows** : `.\scripts\setup.ps1` (PowerShell). Optionnel : `-InstallDir C:\Akasha`, `-InstallUi` / `-NoInstallUi`, `-AutoStart` / `-NoAutoStart`.
 - **Linux / macOS** : `./scripts/setup.sh`. Optionnel : `--dir DIR`, `--install-ui` / `--no-install-ui`, `--auto-start` / `--no-auto-start`.

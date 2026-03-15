@@ -51,6 +51,10 @@ pub enum EventType {
     TaskEscalatedToHuman,
     /// Approval request for a sensitive tool expired before the user responded.
     ToolApprovalExpired,
+    /// Agent updated the task todo list (write_todos). Payload: { task_id, todos: [...] }.
+    TodoListUpdated,
+    /// Request for user to approve, reject, or edit a tool call before execution. Payload: { tool, args_redacted, task_id }.
+    ToolApprovalRequest,
 }
 
 impl EventType {
@@ -92,6 +96,8 @@ impl EventType {
             Self::AgentReplied => "agent_replied",
             Self::TaskEscalatedToHuman => "task_escalated_to_human",
             Self::ToolApprovalExpired => "tool_approval_expired",
+            Self::TodoListUpdated => "todo_list_updated",
+            Self::ToolApprovalRequest => "tool_approval_request",
         }
     }
 
@@ -133,6 +139,8 @@ impl EventType {
             "agent_replied" => Some(Self::AgentReplied),
             "task_escalated_to_human" => Some(Self::TaskEscalatedToHuman),
             "tool_approval_expired" => Some(Self::ToolApprovalExpired),
+            "todo_list_updated" => Some(Self::TodoListUpdated),
+            "tool_approval_request" => Some(Self::ToolApprovalRequest),
             _ => None,
         }
     }

@@ -90,3 +90,9 @@ Write-Host "Setup complete." -ForegroundColor Green
 Write-Host "  CLI: $InstallDir\akasha.exe (add to PATH if needed)"
 Write-Host "  Daemon: already started; will restart at logon if you chose auto-start."
 Write-Host "  Desktop app: use Start menu or run 'Akasha' if installed."
+$r = Read-Host "Lancer l'assistant de configuration maintenant ? [Y/n]"
+if ($r -eq "" -or $r -match "^(y|yes)$") {
+    $akashaExe = Join-Path $InstallDir "akasha.exe"
+    & $akashaExe init
+    Write-Host "You can also run: & '$akashaExe' tui   (terminal UI)"
+}

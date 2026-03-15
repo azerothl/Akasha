@@ -900,6 +900,24 @@ pre,
   font-weight: 600;
 }
 
+/* Scheduled returns panel: scrollable content */
+.scheduled-panel .scheduled-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+.scheduled-panel .panel-description {
+  margin: 0 0 0.75rem;
+  color: var(--akasha-text-muted);
+  font-size: 0.875rem;
+}
+
+.scheduled-panel .scheduled-reports {
+  padding-bottom: 1rem;
+}
+
 /* Chat */
 .chat-panel {
   padding: 0;
@@ -2941,6 +2959,84 @@ pre,
 
 .calendar-recent-panel .calendar-runs-header { margin-top: 0; }
 .calendar-schedules-panel h3 { margin-top: 0; }
+.calendar-schedules-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.calendar-schedule-delete-selection {
+  padding: 0.35rem 0.6rem;
+  font-size: 0.875rem;
+  background: color-mix(in srgb, var(--akasha-error) 15%, var(--akasha-bg-surface));
+  color: var(--akasha-error);
+  border: 1px solid var(--akasha-error);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.calendar-schedule-delete-selection:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--akasha-error) 25%, var(--akasha-bg-surface));
+}
+.calendar-schedule-delete-selection:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+.calendar-schedule-list-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.calendar-schedule-list-item .calendar-schedule-list-label {
+  flex: 1;
+  min-width: 0;
+}
+.calendar-schedule-checkbox {
+  flex-shrink: 0;
+  margin: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+.calendar-schedule-checkbox input {
+  margin: 0;
+  cursor: pointer;
+}
+.calendar-schedule-delete-one {
+  flex-shrink: 0;
+  padding: 0.2rem 0.45rem;
+  font-size: 0.75rem;
+  background: transparent;
+  color: var(--akasha-text-muted);
+  border: 1px solid var(--akasha-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.calendar-schedule-delete-one:hover {
+  color: var(--akasha-error);
+  border-color: var(--akasha-error);
+  background: color-mix(in srgb, var(--akasha-error) 8%, transparent);
+}
+.schedule-detail-actions {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--akasha-border);
+}
+.schedule-detail-delete {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.875rem;
+  background: color-mix(in srgb, var(--akasha-error) 12%, var(--akasha-bg-surface));
+  color: var(--akasha-error);
+  border: 1px solid var(--akasha-error);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.schedule-detail-delete:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--akasha-error) 22%, var(--akasha-bg-surface));
+}
+.schedule-detail-delete:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
 .calendar-run-item-title { display: block; margin-bottom: 0.15rem; }
 
 .calendar-runs-header {
@@ -3054,6 +3150,212 @@ pre,
   flex: 1;
   min-height: 0;
   margin-bottom: 1rem;
+}
+
+.memory-graph-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  margin-bottom: 1rem;
+}
+
+.memory-graph-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.memory-graph-hint {
+  font-size: 0.8125rem;
+  color: var(--akasha-text-muted);
+}
+
+.memory-long-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.memory-long-toolbar .btn-secondary,
+.memory-graph-toolbar .btn-secondary {
+  flex-shrink: 0;
+}
+
+.memory-rebuild-msg {
+  align-self: center;
+  font-size: 0.875rem;
+  color: var(--akasha-muted);
+}
+
+/* Memory search bar: same style as rest of app */
+.memory-search-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  flex: 1;
+  min-height: 0;
+}
+
+.memory-search-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.memory-search-bar .memory-search-input {
+  flex: 1;
+  min-width: 12rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  border: 1px solid var(--akasha-border);
+  border-radius: 6px;
+  background: var(--akasha-bg-elevated);
+  color: var(--akasha-text);
+}
+
+.memory-search-bar .memory-search-input::placeholder {
+  color: var(--akasha-text-muted);
+}
+
+.memory-search-bar .memory-search-input:focus {
+  outline: none;
+  border-color: var(--akasha-accent);
+}
+
+/* Memory graph node detail modal */
+.memory-detail-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.memory-detail-modal {
+  background: var(--akasha-bg-elevated);
+  border: 1px solid var(--akasha-border);
+  border-radius: 12px;
+  max-width: 32rem;
+  max-height: 85vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+}
+
+.memory-detail-title {
+  margin: 0;
+  padding: 1rem 1.25rem;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--akasha-text);
+  border-bottom: 1px solid var(--akasha-border);
+}
+
+.memory-detail-meta {
+  padding: 0.5rem 1.25rem 0;
+  font-size: 0.8125rem;
+  color: var(--akasha-text-muted);
+}
+
+.memory-detail-content {
+  padding: 1rem 1.25rem;
+  font-size: 0.875rem;
+  color: var(--akasha-text);
+  line-height: 1.5;
+  overflow-y: auto;
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.memory-detail-links-section {
+  padding: 0 1.25rem 1rem;
+  border-top: 1px solid var(--akasha-border);
+}
+
+.memory-detail-links-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--akasha-text-muted);
+}
+
+.memory-detail-links-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.memory-detail-link-item {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--akasha-border);
+  font-size: 0.8125rem;
+}
+
+.memory-detail-link-item:last-child {
+  border-bottom: none;
+}
+
+.memory-detail-link-type {
+  display: inline-block;
+  font-weight: 600;
+  color: var(--akasha-accent);
+  margin-right: 0.5rem;
+}
+
+.memory-detail-link-id {
+  color: var(--akasha-text-dim);
+}
+
+.memory-detail-link-preview,
+.memory-detail-link-missing {
+  margin: 0.25rem 0 0;
+  color: var(--akasha-text-muted);
+  line-height: 1.4;
+}
+
+.memory-detail-link-missing {
+  font-style: italic;
+}
+
+.memory-detail-links-none {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--akasha-text-dim);
+  line-height: 1.4;
+}
+
+.memory-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 1rem 1.25rem;
+  border-top: 1px solid var(--akasha-border);
+}
+
+.memory-graph-canvas {
+  flex: 1;
+  min-height: 350px;
+  position: relative;
+  background: var(--akasha-bg);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.memory-graph-canvas > div {
+  width: 100%;
+  height: 100%;
+  background: inherit;
 }
 
 .memory-panel .memory-section-title {
