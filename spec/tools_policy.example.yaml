@@ -45,6 +45,12 @@ command_timeout_secs: 60
 # l'agent utilisera web_search pour chercher lui-même météo, actualités, etc. au lieu de suggérer des sites.
 # web_search_enabled: false
 
+# Optionnel : crawl de site entier via Cloudflare Browser Rendering (/crawl).
+# Si activé, l'agent peut utiliser web_crawl et web_crawl_status. Nécessite un compte Cloudflare.
+# web_crawl_enabled: false
+# cloudflare_account_id: ""   # ex. identifiant du compte Cloudflare
+# Clé API : vault cloudflare_api_token ou variable d'environnement CLOUDFLARE_API_TOKEN
+
 # Optionnel : profils d'outils (default_profile = nom du profil ; tool_profiles[profil] = liste d'outils)
 # default_profile: null
 # tool_profiles: {}

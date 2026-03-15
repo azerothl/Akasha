@@ -1,11 +1,10 @@
 //! Debug session logging (NDJSON to file) for allocation/overflow investigation.
 //! Log path and session are derived from environment; no-op if disabled or file cannot be opened.
 
-use std::io::Write;
-
 #[cfg(feature = "debug_log")]
 /// Append one NDJSON line to the debug log. Silently ignores errors.
 pub fn log(location: &str, message: &str, data: &serde_json::Value, hypothesis_id: &str) {
+    use std::io::Write;
     // Derive log path and session ID from environment. If no log path is configured,
     // treat logging as disabled and return immediately.
     let log_path = match std::env::var("AKASHA_DEBUG_LOG_PATH") {

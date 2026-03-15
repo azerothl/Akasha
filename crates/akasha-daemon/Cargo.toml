@@ -18,6 +18,8 @@ embedded-baguettotron = ["akasha-llm/embedded-baguettotron"]
 embedded-cuda = ["akasha-llm/embedded-cuda"]
 # Intel MKL: faster CPU for embedded LLM (Linux/WSL2). Use when CUDA does not build or on Intel CPUs.
 embedded-mkl = ["akasha-llm/embedded-mkl"]
+# Debug session logging (NDJSON to file); set AKASHA_DEBUG_LOG_PATH and AKASHA_DEBUG_SESSION_ID
+debug_log = []
 
 [dependencies]
 akasha-core = { path = "../akasha-core" }
