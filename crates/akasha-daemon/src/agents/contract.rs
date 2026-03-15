@@ -50,11 +50,11 @@ pub fn parse_contract_from_response(response: &str) -> Option<AgentOutputContrac
     if trimmed.is_empty() {
         return None;
     }
-    // Look for ```json ... ``` or ``` ... ``` block
+    // Look for last ```json ... ``` block (rfind finds the last opening fence)
     let code_fence = "```";
-    if let Some(start) = trimmed.rfind(code_fence) {
-        let after_open = &trimmed[start + code_fence.len()..];
-        let block = after_open.strip_prefix("json").unwrap_or(after_open).trim();
+    if let Some(start) = trimmed.rfind("```json") {
+        let after_open = &trimmed[start + "```json".len()..];
+        let block = after_open.trim_start_matches(&['\r', '\n'][..]);
         if let Some(end) = block.find(code_fence) {
             let json_str = block[..end].trim();
             if let Ok(c) = serde_json::from_str::<AgentOutputContract>(json_str) {

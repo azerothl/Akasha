@@ -90,6 +90,8 @@ impl MemoryImportance {
 
 /// Optional attribution filter for search (plan: court terme 3).
 /// Extended with scope and include_expired (Phase 1).
+/// When session_id/entity_id/process_id/scope are set, only rows matching those values are
+/// returned (strict attribution). Set `include_global` to also include unattributed (NULL) rows.
 #[derive(Debug, Clone, Default)]
 pub struct MemorySearchFilter {
     pub entity_id: Option<String>,
@@ -99,6 +101,9 @@ pub struct MemorySearchFilter {
     pub scope: Option<String>,
     /// If true, include entries that have expired (expires_at < now). Default false.
     pub include_expired: bool,
+    /// If true, also include unattributed (NULL) rows when filtering by session_id/entity_id/etc.
+    /// Default false (strict attribution). Set to true to include global/legacy entries.
+    pub include_global: bool,
 }
 
 impl LongTermStore {
@@ -330,26 +335,42 @@ impl LongTermStore {
         let mut conditions = Vec::new();
         if let Some(f) = filter {
             if let Some(ref e) = f.entity_id {
-                conditions.push("(entity_id IS NULL OR entity_id = ?)");
+                if f.include_global {
+                    conditions.push("(entity_id IS NULL OR entity_id = ?)");
+                } else {
+                    conditions.push("entity_id = ?");
+                }
                 params.push(Box::new(e.clone()));
             }
             if let Some(ref p) = f.process_id {
-                conditions.push("(process_id IS NULL OR process_id = ?)");
+                if f.include_global {
+                    conditions.push("(process_id IS NULL OR process_id = ?)");
+                } else {
+                    conditions.push("process_id = ?");
+                }
                 params.push(Box::new(p.clone()));
             }
             if let Some(ref s) = f.session_id {
-                conditions.push("(session_id IS NULL OR session_id = ?)");
+                if f.include_global {
+                    conditions.push("(session_id IS NULL OR session_id = ?)");
+                } else {
+                    conditions.push("session_id = ?");
+                }
                 params.push(Box::new(s.clone()));
             }
             if let Some(ref sc) = f.scope {
-                conditions.push("(scope IS NULL OR scope = ?)");
+                if f.include_global {
+                    conditions.push("(scope IS NULL OR scope = ?)");
+                } else {
+                    conditions.push("scope = ?");
+                }
                 params.push(Box::new(sc.clone()));
             }
             if !f.include_expired {
-                conditions.push("(expires_at IS NULL OR expires_at > datetime('now'))");
+                conditions.push("(expires_at IS NULL OR datetime(expires_at) > datetime('now'))");
             }
         } else {
-            conditions.push("(expires_at IS NULL OR expires_at > datetime('now'))");
+            conditions.push("(expires_at IS NULL OR datetime(expires_at) > datetime('now'))");
         }
         let where_clause = if conditions.is_empty() {
             "".to_string()

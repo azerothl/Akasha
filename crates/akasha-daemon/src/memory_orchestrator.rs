@@ -129,6 +129,7 @@ pub async fn recall_context(
         let recall_filter = if params.filter_by_session {
             Some(MemorySearchFilter {
                 session_id: Some(params.session_id.clone()),
+                include_global: true,
                 ..Default::default()
             })
         } else {

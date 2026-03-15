@@ -507,110 +507,21 @@ fn windows_spawn(
     }))
 }
 
-/// Build a single shell command string from command + args, quoting args that need it. Then substitute $VAR for each (VAR, value) in extra_env. Only used on Unix (Windows uses PowerShell script).
-#[cfg(not(windows))]
-fn build_shell_command_and_substitute(
-    command: &str,
-    args: &[String],
-    extra_env: &[(String, String)],
-) -> String {
-    fn needs_quoting(s: &str) -> bool {
-        s.is_empty() || s.contains(' ') || s.contains('"') || s.contains('&') || s.contains('|') || s.contains(';')
+/// Substitute $VAR and ${VAR} patterns in a string with values from env pairs.
+/// Used to expand vault/env variables in command arguments without a shell.
+fn substitute_env_vars(s: &str, env: &[(String, String)]) -> String {
+    let mut result = s.to_string();
+    for (k, v) in env {
+        result = result.replace(&format!("${{{}}}", k), v);
+        result = result.replace(&format!("${}", k), v);
     }
-    #[cfg(windows)]
-    fn escape_for_shell(s: &str) -> String {
-        s.replace('"', "\"\"")
-    }
-    #[cfg(not(windows))]
-    fn escape_for_shell(s: &str) -> String {
-        s.replace('\\', "\\\\").replace('"', "\\\"")
-    }
-    let mut parts = vec![command.trim().to_string()];
-    for a in args {
-        if needs_quoting(a) {
-            parts.push(format!("\"{}\"", escape_for_shell(a)));
-        } else {
-            parts.push(a.clone());
-        }
-    }
-    let mut shell_cmd = parts.join(" ");
-    for (k, v) in extra_env {
-        let escaped = escape_for_shell(v);
-        shell_cmd = shell_cmd.replace(&format!("${}", k), &escaped);
-        shell_cmd = shell_cmd.replace(&format!("${{{}}}", k), &escaped);
-    }
-    shell_cmd
-}
-
-/// On Windows, when extra_env is set, run the command via a PowerShell script file so env vars are set in the script and $env:VAR is used — avoids cmd.exe quoting issues.
-/// Returns (child, script_path). Caller must remove the script file after the process exits.
-#[cfg(windows)]
-fn run_command_via_powershell_script(
-    command: &str,
-    args: &[String],
-    extra_env: &[(String, String)],
-    cwd: &Path,
-) -> Result<(tokio::process::Child, std::path::PathBuf), std::io::Error> {
-    fn needs_quoting(s: &str) -> bool {
-        s.is_empty() || s.contains(' ') || s.contains('"') || s.contains('&') || s.contains('|') || s.contains(';')
-    }
-    // Escape for PowerShell single-quoted string: ' -> ''
-    fn escape_ps1_single(s: &str) -> String {
-        s.replace('\'', "''")
-    }
-    // On Windows PowerShell, "curl" is an alias for Invoke-WebRequest; use curl.exe so -H etc. work.
-    let cmd = command.trim();
-    let cmd = if cmd.eq_ignore_ascii_case("curl") {
-        "curl.exe".to_string()
-    } else {
-        cmd.to_string()
-    };
-    let mut parts = vec![cmd];
-    for a in args {
-        if needs_quoting(a) {
-            parts.push(format!("\"{}\"", a.replace('"', "`\"")));
-        } else {
-            parts.push(a.clone());
-        }
-    }
-    let mut cmd_line = parts.join(" ");
-    for (k, _) in extra_env {
-        let env_ref = format!("$env:{}", k);
-        cmd_line = cmd_line.replace(&format!("${}", k), &env_ref);
-        cmd_line = cmd_line.replace(&format!("${{{}}}", k), &env_ref);
-    }
-    let mut script_lines: Vec<String> = Vec::new();
-    for (k, v) in extra_env {
-        script_lines.push(format!("$env:{} = '{}'", k, escape_ps1_single(v)));
-    }
-    script_lines.push(cmd_line);
-    let script_content = script_lines.join("\n");
-
-    let mut script_path = std::env::temp_dir();
-    script_path.push(format!(
-        "akasha_run_{}.ps1",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    std::fs::write(&script_path, script_content).map_err(|e| {
-        std::io::Error::new(e.kind(), format!("write powershell script: {}", e))
-    })?;
-    let script_path_str = script_path.to_string_lossy().into_owned();
-
-    let child = tokio::process::Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &script_path_str])
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    Ok((child, script_path))
+    result
 }
 
 /// Run a command with timeout. Command name must be allowed by policy.
 /// `extra_env`: optional env vars (e.g. from vault) to inject into the child process.
-/// When extra_env is set, the command is run via the OS shell so that $VAR in args is substituted (Windows cmd does not expand $VAR, so we substitute in-process).
+/// When extra_env is set, $VAR and ${VAR} patterns in args are substituted in-process,
+/// and the command is spawned directly (no shell) with env vars passed via Command::env.
 pub async fn run_command(
     command: &str,
     args: &[String],
@@ -638,52 +549,33 @@ pub async fn run_command(
     let cwd = cwd.unwrap_or_else(|| Path::new("."));
     let env_slice = extra_env.unwrap_or(&[]);
 
-    let (child, script_to_remove) = if !env_slice.is_empty() {
+    // Substitute $VAR/${VAR} patterns in args in-process, then spawn directly (no shell).
+    // Env vars are also passed via Command::env so child processes inherit them.
+    let substituted_args: Vec<String> = args.iter().map(|a| substitute_env_vars(a, env_slice)).collect();
+
+    let child = {
         #[cfg(windows)]
         {
-            let (c, script_path) = run_command_via_powershell_script(command, args, env_slice, cwd)
-                .with_context(|| format!("run_command (powershell) {}", command))?;
-            (c, Some(script_path))
+            windows_spawn(command, &substituted_args, cwd, env_slice)
+                .with_context(|| format!("run_command {}", command))?
         }
         #[cfg(not(windows))]
         {
-            let shell_cmd = build_shell_command_and_substitute(command, args, env_slice);
-            let mut cmd = tokio::process::Command::new("sh");
-            cmd.arg("-c").arg(&shell_cmd).current_dir(cwd)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            for (k, v) in env_slice {
-                cmd.env(k, v);
-            }
-            (
-                cmd.spawn().with_context(|| format!("run_command (shell) {}", command))?,
-                None::<std::path::PathBuf>,
-            )
-        }
-    } else {
-        #[cfg(windows)]
-        let child = windows_spawn(command, args, cwd, env_slice).with_context(|| format!("run_command {}", command))?;
-        #[cfg(not(windows))]
-        let child = {
             let mut cmd = tokio::process::Command::new(command);
-            cmd.args(args).current_dir(cwd)
+            cmd.args(&substituted_args).current_dir(cwd)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
             for (k, v) in env_slice {
                 cmd.env(k, v);
             }
             cmd.spawn().with_context(|| format!("run_command {}", command))?
-        };
-        (child, None::<std::path::PathBuf>)
+        }
     };
 
     let timeout = Duration::from_secs(if timeout_secs == 0 { 60 } else { timeout_secs });
     let output: std::process::Output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
         .context("run_command timeout")??;
-    if let Some(p) = script_to_remove {
-        let _ = std::fs::remove_file(&p);
-    }
     let success = output.status.success();
     let code = output.status.code().unwrap_or(-1);
     let stdout_len = output.stdout.len();

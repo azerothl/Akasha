@@ -85,6 +85,7 @@
   "calendar.delete_schedule": "Supprimer cette récurrence",
   "calendar.delete_selection": "Supprimer la sélection",
   "calendar.delete_schedule_aria": "Supprimer la récurrence {name}",
+  "calendar.select_schedule": "Sélectionner la récurrence",
   "memory.title": "Mémoire",
   "memory.short_empty": "Aucun tour en mémoire court terme.",
   "memory.long_unavailable": "Mémoire long terme non disponible (embeddings non configurés ou désactivés).",

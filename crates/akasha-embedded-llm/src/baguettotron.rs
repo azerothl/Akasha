@@ -160,7 +160,7 @@ where
 {
     use candle_core::IndexOp;
 
-    let max_new = max_tokens.unwrap_or(MAX_NEW_TOKENS);
+    let max_new = max_tokens.unwrap_or(MAX_NEW_TOKENS).min(512);
     let enc = pipeline
         .tokenizer
         .encode(prompt, true)
