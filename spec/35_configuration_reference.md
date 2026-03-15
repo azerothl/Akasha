@@ -118,7 +118,7 @@ Voir [tools_policy.example.yaml](tools_policy.example.yaml).
 **Format** : JSON.  
 **Utilisé par** : daemon (contexte injecté en tête du prompt LLM), CLI (`akasha init` pour les templates), UI (Paramètres → Profil de l'agent).
 
-Définit l’**identité et la personnalité** de l’agent : nom, ton, règles et contraintes. Ce bloc est formaté par `format_for_prompt()` et injecté en tête du contexte à chaque tour de conversation, afin que l’agent adopte ce profil de façon stable.
+Définit l’**identité et la personnalité** de l’agent : nom, ton, règles et contraintes. Ce bloc est formaté par `format_for_prompt()` (ou par la couche personnalité 5 niveaux quand les YAML sont présents) et injecté en tête du contexte à chaque tour de conversation, afin que l’agent adopte ce profil de façon stable. Voir [52_personality_architecture.md](52_personality_architecture.md) pour l'architecture en 5 niveaux et les fichiers spec/personality_core.yaml, spec/personality_modes.yaml, spec/initiative_policy.yaml.
 
 ### Structure et types
 
@@ -132,6 +132,8 @@ Définit l’**identité et la personnalité** de l’agent : nom, ton, règles 
 | `rules`      | liste de strings | Non         | Règles à respecter (une par ligne).                                        |
 | `can_do`     | liste de strings | Non         | Comportements autorisés.                                                    |
 | `cannot_do`   | liste de strings | Non         | Comportements interdits.                                                    |
+| `traits_override` | objet (clé → nombre 0–1) | Non | Surcharge des traits (verbosity, warmth, pedagogy, rigor, humor, proactivity, cautiousness, initiative). Vide = valeurs par défaut du personality_core. |
+| `preferred_mode` | string | Non | Mode par défaut : `"assistant"`, `"operator"`, `"architect"`, `"onboarding"`. |
 
 ### Limites (UI)
 

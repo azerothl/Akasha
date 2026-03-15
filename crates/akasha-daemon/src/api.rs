@@ -2657,13 +2657,14 @@ pub(crate) async fn run_message_via_llm(
         context_prefix.push_str("\n\n");
     }
 
-    // Agent profile: name, personality, rules, can/cannot (persisted in data_dir/agent_profile.json)
+    // Agent profile: name, personality, rules, can/cannot (persisted in data_dir/agent_profile.json).
+    // When spec personality YAMLs exist, use 5-level personality layer; else fallback to format_for_prompt().
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
     let agent_profile = match &agent_profile_cache {
         Some(cache) => get_or_load_agent_profile(data_dir, cache).await,
         None => AgentProfile::load(data_dir),
     };
-    let profile_block = agent_profile.format_for_prompt();
+    let profile_block = crate::personality::build_personality_prompt(spec_dir.as_path(), &agent_profile);
     if !profile_block.is_empty() {
         context_prefix.push_str(&profile_block);
     }
@@ -3859,7 +3860,7 @@ pub async fn handle_api(
         }
     }
 
-    // GET /api/agent-profile — read agent profile (name, personality, role, gender, avatar, rules, can_do, cannot_do)
+    // GET /api/agent-profile — read agent profile (name, personality, role, gender, avatar, rules, can_do, cannot_do, traits_override, preferred_mode)
     if method == "GET" && path == "/api/agent-profile" {
         let profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         let body_json = serde_json::json!({
@@ -3870,12 +3871,14 @@ pub async fn handle_api(
             "avatar": profile.avatar,
             "rules": profile.rules,
             "can_do": profile.can_do,
-            "cannot_do": profile.cannot_do
+            "cannot_do": profile.cannot_do,
+            "traits_override": profile.traits_override,
+            "preferred_mode": profile.preferred_mode
         });
         return json_response("200 OK", &body_json.to_string());
     }
 
-    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, role?, gender?, avatar?, rules?, can_do?, cannot_do? }
+    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, role?, gender?, avatar?, rules?, can_do?, cannot_do?, traits_override?, preferred_mode? }
     if method == "POST" && path == "/api/agent-profile" {
         let mut profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         if let Some(body) = body.as_deref() {
@@ -3903,6 +3906,18 @@ pub async fn handle_api(
                 }
                 if let Some(arr) = v.get("cannot_do").and_then(|x| x.as_array()) {
                     profile.cannot_do = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+                }
+                if let Some(obj) = v.get("traits_override").and_then(|x| x.as_object()) {
+                    let mut map = std::collections::HashMap::new();
+                    for (k, val) in obj {
+                        if let Some(n) = val.as_f64() {
+                            map.insert(k.clone(), n);
+                        }
+                    }
+                    profile.traits_override = if map.is_empty() { None } else { Some(map) };
+                }
+                if v.get("preferred_mode").is_some() {
+                    profile.preferred_mode = v.get("preferred_mode").and_then(|x| x.as_str()).map(String::from);
                 }
             }
         }

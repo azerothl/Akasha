@@ -2,6 +2,7 @@
 
 pub mod agent_profile;
 pub mod agents;
+pub mod personality;
 pub mod api;
 pub mod channels;
 pub mod daemon;
