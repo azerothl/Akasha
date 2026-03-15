@@ -112,19 +112,19 @@ impl EpisodicStore {
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(ref e) = filter.entity_id {
-            conditions.push("(entity_id IS NULL OR entity_id = ?)");
+            conditions.push("entity_id = ?");
             params.push(Box::new(e.clone()));
         }
         if let Some(ref p) = filter.process_id {
-            conditions.push("(process_id IS NULL OR process_id = ?)");
+            conditions.push("process_id = ?");
             params.push(Box::new(p.clone()));
         }
         if let Some(ref s) = filter.session_id {
-            conditions.push("(session_id IS NULL OR session_id = ?)");
+            conditions.push("session_id = ?");
             params.push(Box::new(s.clone()));
         }
         if let Some(ref sc) = filter.scope {
-            conditions.push("(scope IS NULL OR scope = ?)");
+            conditions.push("scope = ?");
             params.push(Box::new(sc.clone()));
         }
         if let Some(ref t) = filter.event_type {

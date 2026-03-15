@@ -449,13 +449,10 @@ pub fn start_memory_actor(
                 }
             };
             let episodic_store = match EpisodicStore::open(&memory_db_path) {
-                Ok(s) => s,
+                Ok(s) => Some(s),
                 Err(e) => {
-                    tracing::error!(error = %e, "Episodic store open failed");
-                    while let Ok((_, resp_tx)) = rx.recv() {
-                        let _ = resp_tx.send(MemoryResponse::EmitEvent(Err(e.to_string())));
-                    }
-                    return;
+                    tracing::error!(error = %e, "Episodic store open failed; episodic features will be unavailable");
+                    None
                 }
             };
             let facts_store = FactsStore::open(&memory_db_path).ok();
@@ -590,23 +587,29 @@ pub fn start_memory_actor(
                         MemoryResponse::HasDailySummary(exists)
                     }
                     MemoryRequest::EmitEvent { event_type, payload, entity_id, process_id, session_id, task_id, importance, scope, tags } => {
-                        let result = episodic_store
-                            .insert_event(
-                                &event_type,
-                                &payload,
-                                entity_id.as_deref(),
-                                process_id.as_deref(),
-                                session_id.as_deref(),
-                                task_id.as_deref(),
-                                importance,
-                                scope.as_deref(),
-                                tags.as_deref(),
-                            )
-                            .map_err(|e| e.to_string());
+                        let result = match episodic_store {
+                            Some(ref es) => es
+                                .insert_event(
+                                    &event_type,
+                                    &payload,
+                                    entity_id.as_deref(),
+                                    process_id.as_deref(),
+                                    session_id.as_deref(),
+                                    task_id.as_deref(),
+                                    importance,
+                                    scope.as_deref(),
+                                    tags.as_deref(),
+                                )
+                                .map_err(|e| e.to_string()),
+                            None => Err("episodic store failed to initialize".to_string()),
+                        };
                         MemoryResponse::EmitEvent(result.map(|u| u))
                     }
                     MemoryRequest::SearchEpisodic { filter, limit } => {
-                        let events = episodic_store.get_events_filtered(&filter, limit).unwrap_or_default();
+                        let events = episodic_store
+                            .as_ref()
+                            .and_then(|es| es.get_events_filtered(&filter, limit).ok())
+                            .unwrap_or_default();
                         MemoryResponse::SearchEpisodic(events)
                     }
                     MemoryRequest::GetFactsByEntity { entity_id, limit } => {

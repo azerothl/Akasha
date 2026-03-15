@@ -5,6 +5,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::RwLock;
 
+/// Validate that `session_id` is safe to use as a filename component.
+/// Allows only alphanumeric characters, `-` and `_` to prevent path traversal.
+fn is_safe_session_id(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// One turn in the conversation (user or assistant).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationTurn {
@@ -105,10 +114,12 @@ impl ShortTermStore {
         };
         if !to_persist.is_empty() {
             if let Some(ref dir) = self.persistence_dir {
-                let path = dir.join(format!("{}.json", session_id));
-                let _ = std::fs::create_dir_all(dir);
-                if let Ok(json) = serde_json::to_string(&to_persist) {
-                    let _ = std::fs::write(&path, json);
+                if is_safe_session_id(session_id) {
+                    let path = dir.join(format!("{}.json", session_id));
+                    let _ = std::fs::create_dir_all(dir);
+                    if let Ok(json) = serde_json::to_string(&to_persist) {
+                        let _ = std::fs::write(&path, json);
+                    }
                 }
             }
         }
@@ -147,10 +158,12 @@ impl ShortTermStore {
         };
         if !to_persist.is_empty() {
             if let Some(ref dir) = self.persistence_dir {
-                let path = dir.join(format!("{}.json", session_id));
-                let _ = std::fs::create_dir_all(dir);
-                if let Ok(json) = serde_json::to_string(&to_persist) {
-                    let _ = std::fs::write(&path, json);
+                if is_safe_session_id(session_id) {
+                    let path = dir.join(format!("{}.json", session_id));
+                    let _ = std::fs::create_dir_all(dir);
+                    if let Ok(json) = serde_json::to_string(&to_persist) {
+                        let _ = std::fs::write(&path, json);
+                    }
                 }
             }
         }
@@ -181,6 +194,9 @@ impl ShortTermStore {
 
     /// Load a session from disk ({session_id}.json). Used on demand in get_turns for any session; day-* can also be loaded at startup via load_day_from_disk.
     pub async fn load_session_from_disk(&self, session_id: &str) {
+        if !is_safe_session_id(session_id) {
+            return;
+        }
         let dir = match &self.persistence_dir {
             Some(d) => d,
             None => return,
@@ -210,7 +226,7 @@ impl ShortTermStore {
 
     /// Read turns for a day session from disk without loading into the store (e.g. to summarize yesterday).
     pub fn read_day_from_disk(session_id: &str, persistence_dir: &std::path::Path) -> Option<Vec<ConversationTurn>> {
-        if !session_id.starts_with("day-") {
+        if !session_id.starts_with("day-") || !is_safe_session_id(session_id) {
             return None;
         }
         let path = persistence_dir.join(format!("{}.json", session_id));

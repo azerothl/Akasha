@@ -84,30 +84,36 @@ pub fn parse_todos_from_payload(payload: &str) -> Vec<TodoItem> {
     if trimmed.is_empty() {
         return Vec::new();
     }
-    // Try JSON first
-    if let Ok(items) = serde_json::from_str::<Vec<TodoItem>>(trimmed) {
-        return items;
+    // Helper to parse a JSON array of objects, with status optional (defaulting to Pending).
+    let parse_json_array = |arr: &[serde_json::Value]| -> Vec<TodoItem> {
+        arr.iter()
+            .filter_map(|v| {
+                let title = v.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                let status = v
+                    .get("status")
+                    .and_then(|s| s.as_str())
+                    .map(TodoStatus::from_str)
+                    .unwrap_or(TodoStatus::Pending);
+                let id = v.get("id").and_then(|i| i.as_str()).map(String::from);
+                if title.is_empty() {
+                    None
+                } else {
+                    Some(TodoItem { id, title, status })
+                }
+            })
+            .collect()
+    };
+    // Try JSON array first (status optional)
+    if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        let items = parse_json_array(&arr);
+        if !items.is_empty() {
+            return items;
+        }
     }
     // Try JSON object with "todos" key
     if let Ok(obj) = serde_json::from_str::<serde_json::Value>(trimmed) {
         if let Some(arr) = obj.get("todos").and_then(|v| v.as_array()) {
-            let items: Vec<TodoItem> = arr
-                .iter()
-                .filter_map(|v| {
-                    let title = v.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                    let status = v
-                        .get("status")
-                        .and_then(|s| s.as_str())
-                        .map(TodoStatus::from_str)
-                        .unwrap_or(TodoStatus::Pending);
-                    let id = v.get("id").and_then(|i| i.as_str()).map(String::from);
-                    if title.is_empty() {
-                        None
-                    } else {
-                        Some(TodoItem { id, title, status })
-                    }
-                })
-                .collect();
+            let items = parse_json_array(arr);
             if !items.is_empty() {
                 return items;
             }

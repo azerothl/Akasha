@@ -149,6 +149,7 @@ impl PipelineStore {
     }
 
     pub fn increment_attempt(&self, root_task_id: Uuid) -> anyhow::Result<u32> {
+        self.init_if_missing(root_task_id)?;
         self.conn.execute(
             "UPDATE pipeline_context SET attempt_count = COALESCE(attempt_count, 0) + 1, updated_at = ?1 WHERE root_task_id = ?2",
             rusqlite::params![Utc::now().to_rfc3339(), root_task_id.to_string()],

@@ -916,6 +916,7 @@ impl App {
     fn fetch_memory_search(&mut self) {
         let query = self.memory_search_query.trim();
         if query.is_empty() {
+            self.memory_search_results = Vec::new();
             return;
         }
         let url = format!(
