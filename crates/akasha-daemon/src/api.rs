@@ -1223,7 +1223,7 @@ const APP_CONTEXT: &str = concat!(
     "Full documentation is available in the Doc tab of the interface. ",
     "Language: ALWAYS reply in the same language as the user's last message (French → French, English → English, etc.). Do not switch language even if tool results or context are in another language. ",
     "Never invent data. If you do not have the information to answer, say so clearly (e.g. \"I did not find that information\"). ",
-    "For questions about information you do not have (weather, forecasts, news, schedules, etc.), you must use the web_search tool to search yourself then reply with the results. ",
+    "For questions about information you do not have (weather, forecasts, news, schedules, etc.), you must use the web_search tool to search yourself then reply with the results. When you have just received tool results (e.g. web_search, web_fetch), you must answer immediately with the synthesized result — do not reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"); the task ends after your message, so give the actual answer. ",
     "Do not suggest the user visit a site without having used web_search first if you have access to that tool. ",
     "If web_search returns an error (e.g. not enabled), you can then suggest sites and explain how to enable web search (tools_policy.yaml, web_search_enabled, BRAVE_API_KEY). ",
     "You have access to the write_file tool: you MUST use it whenever the user asks to save, store or write a file (e.g. \"save the code to …\", \"write to file\"). ",
@@ -2498,13 +2498,12 @@ Factual response in English.\n\n{}",
 }
 
 /// Returns true if the text looks like a placeholder / promise ("I'll do it", "one second") rather than an actual answer.
-/// Used after tool calls to avoid completing the task with "Je vais récupérer… Une seconde." instead of the real result.
+/// Used after tool calls to avoid completing the task with "I will fetch…" instead of the real result.
 fn looks_like_placeholder_after_tools(text: &str) -> bool {
-    let t = text.trim();
-    if t.len() > 200 {
+    let lower = text.trim().to_lowercase();
+    if lower.is_empty() {
         return false;
     }
-    let lower = t.to_lowercase();
     let placeholder_phrases = [
         "une seconde",
         "one second",
@@ -2513,6 +2512,10 @@ fn looks_like_placeholder_after_tools(text: &str) -> bool {
         "je vais ",
         "i'll ",
         "i will ",
+        "i'm fetching",
+        "i'm retrieving",
+        "i'm getting",
+        "i'm checking",
         "let me fetch",
         "let me get",
         "let me check",
@@ -2524,6 +2527,16 @@ fn looks_like_placeholder_after_tools(text: &str) -> bool {
         "récupération",
         "attendez",
         "wait ",
+        "action en cours",
+        "en cours",
+        "puis te les résumer",
+        "puis vous les",
+        "then i'll ",
+        "then i will ",
+        "and then give you",
+        "and then summarize",
+        "will summarize",
+        "will give you",
     ];
     placeholder_phrases.iter().any(|p| lower.contains(p))
 }
@@ -3436,7 +3449,10 @@ pub(crate) async fn run_message_via_llm(
             }
             let results_blob = tool_results.join("\n");
             last_tool_results_blob = Some(results_blob.clone());
-            current_prompt = format!("{}\n\nTool results:\n{}\n\nProvide your final answer to the user (no more TOOL: lines).", response, results_blob);
+            current_prompt = format!(
+                "{}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, write the final answer to the user now. Do NOT reply with a promise (e.g. \"I will fetch…\", \"I will summarize…\", \"Action in progress\"). The task ends after this message — give the actual answer (e.g. weather forecast, search summary). No TOOL: lines.",
+                response, results_blob
+            );
             if round >= MAX_TOOL_ROUNDS {
                 let response_for_user = response
                     .lines()
@@ -3488,7 +3504,7 @@ pub(crate) async fn run_message_via_llm(
         {
             force_synthesis_attempted = true;
             current_prompt = format!(
-                "Tool results:\n{}\n\nThe user is waiting for the actual answer. Your previous message was only a placeholder. Based on the tool results above, write ONLY the final answer now (e.g. weather summary, search result). Do not say you will do it — do it. No TOOL: lines.",
+                "Tool results:\n{}\n\nThe user is waiting for the actual answer. Your previous message was a promise (e.g. \"I will fetch…\") — the task is about to close, so you must answer NOW. Using the tool results above, write ONLY the final answer (e.g. weather forecast, search summary). Do not say you will do it — do it. No TOOL: lines, no \"action in progress\".",
                 last_tool_results_blob.as_deref().unwrap_or("")
             );
             continue;
