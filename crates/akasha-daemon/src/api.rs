@@ -4125,6 +4125,58 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
+    // GET /api/memory/search?q=...&top_k=... — semantic search in long-term memory
+    if method == "GET" && path.starts_with("/api/memory/search") {
+        let (q, top_k) = path
+            .split('?')
+            .nth(1)
+            .map(|query_str| {
+                let mut q = None;
+                let mut top_k = 10u32;
+                for part in query_str.split('&') {
+                    if let Some(v) = part.strip_prefix("q=") {
+                        let decoded = urlencoding::decode(v).unwrap_or_else(|_| std::borrow::Cow::Borrowed(v));
+                        q = Some(decoded.trim().to_string());
+                    } else if let Some(v) = part.strip_prefix("top_k=") {
+                        if let Ok(n) = v.parse::<u32>() {
+                            top_k = n.min(20);
+                        }
+                    }
+                }
+                (q, top_k)
+            })
+            .unwrap_or((None, 10));
+        let query = q.as_deref().map(|s| s.trim()).unwrap_or("");
+        if query.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing or empty q"}"#);
+        }
+        let result = match long_term_client {
+            Some(ref client) => {
+                let client = client.clone();
+                let query = query.to_string();
+                let top_k = top_k as usize;
+                tokio::task::spawn_blocking(move || client.search(query, top_k, None))
+                    .await
+                    .unwrap_or_default()
+            }
+            None => {
+                return json_response(
+                    "503 Service Unavailable",
+                    r#"{"error":"long-term memory not available","long_term_available":false}"#,
+                );
+            }
+        };
+        let results: Vec<serde_json::Value> = result
+            .iter()
+            .map(|(id, content)| serde_json::json!({ "id": id, "content": content }))
+            .collect();
+        let body_json = serde_json::json!({
+            "results": results,
+            "long_term_available": true
+        });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
     // GET /api/memory/long-term?limit=50 — recent long-term entries (content, created_at, source, related)
     if method == "GET" && path.starts_with("/api/memory/long-term") {
         let limit = path
