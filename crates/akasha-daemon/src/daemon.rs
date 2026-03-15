@@ -798,7 +798,20 @@ impl Daemon {
                                         Some((header_end, content_length)) if content_length <= MAX_BODY => {
                                             let total_needed = header_end.saturating_add(4).saturating_add(content_length);
                                             // #region agent log
-                                            debug_log::log("daemon.rs:body_read", "content_length branch", &serde_json::json!({"header_end": header_end, "content_length": content_length, "total_needed": total_needed, "buf_len": buf.len(), "max_body": MAX_BODY}), "A");
+                                            if std::env::var("AKASHA_AGENT_DEBUG").map(|v| v == "1").unwrap_or(false) {
+                                                debug_log::log(
+                                                    "daemon.rs:body_read",
+                                                    "content_length branch",
+                                                    &serde_json::json!({
+                                                        "header_end": header_end,
+                                                        "content_length": content_length,
+                                                        "total_needed": total_needed,
+                                                        "buf_len": buf.len(),
+                                                        "max_body": MAX_BODY
+                                                    }),
+                                                    "A",
+                                                );
+                                            }
                                             // #endregion
                                             if buf.len() >= total_needed {
                                                 buf
@@ -818,13 +831,35 @@ impl Daemon {
                                         _ => {
                                             // #region agent log
                                             let pc = parse_content_length(&buf);
-                                            debug_log::log("daemon.rs:body_skip", "skip branch (content_length > MAX_BODY or no Content-Length)", &serde_json::json!({"parse_result": pc.map(|(he,cl)| serde_json::json!({"header_end": he, "content_length": cl})), "buf_len": buf.len()}), "A");
+                                            if std::env::var("AKASHA_AGENT_DEBUG").map(|v| v == "1").unwrap_or(false) {
+                                                debug_log::log(
+                                                    "daemon.rs:body_skip",
+                                                    "skip branch (content_length > MAX_BODY or no Content-Length)",
+                                                    &serde_json::json!({
+                                                        "parse_result": pc.map(|(he, cl)| serde_json::json!({
+                                                            "header_end": he,
+                                                            "content_length": cl
+                                                        })),
+                                                        "buf_len": buf.len()
+                                                    }),
+                                                    "A",
+                                                );
+                                            }
                                             // #endregion
                                             buf
                                         }
                                     };
                                     // #region agent log
-                                    debug_log::log("daemon.rs:before_parse_request", "before parse_request", &serde_json::json!({"full_buf_len": full_buf.len()}), "B");
+                                    if std::env::var("AKASHA_AGENT_DEBUG").map(|v| v == "1").unwrap_or(false) {
+                                        debug_log::log(
+                                            "daemon.rs:before_parse_request",
+                                            "before parse_request",
+                                            &serde_json::json!({
+                                                "full_buf_len": full_buf.len()
+                                            }),
+                                            "B",
+                                        );
+                                    }
                                     // #endregion
                                     let (method, path, body, headers) = parse_request(&full_buf);
                                     if method == "GET" && path == "/api/events" {
