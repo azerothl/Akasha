@@ -302,12 +302,19 @@ function App() {
     return { byHour, byDate };
   }, [calendarGridEvents]);
   const [memoryShortTerm, setMemoryShortTerm] = useState<Array<{ role: string; content: string }>>([]);
-  const [memoryLongTerm, setMemoryLongTerm] = useState<Array<{ id?: string; content: string; created_at: string; source: string }>>([]);
+  type MemoryLongTermEntry = { id?: string; content: string; created_at: string; source: string; related?: Array<{ id: string; kind?: string }> };
+  const [memoryLongTerm, setMemoryLongTerm] = useState<MemoryLongTermEntry[]>([]);
   const [memoryLongTermAvailable, setMemoryLongTermAvailable] = useState(false);
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
   type MemorySubTab = "short" | "long";
   const [memorySubTab, setMemorySubTab] = useState<MemorySubTab>("short");
+  const [memorySearchQuery, setMemorySearchQuery] = useState("");
+  const [memorySearchResults, setMemorySearchResults] = useState<Array<{ id: string; content: string }>>([]);
+  const [memorySearchActive, setMemorySearchActive] = useState(false);
+  const [memorySearchLoading, setMemorySearchLoading] = useState(false);
+  const [memoryViewGraph, setMemoryViewGraph] = useState(false);
+  const [memoryLongTermSelected, setMemoryLongTermSelected] = useState(0);
   const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
   const [sessionId, setSessionId] = useState<string | null>(() => {
     try {
@@ -858,13 +865,13 @@ function App() {
           sessionId: sessionId ?? undefined,
           port: DAEMON_PORT,
         }),
-        invoke<{ entries?: Array<{ id?: string; content: string; created_at: string; source: string }>; long_term_available?: boolean }>("get_memory_long_term", {
+        invoke<{ entries?: MemoryLongTermEntry[]; long_term_available?: boolean }>("get_memory_long_term", {
           limit: 50,
           port: DAEMON_PORT,
         }),
       ]);
       const short = shortRes?.turns ?? [];
-      const long = longRes?.entries ?? [];
+      const long = (longRes?.entries ?? []) as MemoryLongTermEntry[];
       setMemoryShortTerm(short);
       setMemoryLongTerm(long);
       setMemoryLongTermAvailable(longRes?.long_term_available ?? false);
@@ -879,9 +886,28 @@ function App() {
     }
   }, [sessionId]);
 
+  const runMemorySearch = useCallback(async () => {
+    const q = memorySearchQuery.trim();
+    if (!q) return;
+    setMemorySearchLoading(true);
+    try {
+      const res = await invoke<{ results?: Array<{ id: string; content: string }>; long_term_available?: boolean }>("get_memory_search", {
+        q,
+        top_k: 20,
+        port: DAEMON_PORT,
+      });
+      setMemorySearchResults(res?.results ?? []);
+    } catch (e) {
+      setMemoryError(String(e));
+      setMemorySearchResults([]);
+    } finally {
+      setMemorySearchLoading(false);
+    }
+  }, [memorySearchQuery]);
+
   useEffect(() => {
     if (tab !== "memory") return;
-    const cached = getCached<{ short: Array<{ role: string; content: string }>; long: Array<{ id?: string; content: string; created_at: string; source: string }>; longTermAvailable: boolean }>("memory");
+    const cached = getCached<{ short: Array<{ role: string; content: string }>; long: MemoryLongTermEntry[]; longTermAvailable: boolean }>("memory");
     if (cached != null) {
       setMemoryShortTerm(cached.short);
       setMemoryLongTerm(cached.long);
@@ -892,6 +918,12 @@ function App() {
     }
     fetchMemory();
   }, [tab, fetchMemory]);
+
+  useEffect(() => {
+    if (memoryLongTerm.length > 0 && memoryLongTermSelected >= memoryLongTerm.length) {
+      setMemoryLongTermSelected(memoryLongTerm.length - 1);
+    }
+  }, [memoryLongTerm.length, memoryLongTermSelected]);
 
   const fetchScheduleReports = useCallback(async () => {
     try {
@@ -3506,38 +3538,117 @@ function App() {
                   >
                     {!memoryLongTermAvailable ? (
                       <p className="muted">{t("memory.long_unavailable")}</p>
+                    ) : memorySearchActive ? (
+                      <div className="memory-search-wrap">
+                        <div className="memory-search-bar">
+                          <input
+                            type="text"
+                            value={memorySearchQuery}
+                            onChange={(ev) => setMemorySearchQuery(ev.target.value)}
+                            onKeyDown={(ev) => ev.key === "Enter" && runMemorySearch()}
+                            placeholder={t("memory.search_placeholder")}
+                            aria-label={t("memory.search")}
+                          />
+                          <button type="button" onClick={runMemorySearch} disabled={memorySearchLoading || !memorySearchQuery.trim()}>
+                            {memorySearchLoading ? t("common.loading") : t("memory.search")}
+                          </button>
+                          <button type="button" onClick={() => { setMemorySearchActive(false); setMemorySearchQuery(""); setMemorySearchResults([]); }}>
+                            {t("memory.search_back")}
+                          </button>
+                        </div>
+                        {memorySearchResults.length === 0 ? (
+                          <p className="muted">Saisir une requête puis Rechercher. Aucun résultat pour l’instant.</p>
+                        ) : (
+                          <ul className="memory-long-term-list">
+                            {memorySearchResults.map((r, i) => (
+                              <li key={r.id ?? i} className="memory-long-term-item">
+                                <div className="memory-long-term-body">
+                                  <div className="memory-long-term-content">{r.content}</div>
+                                  <div className="memory-long-term-meta">id: {r.id}</div>
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    ) : memoryViewGraph ? (
+                      <div className="memory-graph-wrap">
+                        <button type="button" onClick={() => setMemoryViewGraph(false)}>{t("memory.view_list")}</button>
+                        {memoryLongTerm.length === 0 ? (
+                          <p className="empty-state">{t("memory.long_empty")}</p>
+                        ) : (() => {
+                          const root = memoryLongTerm[memoryLongTermSelected];
+                          if (!root) return <p className="muted">Sélectionnez une entrée en vue liste.</p>;
+                          const related = root.related ?? [];
+                          const idToContent = new Map(memoryLongTerm.filter((e): e is MemoryLongTermEntry & { id: string } => e.id != null).map((e) => [e.id!, e]));
+                          return (
+                            <div className="memory-graph-tree">
+                              <div className="memory-graph-root">
+                                <strong>●</strong> [{root.source}] {root.created_at} — {root.content.slice(0, 80)}{root.content.length > 80 ? "…" : ""}
+                                {root.id && <span className="memory-graph-id"> (id: {root.id.slice(0, 8)})</span>}
+                              </div>
+                              {related.map((rel) => {
+                                const content = idToContent.get(rel.id);
+                                return (
+                                  <div key={rel.id} className="memory-graph-child">
+                                    └─ {rel.id.slice(0, 8)} ({rel.kind || "related"})
+                                    {content && `: ${content.content.slice(0, 50)}${content.content.length > 50 ? "…" : ""}`}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })()}
+                      </div>
                     ) : memoryLongTerm.length === 0 ? (
                       <p className="empty-state">{t("memory.long_empty")}</p>
                     ) : (
                       <div className="memory-list-scroll">
+                        <div className="memory-long-toolbar">
+                          <button type="button" onClick={() => setMemorySearchActive(true)}>{t("memory.search")}</button>
+                          <button type="button" onClick={() => setMemoryViewGraph(true)}>{t("memory.view_graph")}</button>
+                        </div>
                         <ul className="memory-long-term-list">
                           {memoryLongTerm.map((e, i) => (
-                      <li key={e.id ?? `entry-${i}`} className="memory-long-term-item">
-                        <div className="memory-long-term-body">
-                          <div className="memory-long-term-content">{e.content}</div>
-                          <div className="memory-long-term-meta">
-                            {e.created_at} {e.source ? ` · ${e.source}` : ""}
-                          </div>
-                        </div>
-                        {e.id != null && (
-                          <button
-                            type="button"
-                            className="memory-long-term-delete"
-                            onClick={async () => {
-                              try {
-                                await invoke("delete_memory_long_term", { id: e.id, port: DAEMON_PORT });
-                                fetchMemory();
-                              } catch (err) {
-                                setMemoryError(String(err));
-                              }
-                            }}
-                            aria-label="Supprimer cette entrée"
-                            title="Supprimer de la mémoire long terme"
-                          >
-                            Supprimer
-                          </button>
-                        )}
-                          </li>
+                            <li
+                              key={e.id ?? `entry-${i}`}
+                              className={"memory-long-term-item" + (i === memoryLongTermSelected ? " selected" : "")}
+                              onClick={() => setMemoryLongTermSelected(i)}
+                            >
+                              <div className="memory-long-term-body">
+                                <div className="memory-long-term-content">{e.content}</div>
+                                <div className="memory-long-term-meta">
+                                  {e.created_at} {e.source ? ` · ${e.source}` : ""}
+                                </div>
+                                {e.related && e.related.length > 0 && (
+                                  <div className="memory-long-term-related">
+                                    → {t("memory.related")}: {e.related.map((r) => {
+                                      const content = memoryLongTerm.find((x) => x.id === r.id);
+                                      return content ? `${content.content.slice(0, 30)}… (${r.kind || "related"})` : `${r.id.slice(0, 8)} (${r.kind || "related"})`;
+                                    }).join(", ")}
+                                  </div>
+                                )}
+                              </div>
+                              {e.id != null && (
+                                <button
+                                  type="button"
+                                  className="memory-long-term-delete"
+                                  onClick={async (ev) => {
+                                    ev.stopPropagation();
+                                    try {
+                                      await invoke("delete_memory_long_term", { id: e.id, port: DAEMON_PORT });
+                                      fetchMemory();
+                                    } catch (err) {
+                                      setMemoryError(String(err));
+                                    }
+                                  }}
+                                  aria-label="Supprimer cette entrée"
+                                  title="Supprimer de la mémoire long terme"
+                                >
+                                  Supprimer
+                                </button>
+                              )}
+                            </li>
                           ))}
                         </ul>
                       </div>
