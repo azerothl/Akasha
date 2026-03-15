@@ -15,6 +15,15 @@ pub struct MemoryEntry {
     pub embedding: Vec<u8>,
     pub created_at: DateTime<Utc>,
     pub source: String, // e.g. "compaction", "promote", "explicit"
+    /// Importance (Phase 1). None for legacy entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub importance: Option<i64>,
+    /// Scope: global_user, project, task, channel, plugin, session, agent
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// When this memory expires (Phase 1). None = never.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// Cosine similarity between two vectors (result in [-1, 1]). Public for hybrid rerank in daemon.
@@ -43,16 +52,53 @@ pub fn decode_embedding_bytes(b: &[u8]) -> Vec<f32> {
     out
 }
 
+/// Recency score for retrieval fusion (Phase 1). Newer = higher. Normalized roughly to [0, 1].
+pub fn recency_score(created_at: &DateTime<Utc>) -> f32 {
+    let age_secs = (Utc::now() - *created_at).num_seconds().max(0) as f32;
+    // Decay: 1.0 at now, ~0.37 after 7 days
+    (-age_secs / (7.0 * 24.0 * 3600.0)).exp()
+}
+
+/// Importance score for retrieval fusion (Phase 1). Maps importance level to [0, 1].
+pub fn importance_score(importance: Option<i64>) -> f32 {
+    match importance.unwrap_or(1) {
+        0 => 0.2,
+        1 => 0.4,
+        2 => 0.6,
+        3 => 0.8,
+        4 => 1.0,
+        _ => 0.4,
+    }
+}
+
 pub struct LongTermStore {
     conn: Connection,
 }
 
+/// Importance level for memory entries (Phase 1 — Mémoire 4 couches).
+/// banal=0, utile=1, important=2, critique=3, permanent=4
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MemoryImportance(pub i64);
+
+impl MemoryImportance {
+    pub const BANAL: Self = Self(0);
+    pub const UTILE: Self = Self(1);
+    pub const IMPORTANT: Self = Self(2);
+    pub const CRITIQUE: Self = Self(3);
+    pub const PERMANENT: Self = Self(4);
+}
+
 /// Optional attribution filter for search (plan: court terme 3).
+/// Extended with scope and include_expired (Phase 1).
 #[derive(Debug, Clone, Default)]
 pub struct MemorySearchFilter {
     pub entity_id: Option<String>,
     pub process_id: Option<String>,
     pub session_id: Option<String>,
+    /// Filter by scope: global_user, project, task, channel, plugin, session, agent
+    pub scope: Option<String>,
+    /// If true, include entries that have expired (expires_at < now). Default false.
+    pub include_expired: bool,
 }
 
 impl LongTermStore {
@@ -81,6 +127,16 @@ impl LongTermStore {
                 conn.execute(&format!("ALTER TABLE memory_entries ADD COLUMN {} TEXT", col), [])?;
             }
         }
+        // Phase 1 — Mémoire 4 couches: importance, scope, expires_at
+        if !has_col("importance")? {
+            conn.execute("ALTER TABLE memory_entries ADD COLUMN importance INTEGER", [])?;
+        }
+        if !has_col("scope")? {
+            conn.execute("ALTER TABLE memory_entries ADD COLUMN scope TEXT", [])?;
+        }
+        if !has_col("expires_at")? {
+            conn.execute("ALTER TABLE memory_entries ADD COLUMN expires_at TEXT", [])?;
+        }
         Ok(Self { conn })
     }
 
@@ -90,10 +146,23 @@ impl LongTermStore {
         embedding: &[u8],
         source: &str,
     ) -> anyhow::Result<Uuid> {
-        self.insert_with_attribution(content, embedding, source, None, None, None, None, None)
+        self.insert_with_attribution(
+            content,
+            embedding,
+            source,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Insert with optional attribution and metadata (plan long terme 4: title, tags).
+    /// Phase 1: importance, scope, expires_at. Defaults: importance=UTILE, scope from session/process/entity, no expiry.
     pub fn insert_with_attribution(
         &self,
         content: &str,
@@ -104,13 +173,17 @@ impl LongTermStore {
         session_id: Option<&str>,
         title: Option<&str>,
         tags: Option<&str>,
+        importance: Option<i64>,
+        scope: Option<&str>,
+        expires_at: Option<&DateTime<Utc>>,
     ) -> anyhow::Result<Uuid> {
         let id = Uuid::new_v4();
         let now = Utc::now();
+        let expires_at_s = expires_at.map(|t| t.to_rfc3339());
         self.conn.execute(
             r#"
-            INSERT INTO memory_entries (id, content, embedding, created_at, source, entity_id, process_id, session_id, title, tags)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            INSERT INTO memory_entries (id, content, embedding, created_at, source, entity_id, process_id, session_id, title, tags, importance, scope, expires_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             "#,
             rusqlite::params![
                 id.to_string(),
@@ -123,6 +196,9 @@ impl LongTermStore {
                 session_id,
                 title,
                 tags,
+                importance,
+                scope,
+                expires_at_s,
             ],
         )?;
         Ok(id)
@@ -222,14 +298,14 @@ impl LongTermStore {
     }
 
     /// Retrieve all entries with their embeddings for similarity search in memory.
-    /// When filter is provided, only rows matching entity_id/process_id/session_id (or NULL) are returned.
+    /// When filter is provided, only rows matching entity_id/process_id/session_id/scope and not expired are returned.
     fn get_all_with_embedding(
         &self,
         filter: Option<&MemorySearchFilter>,
-    ) -> anyhow::Result<Vec<(String, String, Vec<u8>, String, String)>> {
+    ) -> anyhow::Result<Vec<(String, String, Vec<u8>, String, String, Option<i64>, Option<String>, Option<String>)>> {
         let (where_clause, params) = Self::filter_clause(filter);
         let sql = format!(
-            "SELECT id, content, embedding, created_at, source FROM memory_entries {} ORDER BY created_at",
+            "SELECT id, content, embedding, created_at, source, importance, scope, expires_at FROM memory_entries {} ORDER BY created_at",
             where_clause
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -241,6 +317,9 @@ impl LongTermStore {
                 row.get::<_, Vec<u8>>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -262,6 +341,15 @@ impl LongTermStore {
                 conditions.push("(session_id IS NULL OR session_id = ?)");
                 params.push(Box::new(s.clone()));
             }
+            if let Some(ref sc) = f.scope {
+                conditions.push("(scope IS NULL OR scope = ?)");
+                params.push(Box::new(sc.clone()));
+            }
+            if !f.include_expired {
+                conditions.push("(expires_at IS NULL OR expires_at > datetime('now'))");
+            }
+        } else {
+            conditions.push("(expires_at IS NULL OR expires_at > datetime('now'))");
         }
         let where_clause = if conditions.is_empty() {
             "".to_string()
@@ -373,7 +461,7 @@ impl LongTermStore {
     }
 
     /// Search by embedding: returns up to `top_k` entries ordered by cosine similarity (desc).
-    /// Optionally filter by entity_id/process_id/session_id.
+    /// Optionally filter by entity_id/process_id/session_id/scope; excludes expired unless filter.include_expired.
     pub fn search_by_embedding(
         &self,
         query_embedding: &[f32],
@@ -381,7 +469,7 @@ impl LongTermStore {
         filter: Option<&MemorySearchFilter>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
         let rows = self.get_all_with_embedding(filter)?;
-        let mut scored: Vec<(f32, (String, String, Vec<u8>, String, String))> = rows
+        let mut scored: Vec<(f32, (String, String, Vec<u8>, String, String, Option<i64>, Option<String>, Option<String>))> = rows
             .into_iter()
             .map(|row| {
                 let vec = decode_embedding_bytes(&row.2);
@@ -393,16 +481,23 @@ impl LongTermStore {
         let out: Vec<MemoryEntry> = scored
             .into_iter()
             .take(top_k)
-            .map(|(_, (id, content, embedding, created_at, source))| {
+            .map(|(_, (id, content, embedding, created_at, source, importance, scope, expires_at_s))| {
                 let created_at = DateTime::parse_from_rfc3339(&created_at)
                     .map(|dt| dt.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now());
+                let expires_at = expires_at_s
+                    .as_ref()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
                 MemoryEntry {
                     id: Uuid::parse_str(&id).unwrap_or_else(|_| Uuid::nil()),
                     content,
                     embedding,
                     created_at,
                     source,
+                    importance,
+                    scope,
+                    expires_at,
                 }
             })
             .collect();
@@ -483,10 +578,10 @@ mod tests {
         let store = LongTermStore::open(f.path()).unwrap();
         let emb = embedding_f32_to_bytes(&[1.0, 0.0, 0.0]);
         store
-            .insert_with_attribution("s1 entry", &emb, "test", None, None, Some("s1"), None, None)
+            .insert_with_attribution("s1 entry", &emb, "test", None, None, Some("s1"), None, None, None, None, None)
             .unwrap();
         store
-            .insert_with_attribution("s2 entry", &emb, "test", None, None, Some("s2"), None, None)
+            .insert_with_attribution("s2 entry", &emb, "test", None, None, Some("s2"), None, None, None, None, None)
             .unwrap();
         let filter = MemorySearchFilter {
             session_id: Some("s1".to_string()),
