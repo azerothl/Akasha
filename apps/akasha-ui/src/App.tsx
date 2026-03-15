@@ -1689,8 +1689,8 @@ function App() {
           /* ignore */
         }
       }
-      const ackText = ack?.message ?? "Je prends en compte votre demande.";
-      setMessages((prev) => [...prev, { role: "assistant", text: ackText + (ack?.task_id ? " Tu peux suivre l'avancement dans Tâches." : "") }]);
+      const ackText = ack?.message ?? "Request received. You can follow progress in the Tasks tab.";
+      setMessages((prev) => [...prev, { role: "assistant", text: ackText }]);
       if (ack?.task_id) {
         setRunningTaskChips((prev) => ({ ...prev, [ack.task_id]: { pct: 0, message: "en cours…" } }));
         setRunningTaskEvents((prev) => ({ ...prev, [ack.task_id]: [] }));

@@ -128,7 +128,7 @@ async fn send_message_ack(
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let task_id = json.get("task_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let session_id = json.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let message = json.get("message").and_then(|v| v.as_str()).unwrap_or("Je prends en compte votre demande.").to_string();
+    let message = json.get("message").and_then(|v| v.as_str()).unwrap_or("Request received. You can follow progress in the Tasks tab.").to_string();
     Ok(SendMessageAckResult {
         ack: true,
         task_id,

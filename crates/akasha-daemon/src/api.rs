@@ -1199,7 +1199,7 @@ async fn do_uninstall_skill(
 
 const WRITE_FILE_REMINDER: &str = "\n[Reminder: the user is asking to save a file. You MUST reply ONLY with the line TOOL: write_file <full_path> then the file content on the following lines. Never say you cannot write to disk.]\n\n";
 
-const WEB_SEARCH_REMINDER: &str = "\n[Reminder: the user is asking for external information (weather, news, etc.). You MUST use TOOL: web_search <query> to search yourself then reply with the results. Do not suggest visiting a site without having used web_search first.]\n\n";
+const WEB_SEARCH_REMINDER: &str = "\n[Reminder: the user is asking for external information (weather/météo, news, etc.). You MUST use TOOL: web_search <query> to search — do NOT use bankr or portfolio for weather. Then reply with the results. Do not suggest visiting a site without having used web_search first.]\n\n";
 
 const DEVICE_CAMERA_REMINDER: &str = "\n[Reminder: webcam/camera photo request. You MUST chain directly: TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture. Do NOT ask the user \"which device action?\" with ask_user — they already said they want a photo; call device_invoke camera capture. Do NOT suggest: file upload, open UI, AI image. Do NOT mention tools_policy.yaml or allowed_write_paths for this request: the user wants a camera photo, not to configure file writing. If the user asked to \"display the photo in the chat\", after capture reply ONLY with a short confirmation in their language (e.g. \"Photo captured. It is shown below.\"): do NOT suggest \"save to file\", \"get a description\", \"take another photo\" or \"What would you like to do next?\" — the image is added automatically below your reply. Reply in the same language as the user.]\n\n";
 const IMAGE_GENERATION_REMINDER: &str = "\n[Reminder: request to \"generate an image\", \"draw\", \"create an image\" (by AI, not webcam). You MUST use TOOL: generate_image <prompt> (e.g. TOOL: generate_image a cat on a sofa). Spec 42.]\n\n";
@@ -2497,6 +2497,67 @@ Factual response in English.\n\n{}",
     }
 }
 
+/// Returns a short, user-friendly progress message for a tool invocation (for key steps).
+fn progress_message_for_tool(tool: &str, args: &[String]) -> String {
+    let first_arg = args.first().map(|s| s.as_str()).unwrap_or("");
+    let second_arg = args.get(1).map(|s| s.as_str()).unwrap_or("");
+    let lower = tool.to_lowercase();
+    if lower.contains("web_search") || lower == "search" {
+        let query_preview = first_arg.chars().take(40).collect::<String>();
+        if query_preview.is_empty() {
+            "Searching the web…".to_string()
+        } else {
+            format!("Searching the web for “{}”…", query_preview.trim())
+        }
+    } else if lower.contains("web_fetch") || lower == "fetch" {
+        "Fetching the page…".to_string()
+    } else if lower == "bankr" || first_arg.eq_ignore_ascii_case("bankr") {
+        if second_arg.eq_ignore_ascii_case("portfolio") {
+            "Checking your portfolio…".to_string()
+        } else {
+            "Running Bankr…".to_string()
+        }
+    } else if lower.contains("run_command") && first_arg.eq_ignore_ascii_case("bankr") {
+        if second_arg.eq_ignore_ascii_case("portfolio") {
+            "Checking your portfolio…".to_string()
+        } else {
+            "Running Bankr…".to_string()
+        }
+    } else if lower.contains("write_file") || lower.contains("search_replace") || lower.contains("edit_file") {
+        "Writing the file…".to_string()
+    } else if lower.contains("read_file") {
+        "Reading the file…".to_string()
+    } else if lower.contains("generate_image") {
+        "Generating the image…".to_string()
+    } else if lower.contains("device_invoke") && first_arg.to_lowercase().contains("camera") {
+        "Capturing with camera…".to_string()
+    } else if lower.contains("run_command") {
+        "Running the command…".to_string()
+    } else if lower == "ask_user" {
+        "Waiting for your input…".to_string()
+    } else {
+        format!("Running {}…", tool)
+    }
+}
+
+/// Builds a short, task-specific acknowledgment message so the user sees a real take-over instead of a generic placeholder.
+/// Uses the start of the user message for context; one coherent sentence, same tone (formal "you").
+fn build_ack_message(user_message: &str) -> String {
+    let trimmed = user_message.trim();
+    let preview = if trimmed.is_empty() {
+        "your request".to_string()
+    } else {
+        let max_len = 50;
+        let truncated: String = trimmed.chars().take(max_len).collect();
+        if truncated.chars().count() >= max_len {
+            format!("« {}… »", truncated.trim_end())
+        } else {
+            format!("« {} »", truncated)
+        }
+    };
+    format!("On it — looking into {}. You can follow progress in the Tasks tab.", preview)
+}
+
 /// Returns true if the text looks like a placeholder / promise ("I'll do it", "one second") rather than an actual answer.
 /// Used after tool calls to avoid completing the task with "I will fetch…" instead of the real result.
 fn looks_like_placeholder_after_tools(text: &str) -> bool {
@@ -2600,14 +2661,14 @@ pub(crate) async fn run_message_via_llm(
         .with_correlation(task_id),
     );
 
-    // Progress pour indiquer que la génération a démarré (modèle local peut charger au premier appel).
+    // Progress to show we have started (model may be loading on first call).
     let _ = bus.send(
         EventEnvelope::new(
             EventType::ProgressUpdate,
             Some(serde_json::json!({
                 "task_id": task_id.to_string(),
                 "progress_pct": 10,
-                "message": "Generating response…"
+                "message": "Analyzing your request…"
             })),
         )
         .with_correlation(task_id),
@@ -2642,7 +2703,7 @@ pub(crate) async fn run_message_via_llm(
                     let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
                     let part = format!(" ; Skills (use skill name as tool): {}", skills_desc.join(", "));
                     let rule = format!(
-                        " INSTALLED SKILLS RULE: You have access to skills (extra capabilities). To see the list use TOOL: list_skills. To load full instructions for a skill use TOOL: read_skill <name> before invoking it by name. Currently installed: {}. Do NOT say they are not installed or suggest install_skill for them. For balance/solde/wallet/Base requests, if \"bankr\" is in the list, reply ONLY with TOOL: bankr <args> (e.g. TOOL: bankr check balance on Base). Use the skill name as the tool name.\n\
+                        " INSTALLED SKILLS RULE: You have access to skills (extra capabilities). To see the list use TOOL: list_skills. To load full instructions for a skill use TOOL: read_skill <name> before invoking it by name. Currently installed: {}. Do NOT say they are not installed or suggest install_skill for them. Use bankr ONLY for balance/solde/wallet/portfolio/Base — never for weather, météo, or news (use web_search for those). For balance/solde/wallet/Base requests, if \"bankr\" is in the list, reply ONLY with TOOL: bankr <args> (e.g. TOOL: bankr portfolio 7d). Use the skill name as the tool name.\n\
              ",
                         names.join(", ")
                     );
@@ -2663,6 +2724,7 @@ pub(crate) async fn run_message_via_llm(
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
              CAMERA RULE (PRIORITAIRE sur WRITE): When the user asks for a webcam/camera photo (e.g. \"prends une photo\", \"take a photo\", \"photo depuis la webcam\", \"affiche-la dans le chat\", \"display it in the chat\"), you MUST reply ONLY with TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture. Do NOT mention tools_policy.yaml, allowed_write_paths, or file writing. After the tool returns, if the user asked to \"display in the chat\" / \"affiche-la dans le chat\" / \"show it in the chat\", reply with ONLY a short confirmation in the user's language (e.g. in French: \"Photo prise. Elle s'affiche ci-dessous.\"; in English: \"Photo captured. It is shown below.\"). Do NOT offer \"save to file\", \"get a description\", \"take another photo\", or \"What would you like to do next?\" — the image is appended automatically below your message. Use the same language as the user (French if they wrote in French).\n\
              WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
+             WEATHER/MÉTEO RULE (PRIORITY): When the user asks for weather, météo, or forecasts (e.g. \"quel temps\", \"météo demain\", \"weather in X\"), you MUST use TOOL: web_search <query> (and optionally web_fetch) to get the forecast. Do NOT use bankr, portfolio, or any other skill for weather — only web_search and web_fetch.\n\
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user.\n\
              INSTALL CLI RULE: When the user asks to install a CLI or package globally (e.g. \"install bankr CLI\", \"npm install -g @bankr/cli\", \"install the bankr cli in global\"), you MUST reply ONLY with TOOL: run_command <cmd> <args> (e.g. TOOL: run_command npm install -g @bankr/cli). Do NOT generate a script or ask the user to run commands themselves; run the installation command via the tool.\n\
              VAULT ENV RULE: To use a vault secret in a command you MUST call TOOL: run_command with VAULT:<vault_key>=<ENV_VAR> as the FIRST argument(s), then the command. The system injects the secret value into ENV_VAR for that command only. Example: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo. FORBIDDEN: never tell the user to run GITHUB_TOKEN=VAULT:GITHUB_TOKEN or export GITHUB_TOKEN=... or VAULT:GITHUB_TOKEN=ghp_... — you must output the TOOL: line yourself so the system runs the command and injects the token. For GitHub with token in vault: use TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (or gh repo view owner/repo). The vault key may be GITHUB_TOKEN or github_token; the part after = is the env var name the command uses (e.g. $GITHUB_TOKEN). Do NOT say you cannot access the repo without having called run_command with VAULT:... first.\n\
@@ -3066,6 +3128,20 @@ pub(crate) async fn run_message_via_llm(
                         break 'tool_rounds;
                     }
                 }
+                // User-friendly progress at key step: what we are doing right now (use skill name when actual_tool is empty, e.g. bankr skill).
+                let display_tool = if actual_tool.is_empty() { name.as_str() } else { &actual_tool };
+                let progress_msg = progress_message_for_tool(display_tool, args);
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 50,
+                            "message": progress_msg
+                        })),
+                    )
+                    .with_correlation(task_id),
+                );
                 // Phase 3.1: tools in require_approval need user confirmation before execution.
                 if exec.policy.requires_approval(&actual_tool) {
                     match &human_input_store {
@@ -3449,9 +3525,10 @@ pub(crate) async fn run_message_via_llm(
             }
             let results_blob = tool_results.join("\n");
             last_tool_results_blob = Some(results_blob.clone());
+            // Re-inject the user's request so the model always knows what to answer (avoids treating another demand or losing context).
             current_prompt = format!(
-                "{}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, write the final answer to the user now. Do NOT reply with a promise (e.g. \"I will fetch…\", \"I will summarize…\", \"Action in progress\"). The task ends after this message — give the actual answer (e.g. weather forecast, search summary). No TOOL: lines.",
-                response, results_blob
+                "User request: {}\n\nYour previous reply:\n{}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, answer the user's request now. Do NOT reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"). The task ends after this message — give the actual answer (e.g. weather forecast, search summary). No TOOL: lines.",
+                user_message, response, results_blob
             );
             if round >= MAX_TOOL_ROUNDS {
                 let response_for_user = response
@@ -3504,7 +3581,8 @@ pub(crate) async fn run_message_via_llm(
         {
             force_synthesis_attempted = true;
             current_prompt = format!(
-                "Tool results:\n{}\n\nThe user is waiting for the actual answer. Your previous message was a promise (e.g. \"I will fetch…\") — the task is about to close, so you must answer NOW. Using the tool results above, write ONLY the final answer (e.g. weather forecast, search summary). Do not say you will do it — do it. No TOOL: lines, no \"action in progress\".",
+                "User request: {}\n\nTool results:\n{}\n\nThe user is waiting for the actual answer. Your previous message was a promise — the task is about to close, so you must answer NOW. Using the tool results above, write ONLY the final answer to the user's request. No TOOL: lines, no \"action in progress\".",
+                user_message,
                 last_tool_results_blob.as_deref().unwrap_or("")
             );
             continue;
@@ -4596,11 +4674,12 @@ pub async fn handle_api(
         // User talks only to orchestrator: ack immediately, delegate to conversation worker in background (non-blocking). session_id used for short-term memory.
         match main_agent.handle_message(store_path, &message, correlation_id, true, &session_id, image_data_urls, priority) {
             Ok(task_id) => {
+                let ack_message = build_ack_message(&message);
                 let body = serde_json::json!({
                     "ack": true,
                     "task_id": task_id.to_string(),
                     "session_id": session_id,
-                    "message": "Je prends en compte votre demande."
+                    "message": ack_message
                 });
                 return json_response("200 OK", &body.to_string());
             }
