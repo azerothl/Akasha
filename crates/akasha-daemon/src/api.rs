@@ -6,7 +6,7 @@ use akasha_llm::CompletionRequest;
 use akasha_store::{parse_todos_from_payload, Schedule, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore, TodoStatus};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use crate::agent_profile::AgentProfile;
-use crate::agents::{EventBus, OrchestratorTask, TaskPriority};
+use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use std::path::{Path, PathBuf};
@@ -2538,6 +2538,7 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
+    let structured = interpret_message(&message);
     let assigned_agent = store
         .get(task_id)
         .ok()
@@ -3704,7 +3705,7 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
         "completed",
         &reply_text.chars().take(300).collect::<String>(),
         Some(&session_id),
-        None,
+        structured.intent_slug.as_deref(),
     );
 }
 
