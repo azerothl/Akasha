@@ -900,6 +900,24 @@ pre,
   font-weight: 600;
 }
 
+/* Scheduled returns panel: scrollable content */
+.scheduled-panel .scheduled-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+.scheduled-panel .panel-description {
+  margin: 0 0 0.75rem;
+  color: var(--akasha-text-muted);
+  font-size: 0.875rem;
+}
+
+.scheduled-panel .scheduled-reports {
+  padding-bottom: 1rem;
+}
+
 /* Chat */
 .chat-panel {
   padding: 0;

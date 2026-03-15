@@ -203,12 +203,14 @@ Les variables définies via `akasha config env set` sont enregistrées dans le f
 
 ### Interface terminal (TUI)
 
-- **Onglets** : Chat, Routeur (métriques), Doc (cette documentation), Tâches, Calendrier, Mémoire.
-- **Raccourcis** : Tab (changer d'onglet), Entrée (envoyer un message), R (rafraîchir Routeur ou liste des tâches), ↑/↓ PgUp/PgDn Home/End (défilement), Échap ou Ctrl+Q (quitter). **Onglet Tâches** : ↑/↓ (sélectionner une tâche), D (filtrer racines uniquement). **Onglet Mémoire** : / ou S (recherche), G (basculer vue graphe), D ou Suppr (supprimer l'entrée long terme sélectionnée).
+- **Onglets** : Chat, **Retours planifiés** (réponses des tâches récurrentes), Routeur (métriques), Doc (cette documentation), Tâches, Calendrier, Mémoire.
+- **Chat** : uniquement la conversation avec l’agent (messages envoyés et réponses). **Retours planifiés** : uniquement les réponses de l’agent pour les rappels / tâches planifiées (schedules), sans les mélanger au fil du chat.
+- **Raccourcis** : Tab (changer d'onglet), Entrée (envoyer un message), R (rafraîchir Routeur, Retours planifiés ou liste des tâches), ↑/↓ PgUp/PgDn Home/End (défilement), Échap ou Ctrl+Q (quitter). **Onglet Tâches** : ↑/↓ (sélectionner une tâche), D (filtrer racines uniquement). **Onglet Mémoire** : / ou S (recherche), G (basculer vue graphe), D ou Suppr (supprimer l'entrée long terme sélectionnée).
 
 ### Interface web / desktop (si installée)
 
-- **Onglets** : Chat, Routeur, Documentation, Tâches, Calendrier, Mémoire, Paramètres. **Raccourcis** : touches **1 à 7** pour basculer vers l'onglet correspondant (inactif si le focus est dans un champ de saisie ou une modale).
+- **Onglets** : Chat, **Retours planifiés**, Routeur, Documentation, Tâches, Calendrier, Mémoire, Paramètres. **Chat** = conversation uniquement ; **Retours planifiés** = réponses de l’agent pour les tâches planifiées (rappels récurrents), dans un onglet dédié.
+- **Raccourcis** : touches **1 à 8** pour basculer vers l'onglet correspondant (inactif si le focus est dans un champ de saisie ou une modale).
 - **Pièces jointes** : dans le Chat, vous pouvez joindre des images ou des documents (texte, PDF) ; l'agent les reçoit pour analyse.
 - **RAG utilisateur** : dans Paramètres, section « Mes documents (RAG utilisateur) », vous pouvez ajouter ou supprimer des documents ; les extraits pertinents sont utilisés par l'agent lors des réponses.
 - **Profil de l'agent** : dans Paramètres → Profil de l'agent, vous pouvez définir le nom, le rôle, la personnalité, les règles et les comportements autorisés/interdits ; des modèles (Neutre, Bienveillant, Concis/technique, etc.) sont proposés.

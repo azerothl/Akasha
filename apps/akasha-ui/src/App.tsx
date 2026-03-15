@@ -139,7 +139,7 @@ function loadSavedTheme(): ThemeId {
   return "dark_akasha";
 }
 
-type Tab = "chat" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
+type Tab = "chat" | "scheduled" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
 
 type SettingsSection = "display" | "system" | "agent" | "user" | "data";
 type AgentProfileSubTab = "identity" | "personality" | "traits" | "rules" | "can_do" | "cannot_do";
@@ -839,14 +839,14 @@ function App() {
   }, [pendingNotifOpen]);
 
   // Global keyboard shortcuts: 1–7 = switch tab (when not in a modal or input)
-  const tabsByIndex: Tab[] = ["chat", "router", "docs", "tasks", "calendar", "memory", "settings"];
+  const tabsByIndex: Tab[] = ["chat", "scheduled", "router", "docs", "tasks", "calendar", "memory", "settings"];
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (humanInputModalTaskId != null) return;
       const target = e.target as HTMLElement;
       if (target?.closest("input") || target?.closest("textarea") || target?.closest("[role='dialog']")) return;
-      const n = e.key === "1" ? 1 : e.key === "2" ? 2 : e.key === "3" ? 3 : e.key === "4" ? 4 : e.key === "5" ? 5 : e.key === "6" ? 6 : e.key === "7" ? 7 : 0;
-      if (n >= 1 && n <= 7) {
+      const n = e.key === "1" ? 1 : e.key === "2" ? 2 : e.key === "3" ? 3 : e.key === "4" ? 4 : e.key === "5" ? 5 : e.key === "6" ? 6 : e.key === "7" ? 7 : e.key === "8" ? 8 : 0;
+      if (n >= 1 && n <= 8) {
         e.preventDefault();
         setTab(tabsByIndex[n - 1]);
       }
@@ -1233,7 +1233,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (tab === "chat") fetchScheduleReports();
+    if (tab === "scheduled") fetchScheduleReports();
   }, [tab, fetchScheduleReports]);
 
   const fetchUserRagDocuments = useCallback(async () => {
@@ -1997,6 +1997,16 @@ function App() {
             </button>
             <button
               role="tab"
+              aria-selected={tab === "scheduled"}
+              aria-controls="panel-scheduled"
+              id="tab-scheduled"
+              className={tab === "scheduled" ? "active" : ""}
+              onClick={() => setTab("scheduled")}
+            >
+              {t("tabs.scheduled")}
+            </button>
+            <button
+              role="tab"
               aria-selected={tab === "router"}
               aria-controls="panel-router"
               id="tab-router"
@@ -2428,16 +2438,6 @@ function App() {
                 </div>
               ) : (
                 <>
-                  {scheduleReports.map((r, i) => (
-                    <div key={`report-${i}`} className="message system report">
-                      <span className="role" aria-hidden>Rappel exécuté</span>
-                      <div className="text markdown-rendered">
-                        <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
-                          {`**« ${r.schedule_name} »** — ${r.message}`}
-                        </LazyMarkdownContent></Suspense>
-                      </div>
-                    </div>
-                  ))}
                   {messages.map((m, i) => {
                     const askUserData = m.role === "assistant" ? parseAskUserMessage(m.text) : null;
                     return (
@@ -2756,6 +2756,43 @@ function App() {
             <p id="send-hint" className="hint sr-only">
               Entrée pour envoyer
             </p>
+          </section>
+        )}
+
+        {tab === "scheduled" && (
+          <section
+            id="panel-scheduled"
+            role="tabpanel"
+            aria-labelledby="tab-scheduled"
+            className="panel scheduled-panel"
+          >
+            <h2 className="panel-title">{t("tabs.scheduled")}</h2>
+            <p className="panel-description">{t("scheduled.description")}</p>
+            <div className="scheduled-scroll" role="region" aria-label={t("tabs.scheduled")}>
+            {scheduleReports.length === 0 ? (
+              <p className="scheduled-empty">{t("scheduled.empty")}</p>
+            ) : (
+              <div className="scheduled-reports">
+                {scheduleReports.map((r, i) => (
+                  <div key={`report-${i}`} className="message system report scheduled-report">
+                    <span className="role" aria-hidden>{t("scheduled.role")}</span>
+                    {r.ended_at && (
+                      <time className="scheduled-report-time" dateTime={r.ended_at}>
+                        {new Date(r.ended_at).toLocaleString()}
+                      </time>
+                    )}
+                    <div className="text markdown-rendered">
+                      <Suspense fallback={<span className="markdown-rendered">…</span>}>
+                        <LazyMarkdownContent>
+                          {`**« ${r.schedule_name} »** — ${r.message}`}
+                        </LazyMarkdownContent>
+                      </Suspense>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            </div>
           </section>
         )}
 

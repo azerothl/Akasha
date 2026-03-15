@@ -60,6 +60,7 @@ fn daemon_base_url(port: u16) -> String {
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Chat,
+    ScheduleReports,
     Router,
     Doc,
     Tasks,
@@ -454,7 +455,7 @@ impl App {
                 self.fetch_schedule_detail(&id);
             }
         }
-        if self.mode == Mode::Chat {
+        if self.mode == Mode::ScheduleReports {
             self.fetch_schedule_reports();
         }
         if self.mode == Mode::Memory {
@@ -1933,6 +1934,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     f.render_widget(header, top_chunks[0]);
     let titles = vec![
         format!(" {} ", app.i18n.t("tabs.chat")),
+        format!(" {} ", app.i18n.t("tabs.scheduled")),
         format!(" {} ", app.i18n.t("tabs.router")),
         format!(" {} ", app.i18n.t("tabs.docs")),
         format!(" {} ", app.i18n.t("tabs.tasks")),
@@ -1941,11 +1943,12 @@ fn ui(f: &mut Frame, app: &mut App) {
     ];
     let tab_index = match app.mode {
         Mode::Chat => 0,
-        Mode::Router => 1,
-        Mode::Doc => 2,
-        Mode::Tasks => 3,
-        Mode::Calendar => 4,
-        Mode::Memory => 5,
+        Mode::ScheduleReports => 1,
+        Mode::Router => 2,
+        Mode::Doc => 3,
+        Mode::Tasks => 4,
+        Mode::Calendar => 5,
+        Mode::Memory => 6,
     };
     let tabs = Tabs::new(titles.clone())
         .block(Block::default().borders(Borders::BOTTOM).title(format!(" {} ", app.i18n.t("tui.tab_switch_hint"))).border_style(theme.block_border()))
@@ -1968,15 +1971,6 @@ fn ui(f: &mut Frame, app: &mut App) {
         Mode::Chat => {
             let content_width = content_area.width as usize;
             let mut lines: Vec<Line<'static>> = Vec::new();
-            for (name, msg) in &app.schedule_reports {
-                lines.push(Line::from(""));
-                let style_muted = Style::default().fg(theme.palette().muted).add_modifier(Modifier::BOLD);
-                lines.push(Line::from(Span::styled(format!("  ─── {} ───", app.i18n.t("tui.schedule_executed")), style_muted)));
-                lines.push(Line::from(Span::styled(format!("  « {} »", name), Style::default().fg(theme.palette().muted))));
-                let md_styles = theme.markdown_styles();
-                let marked = markdown::from_str_with_width(msg, &md_styles, Some(content_width.saturating_sub(2) as u16));
-                lines.extend(marked.to_flat_lines());
-            }
             for m in &app.messages {
                 let role_display = if m.is_error { app.i18n.t("common.error") } else { app.i18n.t(&format!("chat.role_{}", m.role)) };
                 let (role_style, _base_style) = if m.role == "user" {
@@ -2073,6 +2067,54 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .wrap(Wrap { trim: true })
                 .scroll((app.scroll as u16, 0));
             f.render_widget(chat, content_area);
+        }
+        Mode::ScheduleReports => {
+            let content_width = content_area.width as usize;
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            let style_muted = Style::default().fg(theme.palette().muted).add_modifier(Modifier::BOLD);
+            for (name, msg) in &app.schedule_reports {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(format!("  ─── {} ───", app.i18n.t("tui.schedule_executed")), style_muted)));
+                lines.push(Line::from(Span::styled(format!("  « {} »", name), Style::default().fg(theme.palette().muted))));
+                let md_styles = theme.markdown_styles();
+                let marked = markdown::from_str_with_width(msg, &md_styles, Some(content_width.saturating_sub(2) as u16));
+                lines.extend(marked.to_flat_lines());
+            }
+            if app.schedule_reports.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    app.i18n.t("tui.scheduled_empty"),
+                    Style::default().fg(theme.palette().muted),
+                )));
+            }
+            let content_height = content_area.height.saturating_sub(2);
+            app.last_content_lines = lines.len();
+            app.last_content_area_height = content_height;
+            app.last_content_rendered_rows = if content_width > 0 {
+                lines
+                    .iter()
+                    .map(|l| {
+                        let w = l.width() as usize;
+                        if w == 0 { 1 } else { (w + content_width - 1) / content_width }
+                    })
+                    .sum()
+            } else {
+                lines.len()
+            };
+            let max_scroll = app.max_scroll();
+            if app.scroll > max_scroll {
+                app.scroll = max_scroll;
+            }
+            let block = Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(app.i18n.t("tui.scheduled_block_title"))
+                        .border_style(theme.block_border()),
+                )
+                .wrap(Wrap { trim: true })
+                .scroll((app.scroll as u16, 0));
+            f.render_widget(block, content_area);
         }
         Mode::Router => {
             let rows: Vec<Row> = app
@@ -2701,16 +2743,17 @@ fn run_app(
                             let x = mouse.column;
                             let y = mouse.row;
                             if x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height {
-                                const N_TABS: u16 = 6;
+                                const N_TABS: u16 = 7;
                                 let tab_w = (rect.width / N_TABS).max(1);
                                 let col = x.saturating_sub(rect.x);
                                 let tab_idx = (col / tab_w).min(N_TABS - 1) as usize;
                                 let new_mode = match tab_idx {
                                     0 => Mode::Chat,
-                                    1 => Mode::Router,
-                                    2 => Mode::Doc,
-                                    3 => Mode::Tasks,
-                                    4 => Mode::Calendar,
+                                    1 => Mode::ScheduleReports,
+                                    2 => Mode::Router,
+                                    3 => Mode::Doc,
+                                    4 => Mode::Tasks,
+                                    5 => Mode::Calendar,
                                     _ => Mode::Memory,
                                 };
                                 if app.mode != new_mode {
@@ -2759,7 +2802,7 @@ fn run_app(
                     // Mouse wheel: scroll in Chat, Doc, Memory, Calendar
                     if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
                         match app.mode {
-                            Mode::Chat | Mode::Doc | Mode::Memory | Mode::Calendar => {
+                            Mode::Chat | Mode::ScheduleReports | Mode::Doc | Mode::Memory | Mode::Calendar => {
                                 if mouse.kind == MouseEventKind::ScrollUp {
                                     app.scroll_up();
                                 } else {
@@ -2842,7 +2885,8 @@ fn run_app(
                     }
                     (_, KeyCode::Tab, _) => {
                         app.mode = match app.mode {
-                            Mode::Chat => Mode::Router,
+                            Mode::Chat => Mode::ScheduleReports,
+                            Mode::ScheduleReports => Mode::Router,
                             Mode::Router => Mode::Doc,
                             Mode::Doc => Mode::Tasks,
                             Mode::Tasks => Mode::Calendar,
@@ -2851,15 +2895,16 @@ fn run_app(
                         };
                         app.trigger_mode_entered();
                     }
-                    (_, KeyCode::Char(c), _) if app.mode != Mode::Chat && ('1'..='6').contains(&c) => {
+                    (_, KeyCode::Char(c), _) if app.mode != Mode::Chat && ('1'..='7').contains(&c) => {
                         let idx = (c as u8 - b'1') as usize;
                         let new_mode = match idx {
                             0 => Mode::Chat,
-                            1 => Mode::Router,
-                            2 => Mode::Doc,
-                            3 => Mode::Tasks,
-                            4 => Mode::Calendar,
-                            5 => Mode::Memory,
+                            1 => Mode::ScheduleReports,
+                            2 => Mode::Router,
+                            3 => Mode::Doc,
+                            4 => Mode::Tasks,
+                            5 => Mode::Calendar,
+                            6 => Mode::Memory,
                             _ => continue,
                         };
                         if app.mode != new_mode {
@@ -2994,12 +3039,21 @@ fn run_app(
                     (Mode::Router, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_metrics();
                     }
+                    (Mode::ScheduleReports, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
+                        app.fetch_schedule_reports();
+                    }
                     (Mode::Doc, KeyCode::Up, _) => app.scroll_up(),
                     (Mode::Doc, KeyCode::Down, _) => app.scroll_down(),
                     (Mode::Doc, KeyCode::PageUp, _) => app.scroll_page_up(),
                     (Mode::Doc, KeyCode::PageDown, _) => app.scroll_page_down(),
                     (Mode::Doc, KeyCode::Home, _) => app.scroll = 0,
                     (Mode::Doc, KeyCode::End, _) => app.scroll_to_bottom(),
+                    (Mode::ScheduleReports, KeyCode::Up, _) => app.scroll_up(),
+                    (Mode::ScheduleReports, KeyCode::Down, _) => app.scroll_down(),
+                    (Mode::ScheduleReports, KeyCode::PageUp, _) => app.scroll_page_up(),
+                    (Mode::ScheduleReports, KeyCode::PageDown, _) => app.scroll_page_down(),
+                    (Mode::ScheduleReports, KeyCode::Home, _) => app.scroll = 0,
+                    (Mode::ScheduleReports, KeyCode::End, _) => app.scroll_to_bottom(),
                     (Mode::Memory, KeyCode::Char('/'), _) if !app.memory_search_active => {
                         app.memory_search_active = true;
                     }
