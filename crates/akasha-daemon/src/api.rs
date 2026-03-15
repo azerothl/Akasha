@@ -3698,15 +3698,17 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
     );
     let _ = store.update_status(task_id, TaskStatus::Completed);
     notify_task_completion(&task_completion_registry, task_id).await;
-    learn_from_task_outcome(
-        long_term_client.as_ref(),
+    let summary_preview: String = reply_text.chars().take(300).collect();
+    learn_from_task_outcome_async(
+        long_term_client.clone(),
         task_id,
-        &message,
-        "completed",
-        &reply_text.chars().take(300).collect::<String>(),
-        Some(&session_id),
-        structured.intent_slug.as_deref(),
-    );
+        message.clone(),
+        "completed".to_string(),
+        summary_preview,
+        Some(session_id.clone()),
+        structured.intent_slug.clone(),
+    )
+    .await;
 }
 
 /// Notify any waiter in the TaskCompletionRegistry that `task_id` has finished.
@@ -3720,6 +3722,7 @@ async fn notify_task_completion(registry: &Option<TaskCompletionRegistry>, task_
 
 /// Learn step: emit a `task_outcome` episodic event after a task completes (conversation or orchestrator).
 /// Payload: task_id, initial_message_preview (200 chars), status, summary_preview (300 chars), optional intent.
+/// Synchronous; must not be called from a tokio runtime thread (use learn_from_task_outcome_async from async code).
 pub(crate) fn learn_from_task_outcome(
     client: Option<&LongTermMemoryClient>,
     task_id: Uuid,
@@ -3752,6 +3755,31 @@ pub(crate) fn learn_from_task_outcome(
     ) {
         tracing::debug!(task_id = %task_id, error = %e, "task_outcome emit failed");
     }
+}
+
+/// Async wrapper: runs learn_from_task_outcome in spawn_blocking so it is safe to call from async (avoids blocking the runtime).
+pub(crate) async fn learn_from_task_outcome_async(
+    client: Option<LongTermMemoryClient>,
+    task_id: Uuid,
+    initial_message: String,
+    status: String,
+    summary: String,
+    session_id: Option<String>,
+    intent: Option<String>,
+) {
+    let Some(client) = client else { return };
+    let _ = tokio::task::spawn_blocking(move || {
+        learn_from_task_outcome(
+            Some(&client),
+            task_id,
+            &initial_message,
+            &status,
+            &summary,
+            session_id.as_deref(),
+            intent.as_deref(),
+        );
+    })
+    .await;
 }
 
 /// Optional channel to trigger daemon shutdown (for POST /api/restart).
