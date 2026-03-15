@@ -4014,7 +4014,7 @@ pub async fn handle_api(
 
     // POST /api/personality-memory — store a structured personality preference (Phase 3). Body: { "key": "preferred_tone"|"technical_depth_preference"|..., "value": "..." }
     if method == "POST" && path == "/api/personality-memory" {
-        let Some(ref client) = long_term_client else {
+        let Some(client) = long_term_client.clone() else {
             return json_response("503 Service Unavailable", r#"{"error":"long_term_memory_unavailable"}"#);
         };
         let Some(body) = body.as_deref() else {
@@ -4030,19 +4030,24 @@ pub async fn handle_api(
         };
         let value = v.get("value").and_then(|x| x.as_str()).unwrap_or("").to_string();
         let payload = serde_json::json!({ "key": key, "value": value }).to_string();
-        match client.emit_event(
-            "personality_memory".to_string(),
-            payload,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ) {
-            Ok(id) => return json_response("200 OK", &serde_json::json!({ "ok": true, "id": id.to_string() }).to_string()),
-            Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e }).to_string()),
+        let result = tokio::task::spawn_blocking(move || {
+            client.emit_event(
+                "personality_memory".to_string(),
+                payload,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        })
+        .await;
+        match result {
+            Ok(Ok(id)) => return json_response("200 OK", &serde_json::json!({ "ok": true, "id": id.to_string() }).to_string()),
+            Ok(Err(e)) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e }).to_string()),
+            Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
         }
     }
 
