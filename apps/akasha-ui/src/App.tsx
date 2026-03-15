@@ -28,7 +28,10 @@ function loadSavedTheme(): ThemeId {
 type Tab = "chat" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
 
 type SettingsSection = "display" | "system" | "agent" | "data";
-type AgentProfileSubTab = "identity" | "personality" | "rules" | "can_do" | "cannot_do";
+type AgentProfileSubTab = "identity" | "personality" | "traits" | "rules" | "can_do" | "cannot_do";
+
+const TRAIT_KEYS = ["verbosity", "warmth", "pedagogy", "rigor", "humor", "proactivity", "cautiousness", "initiative"] as const;
+const PREFERRED_MODES = ["assistant", "operator", "architect", "onboarding"] as const;
 
 const AGENT_PROFILE_LIMITS = {
   name: 128,
@@ -319,8 +322,19 @@ function App() {
   const userRagFileInputRef = useRef<HTMLInputElement>(null);
   const agentAvatarFileInputRef = useRef<HTMLInputElement>(null);
   const userAvatarFileInputRef = useRef<HTMLInputElement>(null);
-  /** Agent profile (name, role, gender, avatar, personality, rules, can_do, cannot_do) for Settings panel. */
-  const [agentProfile, setAgentProfile] = useState<{ name: string; role: string; gender: string; avatar: string; personality: string; rules: string[]; can_do: string[]; cannot_do: string[] }>({
+  /** Agent profile (name, role, gender, avatar, personality, rules, can_do, cannot_do, traits_override, preferred_mode) for Settings panel. */
+  const [agentProfile, setAgentProfile] = useState<{
+    name: string;
+    role: string;
+    gender: string;
+    avatar: string;
+    personality: string;
+    rules: string[];
+    can_do: string[];
+    cannot_do: string[];
+    traits_override: Record<string, number>;
+    preferred_mode: string;
+  }>({
     name: "",
     role: "",
     gender: "",
@@ -329,6 +343,8 @@ function App() {
     rules: [],
     can_do: [],
     cannot_do: [],
+    traits_override: {},
+    preferred_mode: "",
   });
   /** User avatar (data URL) for chat display. Stored in localStorage. */
   const [userAvatar, setUserAvatar] = useState<string>(() => {
@@ -918,10 +934,19 @@ function App() {
     setAgentProfileLoading(true);
     setAgentProfileError(null);
     try {
-      const data = await invoke<{ name?: string | null; personality?: string | null; role?: string | null; gender?: string | null; avatar?: string | null; rules?: string[]; can_do?: string[]; cannot_do?: string[] }>(
-        "get_agent_profile",
-        { port: DAEMON_PORT }
-      );
+      const data = await invoke<{
+        name?: string | null;
+        personality?: string | null;
+        role?: string | null;
+        gender?: string | null;
+        avatar?: string | null;
+        rules?: string[];
+        can_do?: string[];
+        cannot_do?: string[];
+        traits_override?: Record<string, number> | null;
+        preferred_mode?: string | null;
+      }>("get_agent_profile", { port: DAEMON_PORT });
+      const to = data?.traits_override;
       setAgentProfile({
         name: data?.name ?? "",
         personality: data?.personality ?? "",
@@ -931,6 +956,8 @@ function App() {
         rules: Array.isArray(data?.rules) ? data.rules : [],
         can_do: Array.isArray(data?.can_do) ? data.can_do : [],
         cannot_do: Array.isArray(data?.cannot_do) ? data.cannot_do : [],
+        traits_override: to && typeof to === "object" ? { ...to } : {},
+        preferred_mode: data?.preferred_mode ?? "",
       });
     } catch (e) {
       setAgentProfileError(String(e));
@@ -3636,7 +3663,7 @@ function App() {
                 {!agentProfileLoading && (
                   <>
                     <div className="settings-agent-subtabs" role="tablist" aria-label={t("settings.agent_profile_title")}>
-                      {(["identity", "personality", "rules", "can_do", "cannot_do"] as const).map((st) => (
+                      {(["identity", "personality", "traits", "rules", "can_do", "cannot_do"] as const).map((st) => (
                         <button key={st} role="tab" aria-selected={agentProfileSubTab === st} className={agentProfileSubTab === st ? "active" : ""} onClick={() => setAgentProfileSubTab(st)}>{t(`settings.agent_subtab_${st}`)}</button>
                       ))}
                     </div>
@@ -3704,6 +3731,57 @@ function App() {
                             <span className="settings-char-count">{agentProfile.personality.length} / {AGENT_PROFILE_LIMITS.personality}</span>
                           </dd>
                         </dl>
+                      )}
+                      {agentProfileSubTab === "traits" && (
+                        <div className="settings-list">
+                          <p className="settings-doc muted">{t("settings.agent_traits_desc")}</p>
+                          <dl className="settings-list">
+                            <dt>{t("settings.agent_preferred_mode")}</dt>
+                            <dd>
+                              <select
+                                aria-label={t("settings.agent_preferred_mode")}
+                                className="settings-theme-select"
+                                value={agentProfile.preferred_mode || "assistant"}
+                                onChange={(e) => setAgentProfile((p) => ({ ...p, preferred_mode: e.target.value || "" }))}
+                              >
+                                <option value="">—</option>
+                                {PREFERRED_MODES.map((m) => (
+                                  <option key={m} value={m}>{t(`settings.agent_preferred_mode_${m}`)}</option>
+                                ))}
+                              </select>
+                            </dd>
+                          </dl>
+                          {TRAIT_KEYS.map((key) => (
+                            <dl key={key} className="settings-list">
+                              <dt>{t(`settings.trait_${key}`)}</dt>
+                              <dd className="settings-trait-row">
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={1}
+                                  step={0.05}
+                                  aria-label={t(`settings.trait_${key}`)}
+                                  value={agentProfile.traits_override[key] ?? 0.5}
+                                  onChange={(e) => {
+                                    const v = parseFloat(e.target.value);
+                                    setAgentProfile((p) => ({
+                                      ...p,
+                                      traits_override: { ...p.traits_override, [key]: v },
+                                    }));
+                                  }}
+                                />
+                                <span className="settings-trait-value">{(agentProfile.traits_override[key] ?? 0.5).toFixed(2)}</span>
+                              </dd>
+                            </dl>
+                          ))}
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            onClick={() => setAgentProfile((p) => ({ ...p, traits_override: {}, preferred_mode: "" }))}
+                          >
+                            {t("settings.traits_reset")}
+                          </button>
+                        </div>
                       )}
                       {agentProfileSubTab === "rules" && (
                         <div className="settings-list-two-cols">
@@ -3883,7 +3961,7 @@ function App() {
                         </div>
                       )}
                     </div>
-                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role) || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
+                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { const traits = Object.keys(agentProfile.traits_override).length ? agentProfile.traits_override : undefined; await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role) || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do, traits_override: traits, preferred_mode: agentProfile.preferred_mode.trim() || undefined }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
                   </>
                 )}
               </div>
