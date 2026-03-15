@@ -1,30 +1,46 @@
 //! Debug session logging (NDJSON to file) for allocation/overflow investigation.
-//! Log path and session from debug session config; no-op if file cannot be opened.
+//! Log path and session are derived from environment; no-op if disabled or file cannot be opened.
 
 use std::io::Write;
 
-const LOG_PATH: &str = "debug-a2ae51.log";
-const SESSION_ID: &str = "a2ae51";
-
+#[cfg(feature = "debug_log")]
 /// Append one NDJSON line to the debug log. Silently ignores errors.
-#[allow(dead_code)]
 pub fn log(location: &str, message: &str, data: &serde_json::Value, hypothesis_id: &str) {
+    // Derive log path and session ID from environment. If no log path is configured,
+    // treat logging as disabled and return immediately.
+    let log_path = match std::env::var("AKASHA_DEBUG_LOG_PATH") {
+        Ok(p) if !p.is_empty() => p,
+        _ => return,
+    };
+
+    let session_id = std::env::var("AKASHA_DEBUG_SESSION_ID").unwrap_or_else(|_| "unknown".to_string());
+
     let payload = serde_json::json!({
-        "sessionId": SESSION_ID,
+        "sessionId": session_id,
         "location": location,
         "message": message,
         "data": data,
         "hypothesisId": hypothesis_id,
-        "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+        "timestamp": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
     });
+
     if let Ok(line) = serde_json::to_string(&payload) {
         let _ = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(LOG_PATH)
+            .open(&log_path)
             .and_then(|mut f| {
                 f.write_all(line.as_bytes())?;
                 f.write_all(b"\n")
             });
     }
+}
+
+#[cfg(not(feature = "debug_log"))]
+/// No-op debug logger when the `debug_log` feature is disabled.
+pub fn log(location: &str, message: &str, data: &serde_json::Value, hypothesis_id: &str) {
+    let _ = (location, message, data, hypothesis_id);
 }
