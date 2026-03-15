@@ -1246,10 +1246,11 @@ function App() {
     return () => clearTimeout(t);
   }, [memoryViewGraph, memoryLongTerm, memoryLongTermSelected, theme]);
 
-  // Re-apply graph options when theme changes so canvas/edges/nodes use the new colors
+  // Re-apply graph options when theme changes so canvas/edges/nodes use the new colors (setOptions is on the instance, not the ref)
   useEffect(() => {
     if (!memoryViewGraph || !memoryGraphRef.current) return;
-    memoryGraphRef.current.setOptions(memoryGraphOptions, () => {});
+    const instance = memoryGraphRef.current.getInstance?.();
+    if (instance) void (instance as { setOptions: (opts: RGOptions) => void | Promise<void> }).setOptions(memoryGraphOptions);
   }, [theme, memoryViewGraph, memoryGraphOptions]);
 
   const fetchScheduleReports = useCallback(async () => {
