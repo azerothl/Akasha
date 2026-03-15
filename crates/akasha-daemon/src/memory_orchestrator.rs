@@ -25,6 +25,8 @@ pub struct RecallParams {
     pub filter_by_session: bool,
     /// Phase 6: optional explicit policy/rules text (e.g. from tools_policy summary).
     pub policy_summary: Option<String>,
+    /// Graph RAG: when true, expand context with 1-hop related entries (AKASHA_GRAPH_EXPAND=1).
+    pub expand_by_graph: bool,
 }
 
 impl RecallParams {
@@ -42,6 +44,7 @@ impl RecallParams {
             is_first_message: false,
             filter_by_session: true,
             policy_summary: None,
+            expand_by_graph: false,
         }
     }
 }
@@ -140,10 +143,46 @@ pub async fn recall_context(
             params.semantic_top_k,
             recall_filter,
         );
+        let result_ids: std::collections::HashSet<String> = results.iter().map(|(id, _)| id.clone()).collect();
         for (_, content) in &results {
             ctx.long_term_block.push_str("- ");
             ctx.long_term_block.push_str(&content.replace('\n', " "));
             ctx.long_term_block.push_str("\n");
+        }
+
+        // Graph RAG: optional 1-hop expansion from top results
+        const MAX_RELATED_ENTRIES: usize = 5;
+        const MAX_RELATED_CHARS: usize = 1500;
+        if params.expand_by_graph && results.len() > 0 {
+            let expand_from = results.iter().take(3).map(|(id, _)| id.clone()).collect::<Vec<_>>();
+            let mut related_ids = std::collections::HashSet::new();
+            for id in &expand_from {
+                let ids = client.get_related_ids(id.clone(), None, 5);
+                for to_id in ids {
+                    if !result_ids.contains(&to_id) {
+                        related_ids.insert(to_id);
+                    }
+                }
+            }
+            let related_ids: Vec<String> = related_ids.into_iter().take(MAX_RELATED_ENTRIES).collect();
+            if !related_ids.is_empty() {
+                let contents = client.get_contents_by_ids(related_ids);
+                let mut added_chars = 0usize;
+                let mut added_count = 0usize;
+                for (_, content) in &contents {
+                    if added_count >= MAX_RELATED_ENTRIES || added_chars >= MAX_RELATED_CHARS {
+                        break;
+                    }
+                    let line = format!("- [lié] {}", content.replace('\n', " "));
+                    if added_chars + line.len() + 1 > MAX_RELATED_CHARS {
+                        break;
+                    }
+                    ctx.long_term_block.push_str(&line);
+                    ctx.long_term_block.push_str("\n");
+                    added_chars += line.len() + 1;
+                    added_count += 1;
+                }
+            }
         }
 
         // Project context when suggested

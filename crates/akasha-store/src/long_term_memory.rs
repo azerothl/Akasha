@@ -142,6 +142,21 @@ impl LongTermStore {
         if !has_col("expires_at")? {
             conn.execute("ALTER TABLE memory_entries ADD COLUMN expires_at TEXT", [])?;
         }
+        // Graph RAG: relations between memory entries (from_id, to_id, kind).
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS memory_relations (
+                from_id TEXT NOT NULL,
+                to_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                PRIMARY KEY (from_id, to_id, kind),
+                FOREIGN KEY (from_id) REFERENCES memory_entries(id) ON DELETE CASCADE,
+                FOREIGN KEY (to_id) REFERENCES memory_entries(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_relations_from ON memory_relations(from_id);
+            CREATE INDEX IF NOT EXISTS idx_memory_relations_to ON memory_relations(to_id);
+            "#,
+        )?;
         Ok(Self { conn })
     }
 
@@ -210,9 +225,93 @@ impl LongTermStore {
     }
 
     /// Delete an entry by id. Returns true if a row was deleted.
+    /// Also removes any relations where this entry is from_id or to_id.
     pub fn delete_by_id(&self, id: Uuid) -> anyhow::Result<bool> {
-        let n = self.conn.execute("DELETE FROM memory_entries WHERE id = ?1", rusqlite::params![id.to_string()])?;
+        let id_s = id.to_string();
+        self.delete_relations_for_entry(&id_s)?;
+        let n = self.conn.execute("DELETE FROM memory_entries WHERE id = ?1", rusqlite::params![id_s])?;
         Ok(n > 0)
+    }
+
+    /// Insert a relation between two memory entries. Ignores if duplicate (same from_id, to_id, kind).
+    pub fn insert_relation(&self, from_id: Uuid, to_id: Uuid, kind: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO memory_relations (from_id, to_id, kind) VALUES (?1, ?2, ?3)",
+            rusqlite::params![from_id.to_string(), to_id.to_string(), kind],
+        )?;
+        Ok(())
+    }
+
+    /// Get related entry ids (to_id) for a given entry. Optionally filter by kind. Limited to `limit` results.
+    pub fn get_related_ids(
+        &self,
+        from_id: &str,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        let limit = limit as i64;
+        if let Some(k) = kind {
+            let mut stmt = self.conn.prepare(
+                "SELECT to_id FROM memory_relations WHERE from_id = ?1 AND kind = ?2 LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![from_id, k, limit], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        } else {
+            let mut stmt = self.conn.prepare("SELECT to_id FROM memory_relations WHERE from_id = ?1 LIMIT ?2")?;
+            let rows = stmt.query_map(rusqlite::params![from_id, limit], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        }
+    }
+
+    /// Remove all relations where the given entry is from_id or to_id.
+    pub fn delete_relations_for_entry(&self, entry_id: &str) -> anyhow::Result<()> {
+        self.conn.execute("DELETE FROM memory_relations WHERE from_id = ?1 OR to_id = ?1", rusqlite::params![entry_id])?;
+        Ok(())
+    }
+
+    /// Load (id, content) for given ids, without embeddings. For graph expansion at recall.
+    pub fn get_entries_content_by_ids(
+        &self,
+        ids: &[String],
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT id, content FROM memory_entries WHERE id IN ({})",
+            placeholders
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Get relations for a batch of entry ids. Returns map from_id -> [(to_id, kind)].
+    pub fn get_relations_for_entries(
+        &self,
+        ids: &[String],
+    ) -> anyhow::Result<std::collections::HashMap<String, Vec<(String, String)>>> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders = ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT from_id, to_id, kind FROM memory_relations WHERE from_id IN ({})",
+            placeholders
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+        let mut out: std::collections::HashMap<String, Vec<(String, String)>> = std::collections::HashMap::new();
+        for r in rows {
+            let (from_id, to_id, kind) = r?;
+            out.entry(from_id).or_default().push((to_id, kind));
+        }
+        Ok(out)
     }
 
     /// Delete entries matching a keyword query (same logic as search_by_keywords). Returns number of deleted rows (plan moyen terme 9).
@@ -677,5 +776,41 @@ mod tests {
         assert!(!store.content_exists("unique content").unwrap());
         store.insert("unique content", &embedding_f32_to_bytes(&[0.0]), "test").unwrap();
         assert!(store.content_exists("unique content").unwrap());
+    }
+
+    #[test]
+    fn memory_relations_insert_get_delete_cascade() {
+        let f = NamedTempFile::new().unwrap();
+        let store = LongTermStore::open(f.path()).unwrap();
+        let emb = embedding_f32_to_bytes(&[0.0]);
+        let a = store.insert("entry a", &emb, "test").unwrap();
+        let b = store.insert("entry b", &emb, "test").unwrap();
+        let c = store.insert("entry c", &emb, "test").unwrap();
+
+        store.insert_relation(a, b, "related").unwrap();
+        store.insert_relation(a, c, "related").unwrap();
+        store.insert_relation(b, c, "same_session").unwrap();
+        store.insert_relation(a, b, "related").unwrap(); // duplicate ignored
+
+        let related = store.get_related_ids(&a.to_string(), None, 10).unwrap();
+        assert_eq!(related.len(), 2);
+        assert!(related.contains(&b.to_string()));
+        assert!(related.contains(&c.to_string()));
+
+        let by_kind = store.get_related_ids(&a.to_string(), Some("related"), 10).unwrap();
+        assert_eq!(by_kind.len(), 2);
+
+        let contents = store.get_entries_content_by_ids(&[b.to_string(), c.to_string()]).unwrap();
+        assert_eq!(contents.len(), 2);
+
+        let rel_map = store.get_relations_for_entries(&[a.to_string(), b.to_string()]).unwrap();
+        assert_eq!(rel_map.get(&a.to_string()).map(|v| v.len()).unwrap_or(0), 2);
+        assert_eq!(rel_map.get(&b.to_string()).map(|v| v.len()).unwrap_or(0), 1);
+
+        assert!(store.delete_by_id(a).unwrap());
+        let after = store.get_relations_for_entries(&[b.to_string()]).unwrap();
+        assert!(after.get(&b.to_string()).map(|v| v.len()).unwrap_or(0) == 1);
+        let from_a = store.get_related_ids(&a.to_string(), None, 10).unwrap();
+        assert!(from_a.is_empty());
     }
 }

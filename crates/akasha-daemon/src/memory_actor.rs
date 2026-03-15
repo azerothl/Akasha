@@ -20,6 +20,9 @@ pub enum MemoryRequest {
         importance: Option<i64>,
         scope: Option<String>,
         expires_at: Option<String>,
+        /// Graph RAG: link new entry to these memory entry ids (kind = link_kind or "related").
+        link_to_ids: Option<Vec<String>>,
+        link_kind: Option<String>,
     },
     List { limit: usize },
     Delete { id: String },
@@ -49,6 +52,12 @@ pub enum MemoryRequest {
     SearchEpisodic { filter: akasha_store::EpisodicFilter, limit: usize },
     /// Phase 3/5: get facts by entity for graph retriever.
     GetFactsByEntity { entity_id: String, limit: usize },
+    /// Graph RAG: get related entry ids for an entry.
+    GetRelatedIds { entry_id: String, kind: Option<String>, limit: usize },
+    /// Graph RAG: get (id, content) for given ids (no embeddings).
+    GetContentsByIds { ids: Vec<String> },
+    /// Graph RAG: get relations for a batch of entry ids (from_id -> [(to_id, kind)]).
+    GetRelationsForEntries { ids: Vec<String> },
 }
 
 pub enum MemoryResponse {
@@ -63,6 +72,9 @@ pub enum MemoryResponse {
     EmitEvent(Result<uuid::Uuid, String>),
     SearchEpisodic(Vec<akasha_store::EpisodicEvent>),
     GetFactsByEntity(Vec<akasha_store::Fact>),
+    GetRelatedIds(Vec<String>),
+    GetContentsByIds(Vec<(String, String)>),
+    GetRelationsForEntries(std::collections::HashMap<String, Vec<(String, String)>>),
 }
 
 /// Client handle: Send + Sync, can be used from async code.
@@ -109,11 +121,13 @@ impl LongTermMemoryClient {
         importance: Option<i64>,
         scope: Option<String>,
         expires_at: Option<String>,
+        link_to_ids: Option<Vec<String>>,
+        link_kind: Option<String>,
     ) -> Result<(), String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-            if self.tx.send((MemoryRequest::Promote { content, source, entity_id, process_id, session_id, importance, scope, expires_at }, resp_tx)).is_err() {
+            if self.tx.send((MemoryRequest::Promote { content, source, entity_id, process_id, session_id, importance, scope, expires_at, link_to_ids, link_kind }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
             match resp_rx.blocking_recv() {
@@ -123,7 +137,7 @@ impl LongTermMemoryClient {
         }
         #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
         {
-            let _ = (content, source, entity_id, process_id, session_id, importance, scope, expires_at);
+            let _ = (content, source, entity_id, process_id, session_id, importance, scope, expires_at, link_to_ids, link_kind);
             Ok(())
         }
     }
@@ -296,6 +310,72 @@ impl LongTermMemoryClient {
         }
     }
 
+    /// Graph RAG: get related entry ids for an entry. Optionally filter by kind.
+    pub fn get_related_ids(&self, entry_id: String, kind: Option<String>, limit: usize) -> Vec<String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::GetRelatedIds { entry_id, kind, limit }, resp_tx)).is_err() {
+                return Vec::new();
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::GetRelatedIds(ids)) => ids,
+                _ => Vec::new(),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = (entry_id, kind, limit);
+            Vec::new()
+        }
+    }
+
+    /// Graph RAG: get (id, content) for given ids (no embeddings).
+    pub fn get_contents_by_ids(&self, ids: Vec<String>) -> Vec<(String, String)> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            if ids.is_empty() {
+                return Vec::new();
+            }
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::GetContentsByIds { ids }, resp_tx)).is_err() {
+                return Vec::new();
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::GetContentsByIds(contents)) => contents,
+                _ => Vec::new(),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = ids;
+            Vec::new()
+        }
+    }
+
+    /// Graph RAG: get relations for a batch of entry ids (from_id -> [(to_id, kind)]).
+    pub fn get_relations_for_entries(&self, ids: Vec<String>) -> std::collections::HashMap<String, Vec<(String, String)>> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            if ids.is_empty() {
+                return std::collections::HashMap::new();
+            }
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::GetRelationsForEntries { ids }, resp_tx)).is_err() {
+                return std::collections::HashMap::new();
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::GetRelationsForEntries(map)) => map,
+                _ => std::collections::HashMap::new(),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = ids;
+            std::collections::HashMap::new()
+        }
+    }
+
     /// GC: delete entries older than retention_days; protect_sources are never deleted. Returns deleted count (plan moyen terme 9).
     pub fn gc(&self, retention_days: u32, protect_sources: Option<Vec<String>>) -> Result<u64, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
@@ -396,7 +476,7 @@ pub fn start_memory_actor(
                         };
                         MemoryResponse::Search(contents)
                     }
-                    MemoryRequest::Promote { content, source, entity_id, process_id, session_id, importance, scope, expires_at } => {
+                    MemoryRequest::Promote { content, source, entity_id, process_id, session_id, importance, scope, expires_at, link_to_ids, link_kind } => {
                         let already_exists = store.content_exists(&content).unwrap_or(false);
                         if already_exists {
                             tracing::debug!(content = %content.chars().take(60).collect::<String>(), "Skipping duplicate long-term memory entry");
@@ -430,6 +510,15 @@ pub fn start_memory_actor(
                                     if let Some(ref fs) = facts_store {
                                         for (s, p, o) in extract_facts_simple(&content) {
                                             let _ = fs.insert_fact(&s, &p, &o, Some(id));
+                                        }
+                                    }
+                                    const MAX_LINK_TO: usize = 10;
+                                    let kind = link_kind.as_deref().unwrap_or("related");
+                                    if let Some(ref ids) = link_to_ids {
+                                        for to_id_str in ids.iter().take(MAX_LINK_TO) {
+                                            if let Ok(to_id) = Uuid::parse_str(to_id_str) {
+                                                let _ = store.insert_relation(id, to_id, kind);
+                                            }
                                         }
                                     }
                                     Ok(())
@@ -488,6 +577,20 @@ pub fn start_memory_actor(
                             .and_then(|fs| fs.get_facts_by_entity(&entity_id, limit).ok())
                             .unwrap_or_default();
                         MemoryResponse::GetFactsByEntity(facts)
+                    }
+                    MemoryRequest::GetRelatedIds { entry_id, kind, limit } => {
+                        let ids = store
+                            .get_related_ids(&entry_id, kind.as_deref(), limit)
+                            .unwrap_or_default();
+                        MemoryResponse::GetRelatedIds(ids)
+                    }
+                    MemoryRequest::GetContentsByIds { ids } => {
+                        let contents = store.get_entries_content_by_ids(&ids).unwrap_or_default();
+                        MemoryResponse::GetContentsByIds(contents)
+                    }
+                    MemoryRequest::GetRelationsForEntries { ids } => {
+                        let map = store.get_relations_for_entries(&ids).unwrap_or_default();
+                        MemoryResponse::GetRelationsForEntries(map)
                     }
                 };
                 let _ = resp_tx.send(response);

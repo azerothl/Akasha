@@ -569,7 +569,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("web_search", "web_search <query> [max_results] — rechercher sur le web (Brave API; BRAVE_API_KEY, web_search_enabled)"),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
     ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
-    ("memory_store", "memory_store <content> <source> — stocker/promouvoir un contenu en mémoire long terme"),
+    ("memory_store", "memory_store <content> <source> [link_to: id1,id2...] — stocker en mémoire long terme, optionnellement lier à des entrées existantes (UUIDs)"),
     ("memory_delete", "memory_delete <id> — supprimer une entrée de la mémoire long terme par son id (UUID)"),
     ("memory_forget", "memory_forget <query> — supprimer les entrées dont le contenu correspond aux mots-clés (plan moyen terme 9)"),
     ("memory_stats", "memory_stats — nombre d'entrées et taille approximative de la mémoire long terme"),
@@ -1674,14 +1674,30 @@ async fn execute_tool_call(
             let content = args.get(0).map(|a| a.as_str()).unwrap_or("");
             let source = args.get(1).map(|a| a.as_str()).unwrap_or("agent");
             if content.is_empty() {
-                return (false, "[memory_store] usage: memory_store <content> <source>".to_string(), None);
+                return (false, "[memory_store] usage: memory_store <content> <source> [link_to: id1,id2...]".to_string(), None);
             }
+            let link_to_ids: Option<Vec<String>> = if args.len() > 2 {
+                let ids: Vec<String> = args[2..]
+                    .iter()
+                    .flat_map(|a| a.split(','))
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect();
+                if ids.is_empty() {
+                    None
+                } else {
+                    Some(ids)
+                }
+            } else {
+                None
+            };
             match long_term_client {
                 Some(client) => {
                     let client = client.clone();
                     let content = content.to_string();
                     let source = source.to_string();
-                    let out = tokio::task::spawn_blocking(move || client.promote(content, source, None, None, None, None, None, None))
+                    let out = tokio::task::spawn_blocking(move || client.promote(content, source, None, None, None, None, None, None, link_to_ids, None))
                         .await
                         .ok()
                         .and_then(|r| r.ok());
@@ -2398,7 +2414,7 @@ async fn compact_short_term_if_needed(
                     let session_id_attr = session_id.to_string();
                     let client = client.clone();
                     tokio::task::spawn_blocking(move || {
-                        if let Err(e) = client.promote(summary.clone(), "compaction".to_string(), None, None, Some(session_id_attr.clone()), Some(1), Some("session".to_string()), None) {
+                        if let Err(e) = client.promote(summary.clone(), "compaction".to_string(), None, None, Some(session_id_attr.clone()), Some(1), Some("session".to_string()), None, None, None) {
                             tracing::warn!(error = %e, "Long-term promote after compaction failed");
                         } else if let Err(e) = client.emit_event("memory_promoted".to_string(), summary, None, None, Some(session_id_attr), None, Some(1), Some("session".to_string()), Some("compaction".to_string())) {
                             tracing::debug!(error = %e, "Episodic emit after compaction promote failed");
@@ -2465,7 +2481,7 @@ Réponse en français, factuelle.\n\n{}",
                 let content = format!("Résumé du {} : {}", session_id.trim_start_matches("day-"), summary);
                 let client = client.clone();
                 match tokio::task::spawn_blocking(move || {
-                    let res = client.promote(content.clone(), "daily_summary".to_string(), None, None, None, Some(1), None, None);
+                    let res = client.promote(content.clone(), "daily_summary".to_string(), None, None, None, Some(1), None, None, None, None);
                     if res.is_ok() {
                         let _ = client.emit_event("memory_promoted".to_string(), content, None, None, None, None, Some(1), None, Some("daily_summary".to_string()));
                     }
@@ -2712,12 +2728,14 @@ pub(crate) async fn run_message_via_llm(
         Some(st) => st.get_turns(&session_id).await.is_empty(),
         None => true,
     };
+    let expand_by_graph = std::env::var("AKASHA_GRAPH_EXPAND").ok().as_deref() == Some("1");
     let recall_params = crate::memory_orchestrator::RecallParams {
         message: message.clone(),
         session_id: session_id.clone(),
         filter_by_session: !turns_empty,
         suggest_project: message_suggests_project(&message),
         is_first_message: turns_empty,
+        expand_by_graph,
         ..Default::default()
     };
     let fused = crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params).await;
@@ -3543,7 +3561,7 @@ pub(crate) async fn run_message_via_llm(
             let client = long_term.clone();
             let fact = fact.clone();
             match tokio::task::spawn_blocking(move || {
-                let res = client.promote(fact.clone(), "user_fact".to_string(), None, None, None, Some(2), Some("global_user".to_string()), None);
+                let res = client.promote(fact.clone(), "user_fact".to_string(), None, None, None, Some(2), Some("global_user".to_string()), None, None, None);
                 if res.is_ok() {
                     let _ = client.emit_event("user_preference".to_string(), fact, None, None, None, None, Some(2), Some("global_user".to_string()), Some("user_fact".to_string()));
                 }
@@ -3674,7 +3692,7 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
                 let client = client.clone();
                 let c = content.clone();
                 let s = source.clone();
-                match tokio::task::spawn_blocking(move || client.promote(c, s, None, None, None, None, None, None)).await {
+                match tokio::task::spawn_blocking(move || client.promote(c, s, None, None, None, None, None, None, None, None)).await {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote failed"),
                     Err(e) => tracing::debug!(error = %e, "Promote task join error"),
@@ -4107,7 +4125,7 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
-    // GET /api/memory/long-term?limit=50 — recent long-term entries (content, created_at, source)
+    // GET /api/memory/long-term?limit=50 — recent long-term entries (content, created_at, source, related)
     if method == "GET" && path.starts_with("/api/memory/long-term") {
         let limit = path
             .split('?')
@@ -4127,10 +4145,31 @@ pub async fn handle_api(
         } else {
             vec![]
         };
+        let relations = if !entries.is_empty() {
+            if let Some(ref client) = long_term_client {
+                let ids: Vec<String> = entries.iter().map(|(id, _, _, _)| id.clone()).collect();
+                let client = client.clone();
+                tokio::task::spawn_blocking(move || client.get_relations_for_entries(ids))
+                    .await
+                    .unwrap_or_default()
+            } else {
+                std::collections::HashMap::new()
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
         let list: Vec<serde_json::Value> = entries
             .iter()
             .map(|(id, content, created_at, source)| {
-                serde_json::json!({ "id": id, "content": content, "created_at": created_at, "source": source })
+                let related = relations
+                    .get(id)
+                    .map(|v| {
+                        v.iter()
+                            .map(|(to_id, kind)| serde_json::json!({ "id": to_id, "kind": kind }))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                serde_json::json!({ "id": id, "content": content, "created_at": created_at, "source": source, "related": related })
             })
             .collect();
         let body_json = serde_json::json!({
