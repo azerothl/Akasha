@@ -3697,6 +3697,15 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
     );
     let _ = store.update_status(task_id, TaskStatus::Completed);
     notify_task_completion(&task_completion_registry, task_id).await;
+    learn_from_task_outcome(
+        long_term_client.as_ref(),
+        task_id,
+        &message,
+        "completed",
+        &reply_text.chars().take(300).collect::<String>(),
+        Some(&session_id),
+        None,
+    );
 }
 
 /// Notify any waiter in the TaskCompletionRegistry that `task_id` has finished.
@@ -3705,6 +3714,42 @@ async fn notify_task_completion(registry: &Option<TaskCompletionRegistry>, task_
         if let Some(notify) = reg.write().await.remove(&task_id) {
             notify.notify_one();
         }
+    }
+}
+
+/// Learn step: emit a `task_outcome` episodic event after a task completes (conversation or orchestrator).
+/// Payload: task_id, initial_message_preview (200 chars), status, summary_preview (300 chars), optional intent.
+pub(crate) fn learn_from_task_outcome(
+    client: Option<&LongTermMemoryClient>,
+    task_id: Uuid,
+    initial_message: &str,
+    status: &str,
+    summary: &str,
+    session_id: Option<&str>,
+    intent: Option<&str>,
+) {
+    let Some(client) = client else { return };
+    let initial_preview: String = initial_message.chars().take(200).collect();
+    let summary_preview: String = summary.chars().take(300).collect();
+    let payload = serde_json::json!({
+        "task_id": task_id.to_string(),
+        "initial_message_preview": initial_preview,
+        "status": status,
+        "summary_preview": summary_preview,
+        "intent": intent,
+    });
+    if let Err(e) = client.emit_event(
+        "task_outcome".to_string(),
+        payload.to_string(),
+        None,
+        None,
+        session_id.map(String::from),
+        Some(task_id.to_string()),
+        None,
+        None,
+        None,
+    ) {
+        tracing::debug!(task_id = %task_id, error = %e, "task_outcome emit failed");
     }
 }
 

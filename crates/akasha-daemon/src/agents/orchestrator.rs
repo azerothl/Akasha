@@ -13,7 +13,8 @@ use uuid::Uuid;
 use super::contract::{ContractStatus, parse_contract_from_response};
 use super::prompts::build_task_prompt;
 use super::{EventBus, ExecutionMode, OrchestratorTask};
-use crate::api::{message_suggests_tool_only_action, ProgressCache, TaskCompletionRegistry};
+use crate::api::{learn_from_task_outcome, message_suggests_tool_only_action, ProgressCache, TaskCompletionRegistry};
+use crate::memory_actor::LongTermMemoryClient;
 
 /// Outcome of evaluating whether the aggregated sub-agent response satisfies the user request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +180,7 @@ pub struct Orchestrator {
     progress: ProgressCache,
     llm_router: Arc<akasha_llm::LLMRouter>,
     task_completion: TaskCompletionRegistry,
+    long_term_client: Option<LongTermMemoryClient>,
 }
 
 impl Orchestrator {
@@ -189,6 +191,7 @@ impl Orchestrator {
         progress: ProgressCache,
         llm_router: Arc<akasha_llm::LLMRouter>,
         task_completion: TaskCompletionRegistry,
+        long_term_client: Option<LongTermMemoryClient>,
     ) -> Self {
         Self {
             bus,
@@ -197,6 +200,7 @@ impl Orchestrator {
             progress,
             llm_router,
             task_completion,
+            long_term_client,
         }
     }
 
@@ -211,6 +215,7 @@ impl Orchestrator {
             let progress = self.progress.clone();
             let llm_router = self.llm_router.clone();
             let task_completion = self.task_completion.clone();
+            let long_term_client = self.long_term_client.clone();
             let root_task_id = task.task_id;
             let message = task.message;
             let session_id = task.session_id;
@@ -228,6 +233,7 @@ impl Orchestrator {
                     progress,
                     llm_router,
                     task_completion,
+                    long_term_client,
                     execution_mode,
                 )
                 .await
@@ -250,6 +256,7 @@ async fn process_root_task(
     progress: ProgressCache,
     llm_router: Arc<akasha_llm::LLMRouter>,
     task_completion: TaskCompletionRegistry,
+    long_term_client: Option<LongTermMemoryClient>,
     execution_mode: Option<ExecutionMode>,
 ) -> anyhow::Result<()> {
     if !akasha_core::Role::OrchestratorAgent.can_spawn_agents() {
@@ -420,6 +427,15 @@ async fn process_root_task(
             .with_correlation(root_task_id),
         );
         let _ = store.update_status(root_task_id, TaskStatus::Completed);
+        learn_from_task_outcome(
+            long_term_client.as_ref(),
+            root_task_id,
+            &message,
+            "completed",
+            &success_msg,
+            Some(&session_id),
+            None,
+        );
         let _ = bus.send(
             EventEnvelope::new(
                 EventType::TaskCompleted,
@@ -761,6 +777,16 @@ Tu dois soit : (1) produire une réponse complète et directe à la demande de l
             }
         }
         let _ = store.update_status(root_task_id, root_status);
+        let summary_preview: String = final_aggregated.chars().take(300).collect();
+        learn_from_task_outcome(
+            long_term_client.as_ref(),
+            root_task_id,
+            &message,
+            status_str,
+            &summary_preview,
+            Some(&session_id),
+            None,
+        );
         let event_type = if any_failed { EventType::TaskFailed } else { EventType::TaskCompleted };
         let _ = bus.send(
             EventEnvelope::new(

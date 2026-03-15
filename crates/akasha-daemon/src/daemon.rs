@@ -533,6 +533,7 @@ impl Daemon {
                 progress.clone(),
                 llm_router.clone(),
                 task_completion.clone(),
+                long_term_client.clone(),
             ));
             tokio::spawn({
                 let orch = orchestrator.clone();
