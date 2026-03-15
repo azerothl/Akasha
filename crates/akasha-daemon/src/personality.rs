@@ -463,7 +463,8 @@ mod tests {
 
     #[test]
     fn build_personality_prompt_fallback_when_no_yaml() {
-        let empty_dir = std::path::Path::new("/nonexistent_spec_dir_12345");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let empty_dir = tmp.path();
         let profile = AgentProfile {
             name: Some("TestAgent".to_string()),
             role: Some("test role".to_string()),
@@ -484,7 +485,8 @@ mod tests {
             m.insert("verbosity".to_string(), 0.8);
             Some(m)
         };
-        let empty_dir = std::path::Path::new("/nonexistent_spec_dir_67890");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let empty_dir = tmp.path();
         let out = build_personality_prompt(empty_dir, &profile, None);
         assert!(out.contains("Custom"));
         assert!(out.contains("[Agent profile and instructions]"));

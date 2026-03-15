@@ -507,14 +507,71 @@ fn windows_spawn(
     }))
 }
 
-/// Substitute $VAR and ${VAR} patterns in a string with values from env pairs.
-/// Used to expand vault/env variables in command arguments without a shell.
+/// Substitute $VAR, ${VAR}, and $$ (escape) patterns in a string with values from env pairs.
+/// Uses full-identifier matching for $VAR to avoid prefix collisions (e.g. $PATH won't expand
+/// inside $PATHOLOGY). $$ is an escape sequence that produces a literal $.
 fn substitute_env_vars(s: &str, env: &[(String, String)]) -> String {
-    let mut result = s.to_string();
-    for (k, v) in env {
-        result = result.replace(&format!("${{{}}}", k), v);
-        result = result.replace(&format!("${}", k), v);
+    let map: std::collections::HashMap<&str, &str> =
+        env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+    let mut result = String::with_capacity(s.len());
+    let mut remaining = s;
+
+    while !remaining.is_empty() {
+        let Some(dollar_pos) = remaining.find('$') else {
+            result.push_str(remaining);
+            break;
+        };
+        result.push_str(&remaining[..dollar_pos]);
+        remaining = &remaining[dollar_pos..];
+        let rest = &remaining[1..]; // after '$'
+
+        if rest.starts_with('$') {
+            // $$ -> literal $
+            result.push('$');
+            remaining = &remaining[2..];
+        } else if rest.starts_with('{') {
+            // ${VAR} form: find the closing '}'
+            let inner = &rest[1..];
+            if let Some(close) = inner.find('}') {
+                let var_name = &inner[..close];
+                if let Some(val) = map.get(var_name) {
+                    result.push_str(val);
+                } else {
+                    result.push_str("${");
+                    result.push_str(var_name);
+                    result.push('}');
+                }
+                remaining = &rest[1 + close + 1..];
+            } else {
+                // Unclosed ${, emit as-is
+                result.push('$');
+                remaining = rest;
+            }
+        } else {
+            // $VAR form: only valid if first char is a letter or underscore (POSIX identifier rules)
+            let first = rest.chars().next();
+            if first.map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false) {
+                // Collect the full identifier (alphanumeric + underscore)
+                let ident_end = rest
+                    .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .unwrap_or(rest.len());
+                let var_name = &rest[..ident_end];
+                if let Some(val) = map.get(var_name) {
+                    result.push_str(val);
+                } else {
+                    result.push('$');
+                    result.push_str(var_name);
+                }
+                remaining = &rest[ident_end..];
+            } else {
+                // '$' not followed by a valid identifier start, keep as-is
+                result.push('$');
+                remaining = rest;
+            }
+        }
     }
+
     result
 }
 

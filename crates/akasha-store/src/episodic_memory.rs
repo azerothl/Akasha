@@ -132,7 +132,7 @@ impl EpisodicStore {
             params.push(Box::new(t.clone()));
         }
         if let Some(mi) = filter.min_importance {
-            conditions.push("(importance IS NULL OR importance >= ?)");
+            conditions.push("COALESCE(importance, 0) >= ?");
             params.push(Box::new(mi));
         }
         if let Some(ref from) = filter.from {

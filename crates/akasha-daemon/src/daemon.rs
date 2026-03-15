@@ -301,14 +301,18 @@ impl Daemon {
             info!(chunks = rag_pack.len(), "RAG pack loaded for diagnostic");
         }
 
-        // Initialize store and restore tasks (Phase 1). Phase 7: mark Running tasks with pipeline checkpoint as failed (interrupted by restart).
+        // Initialize store and restore tasks (Phase 1). Phase 7: mark Running tasks with a pipeline checkpoint as failed (interrupted by restart).
         if let Ok(store) = TaskStore::open(&db_path) {
             let tasks = store.get_pending_or_running().unwrap_or_default();
             info!(count = tasks.len(), "Restored tasks from persistence");
             if let Ok(pipeline) = PipelineStore::open(&db_path) {
                 for t in &tasks {
                     if t.status == akasha_store::TaskStatus::Running {
-                        if pipeline.get(t.id).ok().flatten().is_some() {
+                        let has_checkpoint = match pipeline.get(t.id) {
+                            Ok(Some(ctx)) => ctx.checkpoint_json.is_some(),
+                            _ => false,
+                        };
+                        if has_checkpoint {
                             let _ = store.update_status(t.id, akasha_store::TaskStatus::Failed);
                             info!(task_id = %t.id, "Task marked failed (interrupted by daemon restart)");
                         }
