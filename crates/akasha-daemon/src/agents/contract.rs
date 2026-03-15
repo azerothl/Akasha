@@ -69,8 +69,26 @@ pub fn parse_contract_from_response(response: &str) -> Option<AgentOutputContrac
         trimmed
     };
     let open = tail.rfind('{')?;
-    let close = tail[open..].find('}')?;
-    let json_str = &tail[open..open + close + 1];
+    // Find the matching closing brace for the last '{' by tracking nesting depth.
+    let mut depth = 0i32;
+    let mut end_index: Option<usize> = None;
+    for (rel_idx, ch) in tail[open..].char_indices() {
+        match ch {
+            '{' => {
+                depth += 1;
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end_index = Some(open + rel_idx + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end_index?;
+    let json_str = &tail[open..end];
     serde_json::from_str::<AgentOutputContract>(json_str).ok()
 }
 
