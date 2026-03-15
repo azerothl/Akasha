@@ -116,9 +116,9 @@ impl ShortTermStore {
             if let Some(ref dir) = self.persistence_dir {
                 if is_safe_session_id(session_id) {
                     let path = dir.join(format!("{}.json", session_id));
-                    let _ = std::fs::create_dir_all(dir);
                     if let Ok(json) = serde_json::to_string(&to_persist) {
-                        let _ = std::fs::write(&path, json);
+                        let _ = tokio::fs::create_dir_all(dir).await;
+                        let _ = tokio::fs::write(&path, json).await;
                     }
                 }
             }
@@ -160,9 +160,9 @@ impl ShortTermStore {
             if let Some(ref dir) = self.persistence_dir {
                 if is_safe_session_id(session_id) {
                     let path = dir.join(format!("{}.json", session_id));
-                    let _ = std::fs::create_dir_all(dir);
                     if let Ok(json) = serde_json::to_string(&to_persist) {
-                        let _ = std::fs::write(&path, json);
+                        let _ = tokio::fs::create_dir_all(dir).await;
+                        let _ = tokio::fs::write(&path, json).await;
                     }
                 }
             }
@@ -202,7 +202,7 @@ impl ShortTermStore {
             None => return,
         };
         let path = dir.join(format!("{}.json", session_id));
-        let Ok(data) = std::fs::read_to_string(&path) else {
+        let Ok(data) = tokio::fs::read_to_string(&path).await else {
             return;
         };
         let turns: Vec<ConversationTurn> = match serde_json::from_str(&data) {

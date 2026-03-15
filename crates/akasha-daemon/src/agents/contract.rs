@@ -152,8 +152,9 @@ pub fn user_facing_message(response: &str) -> String {
     if let Some(contract) = parse_contract_from_response(trimmed) {
         if let Some(ref summary) = contract.summary {
             if !summary.trim().is_empty() {
-                // Response is essentially raw JSON (starts with { or short and contains JSON)
-                if trimmed.starts_with('{') || (trimmed.len() < 600 && trimmed.contains('{')) {
+                // Only use the summary if the response is essentially raw JSON (starts with '{')
+                // When there is text before the JSON block, strip the block instead.
+                if trimmed.starts_with('{') {
                     return format_summary_for_display(summary);
                 }
             }
