@@ -10,9 +10,11 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::contract::{ContractStatus, parse_contract_from_response};
+use super::contract::{parse_contract_from_response, user_facing_message, ContractStatus};
 use super::prompts::build_task_prompt;
 use super::{EventBus, ExecutionMode, OrchestratorTask};
+use crate::agent_profile::AgentProfile;
+use crate::personality;
 use crate::api::{learn_from_task_outcome_async, message_suggests_tool_only_action, ProgressCache, TaskCompletionRegistry};
 use crate::memory_actor::LongTermMemoryClient;
 
@@ -178,6 +180,8 @@ Output only: SATISFACTORY, CANNOT_DO, or NEEDS_REFINEMENT"#,
 pub struct Orchestrator {
     bus: EventBus,
     store_path: std::path::PathBuf,
+    spec_dir: std::path::PathBuf,
+    data_dir: std::path::PathBuf,
     conversation_tx: mpsc::Sender<OrchestratorTask>,
     progress: ProgressCache,
     llm_router: Arc<akasha_llm::LLMRouter>,
@@ -189,6 +193,8 @@ impl Orchestrator {
     pub fn new(
         bus: EventBus,
         store_path: std::path::PathBuf,
+        spec_dir: std::path::PathBuf,
+        data_dir: std::path::PathBuf,
         conversation_tx: mpsc::Sender<OrchestratorTask>,
         progress: ProgressCache,
         llm_router: Arc<akasha_llm::LLMRouter>,
@@ -198,6 +204,8 @@ impl Orchestrator {
         Self {
             bus,
             store_path,
+            spec_dir,
+            data_dir,
             conversation_tx,
             progress,
             llm_router,
@@ -213,6 +221,8 @@ impl Orchestrator {
         while let Some(task) = rx.recv().await {
             let bus = self.bus.clone();
             let store_path = self.store_path.clone();
+            let spec_dir = self.spec_dir.clone();
+            let data_dir = self.data_dir.clone();
             let conv_tx = self.conversation_tx.clone();
             let progress = self.progress.clone();
             let llm_router = self.llm_router.clone();
@@ -227,6 +237,8 @@ impl Orchestrator {
                 if let Err(e) = process_root_task(
                     bus,
                     store_path.as_path(),
+                    spec_dir.as_path(),
+                    data_dir.as_path(),
                     root_task_id,
                     message,
                     session_id,
@@ -250,6 +262,8 @@ impl Orchestrator {
 async fn process_root_task(
     bus: EventBus,
     store_path: &Path,
+    spec_dir: &Path,
+    data_dir: &Path,
     root_task_id: Uuid,
     message: String,
     session_id: String,
@@ -272,14 +286,14 @@ async fn process_root_task(
     let store = TaskStore::open(store_path)?;
     store.update_status(root_task_id, TaskStatus::Running)?;
 
-    // Progress immédiat pour que la TUI affiche un retour avant le premier appel LLM (chargement modèle possible).
+    // Immediate progress so the TUI shows feedback before the first LLM call (model loading may take time).
     let _ = bus.send(
         EventEnvelope::new(
             EventType::ProgressUpdate,
             Some(serde_json::json!({
                 "task_id": root_task_id.to_string(),
                 "progress_pct": 0,
-                "message": "Analyse de la demande…"
+                "message": "Analyzing request…"
             })),
         )
         .with_correlation(root_task_id),
@@ -301,11 +315,11 @@ async fn process_root_task(
 
     // Progress message so UIs can show "task delegated to specialized agent(s)"
     let delegation_msg = if steps.len() == 1 {
-        format!("Tâche déléguée à l'agent « {} ».", steps[0].0)
+        format!("Task delegated to agent « {} ».", steps[0].0)
     } else {
         let agents: Vec<&str> = steps.iter().map(|(a, _)| a.as_str()).collect();
         format!(
-            "Tâche décomposée en {} sous-tâche(s) — agents spécialisés : {}.",
+            "Task split into {} subtask(s) — specialized agents: {}.",
             steps.len(),
             agents.join(", ")
         )
@@ -333,9 +347,9 @@ async fn process_root_task(
             (interval_secs, name, reminder_message)
         } else if parts.len() == 2 {
             let interval_secs = parts[0].parse::<u64>().unwrap_or(7200);
-            (interval_secs, "Rappel".to_string(), parts[1].to_string())
+            (interval_secs, "Reminder".to_string(), parts[1].to_string())
         } else {
-            (7200, "Rappel".to_string(), payload.to_string())
+            (7200, "Reminder".to_string(), payload.to_string())
         };
         let schedule_store = match ScheduleStore::open(store_path) {
             Ok(s) => s,
@@ -346,7 +360,7 @@ async fn process_root_task(
                         Some(serde_json::json!({
                             "task_id": root_task_id.to_string(),
                             "progress_pct": 100,
-                            "message": format!("Erreur création récurrence : {}", e)
+                            "message": format!("Recurrence creation error: {}", e)
                         })),
                     )
                     .with_correlation(root_task_id),
@@ -363,7 +377,7 @@ async fn process_root_task(
         let schedule = Schedule {
             id: Uuid::new_v4(),
             name: name.clone(),
-            description: format!("Rappel toutes les {} secondes", interval_secs),
+            description: format!("Reminder every {} seconds", interval_secs),
             enabled: true,
             timezone: "UTC".to_string(),
             rrule: String::new(),
@@ -381,7 +395,7 @@ async fn process_root_task(
                     Some(serde_json::json!({
                         "task_id": root_task_id.to_string(),
                         "progress_pct": 100,
-                        "message": format!("Erreur création récurrence : {}", e)
+                        "message": format!("Recurrence creation error: {}", e)
                     })),
                 )
                 .with_correlation(root_task_id),
@@ -539,12 +553,14 @@ async fn process_root_task(
     }
     // Aggregator: wait for all child completion notifications (no polling), then synthesize.
     let store_path_buf = store_path.to_path_buf();
+    let spec_dir_buf = spec_dir.to_path_buf();
+    let data_dir_buf = data_dir.to_path_buf();
     let steps_count = steps.len();
     let user_message = message.clone();
     let conversation_tx_aggregator = conversation_tx.clone();
     let session_id_aggregator = session_id.clone();
     let execution_mode_aggregator = execution_mode;
-    const GENERIC_MESSAGES: &[&str] = &["Done.", "Terminé.", "Échec.", "Annulé."];
+    const GENERIC_MESSAGES: &[&str] = &["Done.", "Failed.", "Cancelled."];
     // Per-child timeout: mirrors the delegation handler's 5-minute limit.  Children are processed
     // sequentially by the conversation worker, so total wait is bounded by N × PER_CHILD_TIMEOUT.
     const PER_CHILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
@@ -630,9 +646,9 @@ async fn process_root_task(
                     }
                     _ => {
                         if child.status == TaskStatus::Failed {
-                            "(Sous-tâche en échec)".to_string()
+                            "(Subtask failed)".to_string()
                         } else {
-                            "(Aucune réponse)".to_string()
+                            "(No response)".to_string()
                         }
                     }
                 };
@@ -641,21 +657,27 @@ async fn process_root_task(
         }
         let raw_responses = parts.join("\n\n");
         let mut synthesis_model_used: Option<String> = None;
-        let aggregated = if raw_responses.is_empty() || raw_responses.trim() == "(Aucune réponse)" {
-            "Aucune réponse des sous-agents.".to_string()
+        let aggregated = if raw_responses.is_empty() || raw_responses.trim() == "(No response)" {
+            "No response from sub-agents.".to_string()
         } else {
             // Ask the conversation LLM to synthesize all sub-agent replies into one answer that directly addresses the user's question.
+            // Use the agent's personality (tone, formal/informal, name) so the synthesis speaks as the agent.
+            let profile = AgentProfile::load(&data_dir_buf);
+            let synthesis_system_prompt = format!(
+                "{}\n\nYou synthesize sub-agent replies into a single response for the user. Reply in your name, with the same tone and form of address (formal/informal as configured). Reply in the SAME LANGUAGE as the user's question (French → French, English → English). Do not produce a JSON block at the end of your response.",
+                personality::build_personality_prompt(&spec_dir_buf, &profile, Some("conversation")).trim_end()
+            );
             let synthesis_prompt = format!(
-                r#"Tu es un synthétiseur. La question de l'utilisateur est :
+                r#"The user's question is:
 
 « {} »
 
-Voici les réponses de différents agents spécialisés :
+Here are the replies from specialized agents:
 
 {}
 
-Produis une seule réponse structurée et claire qui répond exactement à la question de l'utilisateur. Intègre les éléments utiles des réponses ci-dessus sans les lister ni citer les agents ; reformule de façon naturelle et directe pour l'utilisateur.
-N'ajoute aucune information qui ne figure pas dans les réponses des agents ci-dessus. Si les réponses ne permettent pas de répondre à la question, dis simplement que tu n'as pas trouvé d'information."#,
+Produce a single structured, clear response that answers the question. Integrate useful elements from the replies above without listing or citing agents; rephrase in a natural and direct way.
+Reply in the SAME LANGUAGE as the user's question above. Do not add any information not present in the agents' replies. If the replies do not allow answering, simply say you did not find the information."#,
                 user_message.trim(),
                 raw_responses
             );
@@ -664,7 +686,7 @@ N'ajoute aucune information qui ne figure pas dans les réponses des agents ci-d
                 max_tokens: Some(4096),
                 temperature: Some(0.3),
                 preferred_task_type: Some("conversation".to_string()),
-                system_prompt: None,
+                system_prompt: Some(synthesis_system_prompt),
                 image_data_urls: None,
             };
             match tokio::time::timeout(
@@ -682,7 +704,7 @@ N'ajoute aucune information qui ne figure pas dans les réponses des agents ci-d
                     if parts.len() == 1 {
                         parts.into_iter().next().unwrap_or_else(|| raw_responses)
                     } else {
-                        format!("Réponses des sous-agents :\n\n{}", raw_responses)
+                        format!("Sub-agent replies:\n\n{}", raw_responses)
                     }
                 }
             }
@@ -705,13 +727,13 @@ N'ajoute aucune information qui ne figure pas dans les réponses des agents ci-d
             }
             // One refinement round: ask a single conversation agent to produce a complete answer or clearly state what is missing.
             let refinement_prompt = format!(
-                r#"Demande initiale de l'utilisateur : « {} »
+                r#"Initial user request: « {} »
 
-Réponses actuelles des sous-agents (incomplètes ou insuffisantes) :
+Current sub-agent replies (incomplete or insufficient):
 
 {}
 
-Tu dois soit : (1) produire une réponse complète et directe à la demande de l'utilisateur en t'appuyant sur les éléments ci-dessus, soit (2) indiquer clairement que tu ne peux pas réaliser la tâche et expliquer pourquoi (information manquante, outil indisponible, etc.). Ne te contente pas de promettre de faire quelque chose — réponds ou dis clairement que tu ne peux pas."#,
+You must either: (1) produce a complete, direct response to the user's request based on the above, or (2) clearly state that you cannot perform the task and explain why (missing information, tool unavailable, etc.). Do not just promise to do something — either respond or clearly say you cannot."#,
                 user_message.trim(),
                 aggregated.trim()
             );
@@ -761,13 +783,15 @@ Tu dois soit : (1) produire une réponse complète et directe à la demande de l
                 let _ = store.update_status(refinement_child_id, TaskStatus::Completed);
             }
         }
+        // Ensure the UI receives a readable message (never raw JSON): extract summary or strip trailing contract.
+        let display_message = user_facing_message(&final_aggregated);
         let _ = bus.send(
             EventEnvelope::new(
                 EventType::ProgressUpdate,
                 Some(serde_json::json!({
                     "task_id": root_task_id.to_string(),
                     "progress_pct": 100,
-                    "message": final_aggregated
+                    "message": display_message
                 })),
             )
             .with_correlation(root_task_id),
@@ -777,11 +801,11 @@ Tu dois soit : (1) produire une réponse complète et directe à la demande de l
         let status_str = root_status.as_str();
         if root_status == TaskStatus::Completed && execution_mode_aggregator == Some(ExecutionMode::Orchestrated) {
             if let Ok(pipeline) = PipelineStore::open(&store_path_buf) {
-                let _ = pipeline.set_state(root_task_id, PipelineState::Livraison, Some(final_aggregated.as_str()));
+                let _ = pipeline.set_state(root_task_id, PipelineState::Livraison, Some(display_message.as_str()));
             }
         }
         let _ = store.update_status(root_task_id, root_status);
-        let summary_preview: String = final_aggregated.chars().take(300).collect();
+        let summary_preview: String = display_message.chars().take(300).collect();
         learn_from_task_outcome_async(
             long_term_client.clone(),
             root_task_id,

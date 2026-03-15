@@ -224,6 +224,7 @@ function App() {
     updated_at?: string;
     progress?: Array<{ progress_pct?: number; message?: string }>;
   } | null>(null);
+  const [calendarTaskDetailError, setCalendarTaskDetailError] = useState<string | null>(null);
   const [calendarSelectedScheduleId, setCalendarSelectedScheduleId] = useState<string | null>(null);
   const [scheduleDetail, setScheduleDetail] = useState<{
     id: string;
@@ -1071,8 +1072,10 @@ function App() {
   useEffect(() => {
     if (!calendarSelectedTaskId) {
       setCalendarTaskDetail(null);
+      setCalendarTaskDetailError(null);
       return;
     }
+    setCalendarTaskDetailError(null);
     let cancelled = false;
     (async () => {
       try {
@@ -1085,8 +1088,12 @@ function App() {
           updated_at: st?.updated_at,
           progress: st?.progress,
         });
-      } catch {
-        if (!cancelled) setCalendarTaskDetail(null);
+        setCalendarTaskDetailError(null);
+      } catch (e) {
+        if (!cancelled) {
+          setCalendarTaskDetail(null);
+          setCalendarTaskDetailError(typeof e === "string" ? e : (e instanceof Error ? e.message : "Impossible de charger le détail de la tâche."));
+        }
       }
     })();
     return () => { cancelled = true; };
@@ -3308,7 +3315,13 @@ function App() {
                         </button>
                       </div>
                       <div className="calendar-detail-modal-body">
-                        {calendarTaskDetail ? (
+                        {calendarTaskDetailError ? (
+                          <p className="error-inline" role="alert">
+                            {calendarTaskDetailError}
+                            <br />
+                            <small className="muted">Vérifiez que le daemon tourne (port {DAEMON_PORT}).</small>
+                          </p>
+                        ) : calendarTaskDetail ? (
                           <>
                             {(() => {
                               const run = taskRuns.find((r) => r.task_id === calendarSelectedTaskId);
@@ -3322,6 +3335,11 @@ function App() {
                                   {runDone && taskStatus === "running" && (
                                     <p className="task-detail-hint">
                                       Le run est marqué « {statusLabel} » mais la tâche côté orchestrateur affiche encore « running ». Cela peut indiquer un décalage de mise à jour ou une tâche bloquée.
+                                    </p>
+                                  )}
+                                  {(runStatus === "failed" || taskStatus === "failed") && (
+                                    <p className="task-detail-hint">
+                                      Cette tâche a échoué ou a expiré (timeout LLM ou sous-tâche).
                                     </p>
                                   )}
                                   <p><strong>Statut tâche (orchestrateur):</strong> {taskStatus}</p>
@@ -3379,6 +3397,21 @@ function App() {
                                 </ul>
                               </div>
                             )}
+                            {calendarTaskDetail.progress == null || calendarTaskDetail.progress.length === 0 ? (
+                              (() => {
+                                const run = taskRuns.find((r) => r.task_id === calendarSelectedTaskId);
+                                const runStatus = run?.status ?? "?";
+                                const taskStatus = calendarTaskDetail.status;
+                                if (taskStatus === "failed" || runStatus === "failed" || (taskStatus === "running" && runStatus !== "running" && runStatus !== "queued")) {
+                                  return (
+                                    <p className="muted">
+                                      Aucune progression enregistrée. La tâche a peut-être expiré ou échoué avant d’envoyer du contenu.
+                                    </p>
+                                  );
+                                }
+                                return null;
+                              })()
+                            ) : null}
                           </>
                         ) : (
                           <p className="loading-inline">{t("common.loading")}</p>

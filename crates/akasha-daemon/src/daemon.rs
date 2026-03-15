@@ -530,6 +530,8 @@ impl Daemon {
             let orchestrator = Arc::new(Orchestrator::new(
                 bus.clone(),
                 db_path.clone(),
+                self.spec_dir.clone(),
+                self.data_dir.clone(),
                 conv_tx.clone(),
                 progress.clone(),
                 llm_router.clone(),

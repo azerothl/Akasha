@@ -86,27 +86,27 @@ impl FusedMemoryContext {
             out.push_str("\n");
         }
         if !self.episodic_block.is_empty() {
-            out.push_str("[Événements récents]\n");
+            out.push_str("[Recent events]\n");
             out.push_str(&self.episodic_block);
             out.push_str("\n");
         }
         if !self.user_identity_block.is_empty() {
-            out.push_str("[Contexte utilisateur — utilise pour saluer si pertinent]\n");
+            out.push_str("[User context — use for greeting if relevant]\n");
             out.push_str(&self.user_identity_block);
-            out.push_str("Si c'est le premier échange de la session, salue l'utilisateur avec son prénom si tu le connais.\n\n");
+            out.push_str("If this is the first exchange of the session, greet the user by first name if you know it.\n\n");
         }
         if !self.policy_block.is_empty() {
-            out.push_str("[Règles et préférences]\n");
+            out.push_str("[Rules and preferences]\n");
             out.push_str(&self.policy_block);
             out.push_str("\n");
         }
         if !self.personality_memory_block.is_empty() {
-            out.push_str("[Mémoire de personnalité — préférences utilisateur enregistrées]\n");
+            out.push_str("[Personality memory — stored user preferences]\n");
             out.push_str(&self.personality_memory_block);
             out.push_str("Use these when relevant; never infer emotional state or sensitive identity without evidence.\n\n");
         }
         if !self.recent_outcomes_block.is_empty() {
-            out.push_str("[Résultats de tâches récents]\n");
+            out.push_str("[Recent task outcomes]\n");
             out.push_str(&self.recent_outcomes_block);
             out.push_str("\n");
         }

@@ -135,7 +135,7 @@ impl ShortTermStore {
                     0,
                     ConversationTurn {
                         role: "system".to_string(),
-                        content: format!("Résumé de la conversation précédente: {}", summary),
+                        content: format!("Summary of previous conversation: {}", summary),
                     },
                 );
             }
@@ -166,9 +166,9 @@ impl ShortTermStore {
         let mut out = String::new();
         for t in turns {
             let prefix = match t.role.as_str() {
-                "user" => "Utilisateur:",
+                "user" => "User:",
                 "assistant" => "Assistant:",
-                "system" => "[Contexte]",
+                "system" => "[Context]",
                 _ => "",
             };
             out.push_str(prefix);

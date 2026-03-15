@@ -407,7 +407,7 @@ fn merge_traits(
     out
 }
 
-const DEFAULT_POSTURE: &str = "calme, structuré, orienté action";
+const DEFAULT_POSTURE: &str = "calm, structured, action-oriented";
 
 /// One-line personality reminder to prefix the user message (reinforces tone). Name from profile or core; posture/tone from core or active mode.
 pub fn build_personality_reminder_line(
@@ -433,7 +433,7 @@ pub fn build_personality_reminder_line(
             if let Some(ref p) = c.posture {
                 let t = p.trim().replace('\n', " ");
                 if !t.is_empty() {
-                    return format!("Réponds en restant « {} » : {}.\n\n", name, t);
+                    return format!("Reply staying in character as « {} »: {}.\n\n", name, t);
                 }
             }
         }
@@ -447,14 +447,14 @@ pub fn build_personality_reminder_line(
                 if let Some(ref t) = mode_def.tone {
                     let tone = t.trim();
                     if !tone.is_empty() {
-                        return format!("Réponds en restant « {} » : {}.\n\n", name, tone.replace('_', " "));
+                        return format!("Reply staying in character as « {} »: {}.\n\n", name, tone.replace('_', " "));
                     }
                 }
             }
         }
-        return format!("Réponds en restant « {} » : {}.\n\n", name, DEFAULT_POSTURE);
+        return format!("Reply staying in character as « {} »: {}.\n\n", name, DEFAULT_POSTURE);
     }
-    "Réponds en gardant ton rôle et le ton défini ci-dessus.\n\n".to_string()
+    "Reply keeping your role and the tone defined above.\n\n".to_string()
 }
 
 #[cfg(test)]

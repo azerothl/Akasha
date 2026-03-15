@@ -74,6 +74,76 @@ pub fn parse_contract_from_response(response: &str) -> Option<AgentOutputContrac
     serde_json::from_str::<AgentOutputContract>(json_str).ok()
 }
 
+/// Strips the trailing JSON contract block (```json ... ``` or last {...}) from the response.
+/// Returns the preceding text trimmed, or the original string if no contract block found.
+fn strip_trailing_contract(response: &str) -> String {
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    // Remove last ```json ... ``` block
+    if let Some(start) = trimmed.rfind("```json") {
+        let after_open = &trimmed[start + "```json".len()..];
+        let block = after_open.trim_start_matches(&['\r', '\n'][..]);
+        if block.find("```").is_some() {
+            let rest = trimmed[..start].trim_end();
+            if !rest.is_empty() {
+                return rest.to_string();
+            }
+        }
+    }
+    // Remove last {...} that parses as contract (search from end, try parsing)
+    let tail = if trimmed.len() > 2500 {
+        &trimmed[trimmed.len() - 2500..]
+    } else {
+        trimmed
+    };
+    if let Some(open_rel) = tail.rfind('{') {
+        let json_candidate = &tail[open_rel..];
+        if serde_json::from_str::<AgentOutputContract>(json_candidate).is_ok() {
+            let abs_start = trimmed.len() - tail.len() + open_rel;
+            let rest = trimmed[..abs_start].trim_end();
+            if !rest.is_empty() {
+                return rest.to_string();
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Formats a contract summary string for display (e.g. add line breaks before " 1)", " 2)").
+fn format_summary_for_display(summary: &str) -> String {
+    let s = summary.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    // Add newlines before numbered list patterns for readability
+    let mut out = s.replace(" 1) ", "\n\n1) ").replace(" 2) ", "\n\n2) ").replace(" 3) ", "\n\n3) ");
+    out = out.replace(" 4) ", "\n\n4) ").replace(" 5) ", "\n\n5) ");
+    out.trim_start().to_string()
+}
+
+/// Returns a user-facing message from a response that may contain a trailing JSON contract.
+/// If the response is only or mostly raw JSON, returns the contract's summary (formatted) if present.
+/// Otherwise returns the text with the JSON block removed so the UI never shows raw JSON.
+pub fn user_facing_message(response: &str) -> String {
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Some(contract) = parse_contract_from_response(trimmed) {
+        if let Some(ref summary) = contract.summary {
+            if !summary.trim().is_empty() {
+                // Response is essentially raw JSON (starts with { or short and contains JSON)
+                if trimmed.starts_with('{') || (trimmed.len() < 600 && trimmed.contains('{')) {
+                    return format_summary_for_display(summary);
+                }
+            }
+        }
+    }
+    strip_trailing_contract(response)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +157,21 @@ mod tests {
         let c = parse_contract_from_response(r).unwrap();
         assert_eq!(c.status, Some(ContractStatus::Done));
         assert_eq!(c.summary.as_deref(), Some("Done."));
+    }
+
+    #[test]
+    fn user_facing_message_raw_json_returns_summary() {
+        let r = r#"{"status": "done", "summary": "Portefeuille: 100 USD. 1) Diversifier. 2) Rééquilibrer.", "files_created": [], "issues_found": []}"#;
+        let out = user_facing_message(r);
+        assert!(out.contains("Portefeuille"));
+        assert!(out.contains("1)"));
+        assert!(!out.starts_with('{'));
+    }
+
+    #[test]
+    fn user_facing_message_text_plus_json_strips_json() {
+        let r = "Voici l'analyse.\n\n```json\n{\"status\": \"done\", \"summary\": \"Done.\"}\n```";
+        let out = user_facing_message(r);
+        assert_eq!(out, "Voici l'analyse.");
     }
 }
