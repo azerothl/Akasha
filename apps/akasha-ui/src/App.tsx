@@ -17,6 +17,109 @@ export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_la
 
 const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "light_latte"];
 
+/** Graph colors per theme (aligned with styles.css [data-theme]) so the memory graph respects dark/light. */
+const GRAPH_THEME_COLORS: Record<
+  ThemeId,
+  {
+    backgroundColor: string;
+    defaultNodeColor: string;
+    defaultNodeFontColor: string;
+    defaultNodeBorderColor: string;
+    defaultLineColor: string;
+    defaultLineWidth: number;
+    defaultLineFontColor: string;
+    defaultShowLineLabel: boolean;
+    checkedLineColor: string;
+    /** Per-type node colors for better contrast and distinction (entry, related, selected). */
+    nodeType: {
+      entry: { color: string; fontColor: string };
+      related: { color: string; fontColor: string };
+      selected: { color: string; fontColor: string; borderColor: string };
+    };
+  }
+> = {
+  dark_akasha: {
+    backgroundColor: "#0b0f17",
+    defaultNodeColor: "#1a2233",
+    defaultNodeFontColor: "#e4e4e7",
+    defaultNodeBorderColor: "#2a3448",
+    defaultLineColor: "#6b7280",
+    defaultLineWidth: 2,
+    defaultLineFontColor: "#a1a1aa",
+    defaultShowLineLabel: true,
+    checkedLineColor: "#7c8cff",
+    nodeType: {
+      entry: { color: "#1e293b", fontColor: "#e4e4e7" },
+      related: { color: "#334155", fontColor: "#cbd5e1" },
+      selected: { color: "#1e3a5f", fontColor: "#e4e4e7", borderColor: "#7c8cff" },
+    },
+  },
+  dark: {
+    backgroundColor: "#0f0f12",
+    defaultNodeColor: "#27272a",
+    defaultNodeFontColor: "#e4e4e7",
+    defaultNodeBorderColor: "#27272a",
+    defaultLineColor: "#71717a",
+    defaultLineWidth: 2,
+    defaultLineFontColor: "#a1a1aa",
+    defaultShowLineLabel: true,
+    checkedLineColor: "#6366f1",
+    nodeType: {
+      entry: { color: "#27272a", fontColor: "#e4e4e7" },
+      related: { color: "#3f3f46", fontColor: "#d4d4d8" },
+      selected: { color: "#312e81", fontColor: "#e4e4e7", borderColor: "#6366f1" },
+    },
+  },
+  dark_nord: {
+    backgroundColor: "#2e3440",
+    defaultNodeColor: "#434c5e",
+    defaultNodeFontColor: "#eceff4",
+    defaultNodeBorderColor: "#434c5e",
+    defaultLineColor: "#5e6778",
+    defaultLineWidth: 2,
+    defaultLineFontColor: "#d8dee9",
+    defaultShowLineLabel: true,
+    checkedLineColor: "#88c0d0",
+    nodeType: {
+      entry: { color: "#434c5e", fontColor: "#eceff4" },
+      related: { color: "#4c566a", fontColor: "#d8dee9" },
+      selected: { color: "#3b4a5c", fontColor: "#eceff4", borderColor: "#88c0d0" },
+    },
+  },
+  light: {
+    backgroundColor: "#f4f4f5",
+    defaultNodeColor: "#ffffff",
+    defaultNodeFontColor: "#18181b",
+    defaultNodeBorderColor: "#d4d4d8",
+    defaultLineColor: "#71717a",
+    defaultLineWidth: 2,
+    defaultLineFontColor: "#52525b",
+    defaultShowLineLabel: true,
+    checkedLineColor: "#4f46e5",
+    nodeType: {
+      entry: { color: "#ffffff", fontColor: "#18181b" },
+      related: { color: "#f4f4f5", fontColor: "#3f3f46" },
+      selected: { color: "#eef2ff", fontColor: "#18181b", borderColor: "#4f46e5" },
+    },
+  },
+  light_latte: {
+    backgroundColor: "#eff1f5",
+    defaultNodeColor: "#e6e9ef",
+    defaultNodeFontColor: "#4c4f69",
+    defaultNodeBorderColor: "#bcc0cc",
+    defaultLineColor: "#8c8fa1",
+    defaultLineWidth: 2,
+    defaultLineFontColor: "#6c6f85",
+    defaultShowLineLabel: true,
+    checkedLineColor: "#8839ef",
+    nodeType: {
+      entry: { color: "#e6e9ef", fontColor: "#4c4f69" },
+      related: { color: "#ccd0da", fontColor: "#5c5f77" },
+      selected: { color: "#e0e0ea", fontColor: "#4c4f69", borderColor: "#8839ef" },
+    },
+  },
+};
+
 function loadSavedTheme(): ThemeId {
   try {
     const s = localStorage.getItem(THEME_STORAGE_KEY);
@@ -320,7 +423,11 @@ function App() {
   const [memoryLongTermSelected, setMemoryLongTermSelected] = useState(0);
   const memoryGraphRef = useRef<RelationGraphComponent | null>(null);
 
-  function buildMemoryGraphData(entries: MemoryLongTermEntry[], selectedIndex: number): RGJsonData | null {
+  function buildMemoryGraphData(
+    entries: MemoryLongTermEntry[],
+    selectedIndex: number,
+    nodePalette: typeof GRAPH_THEME_COLORS.dark_akasha.nodeType
+  ): RGJsonData | null {
     const idToEntry = new Map<string, MemoryLongTermEntry>();
     for (const e of entries) {
       if (e.id) idToEntry.set(e.id, e);
@@ -332,12 +439,29 @@ function App() {
       }
     }
     if (nodeIds.size === 0) return null;
+    const selectedEntry = entries[selectedIndex];
+    const selectedId = selectedEntry?.id && nodeIds.has(selectedEntry.id) ? selectedEntry.id : null;
     const nodes = Array.from(nodeIds).map((id) => {
       const entry = idToEntry.get(id);
       const text = entry
         ? `${entry.content.slice(0, 40)}${entry.content.length > 40 ? "…" : ""}`
         : id.slice(0, 8);
-      return { id, text };
+      const isSelected = id === selectedId;
+      const isEntry = !!entry;
+      const style = isSelected
+        ? nodePalette.selected
+        : isEntry
+          ? nodePalette.entry
+          : nodePalette.related;
+      return {
+        id,
+        text,
+        color: style.color,
+        fontColor: style.fontColor,
+        ...(isSelected && "borderColor" in style
+          ? { borderColor: (style as { borderColor: string }).borderColor, borderWidth: 2 }
+          : {}),
+      };
     });
     const lines: Array<{ from: string; to: string; text?: string }> = [];
     for (const e of entries) {
@@ -346,10 +470,7 @@ function App() {
         lines.push({ from: e.id, to: r.id, text: r.kind ?? "related" });
       }
     }
-    const selectedEntry = entries[selectedIndex];
-    const rootId = (selectedEntry?.id && nodeIds.has(selectedEntry.id))
-      ? selectedEntry.id
-      : (nodes[0]?.id ?? undefined);
+    const rootId = selectedId ?? (nodes[0]?.id ?? undefined);
     return { nodes, lines, rootId };
   }
 
@@ -963,22 +1084,40 @@ function App() {
     }
   }, [memoryLongTerm.length, memoryLongTermSelected]);
 
-  const memoryGraphOptions = useMemo<RGOptions>(() => ({
-    defaultJunctionPoint: "border",
-    layout: { layoutName: "force" },
-    disableZoom: false,
-    disableDragNode: false,
-  }), []);
+  const memoryGraphOptions = useMemo<RGOptions>(() => {
+    const colors = GRAPH_THEME_COLORS[theme];
+    return {
+      defaultJunctionPoint: "border",
+      layout: { layoutName: "force" },
+      disableZoom: false,
+      disableDragNode: false,
+      backgroundColor: colors.backgroundColor,
+      defaultNodeColor: colors.defaultNodeColor,
+      defaultNodeFontColor: colors.defaultNodeFontColor,
+      defaultNodeBorderColor: colors.defaultNodeBorderColor,
+      defaultLineColor: colors.defaultLineColor,
+      defaultLineWidth: colors.defaultLineWidth,
+      defaultLineFontColor: colors.defaultLineFontColor,
+      defaultShowLineLabel: colors.defaultShowLineLabel,
+      checkedLineColor: colors.checkedLineColor,
+    };
+  }, [theme]);
 
   useEffect(() => {
     if (!memoryViewGraph) return;
-    const data = buildMemoryGraphData(memoryLongTerm, memoryLongTermSelected);
+    const data = buildMemoryGraphData(memoryLongTerm, memoryLongTermSelected, GRAPH_THEME_COLORS[theme].nodeType);
     if (!data) return;
     const t = setTimeout(() => {
       memoryGraphRef.current?.setJsonData(data, true, () => {});
     }, 0);
     return () => clearTimeout(t);
-  }, [memoryViewGraph, memoryLongTerm, memoryLongTermSelected]);
+  }, [memoryViewGraph, memoryLongTerm, memoryLongTermSelected, theme]);
+
+  // Re-apply graph options when theme changes so canvas/edges/nodes use the new colors
+  useEffect(() => {
+    if (!memoryViewGraph || !memoryGraphRef.current) return;
+    memoryGraphRef.current.setOptions(memoryGraphOptions, () => {});
+  }, [theme, memoryViewGraph, memoryGraphOptions]);
 
   const fetchScheduleReports = useCallback(async () => {
     try {
@@ -3660,11 +3799,11 @@ function App() {
                       </div>
                     ) : memoryViewGraph ? (
                       <div className="memory-graph-wrap" role="region" aria-label={t("memory.view_graph")}>
-                        <button type="button" onClick={() => setMemoryViewGraph(false)}>{t("memory.view_list")}</button>
+                        <button type="button" className="btn-secondary" onClick={() => setMemoryViewGraph(false)}>{t("memory.view_list")}</button>
                         {memoryLongTerm.length === 0 ? (
                           <p className="empty-state">{t("memory.long_empty")}</p>
                         ) : (() => {
-                          const graphData = buildMemoryGraphData(memoryLongTerm, memoryLongTermSelected);
+                          const graphData = buildMemoryGraphData(memoryLongTerm, memoryLongTermSelected, GRAPH_THEME_COLORS[theme].nodeType);
                           if (!graphData) {
                             return <p className="muted">Aucune donnée pour le graphe.</p>;
                           }
@@ -3687,8 +3826,8 @@ function App() {
                     ) : (
                       <div className="memory-list-scroll">
                         <div className="memory-long-toolbar">
-                          <button type="button" onClick={() => setMemorySearchActive(true)}>{t("memory.search")}</button>
-                          <button type="button" onClick={() => setMemoryViewGraph(true)}>{t("memory.view_graph")}</button>
+                          <button type="button" className="btn-secondary" onClick={() => setMemorySearchActive(true)}>{t("memory.search")}</button>
+                          <button type="button" className="btn-secondary" onClick={() => setMemoryViewGraph(true)}>{t("memory.view_graph")}</button>
                         </div>
                         <ul className="memory-long-term-list">
                           {memoryLongTerm.map((e, i) => (

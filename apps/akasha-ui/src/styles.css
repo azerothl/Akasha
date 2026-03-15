@@ -3145,17 +3145,34 @@ pre,
 .memory-graph-wrap > button {
   flex-shrink: 0;
   margin-bottom: 0.5rem;
+  align-self: flex-start;
+}
+
+.memory-long-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.memory-long-toolbar .btn-secondary,
+.memory-graph-wrap > .btn-secondary {
+  flex-shrink: 0;
 }
 
 .memory-graph-canvas {
   flex: 1;
   min-height: 350px;
   position: relative;
+  background: var(--akasha-bg);
+  border-radius: 6px;
+  overflow: hidden;
 }
 
 .memory-graph-canvas > div {
   width: 100%;
   height: 100%;
+  background: inherit;
 }
 
 .memory-panel .memory-section-title {
