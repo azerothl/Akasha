@@ -2375,6 +2375,7 @@ async fn compact_short_term_if_needed(
         max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
         preferred_task_type: None,
+        system_prompt: None,
         image_data_urls: None,
     };
     match llm_router.complete(&req).await {
@@ -2447,6 +2448,7 @@ Réponse en français, factuelle.\n\n{}",
         max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
         preferred_task_type: Some("system".to_string()),
+        system_prompt: None,
         image_data_urls: None,
     };
     match llm_router.complete(&req).await {
@@ -2643,23 +2645,7 @@ pub(crate) async fn run_message_via_llm(
         String::new()
     };
 
-    // Build prompt with short-term + long-term memory (spec 06)
-    // Pre-allocate to reduce reallocations when appending role, memory, and document blocks.
-    let mut context_prefix = String::with_capacity(8192);
-    context_prefix.push_str(APP_CONTEXT);
-    let os_env_block = match std::env::consts::OS {
-        "windows" => "[Environnement] Le daemon tourne sous : windows. Pour run_command, privilégie cmd, PowerShell, curl.exe ; évite les commandes Unix seules (grep, cat, sed) qui ne sont pas dans le PATH par défaut (sauf WSL).\n\n",
-        _ => "[Environnement] Le daemon tourne sous : linux/macos. Tu peux utiliser les commandes Unix habituelles (curl, grep, etc.).\n\n",
-    };
-    context_prefix.push_str(os_env_block);
-    if let Some(role_prompt) = agent_role_system_prompt(&assigned_agent) {
-        context_prefix.push_str("[Role]\n");
-        context_prefix.push_str(role_prompt);
-        context_prefix.push_str("\n\n");
-    }
-
-    // Agent profile: name, personality, rules, can/cannot (persisted in data_dir/agent_profile.json).
-    // When spec personality YAMLs exist, use 5-level personality layer; else fallback to format_for_prompt().
+    // Build prompt: system (rules + role + personality) vs user (reminder + memory + turns + message).
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
     let agent_profile = match &agent_profile_cache {
         Some(cache) => get_or_load_agent_profile(data_dir, cache).await,
@@ -2670,11 +2656,34 @@ pub(crate) async fn run_message_via_llm(
         &agent_profile,
         Some(&assigned_agent),
     );
-    if !profile_block.is_empty() {
-        context_prefix.push_str(&profile_block);
+    let os_env_block = match std::env::consts::OS {
+        "windows" => "[Environnement] Le daemon tourne sous : windows. Pour run_command, privilégie cmd, PowerShell, curl.exe ; évite les commandes Unix seules (grep, cat, sed) qui ne sont pas dans le PATH par défaut (sauf WSL).\n\n",
+        _ => "[Environnement] Le daemon tourne sous : linux/macos. Tu peux utiliser les commandes Unix habituelles (curl, grep, etc.).\n\n",
+    };
+    let mut system_prompt = String::with_capacity(8192);
+    system_prompt.push_str(APP_CONTEXT);
+    system_prompt.push_str(os_env_block);
+    if let Some(role_prompt) = agent_role_system_prompt(&assigned_agent) {
+        system_prompt.push_str("[Role]\n");
+        system_prompt.push_str(role_prompt);
+        system_prompt.push_str("\n\n");
     }
+    if !profile_block.is_empty() {
+        system_prompt.push_str(&profile_block);
+    }
+    let system_prompt: Option<String> = if system_prompt.trim().is_empty() {
+        None
+    } else {
+        Some(system_prompt.trim_end().to_string())
+    };
 
-    // Short-term: last 15 messages from this session, cap 2000 chars (plan moyen terme 8, inspired by OpenClaw plugin).
+    let personality_reminder = crate::personality::build_personality_reminder_line(
+        spec_dir.as_path(),
+        &agent_profile,
+        Some(&assigned_agent),
+    );
+    let mut user_prefix = String::with_capacity(8192);
+    user_prefix.push_str(&personality_reminder);
     if let Some(ref st) = short_term {
         let turns = st.get_turns(&session_id).await;
         let last_15: Vec<_> = turns.iter().rev().take(15).cloned().rev().collect();
@@ -2686,14 +2695,12 @@ pub(crate) async fn run_message_via_llm(
                 short_ctx
             };
             if !capped.is_empty() {
-                context_prefix.push_str("[Contexte récent (cette session)]\n");
-                context_prefix.push_str(&capped);
-                context_prefix.push_str("\n\n");
+                user_prefix.push_str("[Contexte récent (cette session)]\n");
+                user_prefix.push_str(&capped);
+                user_prefix.push_str("\n\n");
             }
         }
     }
-
-    // Memory orchestrator (Phase 5): composite retrieval (semantic + graph + episodic + user identity for first message).
     let turns_empty = match &short_term {
         Some(st) => st.get_turns(&session_id).await.is_empty(),
         None => true,
@@ -2709,10 +2716,8 @@ pub(crate) async fn run_message_via_llm(
     let fused = crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params).await;
     let fused_str = fused.to_context_string();
     if !fused_str.is_empty() {
-        context_prefix.push_str(&fused_str);
+        user_prefix.push_str(&fused_str);
     }
-
-    // User RAG: retrieve relevant chunks from user-uploaded documents (keyword match)
     let user_rag_store = crate::user_rag::UserRagStore::new(data_dir);
     let rag_query = message.clone();
     let chunks = tokio::task::spawn_blocking(move || user_rag_store.retrieve(&rag_query, 5))
@@ -2721,15 +2726,14 @@ pub(crate) async fn run_message_via_llm(
         .and_then(|res| res.ok())
         .unwrap_or_default();
     if !chunks.is_empty() {
-        context_prefix.push_str("[Documents utilisateur — utilise ces extraits si pertinent pour répondre]\n");
+        user_prefix.push_str("[Documents utilisateur — utilise ces extraits si pertinent pour répondre]\n");
         for c in &chunks {
-            context_prefix.push_str("- ");
-            context_prefix.push_str(&c.replace('\n', " "));
-            context_prefix.push_str("\n");
+            user_prefix.push_str("- ");
+            user_prefix.push_str(&c.replace('\n', " "));
+            user_prefix.push_str("\n");
         }
-        context_prefix.push_str("\n");
+        user_prefix.push_str("\n");
     }
-
     if let Some(ref st) = short_term {
         let new_msg_tokens = ShortTermStore::estimate_tokens(&message);
         compact_short_term_if_needed(
@@ -2743,8 +2747,8 @@ pub(crate) async fn run_message_via_llm(
         let turns = st.get_turns(&session_id).await;
         let short_ctx = ShortTermStore::turns_to_context(&turns);
         if !short_ctx.is_empty() {
-            context_prefix.push_str(short_ctx.trim_end());
-            context_prefix.push_str("\n\n");
+            user_prefix.push_str(short_ctx.trim_end());
+            user_prefix.push_str("\n\n");
         }
     }
     let intent_flags = compute_message_intent_flags(&message);
@@ -2797,12 +2801,20 @@ pub(crate) async fn run_message_via_llm(
     } else {
         message.clone()
     };
-    let mut current_prompt = if context_prefix.is_empty() {
-        user_message.clone()
+    let mut current_prompt = if user_prefix.trim().is_empty() {
+        format!(
+            "{}{}{}{}{}Utilisateur:\n{}",
+            write_reminder,
+            web_search_reminder,
+            device_camera_reminder,
+            image_generation_reminder,
+            github_vault_reminder,
+            user_message
+        )
     } else {
         format!(
-            "{}{}{}{}{}{}Utilisateur:\n{}",
-            context_prefix.trim_end(),
+            "{}{}{}{}{}{}{}Utilisateur:\n{}",
+            user_prefix.trim_end(),
             write_reminder,
             web_search_reminder,
             device_camera_reminder,
@@ -2857,6 +2869,7 @@ pub(crate) async fn run_message_via_llm(
             max_tokens: Some(max_tokens),
             temperature: Some(0.7),
             preferred_task_type,
+            system_prompt: system_prompt.clone(),
             image_data_urls: if tool_loop_history.is_empty() {
                 image_data_urls.clone()
             } else {
@@ -3567,6 +3580,7 @@ N'extrais que des faits explicitement mentionnés (par l'utilisateur ou l'assist
                 max_tokens: Some(extract_max_tokens),
                 temperature: Some(0.1),
                 preferred_task_type: Some("system".to_string()),
+                system_prompt: None,
                 image_data_urls: None,
             };
             let mut to_promote: Vec<(String, String)> = Vec::new();
@@ -5102,6 +5116,7 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
             max_tokens: Some(512),
             temperature: Some(0.3),
             preferred_task_type: None,
+            system_prompt: None,
             image_data_urls: None,
         };
         let advice_timeout = std::time::Duration::from_secs(120);

@@ -407,6 +407,53 @@ fn merge_traits(
     out
 }
 
+const DEFAULT_POSTURE: &str = "calme, structuré, orienté action";
+
+/// One-line personality reminder to prefix the user message (reinforces tone). Name from profile or core; posture/tone from core or active mode.
+pub fn build_personality_reminder_line(
+    spec_dir: &Path,
+    profile: &AgentProfile,
+    assigned_agent: Option<&str>,
+) -> String {
+    let name = profile
+        .name
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            load_personality_core(spec_dir)
+                .and_then(|c| c.personality_core.as_ref())
+                .and_then(|c| c.name.as_deref())
+        })
+        .unwrap_or(AgentProfile::DEFAULT_NAME);
+    if let Some(core) = load_personality_core(spec_dir) {
+        if let Some(ref c) = core.personality_core {
+            if let Some(ref p) = c.posture {
+                let t = p.trim().replace('\n', " ");
+                if !t.is_empty() {
+                    return format!("Réponds en restant « {} » : {}.\n\n", name, t);
+                }
+            }
+        }
+        let mode_key = profile
+            .preferred_mode
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| assigned_agent.map(mode_from_assigned_agent).unwrap_or("assistant"));
+        if let Some(modes) = load_personality_modes(spec_dir) {
+            if let Some(mode_def) = mode_def_for(&modes, mode_key) {
+                if let Some(ref t) = mode_def.tone {
+                    let tone = t.trim();
+                    if !tone.is_empty() {
+                        return format!("Réponds en restant « {} » : {}.\n\n", name, tone.replace('_', " "));
+                    }
+                }
+            }
+        }
+        return format!("Réponds en restant « {} » : {}.\n\n", name, DEFAULT_POSTURE);
+    }
+    "Réponds en gardant ton rôle et le ton défini ci-dessus.\n\n".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

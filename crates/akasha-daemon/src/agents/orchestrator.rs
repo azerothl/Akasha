@@ -80,6 +80,7 @@ async fn decompose_request(
         max_tokens: Some(system_max_tokens),
         temperature: Some(0.2),
         preferred_task_type: Some("system".to_string()),
+        system_prompt: None,
         image_data_urls: None,
     };
     let decompose_timeout = std::time::Duration::from_secs(120);
@@ -662,6 +663,7 @@ N'ajoute aucune information qui ne figure pas dans les réponses des agents ci-d
                 max_tokens: Some(4096),
                 temperature: Some(0.3),
                 preferred_task_type: Some("conversation".to_string()),
+                system_prompt: None,
                 image_data_urls: None,
             };
             match tokio::time::timeout(
