@@ -714,23 +714,44 @@ function App() {
           } catch {
             /* ignore */
           }
-          // Session empty: show onboarding or first-today greeting
+          // Session empty: show onboarding, or proactive check-in, or first-today greeting
           if ((data.turns?.length ?? 0) === 0) {
             try {
               const profile = await invoke<{ how_to_call?: string; onboarding_completed?: boolean }>("get_user_profile", { port: DAEMON_PORT });
               if (cancelled) return;
               const needsOnboarding = !profile?.how_to_call?.trim() || !profile?.onboarding_completed;
-              const context = needsOnboarding ? "onboarding" : "first_today";
-              const first = await invoke<{ message?: string; session_id?: string }>("get_first_message", { context, port: DAEMON_PORT });
-              if (cancelled) return;
-              const msg = first?.message?.trim();
-              if (msg && first?.session_id) {
-                setMessages([{ role: "assistant", text: msg }]);
-                setSessionId(first.session_id);
-                try {
-                  localStorage.setItem(AKASHA_SESSION_ID_KEY, first.session_id);
-                } catch {
-                  /* ignore */
+              if (needsOnboarding) {
+                const first = await invoke<{ message?: string; session_id?: string }>("get_first_message", { context: "onboarding", port: DAEMON_PORT });
+                if (cancelled) return;
+                const msg = first?.message?.trim();
+                if (msg && first?.session_id) {
+                  setMessages([{ role: "assistant", text: msg }]);
+                  setSessionId(first.session_id);
+                  try {
+                    localStorage.setItem(AKASHA_SESSION_ID_KEY, first.session_id);
+                  } catch {
+                    /* ignore */
+                  }
+                }
+              } else {
+                const proactive = await invoke<{ message?: string; session_id?: string }>("get_first_message", { context: "proactive", port: DAEMON_PORT });
+                if (cancelled) return;
+                let msg = proactive?.message?.trim();
+                let sid = proactive?.session_id;
+                if (!msg && sid) {
+                  const firstToday = await invoke<{ message?: string; session_id?: string }>("get_first_message", { context: "first_today", port: DAEMON_PORT });
+                  if (cancelled) return;
+                  msg = firstToday?.message?.trim();
+                  sid = firstToday?.session_id;
+                }
+                if (msg && sid) {
+                  setMessages([{ role: "assistant", text: msg }]);
+                  setSessionId(sid);
+                  try {
+                    localStorage.setItem(AKASHA_SESSION_ID_KEY, sid);
+                  } catch {
+                    /* ignore */
+                  }
                 }
               }
             } catch {

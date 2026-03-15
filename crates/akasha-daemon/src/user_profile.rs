@@ -18,9 +18,16 @@ pub struct UserProfile {
     /// Whether onboarding (collecting user name) has been completed.
     #[serde(default)]
     pub onboarding_completed: bool,
+    /// If true, show a proactive check-in message when user returns after a period of inactivity.
+    #[serde(default)]
+    pub proactive_check_in_enabled: bool,
+    /// Minimum days without user message before showing proactive check-in (0 = disabled).
+    #[serde(default)]
+    pub proactive_check_in_interval_days: u32,
 }
 
 const FILENAME: &str = "user_profile.json";
+const LAST_ACTIVITY_FILENAME: &str = "last_activity.json";
 
 impl UserProfile {
     /// True if we have at least how_to_call (enough to personalize greetings).
@@ -50,6 +57,23 @@ impl UserProfile {
         let path = data_dir.join(FILENAME);
         std::fs::create_dir_all(data_dir)?;
         let json = serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string());
+        std::fs::write(path, json)
+    }
+
+    /// Load last activity timestamp from data_dir/last_activity.json.
+    pub fn load_last_activity(data_dir: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
+        let path = data_dir.join(LAST_ACTIVITY_FILENAME);
+        let data = std::fs::read_to_string(&path).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+        let s = v.get("last_user_message_at")?.as_str()?;
+        chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&chrono::Utc))
+    }
+
+    /// Save last activity timestamp to data_dir/last_activity.json.
+    pub fn save_last_activity(data_dir: &Path, at: chrono::DateTime<chrono::Utc>) -> Result<(), std::io::Error> {
+        let path = data_dir.join(LAST_ACTIVITY_FILENAME);
+        std::fs::create_dir_all(data_dir)?;
+        let json = serde_json::json!({ "last_user_message_at": at.to_rfc3339() }).to_string();
         std::fs::write(path, json)
     }
 

@@ -4217,11 +4217,13 @@ pub async fn handle_api(
             "last_name": profile.last_name,
             "how_to_call": profile.how_to_call,
             "onboarding_completed": profile.onboarding_completed,
+            "proactive_check_in_enabled": profile.proactive_check_in_enabled,
+            "proactive_check_in_interval_days": profile.proactive_check_in_interval_days,
         });
         return json_response("200 OK", &body_json.to_string());
     }
 
-    // POST /api/user-profile — update user profile. Body: { first_name?, last_name?, how_to_call?, onboarding_completed? }
+    // POST /api/user-profile — update user profile. Body: { first_name?, last_name?, how_to_call?, onboarding_completed?, proactive_check_in_enabled?, proactive_check_in_interval_days? }
     if method == "POST" && path == "/api/user-profile" {
         let mut profile = UserProfile::load(data_dir);
         if let Some(body) = body.as_deref() {
@@ -4237,6 +4239,12 @@ pub async fn handle_api(
                 }
                 if let Some(b) = v.get("onboarding_completed").and_then(|x| x.as_bool()) {
                     profile.onboarding_completed = b;
+                }
+                if v.get("proactive_check_in_enabled").is_some() {
+                    profile.proactive_check_in_enabled = v.get("proactive_check_in_enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+                }
+                if v.get("proactive_check_in_interval_days").is_some() {
+                    profile.proactive_check_in_interval_days = v.get("proactive_check_in_interval_days").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
                 }
             }
         }
@@ -4269,6 +4277,29 @@ pub async fn handle_api(
             return json_response("200 OK", &body_json.to_string());
         }
 
+        if context == "proactive"
+            && user_profile.has_how_to_call()
+            && user_profile.proactive_check_in_enabled
+            && user_profile.proactive_check_in_interval_days > 0
+        {
+            let now = chrono::Utc::now();
+            let last = UserProfile::load_last_activity(data_dir);
+            let interval_days = user_profile.proactive_check_in_interval_days as i64;
+            let show = match last {
+                None => true,
+                Some(t) => (now - t).num_days() >= interval_days,
+            };
+            if show {
+                let how = user_profile.how_to_call.as_deref().unwrap_or("").trim();
+                let message = format!("Ça fait un moment, {} ! Tu veux qu'on travaille sur quelque chose ?", how);
+                if let Some(ref st) = short_term {
+                    st.append(&session_id, "assistant", message.clone()).await;
+                }
+                let body_json = serde_json::json!({ "message": message, "session_id": session_id });
+                return json_response("200 OK", &body_json.to_string());
+            }
+        }
+
         if context == "first_today" && user_profile.has_how_to_call() {
             let how = user_profile.how_to_call.as_deref().unwrap_or("").trim();
             let message = format!("Bonjour {}, quoi de neuf aujourd'hui ?", how);
@@ -4279,7 +4310,7 @@ pub async fn handle_api(
             return json_response("200 OK", &body_json.to_string());
         }
 
-        // Proactive and other contexts: return empty so UI does not show a duplicate message
+        // Other contexts: return empty so UI does not show a duplicate message
         let body_json = serde_json::json!({ "message": "", "session_id": session_id });
         return json_response("200 OK", &body_json.to_string());
     }
@@ -4846,6 +4877,8 @@ pub async fn handle_api(
                 }
             }
         }
+        // Update last user activity for proactive check-in
+        let _ = UserProfile::save_last_activity(data_dir, chrono::Utc::now());
         let correlation_id = uuid::Uuid::new_v4();
         let priority = body_json
             .as_ref()
