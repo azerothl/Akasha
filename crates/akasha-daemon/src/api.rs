@@ -569,7 +569,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("web_search", "web_search <query> [max_results] — rechercher sur le web (Brave API; BRAVE_API_KEY, web_search_enabled)"),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
     ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
-    ("memory_store", "memory_store <content> <source> [link_to: id1,id2...] — stocker en mémoire long terme, optionnellement lier à des entrées existantes (UUIDs)"),
+    ("memory_store", "memory_store <content> <source> [link_to: id1,id2...] [link_kind: spouse|child|birth_date|residence|same_person|...] — stocker en mémoire long terme ; optionnellement lier à des entrées (UUIDs) avec un type de relation."),
     ("memory_delete", "memory_delete <id> — supprimer une entrée de la mémoire long terme par son id (UUID)"),
     ("memory_forget", "memory_forget <query> — supprimer les entrées dont le contenu correspond aux mots-clés (plan moyen terme 9)"),
     ("memory_stats", "memory_stats — nombre d'entrées et taille approximative de la mémoire long terme"),
@@ -1674,30 +1674,34 @@ async fn execute_tool_call(
             let content = args.get(0).map(|a| a.as_str()).unwrap_or("");
             let source = args.get(1).map(|a| a.as_str()).unwrap_or("agent");
             if content.is_empty() {
-                return (false, "[memory_store] usage: memory_store <content> <source> [link_to: id1,id2...]".to_string(), None);
+                return (false, "[memory_store] usage: memory_store <content> <source> [link_to: id1,id2...] [link_kind: spouse|child|birth_date|residence|...]".to_string(), None);
             }
-            let link_to_ids: Option<Vec<String>> = if args.len() > 2 {
-                let ids: Vec<String> = args[2..]
-                    .iter()
-                    .flat_map(|a| a.split(','))
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(String::from)
-                    .collect();
-                if ids.is_empty() {
-                    None
-                } else {
-                    Some(ids)
+            let mut link_to_ids: Option<Vec<String>> = None;
+            let mut link_kind: Option<String> = None;
+            for arg in args.get(2..).unwrap_or(&[]).iter().map(|a| a.as_str()) {
+                if let Some(rest) = arg.strip_prefix("link_to:") {
+                    let ids: Vec<String> = rest
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .collect();
+                    if !ids.is_empty() {
+                        link_to_ids = Some(ids);
+                    }
+                } else if let Some(rest) = arg.strip_prefix("link_kind:") {
+                    let k = rest.trim();
+                    if !k.is_empty() {
+                        link_kind = Some(k.to_string());
+                    }
                 }
-            } else {
-                None
-            };
+            }
             match long_term_client {
                 Some(client) => {
                     let client = client.clone();
                     let content = content.to_string();
                     let source = source.to_string();
-                    let out = tokio::task::spawn_blocking(move || client.promote(content, source, None, None, None, None, None, None, link_to_ids, None))
+                    let out = tokio::task::spawn_blocking(move || client.promote(content, source, None, None, None, None, None, None, link_to_ids, link_kind))
                         .await
                         .ok()
                         .and_then(|r| r.ok());

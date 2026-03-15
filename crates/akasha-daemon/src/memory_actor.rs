@@ -433,6 +433,7 @@ pub fn start_memory_actor(
         use uuid::Uuid;
         use akasha_embeddings::{embedding_to_bytes, Embedder};
         use akasha_store::{cosine_similarity, decode_embedding_bytes, extract_facts_simple, EpisodicStore, FactsStore, LongTermStore};
+        use crate::memory_relation_inference;
 
         let (tx, rx) = mpsc::channel::<(MemoryRequest, oneshot::Sender<MemoryResponse>)>();
         let memory_db_path = _memory_db_path.to_path_buf();
@@ -541,6 +542,8 @@ pub fn start_memory_actor(
                                             }
                                         }
                                     }
+                                    // Infer typed relations from JSON content (mariage/partenaires -> spouse, *_birth -> birth_date, profil_utilisateur Conjoint/Enfants).
+                                    let _ = memory_relation_inference::infer_typed_relations(&store, id, &content);
                                     // Auto-link by semantic similarity so the graph has edges even when the agent doesn't pass link_to.
                                     const AUTO_LINK_TOP_K: usize = 6;
                                     const AUTO_LINK_MAX: usize = 5;

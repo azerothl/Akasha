@@ -13,6 +13,7 @@ pub mod health;
 pub mod image_generation;
 pub mod memory;
 pub mod memory_actor;
+pub mod memory_relation_inference;
 pub mod memory_orchestrator;
 pub mod plugins;
 pub mod scheduler;

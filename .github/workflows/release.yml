@@ -237,6 +237,12 @@ jobs:
               mkdir -p "$RELEASE_DIR/${full_name}/ui"
               cp -r "$ARTIFACTS_ROOT/${ui_name}"/* "$RELEASE_DIR/${full_name}/ui/"
             fi
+            # README at root of full zip (all platforms)
+            printf 'To install: Windows: double-click INSTALL.cmd. Linux/macOS: in a terminal, run: chmod +x scripts/setup.sh && ./scripts/setup.sh\n' > "$RELEASE_DIR/${full_name}/README.txt"
+            # Windows full zip: entry point that bypasses ExecutionPolicy for setup.ps1
+            if [ "$suffix" = "windows-x86_64" ]; then
+              printf '%s\r\n' '@echo off' 'powershell -ExecutionPolicy Bypass -File "%~dp0scripts\setup.ps1"' 'pause' > "$RELEASE_DIR/${full_name}/INSTALL.cmd"
+            fi
             (cd "$RELEASE_DIR/${full_name}" && zip -r "$RELEASE_DIR/${full_name}.zip" .)
             rm -rf "$RELEASE_DIR/${full_name}"
           done

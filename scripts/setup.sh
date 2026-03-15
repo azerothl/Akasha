@@ -98,3 +98,12 @@ echo ""
 echo "Setup complete."
 echo "  CLI: akasha (ensure install dir is in PATH)"
 echo "  Daemon: already started; will restart at login if you chose auto-start."
+AKASHA_CMD=""
+for d in /usr/local/bin "$HOME/.local/bin"; do
+    [[ -x "$d/akasha" ]] && AKASHA_CMD="$d/akasha" && break
+done
+read -r -p "Lancer l'assistant de configuration maintenant ? [Y/n] " r
+if [[ "$r" != "n" && "$r" != "N" && -n "$AKASHA_CMD" ]]; then
+    "$AKASHA_CMD" init || true
+    echo "You can also run: akasha tui   (terminal UI)"
+fi
