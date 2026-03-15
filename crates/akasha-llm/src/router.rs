@@ -389,6 +389,7 @@ mod tests {
             max_tokens: Some(10),
             temperature: Some(0.0),
             preferred_task_type: Some("conversation".into()),
+            system_prompt: None,
             image_data_urls: None,
         };
         let response = router.complete(&request).await.expect("complete should succeed");
