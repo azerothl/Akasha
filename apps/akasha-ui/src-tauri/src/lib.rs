@@ -906,6 +906,30 @@ async fn get_memory_long_term(limit: Option<u32>, port: Option<u16>) -> Result<s
     Ok(json)
 }
 
+/// Memory search: GET /api/memory/search?q=...&top_k=...
+#[tauri::command]
+async fn get_memory_search(q: String, top_k: Option<u32>, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let q = q.trim();
+    if q.is_empty() {
+        return Err("missing or empty q".to_string());
+    }
+    let top_k = top_k.unwrap_or(10).min(20);
+    let url = format!(
+        "{}/api/memory/search?q={}&top_k={}",
+        daemon_base_url(port),
+        urlencoding::encode(q),
+        top_k
+    );
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// Memory long-term: DELETE /api/memory/long-term/:id
 #[tauri::command]
 async fn delete_memory_long_term(id: String, port: Option<u16>) -> Result<(), String> {
@@ -1259,6 +1283,7 @@ pub fn run() {
             get_task_runs,
             get_memory_short_term,
             get_memory_long_term,
+            get_memory_search,
             delete_memory_long_term,
             get_schedule_run_reports,
             get_user_rag_documents,
