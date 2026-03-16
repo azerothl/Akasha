@@ -4593,6 +4593,87 @@ pub async fn handle_api(
         return json_response("200 OK", r#"{"status":"ok"}"#);
     }
 
+    // GET /api/timeline — unified timeline of recent events (Phase 5 AI OS). Query: ?limit=50&task_id=uuid (optional).
+    if method == "GET" && path.starts_with("/api/timeline") {
+        let (limit, task_id_filter) = path
+            .split('?')
+            .nth(1)
+            .map(|q| {
+                let mut limit = 50u32;
+                let mut task_id_filter = None;
+                for part in q.split('&') {
+                    if let Some(v) = part.strip_prefix("limit=") {
+                        if let Ok(n) = v.parse::<u32>() {
+                            limit = n.min(200);
+                        }
+                    } else if let Some(v) = part.strip_prefix("task_id=") {
+                        if let Ok(id) = Uuid::parse_str(v) {
+                            task_id_filter = Some(id);
+                        }
+                    }
+                }
+                (limit, task_id_filter)
+            })
+            .unwrap_or((50, None));
+        let mut all: Vec<(String, String, Option<serde_json::Value>, String)> = {
+            let g = events.read().await;
+            let mut out = Vec::new();
+            for (tid, list) in g.iter() {
+                if let Some(filter) = task_id_filter {
+                    if *tid != filter {
+                        continue;
+                    }
+                }
+                for e in list.iter() {
+                    out.push((tid.to_string(), e.event_type.clone(), e.payload.clone(), e.at.clone()));
+                }
+            }
+            out.sort_by(|a, b| a.3.cmp(&b.3));
+            out.reverse();
+            out.into_iter().take(limit as usize).collect()
+        };
+        all.reverse();
+        let list: Vec<serde_json::Value> = all
+            .into_iter()
+            .map(|(task_id, event_type, payload, at)| {
+                serde_json::json!({ "task_id": task_id, "event_type": event_type, "payload": payload, "at": at })
+            })
+            .collect();
+        let body_json = serde_json::json!({ "events": list });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
+    // GET /api/metrics — task counts and simple metrics (Phase 5 AI OS).
+    if method == "GET" && path == "/api/metrics" {
+        let (pending, running, completed, failed, paused, interrupted) = match TaskStore::open(store_path) {
+            Ok(store) => {
+                let tasks = store.get_all().unwrap_or_default();
+                let mut pending = 0;
+                let mut running = 0;
+                let mut completed = 0;
+                let mut failed = 0;
+                let mut paused = 0;
+                let mut interrupted = 0;
+                for t in &tasks {
+                    match t.status {
+                        TaskStatus::Pending | TaskStatus::Queued | TaskStatus::WaitingUserInput => pending += 1,
+                        TaskStatus::Running => running += 1,
+                        TaskStatus::Completed => completed += 1,
+                        TaskStatus::Failed | TaskStatus::Cancelled => failed += 1,
+                        TaskStatus::Paused => paused += 1,
+                        TaskStatus::Interrupted => interrupted += 1,
+                    }
+                }
+                (pending, running, completed, failed, paused, interrupted)
+            }
+            Err(_) => (0, 0, 0, 0, 0, 0),
+        };
+        let body_json = serde_json::json!({
+            "tasks": { "pending": pending, "running": running, "completed": completed, "failed": failed, "paused": paused, "interrupted": interrupted }
+        });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
     // GET /api/doctor — health checks from daemon (for slash /doctor)
     if method == "GET" && path == "/api/doctor" {
         let mut checks: Vec<serde_json::Value> = Vec::new();
