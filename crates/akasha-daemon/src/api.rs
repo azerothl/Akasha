@@ -4926,7 +4926,7 @@ pub async fn handle_api(
         }
     }
 
-    if method == "GET" && path.starts_with("/api/tasks") && !path.starts_with("/api/tasks/") {
+    if method == "GET" && (path == "/api/tasks" || path.starts_with("/api/tasks?")) {
         let status_filter = path
             .split('?')
             .nth(1)
