@@ -221,17 +221,6 @@ impl MainAgent {
         if !resumable {
             anyhow::bail!("task not resumable (status: {})", task.status.as_str());
         }
-        store.update_status(task_id, TaskStatus::Queued)?;
-        let _ = self.bus.send(
-            EventEnvelope::new(
-                EventType::TaskCreated,
-                Some(serde_json::json!({
-                    "task_id": task_id.to_string(),
-                    "resumed": true
-                })),
-            )
-            .with_correlation(task_id),
-        );
         let message = task
             .initial_message
             .clone()
@@ -248,7 +237,33 @@ impl MainAgent {
             image_data_urls: None,
             execution_mode: None,
         };
-        tx.try_send(task_msg).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        match tx.try_send(task_msg) {
+            Ok(()) => {
+                // Enqueued synchronously.
+            }
+            Err(mpsc::error::TrySendError::Full(task_msg)) => {
+                // Channel is full: fall back to an async send so we don't drop the resume.
+                let tx_clone = tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx_clone.send(task_msg).await;
+                });
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                anyhow::bail!("conversation channel closed");
+            }
+        }
+        // Only mark the task as queued and emit the resume event after enqueueing is ensured.
+        store.update_status(task_id, TaskStatus::Queued)?;
+        let _ = self.bus.send(
+            EventEnvelope::new(
+                EventType::TaskCreated,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "resumed": true
+                })),
+            )
+            .with_correlation(task_id),
+        );
         Ok(())
     }
 }
