@@ -308,9 +308,17 @@ impl Daemon {
             let mut ids = Vec::new();
             for t in &tasks {
                 if t.status == akasha_store::TaskStatus::Running {
-                    let _ = store.update_status(t.id, akasha_store::TaskStatus::Interrupted);
-                    ids.push(t.id);
-                    info!(task_id = %t.id, "Task marked interrupted (daemon restart); can be resumed");
+                    match store.update_status(t.id, akasha_store::TaskStatus::Interrupted) {
+                        Ok(_) => {
+                            ids.push(t.id);
+                            info!(task_id = %t.id, "Task marked interrupted (daemon restart); can be resumed");
+                        }
+                        Err(e) => {
+                            warn!(task_id = %t.id, error = %e, "Failed to mark task as interrupted on daemon restart");
+                            // Keep existing behavior of collecting ids, even if persistence failed.
+                            ids.push(t.id);
+                        }
+                    }
                 }
             }
             ids
