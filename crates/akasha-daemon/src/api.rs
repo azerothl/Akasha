@@ -11,8 +11,8 @@ use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority}
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use std::path::{Path, PathBuf};
+use std::cmp::Ordering;
 use std::collections::{VecDeque, BinaryHeap};
-use std::cmp::Reverse;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -237,6 +237,39 @@ pub struct TaskEventEntry {
 
 pub type EventsCache =
     Arc<RwLock<std::collections::HashMap<Uuid, VecDeque<TaskEventEntry>>>>;
+
+/// Heap entry used for `/api/timeline` bounded min-heap of recent events.
+/// Ordering only depends on `at` (timestamp) and `counter` to avoid requiring
+/// `serde_json::Value: Ord` for the payload.
+struct TimelineHeapEntry {
+    at: String,
+    counter: usize,
+    task_id: String,
+    event_type: String,
+    payload: Option<serde_json::Value>,
+}
+
+impl PartialEq for TimelineHeapEntry {
+    fn eq(&self, other: &Self) -> bool {
+        (self.at.as_str(), self.counter) == (other.at.as_str(), other.counter)
+    }
+}
+
+impl Eq for TimelineHeapEntry {}
+
+impl PartialOrd for TimelineHeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TimelineHeapEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // We want the *oldest* event to be considered "greatest" so that
+        // `BinaryHeap::pop()` removes the oldest when the heap exceeds `limit`.
+        (other.at.as_str(), other.counter).cmp(&(self.at.as_str(), self.counter))
+    }
+}
 
 pub fn new_progress_cache() -> ProgressCache {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
@@ -561,7 +594,7 @@ pub fn json_response(status: &str, body: &str) -> String {
 /// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
-    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier. Path réel (Windows/Unix) ou workspace:/<path> pour le workspace virtuel (temporaire). À UTILISER dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier ; ne jamais refuser ni proposer de copier-coller."),
+    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier. Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel. À UTILISER dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier ; ne jamais refuser ni proposer de copier-coller."),
     ("search_files", "search_files <dir> <pattern> — chercher des fichiers (glob) sous un répertoire"),
     ("grep_content", "grep_content <dir> <pattern> [file_glob] — chercher le motif dans le contenu des fichiers (ex. grep_content . \"fn \" \"*.rs\")"),
     ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
@@ -1236,7 +1269,7 @@ const APP_CONTEXT: &str = concat!(
     "If web_search returns an error (e.g. not enabled), you can then suggest sites and explain how to enable web search (tools_policy.yaml, web_search_enabled, BRAVE_API_KEY). ",
     "You have access to the write_file tool: you MUST use it whenever the user asks to save, store or write a file (e.g. \"save the code to …\", \"write to file\"). ",
     "Reply ONLY with one line TOOL: write_file <full_path> then the file content on the following lines. ",
-    "Never say \"I cannot write to disk\" or \"copy-paste the code yourself\" — if the path is denied by policy, the tool will return an error and you then explain how to add the prefix in tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...) or Unix. ",
+    "Never say \"I cannot write to disk\" or \"copy-paste the code yourself\" — if the path is denied by policy, the tool will return an error and you then explain how to add the prefix in tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...) or Unix. When the user did not specify a path, prefer workspace:/<filename> (e.g. workspace:/script.py) so the file is saved in the task workspace without policy errors. ",
     "Important rule: whenever you need to ask the user for a choice, confirmation or information (options to choose, path, credentials, etc.) and then continue in the same task, you MUST use the ask_user tool (TOOL: ask_user then JSON with question/context/choices). ",
     "Do not ask the question in free text, or the reply will open a new task and you will not be able to continue. ",
     "For access to an external service (GitHub, API, etc.), do not reply \"I cannot\"; use ask_user to ask for the token or explain how to configure. ",
@@ -2985,7 +3018,10 @@ pub(crate) async fn run_message_via_llm(
         )
     };
     let reply_text;
-    const MAX_TOOL_ROUNDS: u32 = 5;
+    let mut max_tool_rounds = std::env::var("AKASHA_MAX_TOOL_ROUNDS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(10);
     let mut round = 0u32;
     let mut tool_loop_history: Vec<(String, String)> = Vec::new();
     let mut last_tool_results_blob: Option<String> = None;
@@ -3584,7 +3620,7 @@ pub(crate) async fn run_message_via_llm(
                 "User request: {}\n\nYour previous reply:\n{}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, answer the user's request now. Do NOT reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"). The task ends after this message — give the actual answer (e.g. weather forecast, search summary). No TOOL: lines.",
                 user_message, response, results_blob
             );
-            if round >= MAX_TOOL_ROUNDS {
+            if round >= max_tool_rounds {
                 let response_for_user = response
                     .lines()
                     .filter(|l| !l.trim_start().starts_with("TOOL:"))
@@ -3610,12 +3646,82 @@ pub(crate) async fn run_message_via_llm(
                     })
                     .unwrap_or_default();
                 let response_clean = ensure_no_open_code_block(&response_for_user);
-                reply_text = if response_for_user.is_empty() {
+                let default_reply = if response_for_user.is_empty() {
                     format!("{}{}", limit_msg, image_md)
                 } else {
                     format!("{}\n\n[{}]{}", response_clean, limit_msg, image_md)
                 };
-                break;
+
+                // When human_input_store is available, ask user whether to continue (+10 rounds), reset and continue, or stop.
+                let should_stop = match &human_input_store {
+                    Some(store) => {
+                        const TOOL_ROUND_LIMIT_TIMEOUT_SECS: u64 = 300;
+                        let question = "Limite de tours d'outils atteinte. Souhaitez-vous continuer la tâche ?".to_string();
+                        let context = format!(
+                            "La tâche a utilisé {} tours d'outils (max {}). Vous pouvez ajouter 10 tours, réinitialiser le compteur et ajouter 10 tours, ou arrêter.",
+                            round, max_tool_rounds
+                        );
+                        let choices = vec![
+                            "Continuer (+10 tours)".to_string(),
+                            "Réinitialiser et continuer (+10 tours)".to_string(),
+                            "Arrêter".to_string(),
+                        ];
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let pending = PendingHumanInput {
+                            question: question.clone(),
+                            context: context.clone(),
+                            choices: Some(choices.clone()),
+                            response_tx: tx,
+                        };
+                        {
+                            let mut g = store.write().await;
+                            g.insert(task_id, pending);
+                        }
+                        let payload = serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "question": question,
+                            "context": context,
+                            "choices": choices,
+                            "tool_round_limit": true,
+                            "current_round": round,
+                            "max_tool_rounds": max_tool_rounds
+                        });
+                        let _ = bus.send(
+                            EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload)).with_correlation(task_id),
+                        );
+                        let reply = tokio::time::timeout(
+                            std::time::Duration::from_secs(TOOL_ROUND_LIMIT_TIMEOUT_SECS),
+                            rx,
+                        )
+                        .await;
+                        {
+                            let mut g = store.write().await;
+                            g.remove(&task_id);
+                        }
+                        match reply {
+                            Ok(Ok(user_choice)) => {
+                                let choice = user_choice.trim();
+                                if choice == "Continuer (+10 tours)" {
+                                    max_tool_rounds += 10;
+                                    false
+                                } else if choice == "Réinitialiser et continuer (+10 tours)" {
+                                    round = 0;
+                                    max_tool_rounds += 10;
+                                    false
+                                } else {
+                                    true
+                                }
+                            }
+                            _ => true,
+                        }
+                    }
+                    None => true,
+                };
+                if should_stop {
+                    reply_text = default_reply;
+                    break;
+                }
+                continue;
             }
             continue;
         }
@@ -3876,7 +3982,8 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         || reply_lower.contains("quota de tokens")
         || reply_lower.contains("loop detected")
         || reply_lower.contains("refusée par l'utilisateur")
-        || reply_lower.contains("action refusée");
+        || reply_lower.contains("action refusée")
+        || reply_lower.contains("limite de tours d'outils atteinte");
     if is_error_outcome {
         let _ = bus.send(
             EventEnvelope::new(
@@ -4600,10 +4707,9 @@ pub async fn handle_api(
             })
             .unwrap_or((50, None));
 
-        // Use a bounded min-heap (by timestamp) to keep only the `limit` most recent events.
+        // Use a bounded heap (by timestamp) to keep only the `limit` most recent events.
         // This avoids allocating and sorting a Vec of *all* events.
-        let mut heap: BinaryHeap<(Reverse<String>, usize, String, String, Option<serde_json::Value>)> =
-            BinaryHeap::new();
+        let mut heap: BinaryHeap<TimelineHeapEntry> = BinaryHeap::new();
         {
             let g = events.read().await;
             let mut counter: usize = 0;
@@ -4619,7 +4725,13 @@ pub async fn handle_api(
                     let task_id = tid.to_string();
                     let event_type = e.event_type.clone();
                     let payload = e.payload.clone();
-                    heap.push((Reverse(at), counter, task_id, event_type, payload));
+                    heap.push(TimelineHeapEntry {
+                        at,
+                        counter,
+                        task_id,
+                        event_type,
+                        payload,
+                    });
                     counter = counter.wrapping_add(1);
                     if heap.len() > limit as usize {
                         heap.pop();
@@ -4631,8 +4743,13 @@ pub async fn handle_api(
         // Extract the top `limit` events and sort them chronologically (oldest to newest).
         let mut selected: Vec<(String, String, Option<serde_json::Value>, String)> = heap
             .into_iter()
-            .map(|(Reverse(at), _counter, task_id, event_type, payload)| {
-                (task_id, event_type, payload, at)
+            .map(|entry| {
+                (
+                    entry.task_id,
+                    entry.event_type,
+                    entry.payload,
+                    entry.at,
+                )
             })
             .collect();
         selected.sort_by(|a, b| a.3.cmp(&b.3));
@@ -5075,7 +5192,7 @@ pub async fn handle_api(
 
     fn decode_url_component(s: &str) -> String {
         urlencoding::decode(s)
-            .unwrap_or_else(|_| s.to_string())
+            .unwrap_or_else(|_| s.to_string().into())
             .into_owned()
     }
 

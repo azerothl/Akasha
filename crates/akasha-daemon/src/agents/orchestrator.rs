@@ -697,7 +697,14 @@ Reply in the SAME LANGUAGE as the user's question above. Do not add any informat
             {
                 Ok(Ok(resp)) if !resp.text.trim().is_empty() => {
                     synthesis_model_used = Some(resp.model_used.clone());
-                    resp.text.trim().to_string()
+                    let text = resp.text.trim().to_string();
+                    // If synthesis is suspiciously short vs sub-agent content, model likely truncated; show full replies so user gets script/CSV/content
+                    const MIN_SYNTHESIS_CHARS: usize = 600;
+                    if text.len() < MIN_SYNTHESIS_CHARS && raw_responses.len() > text.len() * 2 {
+                        format!("Réponses des agents :\n\n{}", raw_responses)
+                    } else {
+                        text
+                    }
                 }
                 _ => {
                     // Fallback: show joined responses if synthesis fails or times out

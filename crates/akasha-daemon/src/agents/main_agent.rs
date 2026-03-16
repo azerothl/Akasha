@@ -5,7 +5,6 @@ use akasha_store::{Task, TaskStatus, TaskStore};
 use chrono::Utc;
 use std::path::Path;
 use tokio::sync::mpsc;
-use tokio::task;
 use uuid::Uuid;
 
 use super::{classify_execution_mode, EventBus, ExecutionMode};
@@ -228,11 +227,10 @@ impl MainAgent {
             .initial_message
             .clone()
             .unwrap_or_else(|| "(Reprise)".to_string());
-        let session_id = task
-            .session_id
-            .clone()
-            .unwrap_or_else(|| format!("day-{}", chrono::Utc::now().format("%Y-%m-%d")));
-        let execution_mode = task.execution_mode.clone();
+        // Session and execution mode are not persisted in the task store; use a
+        // day-scoped session id and direct conversation mode when resuming.
+        let session_id = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
+        let execution_mode = None;
         let tx = self
             .direct_conversation_tx
             .as_ref()
