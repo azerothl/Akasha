@@ -51,40 +51,52 @@ pub struct MessageEnvelope {
 }
 
 impl MessageEnvelope {
-    pub fn api(session_id: String, raw_message: String, image_data_urls: Option<Vec<String>>, priority: TaskPriority) -> Self {
+    pub fn api<S, M>(session_id: S, raw_message: M, image_data_urls: Option<Vec<String>>, priority: TaskPriority) -> Self
+    where
+        S: Into<String>,
+        M: Into<String>,
+    {
         Self {
             channel_type: ChannelType::Api,
             channel_id: None,
-            session_id,
+            session_id: session_id.into(),
             user_id: None,
             workspace_id: None,
-            raw_message,
+            raw_message: raw_message.into(),
             image_data_urls,
             priority,
         }
     }
 
-    pub fn slack(session_id: String, raw_message: String) -> Self {
+    pub fn slack<S, M>(session_id: S, raw_message: M) -> Self
+    where
+        S: Into<String>,
+        M: Into<String>,
+    {
         Self {
             channel_type: ChannelType::Slack,
             channel_id: None,
-            session_id,
+            session_id: session_id.into(),
             user_id: None,
             workspace_id: None,
-            raw_message,
+            raw_message: raw_message.into(),
             image_data_urls: None,
             priority: TaskPriority::UserNormal,
         }
     }
 
-    pub fn teams(session_id: String, raw_message: String, channel_id: Option<String>) -> Self {
+    pub fn teams<S, M>(session_id: S, raw_message: M, channel_id: Option<String>) -> Self
+    where
+        S: Into<String>,
+        M: Into<String>,
+    {
         Self {
             channel_type: ChannelType::Teams,
             channel_id,
-            session_id,
+            session_id: session_id.into(),
             user_id: None,
             workspace_id: None,
-            raw_message,
+            raw_message: raw_message.into(),
             image_data_urls: None,
             priority: TaskPriority::UserNormal,
         }
