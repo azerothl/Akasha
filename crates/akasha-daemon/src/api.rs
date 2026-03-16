@@ -3888,37 +3888,37 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             .with_correlation(task_id),
         );
     }
-    let _ = bus.send(
-        EventEnvelope::new(
-            EventType::TaskCompleted,
-            Some(serde_json::json!({
-                "task_id": task_id.to_string(),
-                "status": "completed",
-                "model_used": last_llm_model_used
-            })),
-        )
-        .with_correlation(task_id),
-    );
-    // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
-    if let Ok(Some(t)) = store.get(task_id) {
-        if t.status != TaskStatus::Paused {
-            let _ = store.update_status(task_id, TaskStatus::Completed);
-        }
-    } else {
+    let should_mark_completed = match store.get(task_id) {
+        Ok(Some(t)) => t.status != TaskStatus::Paused,
+        _ => true,
+    };
+    if should_mark_completed {
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::TaskCompleted,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "status": "completed",
+                    "model_used": last_llm_model_used
+                })),
+            )
+            .with_correlation(task_id),
+        );
+        // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
         let _ = store.update_status(task_id, TaskStatus::Completed);
+        notify_task_completion(&task_completion_registry, task_id).await;
+        let summary_preview: String = reply_text.chars().take(300).collect();
+        learn_from_task_outcome_async(
+            long_term_client.clone(),
+            task_id,
+            message.clone(),
+            "completed".to_string(),
+            summary_preview,
+            Some(session_id.clone()),
+            structured.intent_slug.clone(),
+        )
+        .await;
     }
-    notify_task_completion(&task_completion_registry, task_id).await;
-    let summary_preview: String = reply_text.chars().take(300).collect();
-    learn_from_task_outcome_async(
-        long_term_client.clone(),
-        task_id,
-        message.clone(),
-        "completed".to_string(),
-        summary_preview,
-        Some(session_id.clone()),
-        structured.intent_slug.clone(),
-    )
-    .await;
 }
 
 /// Notify any waiter in the TaskCompletionRegistry that `task_id` has finished.
