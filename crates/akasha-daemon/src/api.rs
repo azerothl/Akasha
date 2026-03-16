@@ -3889,24 +3889,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             .with_correlation(task_id),
         );
     }
-    let should_mark_completed = match store.get(task_id) {
-        Ok(Some(t)) => t.status != TaskStatus::Paused,
-        _ => true,
-    };
-    if should_mark_completed {
-        let _ = bus.send(
-            EventEnvelope::new(
-                EventType::TaskCompleted,
-                Some(serde_json::json!({
-                    "task_id": task_id.to_string(),
-                    "status": "completed",
-                    "model_used": last_llm_model_used
-                })),
-            )
-            .with_correlation(task_id),
-        );
-        // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
-  }
+    // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
     // Determine if the task was paused during execution. If so, we must not emit
     // TaskCompleted nor mark it as completed; instead, emit TaskPaused to keep
     // the event stream consistent with the stored status.
