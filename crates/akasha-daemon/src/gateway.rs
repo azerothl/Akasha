@@ -101,7 +101,7 @@ pub fn handle_envelope(
     main_agent.handle_message(
         store_path,
         &envelope.raw_message,
-        Uuid::new_v4(),
+        Uuid::nil(),
         true,
         &envelope.session_id,
         envelope.image_data_urls,
