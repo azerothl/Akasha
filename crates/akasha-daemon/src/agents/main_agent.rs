@@ -224,17 +224,6 @@ impl MainAgent {
         }
         // Remember the original status so we can roll back on channel closure.
         let original_status = task.status;
-        store.update_status(task_id, TaskStatus::Queued)?;
-        let _ = self.bus.send(
-            EventEnvelope::new(
-                EventType::TaskResumed,
-                Some(serde_json::json!({
-                    "task_id": task_id.to_string(),
-                    "resumed": true
-                })),
-            )
-            .with_correlation(task_id),
-        );
         let message = task
             .initial_message
             .clone()
