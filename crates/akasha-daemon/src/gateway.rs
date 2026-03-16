@@ -110,14 +110,6 @@ pub fn handle_envelope(
     store_path: &Path,
     envelope: MessageEnvelope,
 ) -> anyhow::Result<Uuid> {
-    let MessageEnvelope {
-        raw_message,
-        session_id,
-        image_data_urls,
-        priority,
-        ..
-    } = envelope;
-
     main_agent.handle_message(
         store_path,
         &envelope.raw_message,

@@ -4940,11 +4940,8 @@ pub async fn handle_api(
             .unwrap_or(TaskPriority::UserNormal);
         // Build acknowledgment message before moving `message` into the envelope.
         let ack_message = build_ack_message(&message);
-        // Gateway: single entry point for task creation and routing (spec 48).
-        // Compute acknowledgment message before moving `message` into the envelope.
-        let ack_message = build_ack_message(&message);
         let envelope = crate::gateway::MessageEnvelope::api(session_id.clone(), message, image_data_urls, priority);
-        match crate::gateway::handle_envelope(main_agent, store_path, &envelope) {
+        match crate::gateway::handle_envelope(main_agent, store_path, envelope) {
             Ok(task_id) => {
                 let body = serde_json::json!({
                     "ack": true,
@@ -6404,7 +6401,6 @@ mod tests {
         assert!(out.ends_with(">)"), "output should end with >): {:?}", out);
         assert_eq!(out, "\n\n![Photo](<data:image/jpeg;base64,ABC>)");
     }
-}
 
     // --- is_pausable / is_resumable state transitions ---
 

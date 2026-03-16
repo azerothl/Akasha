@@ -251,23 +251,27 @@ impl MainAgent {
             image_data_urls: None,
             execution_mode: None,
         };
-        match tx.try_send(task_msg) {
-            Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(task_msg)) => {
-                // Channel is full: fall back to an async send and block until there is capacity.
-                let send_result = task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async move {
-                        tx.send(task_msg).await
-                    })
-                });
-                send_result
-                    .map_err(|e| anyhow::anyhow!("failed to enqueue resumed task after channel full: {}", e))?;
-                Ok(())
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                // Channel is closed: attempt to roll back the status and report a clear error.
-                let _ = store.update_status(task_id, original_status);
-                anyhow::bail!("conversation channel closed when resuming task")
+        if let Err(e) = tx.try_send(task_msg) {
+            match e {
+                mpsc::error::TrySendError::Full(task_msg) => {
+                    // Channel is full: fall back to an async send and block until there is capacity.
+                    let send_result = task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async move {
+                            tx.send(task_msg).await
+                        })
+                    });
+                    send_result.map_err(|e| {
+                        anyhow::anyhow!(
+                            "failed to enqueue resumed task after channel full: {}",
+                            e
+                        )
+                    })?;
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    // Channel is closed: attempt to roll back the status and report a clear error.
+                    let _ = store.update_status(task_id, original_status);
+                    anyhow::bail!("conversation channel closed when resuming task")
+                }
             }
         }
 
