@@ -224,7 +224,7 @@ impl MainAgent {
         store.update_status(task_id, TaskStatus::Queued)?;
         let _ = self.bus.send(
             EventEnvelope::new(
-                EventType::TaskCreated,
+                EventType::TaskResumed,
                 Some(serde_json::json!({
                     "task_id": task_id.to_string(),
                     "resumed": true
