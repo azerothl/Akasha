@@ -11,7 +11,8 @@ use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority}
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use std::path::{Path, PathBuf};
-use std::collections::VecDeque;
+use std::collections::{VecDeque, BinaryHeap};
+use std::cmp::Reverse;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -4615,9 +4616,14 @@ pub async fn handle_api(
                 (limit, task_id_filter)
             })
             .unwrap_or((50, None));
-        let mut all: Vec<(String, String, Option<serde_json::Value>, String)> = {
+
+        // Use a bounded min-heap (by timestamp) to keep only the `limit` most recent events.
+        // This avoids allocating and sorting a Vec of *all* events.
+        let mut heap: BinaryHeap<(Reverse<String>, usize, String, String, Option<serde_json::Value>)> =
+            BinaryHeap::new();
+        {
             let g = events.read().await;
-            let mut out = Vec::new();
+            let mut counter: usize = 0;
             for (tid, list) in g.iter() {
                 if let Some(filter) = task_id_filter {
                     if *tid != filter {
@@ -4625,15 +4631,30 @@ pub async fn handle_api(
                     }
                 }
                 for e in list.iter() {
-                    out.push((tid.to_string(), e.event_type.clone(), e.payload.clone(), e.at.clone()));
+                    // Use `Reverse(at)` so the smallest (oldest) timestamp is popped first when exceeding `limit`.
+                    let at = e.at.clone();
+                    let task_id = tid.to_string();
+                    let event_type = e.event_type.clone();
+                    let payload = e.payload.clone();
+                    heap.push((Reverse(at), counter, task_id, event_type, payload));
+                    counter = counter.wrapping_add(1);
+                    if heap.len() > limit as usize {
+                        heap.pop();
+                    }
                 }
             }
-            out.sort_by(|a, b| a.3.cmp(&b.3));
-            out.reverse();
-            out.into_iter().take(limit as usize).collect()
-        };
-        all.reverse();
-        let list: Vec<serde_json::Value> = all
+        }
+
+        // Extract the top `limit` events and sort them chronologically (oldest to newest).
+        let mut selected: Vec<(String, String, Option<serde_json::Value>, String)> = heap
+            .into_iter()
+            .map(|(Reverse(at), _counter, task_id, event_type, payload)| {
+                (task_id, event_type, payload, at)
+            })
+            .collect();
+        selected.sort_by(|a, b| a.3.cmp(&b.3));
+
+        let list: Vec<serde_json::Value> = selected
             .into_iter()
             .map(|(task_id, event_type, payload, at)| {
                 serde_json::json!({ "task_id": task_id, "event_type": event_type, "payload": payload, "at": at })
