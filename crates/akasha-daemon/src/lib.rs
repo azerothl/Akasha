@@ -3,6 +3,7 @@
 pub mod agent_profile;
 pub mod user_profile;
 pub mod agents;
+pub mod gateway;
 pub mod personality;
 pub mod api;
 pub mod debug_log;

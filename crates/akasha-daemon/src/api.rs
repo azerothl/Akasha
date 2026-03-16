@@ -4890,14 +4890,14 @@ pub async fn handle_api(
         }
         // Update last user activity for proactive check-in
         let _ = UserProfile::save_last_activity(data_dir, chrono::Utc::now());
-        let correlation_id = uuid::Uuid::new_v4();
         let priority = body_json
             .as_ref()
             .and_then(|v| v.get("priority").and_then(|p| p.as_str()))
             .map(|s| if s.eq_ignore_ascii_case("high") { TaskPriority::UserHigh } else { TaskPriority::UserNormal })
             .unwrap_or(TaskPriority::UserNormal);
-        // User talks only to orchestrator: ack immediately, delegate to conversation worker in background (non-blocking). session_id used for short-term memory.
-        match main_agent.handle_message(store_path, &message, correlation_id, true, &session_id, image_data_urls, priority) {
+        // Gateway: single entry point for task creation and routing (spec 48).
+        let envelope = crate::gateway::MessageEnvelope::api(session_id.clone(), message.clone(), image_data_urls.clone(), priority);
+        match crate::gateway::handle_envelope(main_agent, store_path, &envelope) {
             Ok(task_id) => {
                 let ack_message = build_ack_message(&message);
                 let body = serde_json::json!({
