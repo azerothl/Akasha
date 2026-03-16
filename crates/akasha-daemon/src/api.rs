@@ -5646,6 +5646,18 @@ async fn cancel_task(
     json_response("200 OK", &body.to_string())
 }
 
+/// Returns true when a task in `status` can be paused.
+/// Only `Pending` and `Queued` tasks can be paused safely; `Running` tasks cannot be cooperatively
+/// interrupted and must be allowed to complete or be cancelled instead.
+pub(crate) fn is_pausable(status: &TaskStatus) -> bool {
+    matches!(status, TaskStatus::Pending | TaskStatus::Queued)
+}
+
+/// Returns true when a task in `status` can be resumed.
+pub(crate) fn is_resumable(status: &TaskStatus) -> bool {
+    matches!(status, TaskStatus::Paused | TaskStatus::Interrupted)
+}
+
 async fn pause_task(
     store_path: &Path,
     id: Uuid,
@@ -5660,14 +5672,10 @@ async fn pause_task(
         Ok(None) => return json_response("404 Not Found", r#"{"error":"task_not_found"}"#),
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
-    let pausable = matches!(
-        task.status,
-        TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running
-    );
-    if !pausable {
+    if !is_pausable(&task.status) {
         let body = serde_json::json!({
             "error": "task_not_pausable",
-            "detail": "La tâche ne peut pas être mise en pause (déjà terminée, annulée ou en pause).",
+            "detail": "La tâche ne peut pas être mise en pause (déjà terminée, annulée, en cours d'exécution ou en pause).",
             "status": task.status.as_str()
         });
         return json_response("400 Bad Request", &body.to_string());
@@ -5700,11 +5708,7 @@ async fn resume_task(
         Ok(None) => return json_response("404 Not Found", r#"{"error":"task_not_found"}"#),
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
-    let resumable = matches!(
-        task.status,
-        TaskStatus::Paused | TaskStatus::Interrupted
-    );
-    if !resumable {
+    if !is_resumable(&task.status) {
         let body = serde_json::json!({
             "error": "task_not_resumable",
             "detail": "Seules les tâches en pause ou interrompues peuvent être reprises.",
@@ -6179,8 +6183,10 @@ async fn get_schedule_run_reports(store_path: &Path, progress: &ProgressCache) -
 mod tests {
     use super::{
         agent_role_system_prompt, build_image_markdown, ensure_no_open_code_block,
+        is_pausable, is_resumable,
         message_suggests_tool_only_action, parse_content_length, parse_device_invoke_params,
     };
+    use akasha_store::TaskStatus;
 
     #[test]
     fn parse_content_length_returns_header_end_and_content_length() {
@@ -6323,5 +6329,57 @@ mod tests {
         assert!(out.contains("](<data:image/"), "output should contain ](<data:image/: {:?}", out);
         assert!(out.ends_with(">)"), "output should end with >): {:?}", out);
         assert_eq!(out, "\n\n![Photo](<data:image/jpeg;base64,ABC>)");
+    }
+}
+
+    // --- is_pausable / is_resumable state transitions ---
+
+    #[test]
+    fn pausable_only_pending_and_queued() {
+        assert!(is_pausable(&TaskStatus::Pending));
+        assert!(is_pausable(&TaskStatus::Queued));
+        // Running tasks cannot be cooperatively paused
+        assert!(!is_pausable(&TaskStatus::Running));
+        assert!(!is_pausable(&TaskStatus::Paused));
+        assert!(!is_pausable(&TaskStatus::Completed));
+        assert!(!is_pausable(&TaskStatus::Failed));
+        assert!(!is_pausable(&TaskStatus::Cancelled));
+        assert!(!is_pausable(&TaskStatus::Interrupted));
+        assert!(!is_pausable(&TaskStatus::WaitingUserInput));
+    }
+
+    #[test]
+    fn resumable_only_paused_and_interrupted() {
+        assert!(is_resumable(&TaskStatus::Paused));
+        assert!(is_resumable(&TaskStatus::Interrupted));
+        // All other statuses are not resumable
+        assert!(!is_resumable(&TaskStatus::Pending));
+        assert!(!is_resumable(&TaskStatus::Queued));
+        assert!(!is_resumable(&TaskStatus::Running));
+        assert!(!is_resumable(&TaskStatus::Completed));
+        assert!(!is_resumable(&TaskStatus::Failed));
+        assert!(!is_resumable(&TaskStatus::Cancelled));
+        assert!(!is_resumable(&TaskStatus::WaitingUserInput));
+    }
+
+    #[test]
+    fn interrupted_status_is_resumable_but_not_pausable() {
+        // Interrupted tasks (daemon-restart survivors) must be resumable, not pausable
+        assert!(is_resumable(&TaskStatus::Interrupted));
+        assert!(!is_pausable(&TaskStatus::Interrupted));
+    }
+
+    #[test]
+    fn task_status_filter_strings_are_canonical() {
+        // Verify that status as_str() values match the strings used in query-param filtering
+        assert_eq!(TaskStatus::Pending.as_str(), "pending");
+        assert_eq!(TaskStatus::Queued.as_str(), "queued");
+        assert_eq!(TaskStatus::Running.as_str(), "running");
+        assert_eq!(TaskStatus::Completed.as_str(), "completed");
+        assert_eq!(TaskStatus::Failed.as_str(), "failed");
+        assert_eq!(TaskStatus::Paused.as_str(), "paused");
+        assert_eq!(TaskStatus::Cancelled.as_str(), "cancelled");
+        assert_eq!(TaskStatus::Interrupted.as_str(), "interrupted");
+        assert_eq!(TaskStatus::WaitingUserInput.as_str(), "waiting_user_input");
     }
 }

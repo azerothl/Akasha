@@ -38,14 +38,25 @@ pub struct PolicyRule {
     pub allow: bool,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct PolicyConfig {
     pub rules: Option<Vec<PolicyRule>>,
+    /// When no rule matches, this determines the outcome. Defaults to `false` (deny-by-default).
+    #[serde(default)]
+    pub default_allow: bool,
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self { rules: None, default_allow: false }
+    }
 }
 
 /// Minimal policy engine: loads rules from YAML and evaluates allow/deny.
 pub struct PolicyEngine {
     rules: Vec<PolicyRule>,
+    /// Outcome when no rule matches. Defaults to `false` (deny-by-default).
+    default_allow: bool,
 }
 
 impl PolicyEngine {
@@ -53,19 +64,21 @@ impl PolicyEngine {
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self { rules: vec![] });
+                return Ok(Self { rules: vec![], default_allow: false });
             }
             Err(e) => return Err(e.into()),
         };
         if content.trim().is_empty() {
-            return Ok(Self { rules: vec![] });
+            return Ok(Self { rules: vec![], default_allow: false });
         }
         let config: PolicyConfig = serde_yaml::from_str(&content)?;
+        let default_allow = config.default_allow;
         let rules = config.rules.unwrap_or_default();
-        Ok(Self { rules })
+        Ok(Self { rules, default_allow })
     }
 
-    /// Evaluate whether (actor, resource, action) is allowed. Default allow if no matching rule.
+    /// Evaluate whether (actor, resource, action) is allowed.
+    /// Returns `default_allow` (deny by default) when no rule matches.
     pub fn evaluate(&self, actor: &Actor, resource: &Resource, action: Action) -> bool {
         let action_str = match action {
             Action::Read => "read",
@@ -91,6 +104,6 @@ impl PolicyEngine {
             }
             return rule.allow;
         }
-        true
+        self.default_allow
     }
 }
