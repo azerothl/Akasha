@@ -1,0 +1,12 @@
+# Exemple de configuration voix (TTS/STT) pour Akasha.
+# Copier vers : data_dir/voice_router.yaml
+# Référence : Kyutai delayed-streams-modeling, Unmute, Pocket TTS.
+# Les services TTS/STT sont externes (HTTP) ; voir deployment/akasha-models pour Docker Compose.
+
+# TTS (text-to-speech) : base_url du service qui expose POST /tts avec body {"text": "..."}, réponse = audio WAV.
+tts:
+  base_url: "http://localhost:8765"   # ex. Pocket TTS FastAPI ou moshi-server TTS (configs/config-tts.toml)
+
+# STT (speech-to-text) : base_url du service qui expose POST /stt avec body = audio WAV, réponse JSON {"text": "..."}.
+stt:
+  base_url: "http://localhost:8766"   # ex. moshi-server STT (configs/config-stt-en_fr-hf.toml)

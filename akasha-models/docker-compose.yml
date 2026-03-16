@@ -1,0 +1,49 @@
+# Akasha Models — services de modèles montés à la demande.
+# Usage: docker compose --profile ollama up -d   (LLM)
+#        docker compose --profile voice up -d   (TTS/STT quand images disponibles)
+# Voir README.md pour les URL à mettre dans llm_router.yaml et voice_router.yaml.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: akasha-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    profiles:
+      - ollama
+    # Pour GPU (Linux) : décommenter et adapter
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # TTS/STT : Kyutai moshi-server ou Pocket TTS ne fournissent pas d’image Docker officielle.
+  # Options :
+  # 1) Lancer sur l’hôte : moshi-server worker --config configs/config-tts.toml (TTS),
+  #    moshi-server worker --config configs/config-stt-en_fr-hf.toml (STT).
+  # 2) Construire une image locale (Dockerfile) qui installe moshi-server + configs.
+  # 3) Pointer voice_router.yaml vers les URL du service (ex. http://host.docker.internal:8765).
+  #
+  # Exemple de service TTS (à adapter selon votre build moshi-server) :
+  # tts:
+  #   build: ./tts  # Dockerfile qui lance moshi-server avec config-tts.toml
+  #   ports:
+  #     - "8765:8765"
+  #   profiles:
+  #     - voice
+  #
+  # Exemple de service STT :
+  # stt:
+  #   build: ./stt  # Dockerfile qui lance moshi-server avec config-stt-en_fr-hf.toml
+  #   ports:
+  #     - "8766:8766"
+  #   profiles:
+  #     - voice
+
+volumes:
+  ollama_data:

@@ -14,6 +14,7 @@ pub mod replication;
 pub mod device_bridge;
 pub mod health;
 pub mod image_generation;
+pub mod voice;
 pub mod memory;
 pub mod memory_actor;
 pub mod memory_relation_inference;

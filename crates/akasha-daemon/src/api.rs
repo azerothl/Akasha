@@ -629,6 +629,8 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("device_discover", "device_discover [interface] — lister les appareils accessibles (optionnel: local_media, system, network, usb). Filtre par politique allowed_device_interfaces / blocked_device_interfaces."),
     ("device_invoke", "device_invoke <interface> <device_id> <action> [params] — exécuter une action sur un appareil. local_media: caméra (device_id camera, action capture), micro (device_id microphone, action record). Appelle directement ; une fenêtre d'autorisation s'affichera dans l'UI. Ne pas demander à l'utilisateur d'« ouvrir l'UI » — utiliser l'outil. synthetic_input: device_id keyboard|mouse, action shortcut|key|type|mouse_move|mouse_click|..."),
     ("generate_image", "generate_image <prompt> [size] — générer une image par IA (ex. OpenAI DALL·E). Prompt en texte libre ; size optionnel (1024x1024, 512x512). Retourne l'image en data URL dans la réponse (spec 42)."),
+    ("speech_synthesize", "speech_synthesize <text> — TTS: synthétiser le texte en audio (Kyutai Unmute/Pocket TTS). Retourne une data URL audio (voice_router.yaml tts.base_url)."),
+    ("speech_transcribe", "speech_transcribe [data_url_audio] — STT: transcrire l'audio en texte. Passer la data URL de l'audio (ex. après device_invoke local_media microphone record) ou laisser vide si l'audio est fourni par le contexte (voice_router.yaml stt.base_url)."),
     ("write_todos", "write_todos <payload> — définir la liste d'étapes (todo) de la tâche. Payload: JSON array [{\"title\":\"...\", \"status\":\"pending\"|\"done\"|\"cancelled\"}] ou une ligne par étape. Remplace toute la liste. Utiliser pour décomposer une tâche complexe et suivre la progression."),
     ("read_todos", "read_todos — retourne la liste des étapes (todos) de la tâche courante."),
     ("update_todo", "update_todo <index> <status> — marquer l'étape à l'index (1-based) comme status (done, cancelled)."),
@@ -2376,6 +2378,26 @@ async fn execute_tool_call(
                 }
             }
         }
+        "speech_synthesize" => {
+            let text = args.get(0).map(String::as_str).unwrap_or("").trim();
+            if text.is_empty() {
+                (false, "[speech_synthesize] usage: speech_synthesize <text>".to_string(), None)
+            } else {
+                let data_dir = store_path.and_then(|p| p.parent()).unwrap_or_else(|| Path::new("."));
+                match crate::voice::speech_synthesize_impl(data_dir, text).await {
+                    Ok((msg, data_url)) => (true, msg, Some(data_url)),
+                    Err(e) => (false, e, None),
+                }
+            }
+        }
+        "speech_transcribe" => {
+            let audio_input = args.get(0).map(String::as_str).unwrap_or("").trim();
+            let data_dir = store_path.and_then(|p| p.parent()).unwrap_or_else(|| Path::new("."));
+            match crate::voice::speech_transcribe_impl(data_dir, audio_input).await {
+                Ok(text) => (true, format!("[speech_transcribe] {}", text), None),
+                Err(e) => (false, e, None),
+            }
+        }
         _ => {
             if executor.policy.can_run_command(tool_name) {
                 match executor.run_command(tool_name, args, None, None).await {
@@ -2574,6 +2596,10 @@ fn progress_message_for_tool(tool: &str, args: &[String]) -> String {
         "Reading the file…".to_string()
     } else if lower.contains("generate_image") {
         "Generating the image…".to_string()
+    } else if lower.contains("speech_synthesize") {
+        "Synthesizing speech…".to_string()
+    } else if lower.contains("speech_transcribe") {
+        "Transcribing audio…".to_string()
     } else if lower.contains("device_invoke") && first_arg.to_lowercase().contains("camera") {
         "Capturing with camera…".to_string()
     } else if lower.contains("run_command") {
@@ -3632,6 +3658,8 @@ pub(crate) async fn run_message_via_llm(
                     "L'accès à l'appareil (caméra/micro) a expiré ou a été refusé. Vous pouvez réessayer en renvoyant votre demande."
                 } else if tool_results.iter().any(|r| r.contains("generate_image") && r.contains("générée")) {
                     "Image générée."
+                } else if tool_results.iter().any(|r| r.contains("speech_synthesize") && r.contains("synthétisé")) {
+                    "Audio synthétisé."
                 } else if tool_results.iter().any(|r| r.contains("device_invoke") && r.contains("success")) {
                     "Photo reçue."
                 } else {
@@ -3641,7 +3669,7 @@ pub(crate) async fn run_message_via_llm(
                     .filter(|b| !b.is_empty())
                     .map(|b| {
                         let url = if b.starts_with("data:") { b.clone() } else { format!("data:image/jpeg;base64,{}", b) };
-                        let label = if b.starts_with("data:") { "Image générée" } else { "Photo capturée" };
+                        let label = if url.starts_with("data:audio/") { "Audio synthétisé" } else if b.starts_with("data:") { "Image générée" } else { "Photo capturée" };
                         build_image_markdown(&label, &url)
                     })
                     .unwrap_or_default();
@@ -3751,7 +3779,7 @@ pub(crate) async fn run_message_via_llm(
             .filter(|b| !b.is_empty())
             .map(|b| {
                 let url = if b.starts_with("data:") { b.clone() } else { format!("data:image/jpeg;base64,{}", b) };
-                let label = if b.starts_with("data:") { "Image générée" } else { "Photo capturée" };
+                let label = if url.starts_with("data:audio/") { "Audio synthétisé" } else if b.starts_with("data:") { "Image générée" } else { "Photo capturée" };
                 build_image_markdown(&label, &url)
             })
             .unwrap_or_default();
@@ -4266,6 +4294,56 @@ pub async fn handle_api(
             return json_response("200 OK", &body.to_string());
         } else {
             return json_response("501 Not Implemented", r#"{"error":"device_bridge_unavailable"}"#);
+        }
+    }
+
+    // GET /api/voice/status — whether TTS/STT are configured (voice_router.yaml)
+    if method == "GET" && path == "/api/voice/status" {
+        let config = crate::voice::load_voice_config(data_dir);
+        let body = serde_json::json!({
+            "tts_configured": config.as_ref().map_or(false, |c| c.tts_configured()),
+            "stt_configured": config.as_ref().map_or(false, |c| c.stt_configured()),
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+
+    // POST /api/voice/tts — synthesize text to audio. Body: { "text": "..." }. Returns { "data_url": "data:audio/wav;base64,...", "message": "..." }.
+    if method == "POST" && path == "/api/voice/tts" {
+        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let text = body_json.as_ref().and_then(|j| j.get("text")).and_then(|v| v.as_str()).unwrap_or("").trim();
+        if text.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"text_required"}"#);
+        }
+        match crate::voice::speech_synthesize_impl(data_dir, text).await {
+            Ok((msg, data_url)) => {
+                let body = serde_json::json!({ "message": msg, "data_url": data_url });
+                return json_response("200 OK", &body.to_string());
+            }
+            Err(e) => {
+                return json_response("502 Bad Gateway", &serde_json::json!({ "error": e }).to_string());
+            }
+        }
+    }
+
+    // POST /api/voice/stt — transcribe audio to text. Body: { "data_url": "data:audio/...;base64,..." } or { "audio_base64": "..." }.
+    if method == "POST" && path == "/api/voice/stt" {
+        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let audio_input = body_json
+            .as_ref()
+            .and_then(|j| j.get("data_url").and_then(|v| v.as_str()))
+            .or_else(|| body_json.as_ref().and_then(|j| j.get("audio_base64").and_then(|v| v.as_str())))
+            .unwrap_or("");
+        if audio_input.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"data_url_or_audio_base64_required"}"#);
+        }
+        match crate::voice::speech_transcribe_impl(data_dir, audio_input).await {
+            Ok(text) => {
+                let body = serde_json::json!({ "text": text });
+                return json_response("200 OK", &body.to_string());
+            }
+            Err(e) => {
+                return json_response("502 Bad Gateway", &serde_json::json!({ "error": e }).to_string());
+            }
         }
     }
 

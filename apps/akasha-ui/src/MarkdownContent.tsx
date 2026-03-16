@@ -5,25 +5,24 @@ import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { useI18n } from "./useI18n";
-import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
+import { preprocessDataUrlImages, preprocessDataUrlAudio } from "./preprocessDataUrlImages";
 
-/** Sanitization schema: extends the safe default to allow the div/img elements
- *  injected by preprocessDataUrlImages, while blocking scripts and other dangerous tags.
- *  Security note: only the default safe protocols (e.g. http/https) are allowed for `src`;
- *  `data:` URLs are intentionally disallowed here to reduce the XSS surface area from
- *  SVG-in-image and similar edge cases. Event handlers (onerror, onclick, etc.) and
- *  <script> tags remain blocked by the schema. */
+/** Sanitization schema: extends the safe default to allow the div/img/audio elements
+ *  injected by preprocessDataUrlImages and preprocessDataUrlAudio, while blocking scripts.
+ *  data: is allowed for src so that inline image and audio data URLs (from generate_image,
+ *  speech_synthesize, camera) render. Event handlers and <script> remain blocked. */
 const sanitizeSchema = {
   ...defaultSchema,
-  tagNames: [...(defaultSchema.tagNames ?? []), "div"],
+  tagNames: [...(defaultSchema.tagNames ?? []), "div", "audio"],
   attributes: {
     ...defaultSchema.attributes,
     div: ["className", "class"],
     img: ["src", "alt", "className", "class", "title", "width", "height"],
+    audio: ["src", "controls", "className", "class"],
   },
   protocols: {
     ...defaultSchema.protocols,
-    src: [...(defaultSchema.protocols?.src ?? ["http", "https"])],
+    src: [...(defaultSchema.protocols?.src ?? ["http", "https"]), "data"],
   },
 };
 
@@ -48,7 +47,7 @@ type MarkdownContentProps = { children?: string; className?: string; onPathClick
 /** Lazy-loaded markdown renderer to reduce initial bundle (react-markdown + remark-gfm in separate chunk). */
 export default function MarkdownContent({ children = "", className, onPathClick }: MarkdownContentProps) {
   const { t } = useI18n();
-  const processed = preprocessDataUrlImages(children);
+  const processed = preprocessDataUrlAudio(preprocessDataUrlImages(children));
   return (
     <div className={className ?? "markdown-rendered"}>
       <ReactMarkdown
