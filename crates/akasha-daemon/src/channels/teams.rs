@@ -1,7 +1,8 @@
 //! Microsoft Teams adapter: Bot Framework webhook.
-//! Receives POST with Activity JSON, creates task via main agent, polls until done, replies via Bot Framework API.
+//! Receives POST with Activity JSON, builds MessageEnvelope, delegates to gateway, polls until done, replies via Bot Framework API.
 
 use crate::agents::MainAgent;
+use crate::gateway;
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -200,16 +201,9 @@ pub fn handle_teams_message(
     let store_path = store_path.to_path_buf();
     let app_id = app_id.to_string();
     let app_password = app_password.to_string();
+    let envelope = gateway::MessageEnvelope::teams("teams".to_string(), text.clone(), Some(conversation_id.clone()));
     tokio::spawn(async move {
-        let task_id = match main_agent.handle_message(
-            &store_path,
-            &text,
-            uuid::Uuid::new_v4(),
-            true,
-            "teams",
-            None,
-            crate::agents::TaskPriority::UserNormal,
-        ) {
+        let task_id = match gateway::handle_envelope(&main_agent, &store_path, envelope) {
             Ok(id) => id,
             Err(_) => {
                 let _ = post_teams_reply(

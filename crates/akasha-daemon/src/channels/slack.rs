@@ -1,7 +1,8 @@
 //! Slack adapter: slash command endpoint.
-//! Receives POST from Slack, creates task via main agent, polls until done, posts result to response_url.
+//! Receives POST from Slack, builds MessageEnvelope, delegates to gateway, polls until done, posts result to response_url.
 
 use crate::agents::MainAgent;
+use crate::gateway;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::path::Path;
@@ -88,8 +89,9 @@ pub fn handle_slack_command(
 
     let main_agent = main_agent.clone();
     let store_path = store_path.to_path_buf();
+    let envelope = gateway::MessageEnvelope::slack("slack".to_string(), text.clone());
     tokio::spawn(async move {
-        let task_id = match main_agent.handle_message(&store_path, &text, uuid::Uuid::new_v4(), true, "slack", None, crate::agents::TaskPriority::UserNormal) {
+        let task_id = match gateway::handle_envelope(&main_agent, &store_path, envelope) {
             Ok(id) => id,
             Err(_) => {
                 let _ = post_slack_response(&response_url, "Failed to create task.").await;
