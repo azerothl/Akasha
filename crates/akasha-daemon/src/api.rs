@@ -143,15 +143,21 @@ fn extract_semaphore() -> Arc<tokio::sync::Semaphore> {
     EXTRACT_SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2))).clone()
 }
 
-async fn get_task_list(store_path: &Path) -> String {
+async fn get_task_list(store_path: &Path, status_filter: Option<String>) -> String {
     let store = match TaskStore::open(store_path) {
         Ok(s) => s,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
-    let tasks = match store.get_all() {
+    let mut tasks = match store.get_all() {
         Ok(t) => t,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
+    if let Some(ref status) = status_filter {
+        let status = status.trim().to_lowercase();
+        if !status.is_empty() {
+            tasks.retain(|t| t.status.as_str() == status);
+        }
+    }
     let list: Vec<serde_json::Value> = tasks
         .into_iter()
         .rev()
@@ -3893,7 +3899,14 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         )
         .with_correlation(task_id),
     );
-    let _ = store.update_status(task_id, TaskStatus::Completed);
+    // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
+    if let Ok(Some(t)) = store.get(task_id) {
+        if t.status != TaskStatus::Paused {
+            let _ = store.update_status(task_id, TaskStatus::Completed);
+        }
+    } else {
+        let _ = store.update_status(task_id, TaskStatus::Completed);
+    }
     notify_task_completion(&task_completion_registry, task_id).await;
     let summary_preview: String = reply_text.chars().take(300).collect();
     learn_from_task_outcome_async(
@@ -4912,8 +4925,16 @@ pub async fn handle_api(
         }
     }
 
-    if method == "GET" && path == "/api/tasks" {
-        return get_task_list(store_path).await;
+    if method == "GET" && path.starts_with("/api/tasks") && !path.starts_with("/api/tasks/") {
+        let status_filter = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| {
+                q.split('&')
+                    .find(|p| p.starts_with("status="))
+                    .map(|p| p.trim_start_matches("status=").to_string())
+            });
+        return get_task_list(store_path, status_filter).await;
     }
     // GET /api/pending-human-input — list all tasks waiting for user input (so UI can show notifications after reload or when user was away)
     if method == "GET" && path == "/api/pending-human-input" {
@@ -4942,6 +4963,12 @@ pub async fn handle_api(
             if let Ok(id) = Uuid::parse_str(id_str) {
                 if method == "POST" && parts.get(1) == Some(&"cancel") {
                     return cancel_task(store_path, id, main_agent).await;
+                }
+                if method == "POST" && parts.get(1) == Some(&"pause") {
+                    return pause_task(store_path, id, main_agent).await;
+                }
+                if method == "POST" && parts.get(1) == Some(&"resume") {
+                    return resume_task(store_path, id, main_agent).await;
                 }
                 if method == "GET" && parts.get(1) == Some(&"events") {
                     return get_task_events(events, id).await;
@@ -5616,6 +5643,84 @@ async fn cancel_task(
     );
     let body = serde_json::json!({ "cancelled": true, "task_id": id.to_string() });
     json_response("200 OK", &body.to_string())
+}
+
+async fn pause_task(
+    store_path: &Path,
+    id: Uuid,
+    main_agent: &crate::agents::MainAgent,
+) -> String {
+    let store = match TaskStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let task = match store.get(id) {
+        Ok(Some(t)) => t,
+        Ok(None) => return json_response("404 Not Found", r#"{"error":"task_not_found"}"#),
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let pausable = matches!(
+        task.status,
+        TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running
+    );
+    if !pausable {
+        let body = serde_json::json!({
+            "error": "task_not_pausable",
+            "detail": "La tâche ne peut pas être mise en pause (déjà terminée, annulée ou en pause).",
+            "status": task.status.as_str()
+        });
+        return json_response("400 Bad Request", &body.to_string());
+    }
+    if store.update_status(id, TaskStatus::Paused).is_err() {
+        return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
+    }
+    let _ = main_agent.bus().send(
+        EventEnvelope::new(
+            EventType::TaskPaused,
+            Some(serde_json::json!({ "task_id": id.to_string() })),
+        )
+        .with_correlation(id),
+    );
+    let body = serde_json::json!({ "paused": true, "task_id": id.to_string() });
+    json_response("200 OK", &body.to_string())
+}
+
+async fn resume_task(
+    store_path: &Path,
+    id: Uuid,
+    main_agent: &crate::agents::MainAgent,
+) -> String {
+    let store = match TaskStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let task = match store.get(id) {
+        Ok(Some(t)) => t,
+        Ok(None) => return json_response("404 Not Found", r#"{"error":"task_not_found"}"#),
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let resumable = matches!(
+        task.status,
+        TaskStatus::Paused | TaskStatus::Interrupted
+    );
+    if !resumable {
+        let body = serde_json::json!({
+            "error": "task_not_resumable",
+            "detail": "Seules les tâches en pause ou interrompues peuvent être reprises.",
+            "status": task.status.as_str()
+        });
+        return json_response("400 Bad Request", &body.to_string());
+    }
+    match main_agent.resume_task(store_path, id) {
+        Ok(()) => {
+            let body = serde_json::json!({ "resumed": true, "task_id": id.to_string() });
+            json_response("200 OK", &body.to_string())
+        }
+        Err(e) => {
+            let body = serde_json::json!({ "error": "resume_failed", "detail": e.to_string() });
+            json_response("500 Internal Server Error", &body.to_string())
+        }
+    }
 }
 
 async fn get_task_status(store_path: &Path, progress: &ProgressCache, task_usage_store: &TaskUsageStore, id: Uuid) -> String {

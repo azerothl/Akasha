@@ -209,4 +209,46 @@ impl MainAgent {
     pub fn bus(&self) -> &EventBus {
         &self.bus
     }
+
+    /// Resume a Paused or Interrupted task: set status to Queued and re-inject into conversation worker (Phase 2 AI OS).
+    pub fn resume_task(&self, store_path: &Path, task_id: Uuid) -> anyhow::Result<()> {
+        let store = TaskStore::open(store_path)?;
+        let task = store.get(task_id)?.ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        let resumable = matches!(
+            task.status,
+            TaskStatus::Paused | TaskStatus::Interrupted
+        );
+        if !resumable {
+            anyhow::bail!("task not resumable (status: {})", task.status.as_str());
+        }
+        store.update_status(task_id, TaskStatus::Queued)?;
+        let _ = self.bus.send(
+            EventEnvelope::new(
+                EventType::TaskCreated,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "resumed": true
+                })),
+            )
+            .with_correlation(task_id),
+        );
+        let message = task
+            .initial_message
+            .clone()
+            .unwrap_or_else(|| "(Reprise)".to_string());
+        let session_id = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
+        let tx = self
+            .direct_conversation_tx
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("conversation channel not available"))?;
+        let task_msg = OrchestratorTask {
+            task_id,
+            message,
+            session_id,
+            image_data_urls: None,
+            execution_mode: None,
+        };
+        tx.try_send(task_msg).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        Ok(())
+    }
 }

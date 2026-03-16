@@ -98,6 +98,7 @@ pub fn spawn_replication_subscriber(nats_client: async_nats::Client, store_path:
                             "paused" => TaskStatus::Paused,
                             "cancelled" => TaskStatus::Cancelled,
                             "waiting_user_input" => TaskStatus::WaitingUserInput,
+                            "interrupted" => TaskStatus::Interrupted,
                             _ => TaskStatus::Pending,
                         };
                         let created_at = p
