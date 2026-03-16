@@ -96,7 +96,7 @@ impl MessageEnvelope {
 pub fn handle_envelope(
     main_agent: &MainAgent,
     store_path: &Path,
-    envelope: &MessageEnvelope,
+    envelope: MessageEnvelope,
 ) -> anyhow::Result<Uuid> {
     main_agent.handle_message(
         store_path,
@@ -104,7 +104,7 @@ pub fn handle_envelope(
         Uuid::new_v4(),
         true,
         &envelope.session_id,
-        envelope.image_data_urls.clone(),
+        envelope.image_data_urls,
         envelope.priority,
     )
 }
