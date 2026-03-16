@@ -4674,6 +4674,39 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
+    // GET /api/agents — list known agent roles (Phase 6 AI OS cockpit).
+    if method == "GET" && path == "/api/agents" {
+        const AGENT_ROLES: &[&str] = &[
+            "conversation", "search", "code", "financial", "documentalist", "project_manager",
+            "technical_writer", "research", "security_audit", "creative", "analyst", "architect",
+            "frontend", "backend", "database", "integration", "qa", "system", "image_generation",
+        ];
+        let list: Vec<serde_json::Value> = AGENT_ROLES
+            .iter()
+            .map(|name| serde_json::json!({ "id": name, "name": name }))
+            .collect();
+        let body_json = serde_json::json!({ "agents": list });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
+    // GET /api/plugins — list loaded skills/plugins (Phase 6 AI OS cockpit).
+    if method == "GET" && path == "/api/plugins" {
+        let list: Vec<serde_json::Value> = skill_registry
+            .list()
+            .await
+            .into_iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "description": s.description,
+                    "parameters": s.parameters,
+                })
+            })
+            .collect();
+        let body_json = serde_json::json!({ "plugins": list });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
     // GET /api/doctor — health checks from daemon (for slash /doctor)
     if method == "GET" && path == "/api/doctor" {
         let mut checks: Vec<serde_json::Value> = Vec::new();
