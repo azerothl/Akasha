@@ -3888,23 +3888,35 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             .with_correlation(task_id),
         );
     }
+    // Determine if the task was paused during execution. If so, we must not emit
+    // TaskCompleted nor mark it as completed; instead, emit TaskPaused to keep
+    // the event stream consistent with the stored status.
+    let is_paused = matches!(
+        store.get(task_id),
+        Ok(Some(Task { status: TaskStatus::Paused, .. }))
+    );
+
+    let final_event_type = if is_paused {
+        EventType::TaskPaused
+    } else {
+        EventType::TaskCompleted
+    };
+    let final_status_str = if is_paused { "paused" } else { "completed" };
+
     let _ = bus.send(
         EventEnvelope::new(
-            EventType::TaskCompleted,
+            final_event_type,
             Some(serde_json::json!({
                 "task_id": task_id.to_string(),
-                "status": "completed",
+                "status": final_status_str,
                 "model_used": last_llm_model_used
             })),
         )
         .with_correlation(task_id),
     );
+
     // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
-    if let Ok(Some(t)) = store.get(task_id) {
-        if t.status != TaskStatus::Paused {
-            let _ = store.update_status(task_id, TaskStatus::Completed);
-        }
-    } else {
+    if !is_paused {
         let _ = store.update_status(task_id, TaskStatus::Completed);
     }
     notify_task_completion(&task_completion_registry, task_id).await;
