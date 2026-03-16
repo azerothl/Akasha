@@ -209,4 +209,61 @@ impl MainAgent {
     pub fn bus(&self) -> &EventBus {
         &self.bus
     }
+
+    /// Resume a Paused or Interrupted task: set status to Queued and re-inject into conversation worker (Phase 2 AI OS).
+    pub fn resume_task(&self, store_path: &Path, task_id: Uuid) -> anyhow::Result<()> {
+        let store = TaskStore::open(store_path)?;
+        let task = store.get(task_id)?.ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        let resumable = matches!(
+            task.status,
+            TaskStatus::Paused | TaskStatus::Interrupted
+        );
+        if !resumable {
+            anyhow::bail!("task not resumable (status: {})", task.status.as_str());
+        }
+        let message = task
+            .initial_message
+            .clone()
+            .unwrap_or_else(|| "(Reprise)".to_string());
+        let session_id = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
+        let tx = self
+            .direct_conversation_tx
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("conversation channel not available"))?;
+        let task_msg = OrchestratorTask {
+            task_id,
+            message,
+            session_id,
+            image_data_urls: None,
+            execution_mode: None,
+        };
+        match tx.try_send(task_msg) {
+            Ok(()) => {
+                // Enqueued synchronously.
+            }
+            Err(mpsc::error::TrySendError::Full(task_msg)) => {
+                // Channel is full: fall back to an async send so we don't drop the resume.
+                let tx_clone = tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx_clone.send(task_msg).await;
+                });
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                anyhow::bail!("conversation channel closed");
+            }
+        }
+        // Only mark the task as queued and emit the resume event after enqueueing is ensured.
+        store.update_status(task_id, TaskStatus::Queued)?;
+        let _ = self.bus.send(
+            EventEnvelope::new(
+                EventType::TaskResumed,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "resumed": true
+                })),
+            )
+            .with_correlation(task_id),
+        );
+        Ok(())
+    }
 }

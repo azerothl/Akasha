@@ -20,6 +20,8 @@ pub enum TaskStatus {
     Paused,
     Cancelled,
     WaitingUserInput,
+    /// Task was running when daemon restarted; can be resumed (Phase 2 AI OS).
+    Interrupted,
 }
 
 impl TaskStatus {
@@ -33,6 +35,7 @@ impl TaskStatus {
             Self::Paused => "paused",
             Self::Cancelled => "cancelled",
             Self::WaitingUserInput => "waiting_user_input",
+            Self::Interrupted => "interrupted",
         }
     }
 
@@ -45,6 +48,7 @@ impl TaskStatus {
             "paused" => Self::Paused,
             "cancelled" => Self::Cancelled,
             "waiting_user_input" => Self::WaitingUserInput,
+            "interrupted" => Self::Interrupted,
             _ => Self::Pending,
         }
     }

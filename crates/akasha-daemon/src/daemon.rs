@@ -1,7 +1,7 @@
 //! Akasha Daemon - Core runtime loop with healthcheck and spec loading
 
 use akasha_core::{load_specs, Specs};
-use akasha_store::{ImmutableLog, MetricsEvent, MetricsStore, PipelineStore, TaskStore};
+use akasha_store::{ImmutableLog, MetricsEvent, MetricsStore, TaskStore};
 use akasha_vault::Vault;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -301,22 +301,14 @@ impl Daemon {
             info!(chunks = rag_pack.len(), "RAG pack loaded for diagnostic");
         }
 
-        // Initialize store and restore tasks (Phase 1). Phase 7: mark Running tasks with a pipeline checkpoint as failed (interrupted by restart).
+        // Initialize store and restore tasks (Phase 1). Phase 2 AI OS: mark Running tasks as Interrupted (recoverable) instead of Failed.
         if let Ok(store) = TaskStore::open(&db_path) {
             let tasks = store.get_pending_or_running().unwrap_or_default();
             info!(count = tasks.len(), "Restored tasks from persistence");
-            if let Ok(pipeline) = PipelineStore::open(&db_path) {
-                for t in &tasks {
-                    if t.status == akasha_store::TaskStatus::Running {
-                        let has_checkpoint = match pipeline.get(t.id) {
-                            Ok(Some(ctx)) => ctx.checkpoint_json.is_some(),
-                            _ => false,
-                        };
-                        if has_checkpoint {
-                            let _ = store.update_status(t.id, akasha_store::TaskStatus::Failed);
-                            info!(task_id = %t.id, "Task marked failed (interrupted by daemon restart)");
-                        }
-                    }
+            for t in &tasks {
+                if t.status == akasha_store::TaskStatus::Running {
+                    let _ = store.update_status(t.id, akasha_store::TaskStatus::Interrupted);
+                    info!(task_id = %t.id, "Task marked interrupted (daemon restart); can be resumed");
                 }
             }
         }
@@ -573,6 +565,7 @@ impl Daemon {
                 async move {
                     while let Some(task) = conv_rx.recv().await {
                         // Phase 4: skip if task was cancelled (e.g. via POST /api/tasks/:id/cancel) before worker started.
+                        // Phase 2 AI OS: skip if task was paused.
                         if let Ok(store) = akasha_store::TaskStore::open(store_path.as_path()) {
                             if let Ok(Some(t)) = store.get(task.task_id) {
                                 if t.status == akasha_store::TaskStatus::Cancelled {
@@ -583,6 +576,9 @@ impl Daemon {
                                         )
                                         .with_correlation(task.task_id),
                                     );
+                                    continue;
+                                }
+                                if t.status == akasha_store::TaskStatus::Paused {
                                     continue;
                                 }
                             }

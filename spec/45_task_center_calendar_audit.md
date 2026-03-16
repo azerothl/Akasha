@@ -8,7 +8,7 @@ Audit des onglets Tâches et Calendrier par rapport à [36_ui_architecture.md](3
 |-----------------|--------|
 | Liste : tâches en cours, terminées, échouées | ✅ Filtres actifs / terminées, recherche |
 | Détail par tâche : graphe sous-tâches, timeline, logs, artefacts | ✅ Événements (timeline), détail dans modale Calendrier pour une tâche |
-| Actions : relance, pause, reprendre, annuler | ✅ **Annuler** (bouton + /stop, /cancel) ; **Relancer** (bouton → Chat avec message) ; pause = désactiver la récurrence (Calendrier) |
+| Actions : relance, pause, reprendre, annuler | ✅ **Annuler** (bouton + /stop, /cancel) ; **Relancer** (bouton → Chat avec message) ; **Pause** (POST /api/tasks/:id/pause) ; **Reprendre** (POST /api/tasks/:id/resume) ; tâches **interrompues** (après redémarrage daemon) : GET /api/tasks?status=interrupted, action Relancer = resume |
 | Mise à jour temps réel | ✅ SSE + refresh liste |
 
 ## Calendrier
