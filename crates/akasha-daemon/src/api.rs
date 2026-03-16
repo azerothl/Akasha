@@ -4925,6 +4925,45 @@ pub async fn handle_api(
         }
     }
 
+    fn decode_url_component(s: &str) -> String {
+        fn hex_val(c: u8) -> Option<u8> {
+            match c {
+                b'0'..=b'9' => Some(c - b'0'),
+                b'a'..=b'f' => Some(c - b'a' + 10),
+                b'A'..=b'F' => Some(c - b'A' + 10),
+                _ => None,
+            }
+        }
+
+        let bytes = s.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'%' if i + 2 < bytes.len() => {
+                    if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                        out.push((h << 4) | l);
+                        i += 3;
+                        continue;
+                    } else {
+                        // Invalid percent-encoding, keep literal '%'
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+                b'+' => {
+                    out.push(b' ');
+                    i += 1;
+                }
+                c => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
     if method == "GET" && path.starts_with("/api/tasks") && !path.starts_with("/api/tasks/") {
         let status_filter = path
             .split('?')
@@ -4932,7 +4971,10 @@ pub async fn handle_api(
             .and_then(|q| {
                 q.split('&')
                     .find(|p| p.starts_with("status="))
-                    .map(|p| p.trim_start_matches("status=").to_string())
+                    .map(|p| {
+                        let raw = p.trim_start_matches("status=");
+                        decode_url_component(raw)
+                    })
             });
         return get_task_list(store_path, status_filter).await;
     }
