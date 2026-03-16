@@ -52,7 +52,10 @@ impl PolicyEngine {
     pub fn load_from_path(path: &Path) -> anyhow::Result<Self> {
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
-            Err(_) => return Ok(Self { rules: vec![] }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self { rules: vec![] });
+            }
+            Err(e) => return Err(e.into()),
         };
         if content.trim().is_empty() {
             return Ok(Self { rules: vec![] });
