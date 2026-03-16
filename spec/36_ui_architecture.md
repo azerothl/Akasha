@@ -49,6 +49,12 @@ Les mises à jour de progression doivent arriver en **&lt; 1 s** en local et **&
 
 Transport : WS/SSE (local), NATS → gateway → WS/SSE (cluster).
 
+### Observabilité (Phase 5 AI OS)
+
+- **GET /api/timeline** : derniers événements (task_id, event_type, payload, at) ; paramètres `limit`, `task_id`.
+- **GET /api/metrics** : métriques tâches (pending, running, completed, failed, paused, interrupted).
+- Onglet **Logs / Audit** : affichage timeline et/ou lecture audit log (ImmutableLog) ; à brancher en UI.
+
 ---
 
 ## 4. Non-blocage et réactivité
