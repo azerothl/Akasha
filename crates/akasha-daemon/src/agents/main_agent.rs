@@ -228,7 +228,11 @@ impl MainAgent {
             .initial_message
             .clone()
             .unwrap_or_else(|| "(Reprise)".to_string());
-        let session_id = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
+        let session_id = task
+            .session_id
+            .clone()
+            .unwrap_or_else(|| format!("day-{}", chrono::Utc::now().format("%Y-%m-%d")));
+        let execution_mode = task.execution_mode.clone();
         let tx = self
             .direct_conversation_tx
             .as_ref()
@@ -238,7 +242,7 @@ impl MainAgent {
             message,
             session_id,
             image_data_urls: None,
-            execution_mode: None,
+            execution_mode,
         };
         if let Err(e) = tx.try_send(task_msg) {
             match e {
