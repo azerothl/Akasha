@@ -5,6 +5,7 @@ use akasha_store::{Task, TaskStatus, TaskStore};
 use chrono::Utc;
 use std::path::Path;
 use tokio::sync::mpsc;
+use tokio::task;
 use uuid::Uuid;
 
 use super::{classify_execution_mode, EventBus, ExecutionMode};
@@ -221,6 +222,19 @@ impl MainAgent {
         if !resumable {
             anyhow::bail!("task not resumable (status: {})", task.status.as_str());
         }
+        // Remember the original status so we can roll back on channel closure.
+        let original_status = task.status;
+        store.update_status(task_id, TaskStatus::Queued)?;
+        let _ = self.bus.send(
+            EventEnvelope::new(
+                EventType::TaskResumed,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "resumed": true
+                })),
+            )
+            .with_correlation(task_id),
+        );
         let message = task
             .initial_message
             .clone()
@@ -238,20 +252,25 @@ impl MainAgent {
             execution_mode: None,
         };
         match tx.try_send(task_msg) {
-            Ok(()) => {
-                // Enqueued synchronously.
-            }
+            Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(task_msg)) => {
-                // Channel is full: fall back to an async send so we don't drop the resume.
-                let tx_clone = tx.clone();
-                tokio::spawn(async move {
-                    let _ = tx_clone.send(task_msg).await;
+                // Channel is full: fall back to an async send and block until there is capacity.
+                let send_result = task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        tx.send(task_msg).await
+                    })
                 });
+                send_result
+                    .map_err(|e| anyhow::anyhow!("failed to enqueue resumed task after channel full: {}", e))?;
+                Ok(())
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                anyhow::bail!("conversation channel closed");
+                // Channel is closed: attempt to roll back the status and report a clear error.
+                let _ = store.update_status(task_id, original_status);
+                anyhow::bail!("conversation channel closed when resuming task")
             }
         }
+
         // Only mark the task as queued and emit the resume event after enqueueing is ensured.
         store.update_status(task_id, TaskStatus::Queued)?;
         let _ = self.bus.send(

@@ -120,11 +120,11 @@ pub fn handle_envelope(
 
     main_agent.handle_message(
         store_path,
-        &raw_message,
-        Uuid::new_v4(),
+        &envelope.raw_message,
+        Uuid::nil(),
         true,
-        &session_id,
-        image_data_urls,
-        priority,
+        &envelope.session_id,
+        envelope.image_data_urls,
+        envelope.priority,
     )
 }

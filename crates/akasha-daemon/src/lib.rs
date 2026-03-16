@@ -5,6 +5,7 @@ pub mod user_profile;
 pub mod agents;
 pub mod gateway;
 pub mod personality;
+pub mod policy_engine;
 pub mod api;
 pub mod debug_log;
 pub mod channels;
