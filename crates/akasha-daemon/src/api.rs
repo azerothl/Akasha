@@ -4899,7 +4899,7 @@ pub async fn handle_api(
         let ack_message = build_ack_message(&message);
         // Gateway: single entry point for task creation and routing (spec 48).
         let envelope = crate::gateway::MessageEnvelope::api(session_id.clone(), message, image_data_urls, priority);
-        match crate::gateway::handle_envelope(main_agent, store_path, &envelope) {
+        match crate::gateway::handle_envelope(main_agent, store_path, envelope) {
             Ok(task_id) => {
                 let body = serde_json::json!({
                     "ack": true,
