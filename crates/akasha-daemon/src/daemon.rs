@@ -302,21 +302,34 @@ impl Daemon {
         }
 
         // Initialize store and restore tasks (Phase 1). Phase 2 AI OS: mark Running tasks as Interrupted (recoverable) instead of Failed.
-        if let Ok(store) = TaskStore::open(&db_path) {
+        let interrupted_ids: Vec<uuid::Uuid> = if let Ok(store) = TaskStore::open(&db_path) {
             let tasks = store.get_pending_or_running().unwrap_or_default();
             info!(count = tasks.len(), "Restored tasks from persistence");
+            let mut ids = Vec::new();
             for t in &tasks {
                 if t.status == akasha_store::TaskStatus::Running {
                     let _ = store.update_status(t.id, akasha_store::TaskStatus::Interrupted);
+                    ids.push(t.id);
                     info!(task_id = %t.id, "Task marked interrupted (daemon restart); can be resumed");
                 }
             }
-        }
+            ids
+        } else {
+            vec![]
+        };
         let cluster_enabled = std::env::var("AKASHA_CLUSTER_ENABLED").as_deref() == Ok("1");
         if !cluster_enabled {
             if let Ok(log) = ImmutableLog::open(&log_path) {
                 if log.verify().unwrap_or(false) {
                     let _ = log.append("daemon_started");
+                    // Phase 4 AI OS: record recovery window (interrupted task ids) in audit log.
+                    if !interrupted_ids.is_empty() {
+                        let payload = format!(
+                            "recovery_started|{}",
+                            interrupted_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")
+                        );
+                        let _ = log.append(&payload);
+                    }
                 }
             }
         }
