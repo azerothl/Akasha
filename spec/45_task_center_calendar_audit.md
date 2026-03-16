@@ -17,7 +17,7 @@ Audit des onglets Tâches et Calendrier par rapport à [36_ui_architecture.md](3
 |-----------------|--------|
 | Vue : récurrences + prochaines occurrences (mois / semaine / jour) | ✅ Grille jour/semaine/mois, onglet Récent, onglet Récurrences |
 | CRUD récurrences (edit, supprimer, pause) | ✅ Détail récurrence : nom, état (activée/pause), prompt, rrule ; /schedule delete ; enregistrer prompt |
-| Exceptions (skip une occurrence) | ⏳ Backend : `schedule_exception` / `get_exceptions_for_schedule` ; UI affichage/édition à brancher si besoin |
+| Exceptions (skip une occurrence) | ✅ Backend : GET/POST/DELETE `/api/schedules/:id/exceptions` ; scheduler applique les exceptions ; UI affichage/édition à brancher |
 | Lien runs historiques (task_run, task_id) | ✅ Clic sur événement → détail tâche (run + statut) |
 
 ## Références

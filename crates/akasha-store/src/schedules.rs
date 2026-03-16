@@ -255,6 +255,11 @@ impl ScheduleStore {
         Ok(())
     }
 
+    pub fn delete_exception(&self, exception_id: Uuid) -> anyhow::Result<()> {
+        self.conn.execute("DELETE FROM schedule_exceptions WHERE id = ?1", [exception_id.to_string()])?;
+        Ok(())
+    }
+
     pub fn get_exceptions_for_schedule(&self, schedule_id: Uuid) -> anyhow::Result<Vec<ScheduleException>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, schedule_id, type, date, override_payload FROM schedule_exceptions WHERE schedule_id = ?1",
