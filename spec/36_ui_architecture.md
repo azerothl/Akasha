@@ -55,6 +55,12 @@ Transport : WS/SSE (local), NATS → gateway → WS/SSE (cluster).
 - **GET /api/metrics** : métriques tâches (pending, running, completed, failed, paused, interrupted).
 - Onglet **Logs / Audit** : affichage timeline et/ou lecture audit log (ImmutableLog) ; à brancher en UI.
 
+### Cockpit (Phase 6 AI OS)
+
+- **GET /api/agents** : liste des rôles d’agents connus (conversation, analyst, architect, …).
+- **GET /api/plugins** : liste des skills/plugins chargés (nom, description, paramètres).
+- Onglets UI prévus : Agents, Plugins, Policies (lecture seule), Health/Runtime (détail composants).
+
 ---
 
 ## 4. Non-blocage et réactivité
