@@ -3,7 +3,7 @@
 use akasha_core::{EventEnvelope, EventType};
 use akasha_vault::Vault;
 use akasha_llm::CompletionRequest;
-use akasha_store::{parse_todos_from_payload, Schedule, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore, TodoStatus};
+use akasha_store::{parse_todos_from_payload, Schedule, ScheduleException, ScheduleExceptionType, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore, TodoStatus};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use crate::agent_profile::AgentProfile;
 use crate::user_profile::UserProfile;
@@ -5209,7 +5209,32 @@ pub async fn handle_api(
         let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
         if let Some(&id_str) = parts.first() {
             if let Ok(id) = Uuid::parse_str(id_str) {
+                if parts.get(1) == Some(&"exceptions") {
+                    return get_schedule_exceptions(store_path, id).await;
+                }
                 return get_schedule_by_id(store_path, id).await;
+            }
+        }
+    }
+    if method == "POST" && path.contains("/exceptions") {
+        let rest = path.trim_start_matches("/api/schedules/");
+        let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.get(1) == Some(&"exceptions") {
+            if let Some(&schedule_id_str) = parts.first() {
+                if let Ok(schedule_id) = Uuid::parse_str(schedule_id_str) {
+                    return post_schedule_exception(store_path, schedule_id, body).await;
+                }
+            }
+        }
+    }
+    if method == "DELETE" && path.contains("/exceptions/") {
+        let rest = path.trim_start_matches("/api/schedules/");
+        let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.get(1) == Some(&"exceptions") {
+            if let (Some(_schedule_id_str), Some(&exception_id_str)) = (parts.first(), parts.get(2)) {
+                if let Ok(exception_id) = Uuid::parse_str(exception_id_str) {
+                    return delete_schedule_exception(store_path, exception_id).await;
+                }
             }
         }
     }
@@ -6009,6 +6034,82 @@ async fn get_schedules_list(store_path: &Path) -> String {
         })
         .collect();
     let body = serde_json::json!({ "schedules": arr });
+    json_response("200 OK", &body.to_string())
+}
+
+async fn get_schedule_exceptions(store_path: &Path, schedule_id: Uuid) -> String {
+    let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let list = match store.get_exceptions_for_schedule(schedule_id) {
+        Ok(l) => l,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let arr: Vec<serde_json::Value> = list
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id.to_string(),
+                "schedule_id": e.schedule_id.to_string(),
+                "type": e.type_.as_str(),
+                "date": e.date.format("%Y-%m-%d").to_string(),
+                "override_payload": e.override_payload
+            })
+        })
+        .collect();
+    let body = serde_json::json!({ "exceptions": arr });
+    json_response("200 OK", &body.to_string())
+}
+
+async fn post_schedule_exception(store_path: &Path, schedule_id: Uuid, body: Option<Vec<u8>>) -> String {
+    let json: serde_json::Value = match body.as_deref().and_then(|b| serde_json::from_slice(b).ok()) {
+        Some(j) => j,
+        None => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
+    };
+    let date_str = json.get("date").and_then(|v| v.as_str()).unwrap_or("");
+    let date = match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+        Ok(d) => d,
+        Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_date","expected":"YYYY-MM-DD"}"#),
+    };
+    let type_str = json.get("type").and_then(|v| v.as_str()).unwrap_or("skip");
+    let type_ = match type_str {
+        "override" => ScheduleExceptionType::Override,
+        _ => ScheduleExceptionType::Skip,
+    };
+    let override_payload = json.get("override_payload").and_then(|v| v.as_str()).map(String::from);
+    let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let e = ScheduleException {
+        id: Uuid::new_v4(),
+        schedule_id,
+        type_,
+        date,
+        override_payload,
+    };
+    if store.insert_exception(&e).is_err() {
+        return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
+    }
+    let body = serde_json::json!({
+        "id": e.id.to_string(),
+        "schedule_id": e.schedule_id.to_string(),
+        "type": e.type_.as_str(),
+        "date": e.date.format("%Y-%m-%d").to_string()
+    });
+    json_response("200 OK", &body.to_string())
+}
+
+async fn delete_schedule_exception(store_path: &Path, exception_id: Uuid) -> String {
+    let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    if store.delete_exception(exception_id).is_err() {
+        return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
+    }
+    let body = serde_json::json!({ "deleted": true, "exception_id": exception_id.to_string() });
     json_response("200 OK", &body.to_string())
 }
 
