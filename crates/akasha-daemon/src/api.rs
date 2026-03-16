@@ -5765,8 +5765,17 @@ async fn resume_task(
         });
         return json_response("400 Bad Request", &body.to_string());
     }
+    let previous_status = task.status;
     match main_agent.resume_task(store_path, id) {
         Ok(()) => {
+            // Emit a TaskResumed event so consumers can track task lifecycle correctly.
+            let event = EventEnvelope::new(EventType::TaskResumed {
+                task_id: id,
+                previous_status: Some(previous_status),
+            });
+            // Ignore any error from event emission to preserve existing API behavior.
+            let _ = main_agent.emit(event);
+
             let body = serde_json::json!({ "resumed": true, "task_id": id.to_string() });
             json_response("200 OK", &body.to_string())
         }
