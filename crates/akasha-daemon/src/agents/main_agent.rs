@@ -270,5 +270,19 @@ impl MainAgent {
                 anyhow::bail!("conversation channel closed when resuming task")
             }
         }
+
+        // Only mark the task as queued and emit the resume event after enqueueing is ensured.
+        store.update_status(task_id, TaskStatus::Queued)?;
+        let _ = self.bus.send(
+            EventEnvelope::new(
+                EventType::TaskResumed,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "resumed": true
+                })),
+            )
+            .with_correlation(task_id),
+        );
+        Ok(())
     }
 }

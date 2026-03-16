@@ -3905,6 +3905,36 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             .with_correlation(task_id),
         );
         // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
+  }
+    // Determine if the task was paused during execution. If so, we must not emit
+    // TaskCompleted nor mark it as completed; instead, emit TaskPaused to keep
+    // the event stream consistent with the stored status.
+    let is_paused = matches!(
+        store.get(task_id),
+        Ok(Some(Task { status: TaskStatus::Paused, .. }))
+    );
+
+    let final_event_type = if is_paused {
+        EventType::TaskPaused
+    } else {
+        EventType::TaskCompleted
+    };
+    let final_status_str = if is_paused { "paused" } else { "completed" };
+
+    let _ = bus.send(
+        EventEnvelope::new(
+            final_event_type,
+            Some(serde_json::json!({
+                "task_id": task_id.to_string(),
+                "status": final_status_str,
+                "model_used": last_llm_model_used
+            })),
+        )
+        .with_correlation(task_id),
+    );
+
+    // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
+    if !is_paused {
         let _ = store.update_status(task_id, TaskStatus::Completed);
         notify_task_completion(&task_completion_registry, task_id).await;
         let summary_preview: String = reply_text.chars().take(300).collect();
@@ -4908,6 +4938,8 @@ pub async fn handle_api(
             .and_then(|v| v.get("priority").and_then(|p| p.as_str()))
             .map(|s| if s.eq_ignore_ascii_case("high") { TaskPriority::UserHigh } else { TaskPriority::UserNormal })
             .unwrap_or(TaskPriority::UserNormal);
+        // Build acknowledgment message before moving `message` into the envelope.
+        let ack_message = build_ack_message(&message);
         // Gateway: single entry point for task creation and routing (spec 48).
         // Compute acknowledgment message before moving `message` into the envelope.
         let ack_message = build_ack_message(&message);
@@ -4926,6 +4958,45 @@ pub async fn handle_api(
         }
     }
 
+    fn decode_url_component(s: &str) -> String {
+        fn hex_val(c: u8) -> Option<u8> {
+            match c {
+                b'0'..=b'9' => Some(c - b'0'),
+                b'a'..=b'f' => Some(c - b'a' + 10),
+                b'A'..=b'F' => Some(c - b'A' + 10),
+                _ => None,
+            }
+        }
+
+        let bytes = s.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'%' if i + 2 < bytes.len() => {
+                    if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                        out.push((h << 4) | l);
+                        i += 3;
+                        continue;
+                    } else {
+                        // Invalid percent-encoding, keep literal '%'
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+                b'+' => {
+                    out.push(b' ');
+                    i += 1;
+                }
+                c => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
     if method == "GET" && (path == "/api/tasks" || path.starts_with("/api/tasks?")) {
         let status_filter = path
             .split('?')
@@ -4933,7 +5004,10 @@ pub async fn handle_api(
             .and_then(|q| {
                 q.split('&')
                     .find(|p| p.starts_with("status="))
-                    .map(|p| p.trim_start_matches("status=").to_string())
+                    .map(|p| {
+                        let raw = p.trim_start_matches("status=");
+                        decode_url_component(raw)
+                    })
             });
         return get_task_list(store_path, status_filter).await;
     }
@@ -5675,7 +5749,7 @@ async fn pause_task(
     if !is_pausable(&task.status) {
         let body = serde_json::json!({
             "error": "task_not_pausable",
-            "detail": "La tâche ne peut pas être mise en pause (déjà terminée, annulée, en cours d'exécution ou en pause).",
+            "detail": "La tâche ne peut pas être mise en pause dans son état actuel (déjà terminée, annulée, en pause ou en cours d'exécution).",
             "status": task.status.as_str()
         });
         return json_response("400 Bad Request", &body.to_string());
