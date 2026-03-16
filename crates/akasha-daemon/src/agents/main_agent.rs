@@ -5,6 +5,7 @@ use akasha_store::{Task, TaskStatus, TaskStore};
 use chrono::Utc;
 use std::path::Path;
 use tokio::sync::mpsc;
+use tokio::task;
 use uuid::Uuid;
 
 use super::{classify_execution_mode, EventBus, ExecutionMode};
@@ -221,6 +222,8 @@ impl MainAgent {
         if !resumable {
             anyhow::bail!("task not resumable (status: {})", task.status.as_str());
         }
+        // Remember the original status so we can roll back on channel closure.
+        let original_status = task.status;
         store.update_status(task_id, TaskStatus::Queued)?;
         let _ = self.bus.send(
             EventEnvelope::new(
@@ -248,7 +251,24 @@ impl MainAgent {
             image_data_urls: None,
             execution_mode: None,
         };
-        tx.try_send(task_msg).map_err(|e| anyhow::anyhow!("{:?}", e))?;
-        Ok(())
+        match tx.try_send(task_msg) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(task_msg)) => {
+                // Channel is full: fall back to an async send and block until there is capacity.
+                let send_result = task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        tx.send(task_msg).await
+                    })
+                });
+                send_result
+                    .map_err(|e| anyhow::anyhow!("failed to enqueue resumed task after channel full: {}", e))?;
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                // Channel is closed: attempt to roll back the status and report a clear error.
+                let _ = store.update_status(task_id, original_status);
+                anyhow::bail!("conversation channel closed when resuming task")
+            }
+        }
     }
 }
