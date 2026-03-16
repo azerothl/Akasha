@@ -5715,12 +5715,12 @@ async fn pause_task(
     };
     let pausable = matches!(
         task.status,
-        TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running
+        TaskStatus::Pending | TaskStatus::Queued
     );
     if !pausable {
         let body = serde_json::json!({
             "error": "task_not_pausable",
-            "detail": "La tâche ne peut pas être mise en pause (déjà terminée, annulée ou en pause).",
+            "detail": "La tâche ne peut pas être mise en pause dans son état actuel (déjà terminée, annulée, en pause ou en cours d'exécution).",
             "status": task.status.as_str()
         });
         return json_response("400 Bad Request", &body.to_string());
