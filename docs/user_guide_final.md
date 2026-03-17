@@ -248,6 +248,7 @@ Dans le chat (TUI ou interface web), les messages commençant par **/** sont des
 | `/vault list` | Clés du vault (noms uniquement). |
 | `/plugins` | Liste des plugins installés. |
 | `/reload` | Recharger les plugins. |
+| `/skills`, `/skills list` | Liste des skills installés (nom et description). |
 | `/skills reload` | Recharger les skills (après en avoir ajouté ou modifié). |
 | `/skills uninstall <nom>` | Désinstaller un skill (ex. `/skills uninstall bankr`). |
 | `/restart` | Redémarrer le daemon (via le superviseur). |

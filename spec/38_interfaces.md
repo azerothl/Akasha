@@ -82,7 +82,7 @@ En production : lancer le binaire installé (ex. `akasha-ui.exe` sous Windows). 
 
 ### Commandes slash (Chat, TUI et Web)
 
-Exemples : `/help`, `/status`, `/config list`, `/advice` (avec résultat du diagnostic), `/plugins`, `/reload`, etc. Voir la documentation dans l’onglet Doc ou `user_guide.md`.
+**Les mêmes commandes sont disponibles en TUI et en Web (Tauri).** Exemples : `/help`, `/status`, `/doctor`, `/advice`, `/config list`, `/models`, `/plugins`, `/reload`, `/skills reload`, `/task create "msg"`, `/stop TASK_ID`, `/newsession`, `/restart`, etc. Voir la documentation dans l’onglet Doc ou [user_guide.md](user_guide.md) (section « Commandes slash »). Taper **/help** dans le chat pour la liste complète.
 
 ---
 

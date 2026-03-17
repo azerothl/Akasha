@@ -1528,6 +1528,8 @@ function App() {
 /vault list       — clés du vault (noms uniquement)
 /plugins          — liste des plugins
 /reload           — recharger les plugins
+/skills            — liste des skills installés
+/skills list       — idem
 /skills reload     — recharger les skills (data_dir/skills, spec/skills)
 /skills uninstall <nom> — désinstaller un skill (ex. /skills uninstall bankr)
 /restart          — redémarrer le daemon (superviseur)
@@ -1646,6 +1648,17 @@ function App() {
     }
     if (cmd === "skills") {
       const sub = parts[1]?.toLowerCase() ?? "";
+      if (sub === "" || sub === "list") {
+        try {
+          const list = await invoke<Array<{ name?: string; description?: string }>>("get_skills", { port });
+          if (!list?.length) return "Aucun skill installé. Utilisez /skills reload après en avoir ajouté dans data_dir/skills ou spec/skills.";
+          return list
+            .map((s) => `  • ${s.name ?? "?"} — ${(s.description ?? "").trim() || "(sans description)"}`)
+            .join("\n");
+        } catch {
+          return "Impossible de lister les skills (daemon déconnecté ou erreur).";
+        }
+      }
       if (sub === "reload") {
         try {
           const json = await invoke<{ reloaded?: boolean; count?: number }>("reload_skills", { port });
@@ -1668,7 +1681,7 @@ function App() {
           return `Impossible de désinstaller le skill : ${String(err)}`;
         }
       }
-      return "Usage: /skills reload — recharger les skills ; /skills uninstall <nom> — désinstaller un skill.";
+      return "Usage: /skills [list] — lister les skills ; /skills reload — recharger ; /skills uninstall <nom> — désinstaller.";
     }
     if (cmd === "metrics") {
       const data = await invoke<Record<string, ModelMetricsEntry>>("get_router_metrics", { port });

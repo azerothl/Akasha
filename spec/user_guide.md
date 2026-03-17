@@ -261,28 +261,36 @@ Voir `spec/33_agents_tools_orchestrator_skills.md` pour la feuille de route (out
 
 ### Commandes slash (TUI et interface web)
 
-Dans le chat, les messages commençant par **/** sont interprétés comme des commandes (pas envoyés au LLM) :
+Dans le chat (TUI et interface web Tauri), les messages commençant par **/** sont interprétés comme des commandes (pas envoyés au LLM). **Les mêmes commandes sont disponibles dans les deux interfaces.** Tapez **/help** ou **/?** pour afficher la liste complète.
 
 | Commande | Description |
 |----------|-------------|
-| `/help`, `/?` | Aide des commandes |
-| `/status` | État du daemon |
-| `/doctor` | Diagnostic (daemon, Ollama, vault, spec, modèle embarqué) ; si le daemon tourne, affiche aussi les checks côté daemon (embedded_llm, etc.) |
-| `/advice` | Conseil diagnostic (RAG + modèle LLM) |
-| `/embedded` | Statut du modèle local embarqué (disponible, chargé ou non) |
-| `/embedded reload` | Décharge le modèle embarqué (rechargé au prochain appel) |
-| `/metrics` | Métriques du routeur LLM |
-| `/models` | Liste des modèles (tous les providers : Ollama, OpenAI, OpenRouter, akasha_embedded, etc.) |
-| `/models list` | Modèles par catégorie (primary + fallback) |
-| `/routes` | Idem : primary et fallback par catégorie |
-| `/models set CATÉGORIE PROVIDER MODÈLE` | Définit le modèle pour une catégorie (ex. `/models set conversation ollama llama3.2`) ; l'ancien primary passe en fallback ; pris en compte immédiatement et sauvegardé |
-| `/config list` | Variables (akasha.env) |
-| `/config get KEY` | Valeur d'une variable |
-| `/config set KEY value` | Définir une variable |
-| `/vault list` | Clés du vault (noms uniquement) |
-| `/plugins` | Liste des plugins installés |
-| `/reload` | Recharger les plugins |
-| `/restart` | Redémarrer le daemon (superviseur) |
+| `/help`, `/?` | Aide des commandes (liste complète). |
+| `/task create "message"` | Crée une tâche (envoie le message au daemon comme un message chat). |
+| `/schedule create NOM INTERVAL_SEC "description"` | Crée une récurrence (ex. rappel périodique). |
+| `/schedule delete SCHEDULE_ID` | Supprime une récurrence. |
+| `/stop TASK_ID`, `/cancel TASK_ID` | Annule une tâche (en cours ou en attente). |
+| `/newsession` | Nouvelle session : contexte court terme effacé, le prochain message repart de zéro. |
+| `/status` | État du daemon. |
+| `/doctor` | Diagnostic (daemon, Ollama, vault, spec, modèle embarqué) ; si le daemon tourne, affiche les checks côté daemon (embedded_llm, etc.). |
+| `/advice` | Conseil diagnostic (RAG + modèle LLM). |
+| `/embedded` | Statut du modèle local embarqué (disponible, chargé ou non). |
+| `/embedded reload` | Décharge le modèle embarqué (rechargé au prochain appel). |
+| `/metrics` | Métriques du routeur LLM. |
+| `/models` | Liste des modèles (tous les providers : Ollama, OpenAI, OpenRouter, akasha_embedded, etc.). |
+| `/models list` | Modèles par catégorie (primary + fallback). |
+| `/models set CATÉGORIE PROVIDER MODÈLE` | Définit le modèle pour une catégorie (ex. `/models set conversation ollama llama3.2`) ; l'ancien primary passe en fallback ; pris en compte immédiatement et sauvegardé. |
+| `/routes` | Primary et fallback par catégorie (identique à `/models list`). |
+| `/config list` | Variables (akasha.env). |
+| `/config get KEY` | Valeur d'une variable. |
+| `/config set KEY value` | Définir une variable. |
+| `/vault list` | Clés du vault (noms uniquement). |
+| `/plugins` | Liste des plugins installés. |
+| `/reload` | Recharger les plugins. |
+| `/skills`, `/skills list` | Liste des skills installés (nom et description). |
+| `/skills reload` | Recharger les skills (data_dir/skills, spec/skills) après ajout ou modification. |
+| `/skills uninstall <nom>` | Désinstaller un skill (ex. `/skills uninstall bankr`). |
+| `/restart` | Redémarrer le daemon (superviseur). |
 
 Pour ajouter une clé au vault : utiliser le CLI `akasha vault set KEY [value]`. Pour supprimer : `akasha vault delete KEY` ou `DELETE /api/vault` avec body `{"key": "KEY"}` (pas d’équivalent slash pour la sécurité).
 

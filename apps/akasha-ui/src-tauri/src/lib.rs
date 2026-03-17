@@ -620,6 +620,20 @@ async fn reload_plugins(port: Option<u16>) -> Result<(), String> {
     Ok(())
 }
 
+/// GET /api/skills — list installed skills. Returns array of { name, description, ... }.
+#[tauri::command]
+async fn get_skills(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/skills", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// POST /api/skills/reload — reload skills from disk (Agent Skills + YAML). Returns { count }.
 #[tauri::command]
 async fn reload_skills(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -1437,6 +1451,7 @@ pub fn run() {
             get_advice,
             get_plugins,
             reload_plugins,
+            get_skills,
             reload_skills,
             uninstall_skill,
             get_router_routes,

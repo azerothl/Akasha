@@ -103,7 +103,7 @@ akasha tui
 
 - **Onglets** : Chat, Routeur (métriques LLM), Doc (guide utilisateur servi par le daemon), Activité (tâches et événements).
 - **Chat** : envoi de messages au daemon ; réponses via l’orchestrateur (ack immédiat, traitement en arrière-plan). Défilement : ↑↓, PgUp/PgDn, Home/End.
-- **Commandes slash** (dans le chat) : `/help`, `/status`, `/doctor`, `/advice`, `/embedded` (statut modèle local), `/embedded reload`, `/metrics`, `/models` (liste), `/models set CATÉGORIE PROVIDER MODÈLE` (ex. `conversation ollama llama3.2`), `/config list`, `/vault list`, `/plugins`, `/reload`, `/restart`.
+- **Commandes slash** (dans le chat, identiques en TUI et Tauri) : `/help`, `/status`, `/doctor`, `/advice`, `/embedded`, `/embedded reload`, `/metrics`, `/models`, `/models list`, `/models set CATÉGORIE PROVIDER MODÈLE`, `/routes`, `/config list` / `get` / `set`, `/vault list`, `/plugins`, `/reload`, `/skills reload`, `/skills uninstall <nom>`, `/restart`, `/task create "msg"`, `/schedule create` / `delete`, `/stop TASK_ID`, `/cancel TASK_ID`, `/newsession`. Liste complète : taper `/help` dans le chat.
 - **Raccourcis** : Tab = changer d’onglet, R = rafraîchir (métriques ou doc), Échap / Ctrl+Q = quitter.
 
 ### Interface web (Tauri)

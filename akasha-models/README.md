@@ -8,23 +8,37 @@ Services de modèles (LLM, TTS/STT) montés **à la demande** pour le daemon Aka
 |-----------|-------------|------------|----------------------------------|
 | Ollama    | LLM local   | 11434      | `llm_router.yaml` → `providers.ollama.base_url` |
 | BitNet    | LLM local   | 8080       | `llm_router.yaml` → `providers.bitnet.base_url` |
-| TTS (Kyutai / Pocket TTS) | Synthèse vocale | 8765 | `voice_router.yaml` → `tts.base_url` |
-| STT (Kyutai moshi-server) | Transcription | 8766 | `voice_router.yaml` → `stt.base_url` |
+| TTS       | Synthèse vocale (edge-tts) | 8765 | `voice_router.yaml` → `tts.base_url` |
+| STT       | Transcription (faster-whisper) | 8766 | `voice_router.yaml` → `stt.base_url` |
 
 ## Démarrage à la demande
 
 Avec Docker Compose (profiles) :
 
 ```bash
-# LLM uniquement (Ollama)
+# LLM Ollama
 docker compose --profile ollama up -d
 
-# TTS/STT uniquement (si images/services définis)
+# LLM BitNet (après avoir placé un modèle GGUF dans le volume ; voir ci-dessous)
+docker compose --profile bitnet up -d
+
+# TTS + STT (construction des images tts/ et stt/ au premier lancement)
 docker compose --profile voice up -d
 
-# Tout
+# Ollama + voix
 docker compose --profile ollama --profile voice up -d
 ```
+
+**BitNet** : le service part du répertoire `bitnet/` (Dockerfile qui clone et compile [BitNet](https://github.com/microsoft/BitNet)). Il faut fournir un modèle GGUF dans le volume monté sur `/models`. Par défaut le compose utilise un volume nommé `bitnet_models`. Pour utiliser un dossier local, remplacer dans `docker-compose.yml` le volume du service `bitnet` par exemple par `./bitnet-models:/models`, puis :
+```bash
+# Télécharger le modèle (une fois)
+pip install huggingface_hub && huggingface-cli download microsoft/BitNet-b1.58-2B-4T-gguf --local-dir ./bitnet-models/BitNet-b1.58-2B-4T
+docker compose --profile bitnet up -d
+```
+
+**TTS** (`tts/`) : serveur Python (edge-tts + pydub) qui expose `POST /tts` avec `{"text": "..."}` et renvoie du WAV. Variable d’environnement `TTS_VOICE` (défaut : `fr-FR-DeniseNeural`).
+
+**STT** (`stt/`) : serveur Python (faster-whisper) qui expose `POST /stt` avec le corps audio WAV et renvoie `{"text": "..."}`. Variable `WHISPER_MODEL` (défaut : `base` ; mettre `tiny` pour un démarrage plus rapide).
 
 Sans Docker : lancer les binaires/serveurs manuellement et pointer les `base_url` vers les hôtes/ports utilisés.
 
@@ -53,16 +67,17 @@ stt:
 
 Si les services tournent sur une autre machine, remplacer `localhost` par l’IP ou le hostname.
 
-## TTS/STT (Kyutai)
+## TTS/STT (Docker ou alternatives)
 
-- **Modèles et configs** : [delayed-streams-modeling](https://github.com/kyutai-labs/delayed-streams-modeling/) (STT `kyutai/stt-1b-en_fr`, TTS, configs TOML).
-- **Serveur Rust** : crate `moshi-server` (repo [kyutai-labs/moshi](https://github.com/kyutai-labs/moshi)).  
-  - STT : `moshi-server worker --config configs/config-stt-en_fr-hf.toml` (ex. port 8766).  
-  - TTS : `moshi-server worker --config configs/config-tts.toml` (ex. port 8765).
-- **Pocket TTS** (CPU, 100M params) : `pip install pocket-tts`, puis lancer le serveur HTTP (voir doc Kyutai) et définir `tts.base_url` sur son URL.
+Ce dépôt fournit des images Docker pour TTS et STT compatibles avec le daemon Akasha :
+
+- **TTS** (`./tts`) : edge-tts (Microsoft) + pydub → `POST /tts` avec `{"text": "..."}` → corps WAV.
+- **STT** (`./stt`) : faster-whisper → `POST /stt` avec corps audio WAV → `{"text": "..."}`.
 
 Le daemon Akasha appelle :
 - **TTS** : `POST {tts.base_url}/tts` avec `{"text": "..."}`, réponse = corps binaire WAV.
 - **STT** : `POST {stt.base_url}/stt` avec corps = audio WAV, réponse JSON `{"text": "..."}`.
 
-Adapter les endpoints si le service expose un autre schéma (ex. Unmute WebSocket) via un petit proxy ou une évolution du client dans le daemon.
+**Alternatives hors Docker** (Kyutai) :
+- **moshi-server** (Rust) : [kyutai-labs/moshi](https://github.com/kyutai-labs/moshi) — STT : `moshi-server worker --config configs/config-stt-en_fr-hf.toml` (8766), TTS : `moshi-server worker --config configs/config-tts.toml` (8765).
+- **Pocket TTS** : `pip install pocket-tts`, puis serveur HTTP et `tts.base_url` dans `voice_router.yaml`.
