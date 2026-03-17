@@ -113,20 +113,31 @@ pub async fn speech_synthesize_impl(
 }
 
 /// Decode optional data URL (data:audio/...;base64,...) to raw bytes. If input is already raw base64, decode it.
-fn decode_audio_input(input: &str) -> Result<Vec<u8>, String> {
+/// Extract the mime type and raw bytes from a data URL or plain base64 audio input.
+/// Returns (mime_type, bytes). If not a data URL, defaults to "audio/wav".
+fn decode_audio_input(input: &str) -> Result<(String, Vec<u8>), String> {
     let input = input.trim();
     if input.starts_with("data:") {
         let comma = input
             .find(',')
             .ok_or_else(|| "[speech_transcribe] data URL sans virgule.".to_string())?;
+        // MIME is between "data:" (5 chars) and the first ';' or ',' — whichever comes first.
+        let mime_end = input.find(';').unwrap_or(comma).min(comma);
+        let mime = if mime_end > 5 {
+            input[5..mime_end].to_string()
+        } else {
+            "audio/wav".to_string()
+        };
         let b64 = input[comma + 1..].trim();
-        base64::engine::general_purpose::STANDARD
+        let bytes = base64::engine::general_purpose::STANDARD
             .decode(b64)
-            .map_err(|e| format!("[speech_transcribe] base64 decode: {}", e))
+            .map_err(|e| format!("[speech_transcribe] base64 decode: {}", e))?;
+        Ok((mime, bytes))
     } else {
-        base64::engine::general_purpose::STANDARD
+        let bytes = base64::engine::general_purpose::STANDARD
             .decode(input)
-            .map_err(|e| format!("[speech_transcribe] base64 decode: {}", e))
+            .map_err(|e| format!("[speech_transcribe] base64 decode: {}", e))?;
+        Ok(("audio/wav".to_string(), bytes))
     }
 }
 
@@ -156,7 +167,7 @@ pub async fn speech_transcribe_impl(
                 .to_string(),
         );
     }
-    let audio_bytes = decode_audio_input(audio_input)?;
+    let (mime_type, audio_bytes) = decode_audio_input(audio_input)?;
     let base_url = config
         .stt
         .base_url
@@ -170,7 +181,7 @@ pub async fn speech_transcribe_impl(
         .map_err(|e| format!("[speech_transcribe] reqwest: {}", e))?;
     let res = client
         .post(&url)
-        .header("Content-Type", "audio/wav")
+        .header("Content-Type", mime_type)
         .body(audio_bytes)
         .send()
         .await
