@@ -630,7 +630,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("device_invoke", "device_invoke <interface> <device_id> <action> [params] — exécuter une action sur un appareil. local_media: caméra (device_id camera, action capture), micro (device_id microphone, action record). Appelle directement ; une fenêtre d'autorisation s'affichera dans l'UI. Ne pas demander à l'utilisateur d'« ouvrir l'UI » — utiliser l'outil. synthetic_input: device_id keyboard|mouse, action shortcut|key|type|mouse_move|mouse_click|..."),
     ("generate_image", "generate_image <prompt> [size] — générer une image par IA (ex. OpenAI DALL·E). Prompt en texte libre ; size optionnel (1024x1024, 512x512). Retourne l'image en data URL dans la réponse (spec 42)."),
     ("speech_synthesize", "speech_synthesize <text> — TTS: synthétiser le texte en audio (Kyutai Unmute/Pocket TTS). Retourne une data URL audio (voice_router.yaml tts.base_url)."),
-    ("speech_transcribe", "speech_transcribe [data_url_audio] — STT: transcrire l'audio en texte. Passer la data URL de l'audio (ex. après device_invoke local_media microphone record) ou laisser vide si l'audio est fourni par le contexte (voice_router.yaml stt.base_url)."),
+    ("speech_transcribe", "speech_transcribe <data_url_audio> — STT: transcrire l'audio en texte. Passer la data URL de l'audio (ex. après device_invoke local_media microphone record). La data URL est obligatoire (voice_router.yaml stt.base_url)."),
     ("write_todos", "write_todos <payload> — définir la liste d'étapes (todo) de la tâche. Payload: JSON array [{\"title\":\"...\", \"status\":\"pending\"|\"done\"|\"cancelled\"}] ou une ligne par étape. Remplace toute la liste. Utiliser pour décomposer une tâche complexe et suivre la progression."),
     ("read_todos", "read_todos — retourne la liste des étapes (todos) de la tâche courante."),
     ("update_todo", "update_todo <index> <status> — marquer l'étape à l'index (1-based) comme status (done, cancelled)."),
@@ -4333,6 +4333,7 @@ pub async fn handle_api(
             .and_then(|j| j.get("data_url").and_then(|v| v.as_str()))
             .or_else(|| body_json.as_ref().and_then(|j| j.get("audio_base64").and_then(|v| v.as_str())))
             .unwrap_or("");
+        let audio_input = audio_input.trim();
         if audio_input.is_empty() {
             return json_response("400 Bad Request", r#"{"error":"data_url_or_audio_base64_required"}"#);
         }
@@ -4798,7 +4799,9 @@ pub async fn handle_api(
                     }
                 }
                 for e in list.iter() {
-                    // Use `Reverse(at)` so the smallest (oldest) timestamp is popped first when exceeding `limit`.
+                    // The custom Ord for TimelineHeapEntry inverts the natural timestamp order so that
+                    // the *oldest* entry is the "greatest" and gets popped first when the heap exceeds `limit`.
+                    // This keeps only the `limit` most-recent events without a full sort.
                     let at = e.at.clone();
                     let task_id = tid.to_string();
                     let event_type = e.event_type.clone();

@@ -7,6 +7,9 @@ import remarkGfm from "remark-gfm";
 import { useI18n } from "./useI18n";
 import { preprocessDataUrlImages, preprocessDataUrlAudio } from "./preprocessDataUrlImages";
 
+const SAFE_DATA_IMAGE_RE = /^data:image\/[a-zA-Z0-9+\-]+(?:;[a-zA-Z0-9\-=]+)*;base64,[A-Za-z0-9+/]+={0,2}$/;
+const SAFE_DATA_AUDIO_RE = /^data:audio\/[a-zA-Z0-9+\-]+(?:;[a-zA-Z0-9\-=]+)*;base64,[A-Za-z0-9+/]+={0,2}$/;
+
 /** Sanitization schema: extends the safe default to allow the div/img/audio elements
  *  injected by preprocessDataUrlImages and preprocessDataUrlAudio, while blocking scripts.
  *  data: is allowed for src so that inline image and audio data URLs (from generate_image,
@@ -56,7 +59,16 @@ export default function MarkdownContent({ children = "", className, onPathClick 
         components={{
           img: ({ src, alt, ...props }) => {
             if (!src || src.trim() === "") return null;
+            // Reject data: URLs that don't match a safe image pattern to prevent XSS.
+            if (src.startsWith("data:") && !SAFE_DATA_IMAGE_RE.test(src)) return null;
             return <img src={src} alt={alt ?? ""} className="markdown-data-image" {...props} />;
+          },
+          audio: ({ src, ...props }) => {
+            if (!src || src.trim() === "") return null;
+            // Only allow safe data:audio/* or https sources.
+            if (src.startsWith("data:") && !SAFE_DATA_AUDIO_RE.test(src)) return null;
+            if (!src.startsWith("data:") && !src.startsWith("https://")) return null;
+            return <audio src={src} controls className="markdown-data-audio" {...props} />;
           },
           a: ({ href, children: linkChildren, ...props }) => {
             if (href?.startsWith("path:") && onPathClick) {
