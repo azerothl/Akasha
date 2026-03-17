@@ -317,6 +317,10 @@ function App() {
   const [voiceRecording, setVoiceRecording] = useState(false);
   const voiceMediaRecorderRef = useRef<MediaRecorder | null>(null);
   const voiceChunksRef = useRef<Blob[]>([]);
+  /** When true, the next completed task reply should be played via TTS (question was sent by voice). */
+  const replyWithTtsRef = useRef(false);
+  /** Ref to handleSend so handleVoiceMessageToggle can call it without being declared after. */
+  const handleSendRef = useRef<(overrideMessage?: string, fromVoice?: boolean) => Promise<void>>(() => Promise.resolve());
   const [humanInputFreeText, setHumanInputFreeText] = useState("");
   /** Reply text for the inline ask_user form in the chat (when modal is not used). */
   const [inlineHumanReplyText, setInlineHumanReplyText] = useState("");
@@ -1873,7 +1877,7 @@ function App() {
         const text = (result?.text ?? "").trim();
         if (text) {
           setMessage(text);
-          handleSend(text);
+          handleSendRef.current(text, true);
         }
       } catch (err) {
         setMessages((prev) => [...prev, { role: "assistant", text: `Erreur transcription : ${String(err)}`, error: true }]);
@@ -1882,8 +1886,8 @@ function App() {
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm";
-      const recorder = new MediaRecorder(stream);
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm";
+      const recorder = new MediaRecorder(stream, { mimeType });
       voiceChunksRef.current = [];
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) voiceChunksRef.current.push(e.data);
@@ -1897,13 +1901,14 @@ function App() {
     } catch (err) {
       setMessages((prev) => [...prev, { role: "assistant", text: `Micro inaccessible : ${String(err)}`, error: true }]);
     }
-  }, [voiceRecording, sessionId, handleSend]);
+  }, [voiceRecording, sessionId]);
 
-  const handleSend = async (overrideMessage?: string) => {
+  const handleSend = async (overrideMessage?: string, fromVoice?: boolean) => {
     const content = (overrideMessage ?? message).trim();
     const hasContent = content || attachments.length > 0;
     if (!hasContent || loading) return;
 
+    if (fromVoice) replyWithTtsRef.current = true;
     const userMessage = content || "(Pièce(s) jointe(s))";
     setMessages((prev) => [...prev, { role: "user", text: userMessage }]);
     if (overrideMessage === undefined) setMessage("");
@@ -2021,6 +2026,18 @@ function App() {
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 const finalMsg = status?.progress?.slice(-1)[0]?.message ?? "Terminé.";
                 setMessages((prev) => [...prev, { role: "assistant", text: finalMsg }]);
+                if (replyWithTtsRef.current && voiceStatus?.tts_configured && finalMsg?.trim()) {
+                  replyWithTtsRef.current = false;
+                  invoke<{ data_url?: string }>("voice_tts", { text: finalMsg, port: DAEMON_PORT })
+                    .then((r) => {
+                      const url = r?.data_url;
+                      if (url) {
+                        const audio = new Audio(url);
+                        audio.play().catch(() => {});
+                      }
+                    })
+                    .catch(() => {});
+                }
                 requestAnimationFrame(() => chatInputRef.current?.focus());
                 return;
               }
@@ -2059,6 +2076,7 @@ function App() {
     }
     chatInputRef.current?.focus();
   };
+  handleSendRef.current = handleSend;
 
   return (
     <div className="app">
@@ -2886,7 +2904,7 @@ function App() {
                 aria-describedby="send-hint"
               />
               <button
-                onClick={handleSend}
+                onClick={() => handleSend()}
                 disabled={loading || (!message.trim() && attachments.length === 0)}
                 aria-label="Envoyer le message"
               >

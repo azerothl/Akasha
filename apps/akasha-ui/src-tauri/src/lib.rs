@@ -407,6 +407,23 @@ async fn voice_stt_transcribe(port: Option<u16>, payload: VoiceSttPayload) -> Re
     Ok(json)
 }
 
+/// POST /api/voice/tts — synthesize text to audio. Returns { "data_url": "data:audio/wav;base64,...", "message": "..." }.
+#[tauri::command]
+async fn voice_tts(port: Option<u16>, text: String) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/voice/tts", daemon_base_url(port));
+    let body = serde_json::json!({ "text": text.trim() });
+    let client = http_client();
+    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        let err_body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({ "error": status.to_string() }));
+        return Err(err_body.get("error").and_then(|v| v.as_str()).unwrap_or("TTS failed").to_string());
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// GET /api/router/embedded-status — embedded LLM status (for /embedded).
 #[tauri::command]
 async fn get_embedded_status(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -1458,6 +1475,7 @@ pub fn run() {
             set_router_route,
             get_voice_status,
             voice_stt_transcribe,
+            voice_tts,
             get_embedded_status,
             embedded_reload,
             get_device_pending,
