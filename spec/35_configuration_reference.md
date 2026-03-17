@@ -171,6 +171,35 @@ Le champ `avatar` (optionnel) peut contenir une data URL d’image (ex. `data:im
 
 ---
 
+## 2c. voice_router.yaml
+
+**Emplacement** : `data_dir/voice_router.yaml`.  
+**Format** : YAML.  
+**Utilisé par** : daemon (TTS/STT), API `GET /api/voice/status`, outils `speech_synthesize` et `speech_transcribe`. Fichier optionnel ; s’il est absent ou sans URL, TTS et STT sont désactivés.
+
+### Structure et types
+
+| Section / clé | Type   | Obligatoire | Description |
+|---------------|--------|-------------|-------------|
+| `tts`         | objet  | Non         | Configuration TTS (synthèse vocale). |
+| `tts.base_url` | string | Non        | URL de base du service TTS (ex. `http://localhost:8765`). Le daemon appelle `POST {base_url}/tts` avec body `{"text": "..."}`, réponse = corps binaire WAV. |
+| `stt`         | objet  | Non         | Configuration STT (transcription). |
+| `stt.base_url` | string | Non        | URL de base du service STT (ex. `http://localhost:8766`). Le daemon envoie l’audio en corps de requête à `POST {base_url}/stt`, réponse JSON `{"text": "..."}`. |
+
+TTS est considéré configuré si `tts.base_url` est défini et non vide ; idem pour STT avec `stt.base_url`. L’interface web affiche le bouton « Message vocal » (micro) dans le chat lorsque STT est configuré.
+
+### Exemple complet
+
+Voir [voice_router.example.yaml](voice_router.example.yaml).
+
+### Cas d’usage
+
+- **Activer TTS** : copier `spec/voice_router.example.yaml` vers `data_dir/voice_router.yaml`, renseigner `tts.base_url` (ex. Pocket TTS, moshi-server TTS sur le port 8765). Les réponses de l’agent peuvent alors inclure des pièces jointes audio (data URL) via l’outil `speech_synthesize`.
+- **Activer STT** : renseigner `stt.base_url` (ex. moshi-server STT sur le port 8766). Le bouton message vocal apparaît dans l’interface web ; l’utilisateur peut enregistrer au micro puis envoyer le message transcrit. L’outil `speech_transcribe` est disponible pour l’agent.
+- **Services externes** : TTS et STT sont des services HTTP externes (Kyutai, Pocket TTS, etc.) ; voir [akasha-models/README.md](../akasha-models/README.md) pour Docker Compose et URLs.
+
+---
+
 ## 3. akasha.env
 
 **Emplacement** : `data_dir/akasha.env`.  
@@ -296,11 +325,12 @@ Voir [spec/skills/read_file_skill.yaml](skills/read_file_skill.yaml).
 
 | Fichier           | Exemple                                                         | Description                                          |
 | ----------------- | --------------------------------------------------------------- | ---------------------------------------------------- |
-| llm_router.yaml   | [llm_router.example.yaml](llm_router.example.yaml)              | Routeur LLM (global, providers, task_types, system). |
-| tools_policy.yaml | [tools_policy.example.yaml](tools_policy.example.yaml)          | Politique des outils (chemins, commandes, timeout).  |
-| cluster.yaml      | [cluster.example.yaml](cluster.example.yaml)                    | Cluster NATS (optionnel, mTLS).                      |
+| llm_router.yaml   | [llm_router.example.yaml](llm_router.example.yaml)              | Routeur LLM (global, providers, task_types, system).  |
+| tools_policy.yaml | [tools_policy.example.yaml](tools_policy.example.yaml)           | Politique des outils (chemins, commandes, timeout).  |
+| voice_router.yaml | [voice_router.example.yaml](voice_router.example.yaml)           | Voix TTS/STT (URLs des services synthèse et transcription). |
+| cluster.yaml      | [cluster.example.yaml](cluster.example.yaml)                     | Cluster NATS (optionnel, mTLS).                       |
 | akasha.env        | (voir section 3 ci‑dessus)                                      | Variables d’environnement (pas de fichier .example). |
-| skills            | [spec/skills/read_file_skill.yaml](skills/read_file_skill.yaml) | Exemple de skill (read_file).                        |
+| skills            | [spec/skills/read_file_skill.yaml](skills/read_file_skill.yaml)  | Exemple de skill (read_file).                         |
 
 
 ---
@@ -309,5 +339,5 @@ Voir [spec/skills/read_file_skill.yaml](skills/read_file_skill.yaml).
 
 - **data_dir** : par défaut `~/akasha` (Linux/macOS) ou `%USERPROFILE%\akasha` (Windows), sauf si `AKASHA_DATA_DIR` est défini. Affiché par `akasha paths`.
 - **llm_router.yaml** : recherché dans `data_dir` puis à la racine du projet.
-- **tools_policy.yaml**, **akasha.env**, **connectors.env**, **cluster.yaml** : dans `data_dir` uniquement.
+- **tools_policy.yaml**, **voice_router.yaml**, **akasha.env**, **connectors.env**, **cluster.yaml** : dans `data_dir` uniquement.
 

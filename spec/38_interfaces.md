@@ -57,9 +57,11 @@ En production : lancer le binaire installé (ex. `akasha-ui.exe` sous Windows). 
 **Différences principales** :
 
 - **Pièces jointes** (images, documents) : uniquement dans l’interface web (Tauri). En TUI, les messages sont envoyés sans pièces jointes.
+- **Message vocal** : lorsque le daemon a un STT configuré (`data_dir/voice_router.yaml` avec `stt.base_url`), l’interface web affiche un bouton micro dans le Chat : premier clic = enregistrement, second clic = arrêt, transcription et envoi du message. Non disponible en TUI.
 - **RAG utilisateur** (documents indexés pour le contexte) : gestion dans l’onglet Paramètres en web ; en TUI, possible via l’API (`GET/POST/DELETE /api/user-rag/documents`).
 - **Liens cliquables** (fichiers/dossiers locaux dans les réponses) : interface web uniquement (ouverture dans l’explorateur / application par défaut). En TUI, les chemins restent du texte.
 - **Affichage d’images générées** (vignettes, « Ouvrir le dossier ») : interface web uniquement.
+- **Lecture audio** (réponses TTS en data URL) : interface web uniquement (lecteur audio dans le markdown).
 
 ---
 

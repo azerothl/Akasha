@@ -9,7 +9,7 @@ Ce document décrit comment **obtenir et utiliser Akasha sans installer Rust ni 
 ### Via GitHub Releases (recommandé)
 
 1. Allez sur la page **Releases** du dépôt (ex. `https://github.com/VOTRE_ORG/akasha/releases`).
-2. Choisissez la dernière version (ex. **v0.1.0**).
+2. Choisissez la dernière version (ex. **v0.6.0**).
 3. Téléchargez l’archive correspondant à votre système :
    - **Installeur unifié (recommandé)** : `akasha-full-windows-x86_64.zip`, `akasha-full-linux-x86_64.zip`, `akasha-full-macos-x86_64.zip` ou `akasha-full-macos-aarch64.zip` (CLI + daemon + TUI + scripts setup + bundle app desktop).
    - **CLI seul** : `akasha-windows-x86_64.zip`, `akasha-linux-x86_64.zip`, `akasha-macos-x86_64.zip`, `akasha-macos-aarch64.zip`.
