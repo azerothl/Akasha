@@ -1860,19 +1860,15 @@ function App() {
       if (chunks.length === 0) return;
       const blob = new Blob(chunks, { type: "audio/webm;codecs=opus" });
       try {
-        const base64 = await new Promise<string>((resolve, reject) => {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
           const r = new FileReader();
-          r.onload = () => {
-            const dataUrl = r.result as string;
-            const comma = dataUrl.indexOf(",");
-            resolve(comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl);
-          };
+          r.onload = () => resolve(r.result as string);
           r.onerror = () => reject(new Error("Read failed"));
           r.readAsDataURL(blob);
         });
         const result = await invoke<{ text?: string }>("voice_stt_transcribe", {
           port: DAEMON_PORT,
-          payload: { audio_base64: base64 },
+          payload: { data_url: dataUrl },
         });
         const text = (result?.text ?? "").trim();
         if (text) {
@@ -1901,7 +1897,7 @@ function App() {
     } catch (err) {
       setMessages((prev) => [...prev, { role: "assistant", text: `Micro inaccessible : ${String(err)}`, error: true }]);
     }
-  }, [voiceRecording, sessionId]);
+  }, [voiceRecording, sessionId, handleSend]);
 
   const handleSend = async (overrideMessage?: string) => {
     const content = (overrideMessage ?? message).trim();

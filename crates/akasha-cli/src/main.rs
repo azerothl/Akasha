@@ -744,13 +744,40 @@ stt:
     Ok(updated)
 }
 
+/// Detect which docker compose binary is available.
+/// Returns `("docker", vec!["compose"])` for the plugin, or `("docker-compose", vec![])` for the legacy binary.
+fn detect_docker_compose() -> anyhow::Result<(String, Vec<String>)> {
+    if Command::new("docker")
+        .args(["compose", "version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return Ok(("docker".into(), vec!["compose".into()]));
+    }
+    if Command::new("docker-compose")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return Ok(("docker-compose".into(), vec![]));
+    }
+    anyhow::bail!(
+        "Docker Compose non disponible. Installez Docker (docker compose ou docker-compose) et réessayez."
+    )
+}
+
 /// Run docker compose in compose_dir. cmd: "up" | "down" | "ps". profiles: e.g. ["ollama", "voice"].
 fn run_docker_compose(compose_dir: &Path, cmd: &str, profiles: &[&str], build: bool) -> anyhow::Result<()> {
     let compose_file = compose_dir.join("docker-compose.yml");
     if !compose_file.exists() {
         anyhow::bail!("docker-compose.yml not found in {}", compose_dir.display());
     }
-    let mut args = vec!["compose", "-f", compose_file.to_str().unwrap_or("docker-compose.yml")];
+    let (binary, prefix) = detect_docker_compose()?;
+    let compose_file_str = compose_file.to_str().unwrap_or("docker-compose.yml");
+    let mut args: Vec<&str> = prefix.iter().map(|s| s.as_str()).collect();
+    args.extend_from_slice(&["-f", compose_file_str]);
     for p in profiles {
         args.push("--profile");
         args.push(p);
@@ -771,7 +798,7 @@ fn run_docker_compose(compose_dir: &Path, cmd: &str, profiles: &[&str], build: b
         }
         _ => anyhow::bail!("unknown docker compose cmd: {}", cmd),
     }
-    let out = Command::new("docker")
+    let out = Command::new(&binary)
         .args(&args)
         .current_dir(compose_dir)
         .output()?;
@@ -827,15 +854,9 @@ fn cmd_services(sub: ServicesSub) -> anyhow::Result<()> {
             }
 
             println!("Vérification de Docker…");
-            let check = Command::new("docker").args(["compose", "version"]).output();
-            if check.as_ref().map(|o| !o.status.success()).unwrap_or(true) {
-                let try_legacy = Command::new("docker-compose").arg("--version").output();
-                if try_legacy.as_ref().map(|o| !o.status.success()).unwrap_or(true) {
-                    anyhow::bail!(
-                        "Docker Compose non disponible. Installez Docker (docker compose ou docker-compose) et réessayez."
-                    );
-                }
-            }
+            // detect_docker_compose() bails with a clear message if neither flavor is available;
+            // run_docker_compose will use the detected binary automatically.
+            detect_docker_compose()?;
 
             println!("Lancement des services (profiles: {})…", profiles.join(", "));
             run_docker_compose(&compose_dir, "up", &profiles, true)?;

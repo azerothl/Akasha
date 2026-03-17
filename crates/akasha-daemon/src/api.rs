@@ -5400,9 +5400,9 @@ pub async fn handle_api(
         let rest = path.trim_start_matches("/api/schedules/");
         let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
         if parts.get(1) == Some(&"exceptions") {
-            if let (Some(_schedule_id_str), Some(&exception_id_str)) = (parts.first(), parts.get(2)) {
-                if let Ok(exception_id) = Uuid::parse_str(exception_id_str) {
-                    return delete_schedule_exception(store_path, exception_id).await;
+            if let (Some(&schedule_id_str), Some(&exception_id_str)) = (parts.first(), parts.get(2)) {
+                if let (Ok(schedule_id), Ok(exception_id)) = (Uuid::parse_str(schedule_id_str), Uuid::parse_str(exception_id_str)) {
+                    return delete_schedule_exception(store_path, schedule_id, exception_id).await;
                 }
             }
         }
@@ -6270,16 +6270,19 @@ async fn post_schedule_exception(store_path: &Path, schedule_id: Uuid, body: Opt
     json_response("200 OK", &body.to_string())
 }
 
-async fn delete_schedule_exception(store_path: &Path, exception_id: Uuid) -> String {
+async fn delete_schedule_exception(store_path: &Path, schedule_id: Uuid, exception_id: Uuid) -> String {
     let store = match ScheduleStore::open(store_path) {
         Ok(s) => s,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
-    if store.delete_exception(exception_id).is_err() {
-        return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
+    match store.delete_exception(schedule_id, exception_id) {
+        Ok(true) => {
+            let body = serde_json::json!({ "deleted": true, "exception_id": exception_id.to_string() });
+            json_response("200 OK", &body.to_string())
+        }
+        Ok(false) => json_response("404 Not Found", r#"{"error":"exception_not_found"}"#),
+        Err(_) => json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     }
-    let body = serde_json::json!({ "deleted": true, "exception_id": exception_id.to_string() });
-    json_response("200 OK", &body.to_string())
 }
 
 async fn get_schedule_by_id(store_path: &Path, id: Uuid) -> String {

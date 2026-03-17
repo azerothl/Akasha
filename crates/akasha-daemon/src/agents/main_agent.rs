@@ -242,6 +242,9 @@ impl MainAgent {
             image_data_urls: None,
             execution_mode,
         };
+        // Update status to Queued BEFORE enqueuing so the conversation worker won't
+        // see a Paused/Interrupted status and silently drop the task.
+        store.update_status(task_id, TaskStatus::Queued)?;
         if let Err(e) = tx.try_send(task_msg) {
             match e {
                 mpsc::error::TrySendError::Full(_) => {
@@ -256,9 +259,6 @@ impl MainAgent {
                 }
             }
         }
-
-        // Only mark the task as queued and emit the resume event after enqueueing is ensured.
-        store.update_status(task_id, TaskStatus::Queued)?;
         let _ = self.bus.send(
             EventEnvelope::new(
                 EventType::TaskResumed,
