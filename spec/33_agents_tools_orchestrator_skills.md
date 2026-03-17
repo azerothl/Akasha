@@ -67,7 +67,8 @@ Liste exposée dans le code (`AVAILABLE_TOOLS`) et via **GET /api/tools** (JSON 
 | `sessions_spawn` | `sessions_spawn <message> [session_id]` | Créer une sous-tâche. |
 | `session_status` | `session_status <task_id>` | Statut d'une tâche. |
 | `message` | `message send <channel> <text>` | Envoyer un message (webhook). |
-| `browser`, `image`, `pdf` | (stubs) | Prévu phase 3. |
+| `browser` | `browser navigate <url>` \| `browser screenshot` | navigate : ouvre l'URL (http/https) dans le navigateur par défaut de la machine du daemon. screenshot : utiliser device_invoke synthetic_input (raccourci OS). |
+| `image`, `pdf` | (stubs) | Prévu phase 3. |
 | `device_discover` | `device_discover [interface]` | Lister les appareils accessibles (local_media, system, synthetic_input, network, usb, etc.). synthetic_input retourne keyboard, mouse. Filtre par `allowed_device_interfaces` / `blocked_device_interfaces`. |
 | `device_invoke` | `device_invoke <interface> <device_id> <action> [params]` | Exécuter une action sur un appareil. `local_media` : caméra, micro (capture, record). `synthetic_input` : clavier/souris — device_id keyboard\|mouse, action shortcut\|key\|type\|mouse_move\|mouse_click\|mouse_double_click\|mouse_scroll\|mouse_drag, params JSON (ex. {\"keys\":[\"Control\",\"Shift\",\"S\"]} pour raccourci). Nécessite client UI. |
 | `speech_synthesize` | `speech_synthesize <text>` | TTS : synthétiser le texte en audio. Retourne une data URL audio (WAV). Nécessite `voice_router.yaml` avec `tts.base_url`. |

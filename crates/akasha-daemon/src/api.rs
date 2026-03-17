@@ -619,7 +619,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("sessions_spawn", "sessions_spawn <message> [session_id] — créer une sous-tâche et la lancer"),
     ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
     ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
-    ("browser", "browser navigate <url> | browser screenshot | browser snapshot — screenshot via device_invoke synthetic_input shortcut; navigate → use web_fetch for content"),
+    ("browser", "browser navigate <url> — open URL in default browser (http/https); browser screenshot — use device_invoke synthetic_input shortcut"),
     ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
     ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
@@ -1451,6 +1451,38 @@ fn parse_run_command_args(args: &[String]) -> (Vec<(String, String)>, String, Ve
     (vault_specs, command, cmd_args)
 }
 
+/// Open a URL in the system default browser. Only http and https URLs are allowed.
+fn open_url_in_browser(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("Only http and https URLs are allowed".to_string());
+    }
+    let parsed = url.parse::<url::Url>().map_err(|e| format!("Invalid URL: {}", e))?;
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return Err("Only http and https URLs are allowed".to_string());
+    }
+    let status = match std::env::consts::OS {
+        "windows" => std::process::Command::new("cmd")
+            .args(["/c", "start", "", url])
+            .status()
+            .map_err(|e| e.to_string())?,
+        "macos" => std::process::Command::new("open")
+            .arg(url)
+            .status()
+            .map_err(|e| e.to_string())?,
+        _ => std::process::Command::new("xdg-open")
+            .arg(url)
+            .status()
+            .map_err(|e| e.to_string())?,
+    };
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Command exited with: {}", status))
+    }
+}
+
 /// Parse `device_invoke` params from the tail of the args list (args[3..]).
 /// - No extra args → `{}`
 /// - Single arg that is valid JSON → that JSON value
@@ -1953,8 +1985,20 @@ async fn execute_tool_call(
             let sub = args.get(0).map(String::as_str).unwrap_or("").trim();
             if sub == "screenshot" {
                 (true, "[browser] For screenshot use: TOOL: device_invoke synthetic_input keyboard shortcut (e.g. Win+Shift+S on Windows, Cmd+Shift+4 on macOS) then paste or share the image.".to_string(), None)
-            } else if sub == "navigate" && args.get(1).map(|s| s.starts_with("http")).unwrap_or(false) {
-                (true, "[browser] Full browser automation (navigate) not implemented. Use web_fetch <url> to get page content.".to_string(), None)
+            } else if sub == "navigate" {
+                if let Some(url_arg) = args.get(1) {
+                    let url = url_arg.trim();
+                    if url.starts_with("http://") || url.starts_with("https://") {
+                        match open_url_in_browser(url) {
+                            Ok(()) => (true, format!("[browser] Opened: {}", url), None),
+                            Err(e) => (false, format!("[browser] error: {}", e), None),
+                        }
+                    } else {
+                        (false, "[browser] navigate requires an http or https URL".to_string(), None)
+                    }
+                } else {
+                    (false, "[browser] usage: browser navigate <url>".to_string(), None)
+                }
             } else {
                 (false, "[browser] usage: browser navigate <url> | browser screenshot | browser snapshot. Screenshot: use device_invoke synthetic_input keyboard shortcut.".to_string(), None)
             }

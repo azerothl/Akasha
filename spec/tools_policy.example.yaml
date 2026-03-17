@@ -81,4 +81,5 @@ command_timeout_secs: 60
 # Optionnel : outils pour lesquels une confirmation utilisateur est requise avant exécution (human-in-the-loop).
 # Quand un outil est dans cette liste, le daemon affiche un résumé d'intention (ex. « Écrire dans le fichier X », « Exécuter la commande Y »)
 # et n'exécute qu'après approbation explicite (bouton Approuver / Refuser dans l'UI).
+# Pour demander confirmation avant d'ouvrir une URL dans le navigateur : ajouter browser à la liste.
 # require_approval: [write_file, run_command, run_in_container, apply_patch, edit_file, device_invoke]
