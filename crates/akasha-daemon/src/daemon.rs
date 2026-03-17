@@ -454,6 +454,8 @@ impl Daemon {
             let process_registry = new_process_registry();
             let human_input_store = new_human_input_store();
             let workspace_store = new_task_workspace_store();
+            let browser_registry: crate::browser::BrowserSessionRegistry =
+                Arc::new(RwLock::new(std::collections::HashMap::new()));
             let task_usage_store = std::sync::Arc::new(crate::api::TaskUsageStore::new());
             let user_rag_store = crate::user_rag::UserRagStore::new_shared(&data_dir);
             let (progress_persistence_tx, progress_persistence_rx) = std::sync::mpsc::channel::<(uuid::Uuid, u8, String)>();
@@ -579,6 +581,7 @@ impl Daemon {
                 let long_term_client = long_term_client.clone();
                 let human_input_store = human_input_store.clone();
                 let workspace_store = workspace_store.clone();
+                let browser_registry = browser_registry.clone();
                 let task_completion = task_completion.clone();
                 let agent_profile_cache = agent_profile_cache.clone();
                 let task_usage_store = task_usage_store.clone();
@@ -628,6 +631,7 @@ impl Daemon {
                             Some(task_usage_store.clone()),
                             Some(device_bridge.clone()),
                             Some(workspace_store.clone()),
+                            Some(browser_registry.clone()),
                         )
                         .instrument(span)
                         .await;

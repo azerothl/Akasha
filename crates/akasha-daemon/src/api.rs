@@ -619,7 +619,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("sessions_spawn", "sessions_spawn <message> [session_id] — créer une sous-tâche et la lancer"),
     ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
     ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
-    ("browser", "browser navigate <url> — open URL in default browser (http/https); browser screenshot — use device_invoke synthetic_input shortcut"),
+    ("browser", "browser navigate <url> — open URL in managed browser (http/https; domain allowed by tools_policy). browser snapshot — text + links of current page. Phase 2: click, fill, screenshot, wait (see spec 39)."),
     ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
     ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
@@ -1452,6 +1452,7 @@ fn parse_run_command_args(args: &[String]) -> (Vec<(String, String)>, String, Ve
 }
 
 /// Open a URL in the system default browser. Only http and https URLs are allowed.
+#[allow(dead_code)]
 fn open_url_in_browser(url: &str) -> Result<(), String> {
     let url = url.trim();
     if !url.starts_with("http://") && !url.starts_with("https://") {
@@ -1512,6 +1513,7 @@ async fn execute_tool_call(
     message_webhook_url: Option<&str>,
     device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
     workspace_store: Option<&TaskWorkspaceStore>,
+    browser_registry: Option<&crate::browser::BrowserSessionRegistry>,
 ) -> (bool, String, Option<String>) {
     use std::path::Path;
     if !executor.policy.can_use_tool(tool_name) {
@@ -1983,24 +1985,104 @@ async fn execute_tool_call(
         }
         "browser" => {
             let sub = args.get(0).map(String::as_str).unwrap_or("").trim();
-            if sub == "screenshot" {
-                (true, "[browser] For screenshot use: TOOL: device_invoke synthetic_input keyboard shortcut (e.g. Win+Shift+S on Windows, Cmd+Shift+4 on macOS) then paste or share the image.".to_string(), None)
-            } else if sub == "navigate" {
-                if let Some(url_arg) = args.get(1) {
-                    let url = url_arg.trim();
-                    if url.starts_with("http://") || url.starts_with("https://") {
-                        match open_url_in_browser(url) {
-                            Ok(()) => (true, format!("[browser] Opened: {}", url), None),
-                            Err(e) => (false, format!("[browser] error: {}", e), None),
-                        }
-                    } else {
-                        (false, "[browser] navigate requires an http or https URL".to_string(), None)
-                    }
-                } else {
-                    (false, "[browser] usage: browser navigate <url>".to_string(), None)
+            if !executor.policy.browser_enabled {
+                return (
+                    false,
+                    "[browser] Browser automation is disabled. Set browser_enabled: true in tools_policy.yaml and install Playwright (npx playwright install chromium).".to_string(),
+                    None,
+                );
+            }
+            let Some(registry) = browser_registry else {
+                return (false, "[browser] Browser registry not available.".to_string(), None);
+            };
+            let Some(runner_path) = crate::browser::find_playwright_runner_path() else {
+                return (
+                    false,
+                    "[browser] Playwright runner not found. Set AKASHA_PLAYWRIGHT_RUNNER or run from repo with scripts/playwright-runner.".to_string(),
+                    None,
+                );
+            };
+            let headless = executor.policy.browser_headless;
+            let action_timeout = executor.policy.browser_action_timeout_secs;
+
+            if sub == "navigate" {
+                let Some(url_arg) = args.get(1) else {
+                    return (false, "[browser] usage: browser navigate <url>".to_string(), None);
+                };
+                let url = url_arg.trim();
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    return (false, "[browser] navigate requires an http or https URL".to_string(), None);
                 }
+                let host = url.parse::<url::Url>().ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_default();
+                if !executor.policy.can_use_browser_domain(&host) {
+                    return (false, format!("[browser] Domain not allowed: {}", host), None);
+                }
+                let mut g = registry.write().await;
+                let session = if let Some(s) = g.get_mut(&task_id) {
+                    let res = s.send_command(&serde_json::json!({ "cmd": "navigate", "params": { "url": url, "timeout_secs": action_timeout } })).await;
+                    drop(g);
+                    res
+                } else {
+                    drop(g);
+                    match crate::browser::create_browser_session(&runner_path, headless, action_timeout).await {
+                        Ok(mut new_session) => {
+                            let res = new_session.send_command(&serde_json::json!({ "cmd": "navigate", "params": { "url": url, "timeout_secs": action_timeout } })).await;
+                            let mut g = registry.write().await;
+                            g.insert(task_id, new_session);
+                            res
+                        }
+                        Err(e) => return (false, format!("[browser] error: {}", e), None),
+                    }
+                };
+                match session {
+                    Ok(resp) => {
+                        let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                        if ok {
+                            let result = resp.get("result");
+                            let msg = if let Some(r) = result {
+                                if let Some(title) = r.get("title").and_then(|v| v.as_str()) {
+                                    format!("[browser] Navigated to {} (title: {}).", url, title)
+                                } else {
+                                    format!("[browser] Navigated to {}.", url)
+                                }
+                            } else {
+                                format!("[browser] Navigated to {}.", url)
+                            };
+                            (true, msg, None)
+                        } else {
+                            let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("Navigate failed");
+                            (false, format!("[browser] {}", err), None)
+                        }
+                    }
+                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                }
+            } else if sub == "snapshot" {
+                let mut g = registry.write().await;
+                let Some(session) = g.get_mut(&task_id) else {
+                    return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
+                };
+                let resp = session.send_command(&serde_json::json!({ "cmd": "snapshot" })).await;
+                drop(g);
+                match resp {
+                    Ok(resp) => {
+                        let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                        if ok {
+                            let result = resp.get("result").and_then(|r| r.get("text").and_then(|t| t.as_str())).unwrap_or("");
+                            let preview = if result.len() > 8000 { format!("{}…", &result[..result.floor_char_boundary(8000)]) } else { result.to_string() };
+                            (true, format!("[browser] Snapshot ({} chars):\n{}", result.len(), preview), None)
+                        } else {
+                            let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("Snapshot failed");
+                            (false, format!("[browser] {}", err), None)
+                        }
+                    }
+                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                }
+            } else if sub == "screenshot" {
+                (true, "[browser] Screenshot is planned for Phase 2. For now use device_invoke synthetic_input keyboard shortcut (e.g. Win+Shift+S).".to_string(), None)
+            } else if sub == "click" || sub == "fill" || sub == "wait" {
+                (true, "[browser] click, fill, wait are planned for Phase 2.".to_string(), None)
             } else {
-                (false, "[browser] usage: browser navigate <url> | browser screenshot | browser snapshot. Screenshot: use device_invoke synthetic_input keyboard shortcut.".to_string(), None)
+                (false, "[browser] usage: browser navigate <url> | browser snapshot | browser screenshot (Phase 2).".to_string(), None)
             }
         }
         "image" => {
@@ -2646,6 +2728,8 @@ fn progress_message_for_tool(tool: &str, args: &[String]) -> String {
         "Transcribing audio…".to_string()
     } else if lower.contains("device_invoke") && first_arg.to_lowercase().contains("camera") {
         "Capturing with camera…".to_string()
+    } else if lower == "browser" && first_arg.eq_ignore_ascii_case("navigate") {
+        "Opening in browser…".to_string()
     } else if lower.contains("run_command") {
         "Running the command…".to_string()
     } else if lower == "ask_user" {
@@ -2777,11 +2861,15 @@ pub(crate) async fn run_message_via_llm(
     task_usage_store: Option<std::sync::Arc<TaskUsageStore>>,
     device_bridge: Option<std::sync::Arc<crate::device_bridge::DeviceBridge>>,
     workspace_store: Option<TaskWorkspaceStore>,
+    browser_registry: Option<crate::browser::BrowserSessionRegistry>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(task_id = %task_id, error_kind = "store_open", error = %e, "LLM task: store open failed");
+            if let Some(reg) = &browser_registry {
+                crate::browser::close_task(reg, task_id).await;
+            }
             notify_task_completion(&task_completion_registry, task_id).await;
             return;
         }
@@ -2875,7 +2963,8 @@ pub(crate) async fn run_message_via_llm(
              CAMERA RULE (PRIORITAIRE sur WRITE): When the user asks for a webcam/camera photo (e.g. \"prends une photo\", \"take a photo\", \"photo depuis la webcam\", \"affiche-la dans le chat\", \"display it in the chat\"), you MUST reply ONLY with TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture. Do NOT mention tools_policy.yaml, allowed_write_paths, or file writing. After the tool returns, if the user asked to \"display in the chat\" / \"affiche-la dans le chat\" / \"show it in the chat\", reply with ONLY a short confirmation in the user's language (e.g. in French: \"Photo prise. Elle s'affiche ci-dessous.\"; in English: \"Photo captured. It is shown below.\"). Do NOT offer \"save to file\", \"get a description\", \"take another photo\", or \"What would you like to do next?\" — the image is appended automatically below your message. Use the same language as the user (French if they wrote in French).\n\
              WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
              WEATHER/MÉTEO RULE (PRIORITY): When the user asks for weather, météo, or forecasts (e.g. \"quel temps\", \"météo demain\", \"weather in X\"), you MUST use TOOL: web_search <query> (and optionally web_fetch) to get the forecast. Do NOT use bankr, portfolio, or any other skill for weather — only web_search and web_fetch.\n\
-             WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user.\n\
+             BROWSER RULE (PRIORITY): When the user explicitly asks to open the browser, go to a website, or show something on X/Twitter (e.g. \"ouvre le navigateur\", \"open the browser\", \"va sur X\", \"go to twitter\", \"cherche sur X\", \"ouvre le navigateur et cherche\"), you MUST use TOOL: browser navigate <url> first with the appropriate URL (e.g. https://x.com/akashabot for a profile, https://x.com for the home page). You may then add a short message. Do NOT use only web_search when the user asked to open the browser or go to X/Twitter.\n\
+             WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user. If web_search returns no useful results, or the content is inaccessible (e.g. X/Twitter pages, login-required sites), use TOOL: browser navigate <url> with the relevant URL so the user can open the page in their browser.\n\
              INSTALL CLI RULE: When the user asks to install a CLI or package globally (e.g. \"install bankr CLI\", \"npm install -g @bankr/cli\", \"install the bankr cli in global\"), you MUST reply ONLY with TOOL: run_command <cmd> <args> (e.g. TOOL: run_command npm install -g @bankr/cli). Do NOT generate a script or ask the user to run commands themselves; run the installation command via the tool.\n\
              VAULT ENV RULE: To use a vault secret in a command you MUST call TOOL: run_command with VAULT:<vault_key>=<ENV_VAR> as the FIRST argument(s), then the command. The system injects the secret value into ENV_VAR for that command only. Example: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo. FORBIDDEN: never tell the user to run GITHUB_TOKEN=VAULT:GITHUB_TOKEN or export GITHUB_TOKEN=... or VAULT:GITHUB_TOKEN=ghp_... — you must output the TOOL: line yourself so the system runs the command and injects the token. For GitHub with token in vault: use TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (or gh repo view owner/repo). The vault key may be GITHUB_TOKEN or github_token; the part after = is the env var name the command uses (e.g. $GITHUB_TOKEN). Do NOT say you cannot access the repo without having called run_command with VAULT:... first.\n\
              {}\
@@ -3615,6 +3704,7 @@ pub(crate) async fn run_message_via_llm(
                             message_webhook_url.as_deref(),
                             device_bridge.as_ref(),
                             workspace_store.as_ref(),
+                            browser_registry.as_ref(),
                         )
                         .await;
                         (s, r, None)
@@ -3644,6 +3734,7 @@ pub(crate) async fn run_message_via_llm(
                         message_webhook_url.as_deref(),
                         device_bridge.as_ref(),
                         workspace_store.as_ref(),
+                        browser_registry.as_ref(),
                     )
                     .await
                 };
@@ -4076,6 +4167,10 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         store.get(task_id),
         Ok(Some(Task { status: TaskStatus::Paused, .. }))
     );
+
+    if let Some(reg) = &browser_registry {
+        crate::browser::close_task(reg, task_id).await;
+    }
 
     let final_event_type = if is_paused {
         EventType::TaskPaused

@@ -67,7 +67,7 @@ Liste exposée dans le code (`AVAILABLE_TOOLS`) et via **GET /api/tools** (JSON 
 | `sessions_spawn` | `sessions_spawn <message> [session_id]` | Créer une sous-tâche. |
 | `session_status` | `session_status <task_id>` | Statut d'une tâche. |
 | `message` | `message send <channel> <text>` | Envoyer un message (webhook). |
-| `browser` | `browser navigate <url>` \| `browser screenshot` | navigate : ouvre l'URL (http/https) dans le navigateur par défaut de la machine du daemon. screenshot : utiliser device_invoke synthetic_input (raccourci OS). |
+| `browser` | `browser navigate <url>` \| `browser snapshot` \| (Phase 2: click, fill, screenshot, wait) | Automation navigateur gérée (une instance Playwright par tâche). Voir [spec 39](39_browser_automation.md). navigate : ouvre l'URL (domaine autorisé). snapshot : texte + liens de la page. |
 | `image`, `pdf` | (stubs) | Prévu phase 3. |
 | `device_discover` | `device_discover [interface]` | Lister les appareils accessibles (local_media, system, synthetic_input, network, usb, etc.). synthetic_input retourne keyboard, mouse. Filtre par `allowed_device_interfaces` / `blocked_device_interfaces`. |
 | `device_invoke` | `device_invoke <interface> <device_id> <action> [params]` | Exécuter une action sur un appareil. `local_media` : caméra, micro (capture, record). `synthetic_input` : clavier/souris — device_id keyboard\|mouse, action shortcut\|key\|type\|mouse_move\|mouse_click\|mouse_double_click\|mouse_scroll\|mouse_drag, params JSON (ex. {\"keys\":[\"Control\",\"Shift\",\"S\"]} pour raccourci). Nécessite client UI. |

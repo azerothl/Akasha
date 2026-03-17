@@ -7,6 +7,7 @@ pub mod gateway;
 pub mod personality;
 pub mod policy_engine;
 pub mod api;
+pub mod browser;
 pub mod debug_log;
 pub mod channels;
 pub mod daemon;
