@@ -77,7 +77,7 @@ Vous pouvez modifier les fichiers suivants dans ce répertoire (avec un éditeur
 |--------|------|
 | `llm_router.yaml` | Fournisseurs LLM (Ollama, OpenAI, OpenRouter) et modèles par type de tâche (conversation, code_generation, etc.). |
 | `tools_policy.yaml` | Autorisations des outils : chemins lecture/écriture (`allowed_read_paths`, `allowed_write_paths`), commandes autorisées (`allowed_commands`), recherche web (Brave), hôtes pour l'installation de skills (`allowed_skill_install_hosts`). |
-| `voice_router.yaml` | (Optionnel) Voix TTS/STT : URLs des services de synthèse (`tts.base_url`) et de transcription (`stt.base_url`). Si STT est configuré, l’interface web affiche un bouton **Message vocal** (micro) dans le chat. |
+| `voice_router.yaml` | (Optionnel) Voix TTS/STT : URLs des services de synthèse (`tts.base_url`) et de transcription (`stt.base_url`). Si STT est configuré, l’interface web affiche un bouton **Message vocal** (micro). Si TTS est aussi configuré, la réponse à un message vocal est affichée en texte et lue en audio. |
 | `akasha.env` | Variables d'environnement persistantes (éditables aussi via `akasha config env`). |
 | `connectors.env` | Activation des canaux (Telegram, Slack, Discord). |
 | `agent_profile.json` | Profil de l'agent : nom, rôle, personnalité, règles. Éditable dans Paramètres → Profil de l'agent (interface web) ou en modifiant le fichier puis en redémarrant le daemon. |

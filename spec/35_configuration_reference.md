@@ -186,7 +186,7 @@ Le champ `avatar` (optionnel) peut contenir une data URL d’image (ex. `data:im
 | `stt`         | objet  | Non         | Configuration STT (transcription). |
 | `stt.base_url` | string | Non        | URL de base du service STT (ex. `http://localhost:8766`). Le daemon envoie l’audio en corps de requête à `POST {base_url}/stt`, réponse JSON `{"text": "..."}`. |
 
-TTS est considéré configuré si `tts.base_url` est défini et non vide ; idem pour STT avec `stt.base_url`. L’interface web affiche le bouton « Message vocal » (micro) dans le chat lorsque STT est configuré.
+TTS est considéré configuré si `tts.base_url` est défini et non vide ; idem pour STT avec `stt.base_url`. L’interface web affiche le bouton « Message vocal » (micro) dans le chat lorsque STT est configuré ; si TTS est aussi configuré, la réponse à un message vocal est affichée en texte et lue automatiquement en audio.
 
 ### Exemple complet
 

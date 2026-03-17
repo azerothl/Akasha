@@ -61,7 +61,7 @@ En production : lancer le binaire installé (ex. `akasha-ui.exe` sous Windows). 
 - **RAG utilisateur** (documents indexés pour le contexte) : gestion dans l’onglet Paramètres en web ; en TUI, possible via l’API (`GET/POST/DELETE /api/user-rag/documents`).
 - **Liens cliquables** (fichiers/dossiers locaux dans les réponses) : interface web uniquement (ouverture dans l’explorateur / application par défaut). En TUI, les chemins restent du texte.
 - **Affichage d’images générées** (vignettes, « Ouvrir le dossier ») : interface web uniquement.
-- **Lecture audio** (réponses TTS en data URL) : interface web uniquement (lecteur audio dans le markdown).
+- **Lecture audio** : interface web uniquement. Réponse à un message vocal : texte + lecture automatique en TTS si `tts.base_url` est configuré. Réponses contenant une data URL audio (outil TTS de l'agent) : lecteur audio dans le markdown.
 
 ---
 
