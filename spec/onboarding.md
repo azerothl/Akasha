@@ -40,6 +40,8 @@ Fichiers créés dans le data_dir (ex. `~/akasha` ou `%USERPROFILE%\akasha`) :
 
 Optionnel : **voice_router.yaml** (TTS/STT) — copier `spec/voice_router.example.yaml` vers `data_dir/voice_router.yaml` et renseigner `tts.base_url` et/ou `stt.base_url` pour activer la synthèse vocale et le message vocal dans l’interface web. Voir [35_configuration_reference.md](35_configuration_reference.md) et [akasha-models/README.md](../akasha-models/README.md).
 
+**Services Docker** : en fin de wizard, `akasha init` propose d'installer les services (Ollama, TTS/STT, BitNet) depuis le projet akasha-models et met à jour les configs. Utilisez **`AKASHA_MODELS_DIR`** pour pointer vers le dossier contenant `docker-compose.yml`, ou lancez plus tard : `akasha services install --ollama`, `--voice`, `--bitnet` ou `--all`.
+
 Mode sans questions (défauts : modèle embarqué akasha_embedded, aucun connecteur) :
 
 ```bash

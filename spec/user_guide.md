@@ -52,8 +52,8 @@ En premier lancement, l’UI peut proposer un guide court (premier objectif) ; o
 
 | Commande | Description |
 |----------|-------------|
-| `akasha init` | Assistant interactif : choix du provider LLM (**Ollama** ou **modèles locaux Akasha** Qwen3 0.6B / Baguettotron, puis OpenAI/OpenRouter), vault, connecteurs ; génère `llm_router.yaml` et `connectors.env`. Si vous choisissez Ollama et qu’il n’est pas détecté, l’app peut ouvrir la page de téléchargement et proposer de télécharger un modèle léger par défaut une fois Ollama installé. |
-| `akasha init --defaults` | Initialisation minimale sans questions : Ollama si disponible (avec modèle par défaut), sinon modèles locaux Akasha ; aucun connecteur |
+| `akasha init` | Assistant interactif : choix du provider LLM (**Ollama** ou **modèles locaux Akasha** Qwen3 0.6B / Baguettotron, puis OpenAI/OpenRouter), vault, connecteurs ; génère `llm_router.yaml` et `connectors.env`. En fin de wizard, proposition d'installer les services Docker (Ollama, TTS/STT, BitNet) si le répertoire akasha-models est trouvé (variable AKASHA_MODELS_DIR ou --compose-dir). Si vous choisissez Ollama et qu’il n’est pas détecté, l’app peut ouvrir la page de téléchargement et proposer de télécharger un modèle léger par défaut une fois Ollama installé. |
+| `akasha init --defaults` | Initialisation minimale sans questions : Ollama si disponible (avec modèle par défaut), sinon modèles locaux Akasha ; aucun connecteur ; pas de proposition Docker |
 
 ### Diagnostic
 
@@ -86,6 +86,22 @@ En premier lancement, l’UI peut proposer un guide court (premier objectif) ; o
 | `akasha config env list` | Affiche les variables dans `akasha.env` |
 | `akasha config env get KEY` | Affiche la valeur d'une variable |
 | `akasha config env set KEY [value]` | Définit une variable (valeur optionnelle, lue depuis stdin si omise) |
+
+### Services Docker (Ollama, TTS/STT, BitNet)
+
+Les services du projet **akasha-models** (Docker Compose) peuvent être installés et démarrés depuis le CLI ; les fichiers `llm_router.yaml` et `voice_router.yaml` sont alors mis à jour pour pointer vers localhost.
+
+| Commande | Description |
+|----------|-------------|
+| `akasha services install --ollama` | Démarre Ollama (port 11434) et met à jour `llm_router.yaml` |
+| `akasha services install --voice` | Démarre TTS + STT (8765, 8766) et crée/met à jour `voice_router.yaml` |
+| `akasha services install --bitnet` | Démarre BitNet (8080) et ajoute le provider dans `llm_router.yaml` |
+| `akasha services install --all` | Démarre tous les services et met à jour les configs |
+| `akasha services install --compose-dir CHEMIN` | Utilise le répertoire indiqué (contenant `docker-compose.yml`) au lieu de la découverte automatique |
+| `akasha services status` | Affiche l’état des conteneurs (`docker compose ps`) |
+| `akasha services stop` | Arrête les services (`docker compose down`) |
+
+**Répertoire compose** : le CLI cherche le dossier akasha-models dans l’ordre : variable d’environnement **`AKASHA_MODELS_DIR`**, répertoire du binaire + `akasha-models`, répertoire de travail courant + `akasha-models`. Si aucun n’est trouvé, utiliser `--compose-dir`. Voir [akasha-models/README.md](../akasha-models/README.md).
 
 ### Routeur LLM
 
@@ -174,7 +190,7 @@ Les variables définies via `akasha config env set` sont enregistrées dans `dat
 Pour les **formats, types de données et exemples** de chaque fichier, voir [35_configuration_reference.md](35_configuration_reference.md).
 
 - **llm_router.yaml** : recherché dans l'ordre : data_dir, puis racine du projet. Définit les providers (Ollama, OpenAI, OpenRouter) et les modèles par type de tâche. **Section `providers` vide** : ce n'est pas la cause de timeouts. Le daemon enregistre Ollama (URL = `OLLAMA_HOST` ou découverte auto), le modèle embarqué, et **OpenRouter/OpenAI dès qu’une clé API est disponible** (env `OPENROUTER_API_KEY` / `OPENAI_API_KEY` ou vault). Vous pouvez donc définir une route primary vers openrouter/openai (TUI ou fichier) sans ajouter `providers.openrouter` dans le YAML si la clé est en variable d’environnement. Pour les modèles avec « thinking » (ex. glm-4.7-flash) qui renvoient une réponse vide (done_reason: length), augmenter **AKASHA_SYSTEM_TASK_MAX_TOKENS** (défaut 4096). Voir `spec/llm_router.example.yaml`.
-- **voice_router.yaml** (dans le data_dir, optionnel) : configuration TTS/STT. Copier `spec/voice_router.example.yaml` vers `data_dir/voice_router.yaml` et renseigner `tts.base_url` et/ou `stt.base_url` pour activer la synthèse vocale et/ou la transcription. Lorsque STT est configuré, l'interface web affiche un bouton **Message vocal** (micro) dans le chat : un clic démarre l'enregistrement, un second clic arrête, transcrit et envoie le message. Voir [35_configuration_reference.md](35_configuration_reference.md) et [akasha-models/README.md](../akasha-models/README.md).
+- **voice_router.yaml** (dans le data_dir, optionnel) : configuration TTS/STT. Créé automatiquement par `akasha services install --voice` ou par `akasha init` si vous choisissez d’installer les services Docker (option Voice). Sinon, copier `spec/voice_router.example.yaml` vers `data_dir/voice_router.yaml` et renseigner `tts.base_url` et/ou `stt.base_url`. Lorsque STT est configuré, l’interface web affiche un bouton **Message vocal** (micro). Voir [35_configuration_reference.md](35_configuration_reference.md) et [akasha-models/README.md](../akasha-models/README.md).
 - **connectors.env** : variables d'activation des connecteurs (chargé par `akasha start`).
 - **akasha.env** : variables persistantes (chargé après connectors.env).
 - **tools_policy.yaml** (dans le data_dir) : politique de sécurité des **outils machine** (lecture/écriture de fichiers, commandes). Utilisé par l’agent pour `read_file`, `write_file`, `search_files`, `run_command`, etc. Si le fichier est absent, le daemon peut le créer à partir de `spec/tools_policy.example.yaml` au premier démarrage. Pour autoriser l’écriture de fichiers (ex. génération de code sur disque), éditez ce fichier et ajoutez les répertoires sous **allowed_write_paths** (et **allowed_read_paths** pour la lecture). Par défaut, tout est refusé si le fichier est vide ou manquant. Pour que l'agent utilise spontanément la recherche web (météo, actualités, etc.) au lieu de suggérer des sites, activez **web_search_enabled: true** et configurez une clé Brave (`BRAVE_API_KEY` ou vault `brave_api_key`).

@@ -73,6 +73,8 @@ cargo build
 # 2. Premier lancement (recommandé)
 .\target\debug\akasha.exe init
 # Configure LLM (Ollama/OpenAI/OpenRouter), vault, connecteurs ; crée llm_router.yaml, connectors.env
+# En fin de wizard : option d'installer les services Docker (Ollama, TTS/STT, BitNet) depuis akasha-models
+# Ou plus tard : akasha services install --ollama --voice --bitnet (voir AKASHA_MODELS_DIR)
 
 # 3. Démarrer le daemon
 .\target\debug\akasha.exe start

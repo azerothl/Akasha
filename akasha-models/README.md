@@ -42,6 +42,20 @@ docker compose --profile bitnet up -d
 
 Sans Docker : lancer les binaires/serveurs manuellement et pointer les `base_url` vers les hôtes/ports utilisés.
 
+## Installation depuis le CLI Akasha
+
+Depuis le poste client, vous pouvez installer et démarrer les services sans lancer Docker Compose à la main :
+
+```bash
+# Depuis le dépôt Akasha (ou avec AKASHA_MODELS_DIR pointant vers ce répertoire)
+akasha services install --ollama
+akasha services install --voice
+akasha services install --bitnet
+# ou tout : akasha services install --all
+```
+
+Le CLI met à jour automatiquement `llm_router.yaml` et `voice_router.yaml` dans le data_dir (localhost). Le répertoire contenant ce `docker-compose.yml` est détecté via la variable d'environnement **`AKASHA_MODELS_DIR`**, ou en exécutant la commande depuis le dépôt Akasha (dossier parent contenant `akasha-models`), ou avec `akasha services install --compose-dir <chemin>`. Voir `akasha services --help`.
+
 ## URLs pour Akasha
 
 Une fois les services démarrés, configurez le **data_dir** d’Akasha :
