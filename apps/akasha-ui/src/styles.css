@@ -1575,6 +1575,15 @@ pre,
   cursor: not-allowed;
 }
 
+.input-area .chat-voice-btn.recording {
+  background: var(--akasha-error, #c53030);
+  animation: chat-voice-pulse 1s ease-in-out infinite;
+}
+
+@keyframes chat-voice-pulse {
+  50% { opacity: 0.85; }
+}
+
 /* Router panel */
 .loading-inline,
 .panel-loading {

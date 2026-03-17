@@ -311,6 +311,12 @@ function App() {
     action: string;
     params: unknown;
   } | null>(null);
+  /** Voice (TTS/STT): whether STT is configured (show "message vocal" button). */
+  const [voiceStatus, setVoiceStatus] = useState<{ stt_configured?: boolean; tts_configured?: boolean } | null>(null);
+  /** Voice: recording in progress for message vocal. */
+  const [voiceRecording, setVoiceRecording] = useState(false);
+  const voiceMediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const voiceChunksRef = useRef<Blob[]>([]);
   const [humanInputFreeText, setHumanInputFreeText] = useState("");
   /** Reply text for the inline ask_user form in the chat (when modal is not used). */
   const [inlineHumanReplyText, setInlineHumanReplyText] = useState("");
@@ -635,6 +641,28 @@ function App() {
       cancelled = true;
     };
   }, []);
+
+  // Voice (TTS/STT): fetch status when daemon is up so we can show "message vocal" button when STT is configured.
+  useEffect(() => {
+    if (!health?.ok) {
+      setVoiceStatus(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const status = await invoke<{ tts_configured?: boolean; stt_configured?: boolean }>("get_voice_status", {
+          port: DAEMON_PORT,
+        });
+        if (!cancelled) setVoiceStatus(status ?? null);
+      } catch {
+        if (!cancelled) setVoiceStatus(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [health?.ok]);
 
   // Fetch all pending human-input (agent questions) on load and periodically, so user sees them after relaunch or when popup was missed.
   const fetchPendingHumanInput = useCallback(async () => {
@@ -1806,13 +1834,70 @@ function App() {
     invoke(openFolder ? "open_path_in_explorer" : "open_path", { path }).catch(() => {});
   }, []);
 
-  const handleSend = async () => {
-    const hasContent = message.trim() || attachments.length > 0;
+  const handleVoiceMessageToggle = useCallback(async () => {
+    if (voiceRecording) {
+      const mr = voiceMediaRecorderRef.current;
+      if (mr && mr.state !== "inactive") {
+        mr.stop();
+      }
+      setVoiceRecording(false);
+      voiceMediaRecorderRef.current = null;
+      const chunks = voiceChunksRef.current;
+      voiceChunksRef.current = [];
+      if (chunks.length === 0) return;
+      const blob = new Blob(chunks, { type: "audio/webm;codecs=opus" });
+      try {
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => {
+            const dataUrl = r.result as string;
+            const comma = dataUrl.indexOf(",");
+            resolve(comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl);
+          };
+          r.onerror = () => reject(new Error("Read failed"));
+          r.readAsDataURL(blob);
+        });
+        const result = await invoke<{ text?: string }>("voice_stt_transcribe", {
+          port: DAEMON_PORT,
+          payload: { audio_base64: base64 },
+        });
+        const text = (result?.text ?? "").trim();
+        if (text) {
+          setMessage(text);
+          handleSend(text);
+        }
+      } catch (err) {
+        setMessages((prev) => [...prev, { role: "assistant", text: `Erreur transcription : ${String(err)}`, error: true }]);
+      }
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm";
+      const recorder = new MediaRecorder(stream);
+      voiceChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) voiceChunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+      };
+      recorder.start(200);
+      voiceMediaRecorderRef.current = recorder;
+      setVoiceRecording(true);
+    } catch (err) {
+      setMessages((prev) => [...prev, { role: "assistant", text: `Micro inaccessible : ${String(err)}`, error: true }]);
+    }
+  }, [voiceRecording, sessionId]);
+
+  const handleSend = async (overrideMessage?: string) => {
+    const content = (overrideMessage ?? message).trim();
+    const hasContent = content || attachments.length > 0;
     if (!hasContent || loading) return;
 
-    const userMessage = message.trim() || "(Pièce(s) jointe(s))";
+    const userMessage = content || "(Pièce(s) jointe(s))";
     setMessages((prev) => [...prev, { role: "user", text: userMessage }]);
-    setMessage("");
+    if (overrideMessage === undefined) setMessage("");
     chatInputRef.current?.focus();
 
     if (userMessage.startsWith("/")) {
@@ -2761,6 +2846,22 @@ function App() {
               >
                 Joindre
               </button>
+              {voiceStatus?.stt_configured && (
+                <button
+                  type="button"
+                  className={`chat-voice-btn ${voiceRecording ? "recording" : ""}`}
+                  onClick={handleVoiceMessageToggle}
+                  disabled={loading}
+                  aria-label={voiceRecording ? "Arrêter l'enregistrement et envoyer" : "Message vocal (enregistrer puis ré-encliquer pour envoyer)"}
+                  title={voiceRecording ? "Arrêter et envoyer" : "Message vocal"}
+                >
+                  {voiceRecording ? (
+                    <span className="chat-voice-btn-inner">● Enregistrement…</span>
+                  ) : (
+                    <span className="chat-voice-btn-inner" aria-hidden>🎤</span>
+                  )}
+                </button>
+              )}
               <label htmlFor="chat-input" className="sr-only">
                 Votre message
               </label>
