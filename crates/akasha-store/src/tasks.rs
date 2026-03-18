@@ -20,6 +20,8 @@ pub enum TaskStatus {
     Paused,
     Cancelled,
     WaitingUserInput,
+    /// Task was running when daemon restarted; can be resumed (Phase 2 AI OS).
+    Interrupted,
 }
 
 impl TaskStatus {
@@ -33,6 +35,7 @@ impl TaskStatus {
             Self::Paused => "paused",
             Self::Cancelled => "cancelled",
             Self::WaitingUserInput => "waiting_user_input",
+            Self::Interrupted => "interrupted",
         }
     }
 
@@ -45,6 +48,7 @@ impl TaskStatus {
             "paused" => Self::Paused,
             "cancelled" => Self::Cancelled,
             "waiting_user_input" => Self::WaitingUserInput,
+            "interrupted" => Self::Interrupted,
             _ => Self::Pending,
         }
     }
@@ -116,6 +120,21 @@ impl TaskStore {
     /// Get the todo list for a task (Deep Agents-style write_todos).
     pub fn get_todos(&self, task_id: Uuid) -> anyhow::Result<Vec<crate::todos::TodoItem>> {
         crate::todos::get_todos(&self.conn, task_id)
+    }
+
+    pub fn get_todos_with_updated_at(
+        &self,
+        task_id: Uuid,
+    ) -> anyhow::Result<(Vec<crate::todos::TodoItem>, Option<String>)> {
+        crate::todos::get_todos_with_updated_at(&self.conn, task_id)
+    }
+
+    pub fn merge_todos_from_payload(
+        &self,
+        task_id: Uuid,
+        payload: &str,
+    ) -> anyhow::Result<Vec<crate::todos::TodoItem>> {
+        crate::todos::merge_todos_from_payload(&self.conn, task_id, payload)
     }
 
     /// Set the todo list for a task (replaces entire list). Emit TodoListUpdated from daemon after this.

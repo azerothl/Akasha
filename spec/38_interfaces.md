@@ -57,9 +57,11 @@ En production : lancer le binaire installé (ex. `akasha-ui.exe` sous Windows). 
 **Différences principales** :
 
 - **Pièces jointes** (images, documents) : uniquement dans l’interface web (Tauri). En TUI, les messages sont envoyés sans pièces jointes.
+- **Message vocal** : lorsque le daemon a un STT configuré (`data_dir/voice_router.yaml` avec `stt.base_url`), l’interface web affiche un bouton micro dans le Chat : premier clic = enregistrement, second clic = arrêt, transcription et envoi du message. Non disponible en TUI.
 - **RAG utilisateur** (documents indexés pour le contexte) : gestion dans l’onglet Paramètres en web ; en TUI, possible via l’API (`GET/POST/DELETE /api/user-rag/documents`).
 - **Liens cliquables** (fichiers/dossiers locaux dans les réponses) : interface web uniquement (ouverture dans l’explorateur / application par défaut). En TUI, les chemins restent du texte.
 - **Affichage d’images générées** (vignettes, « Ouvrir le dossier ») : interface web uniquement.
+- **Lecture audio** : interface web uniquement. Réponse à un message vocal : texte + lecture automatique en TTS si `tts.base_url` est configuré. Réponses contenant une data URL audio (outil TTS de l'agent) : lecteur audio dans le markdown.
 
 ---
 
@@ -80,7 +82,7 @@ En production : lancer le binaire installé (ex. `akasha-ui.exe` sous Windows). 
 
 ### Commandes slash (Chat, TUI et Web)
 
-Exemples : `/help`, `/status`, `/config list`, `/advice` (avec résultat du diagnostic), `/plugins`, `/reload`, etc. Voir la documentation dans l’onglet Doc ou `user_guide.md`.
+**Les mêmes commandes sont disponibles en TUI et en Web (Tauri).** Exemples : `/help`, `/status`, `/doctor`, `/advice`, `/config list`, `/models`, `/plugins`, `/reload`, `/skills reload`, `/task create "msg"`, `/stop TASK_ID`, `/newsession`, `/restart`, etc. Voir la documentation dans l’onglet Doc ou [user_guide.md](user_guide.md) (section « Commandes slash »). Taper **/help** dans le chat pour la liste complète.
 
 ---
 
@@ -100,6 +102,15 @@ Exemples : `/help`, `/status`, `/config list`, `/advice` (avec résultat du diag
 - **Architecture UI** : [36_ui_architecture.md](36_ui_architecture.md) — onglets, Task Center, transport.
 
 Pour une description détaillée des interfaces dans le guide utilisateur, voir la section « Interfaces » et « Lancement des interfaces et du daemon » de [user_guide.md](user_guide.md).
+
+### 6.1 API tâche : étapes (todos)
+
+**`GET /api/tasks/:task_id`** (même réponse que le statut de tâche) inclut :
+
+- **`todos`** : tableau `{ id?, title, status }` avec `status` ∈ `pending` | `done` | `cancelled` — liste persistée par l’agent (`write_todos`, `merge_todos`, `update_todo`).
+- **`todos_updated_at`** (optionnel) : horodatage ISO 8601 de la dernière écriture de la liste.
+
+L’onglet **Tâches** (interface web) affiche ces étapes et se rafraîchit sur l’événement SSE `todo_list_updated`.
 
 ---
 

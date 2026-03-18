@@ -1,6 +1,6 @@
 [package]
 name = "akasha-ui"
-version = "0.5.0"
+version = "0.6.0"
 description = "Akasha desktop UI"
 edition = "2021"
 

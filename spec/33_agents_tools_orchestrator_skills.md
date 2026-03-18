@@ -67,9 +67,12 @@ Liste exposée dans le code (`AVAILABLE_TOOLS`) et via **GET /api/tools** (JSON 
 | `sessions_spawn` | `sessions_spawn <message> [session_id]` | Créer une sous-tâche. |
 | `session_status` | `session_status <task_id>` | Statut d'une tâche. |
 | `message` | `message send <channel> <text>` | Envoyer un message (webhook). |
-| `browser`, `image`, `pdf` | (stubs) | Prévu phase 3. |
+| `browser` | `browser navigate <url>` \| `browser snapshot` \| (Phase 2: click, fill, screenshot, wait) | Automation navigateur gérée (une instance Playwright par tâche). Voir [spec 39](39_browser_automation.md). navigate : ouvre l'URL (domaine autorisé). snapshot : texte + liens de la page. |
+| `image`, `pdf` | (stubs) | Prévu phase 3. |
 | `device_discover` | `device_discover [interface]` | Lister les appareils accessibles (local_media, system, synthetic_input, network, usb, etc.). synthetic_input retourne keyboard, mouse. Filtre par `allowed_device_interfaces` / `blocked_device_interfaces`. |
 | `device_invoke` | `device_invoke <interface> <device_id> <action> [params]` | Exécuter une action sur un appareil. `local_media` : caméra, micro (capture, record). `synthetic_input` : clavier/souris — device_id keyboard\|mouse, action shortcut\|key\|type\|mouse_move\|mouse_click\|mouse_double_click\|mouse_scroll\|mouse_drag, params JSON (ex. {\"keys\":[\"Control\",\"Shift\",\"S\"]} pour raccourci). Nécessite client UI. |
+| `speech_synthesize` | `speech_synthesize <text>` | TTS : synthétiser le texte en audio. Retourne une data URL audio (WAV). Nécessite `voice_router.yaml` avec `tts.base_url`. |
+| `speech_transcribe` | `speech_transcribe <data_url_audio>` | STT : transcrire l’audio en texte. Passer la data URL de l’audio obligatoirement (ex. après enregistrement micro via `device_invoke local_media microphone record`). Nécessite `voice_router.yaml` avec `stt.base_url`. |
 
 **Device bridge et accès appareils** : l’agent peut interagir avec **tout appareil accessible** (périphériques réseau, USB, interfaces locales). Modèle générique : `device_discover` liste les appareils (optionnellement par interface) ; `device_invoke` envoie une action à un appareil. Les interfaces (ex. `local_media`, `system`, `synthetic_input`, `network`, `usb`) sont extensibles. Pour les appareils qui nécessitent consentement ou capture côté utilisateur (caméra, micro, lecture audio), le daemon enregistre une requête dans le **device bridge** ; l’UI (Tauri) interroge `GET /api/device/pending`, exécute l’action (getUserMedia, etc.) et envoie le résultat via `POST /api/device/result`. L’interface **synthetic_input** permet à l’agent d’utiliser clavier et souris (raccourcis OS, saisie, clics, déplacements, scroll, drag) : l’UI exécute les actions via enigo et renvoie le résultat. Exemples : screenshot (raccourci selon OS : Win+Shift+S, Cmd+Shift+4), jeu (mouse_click), dessin (mouse_move, mouse_click, mouse_drag), saisie (type). Recommandation : inclure `device_invoke` dans `require_approval` pour valider chaque action. Politique : `allowed_device_interfaces` (liste ou `["*"]` pour tout) et `blocked_device_interfaces` (prioritaire), même logique que `allowed_commands` / `blocked_commands`.
 
@@ -123,6 +126,14 @@ Activation : placer un fichier **tools_policy.yaml** dans le data_dir (voir `spe
 5. **Orchestrateur** reçoit la réponse finale → **transmet à l’utilisateur** (via le canal d’origine : Web, TUI, Slack, etc.) et met à jour le statut de la tâche.
 
 Tout le chemin « délégation → agent → sous-agents → résultat » est **non bloquant** : l’API et l’orchestrateur peuvent accepter d’autres messages et créer d’autres tâches en parallèle.
+
+### 5.1b Orchestration hybride, plan structuré, stream riche
+
+- **Règles** : fichier optionnel `data_dir/orchestration_rules.yaml` (voir `spec/orchestration_rules.example.yaml`) — correspondance par sous-chaîne ou regex → une étape forcée vers un agent, sans appel LLM décomposeur.
+- **Plan** : le décomposeur peut renvoyer du JSON `{ "steps": [ { "step_id", "agent_type", "intent", "depends_on"[] } ] }` (schéma `spec/schemas/execution_plan.schema.json`) ; sinon le format historique `agent|message` par ligne. Les étapes avec `depends_on` s’exécutent en vagues ; au sein d’une vague, les sous-tâches LLM peuvent tourner en parallèle (`AKASHA_MAX_PARALLEL_SUBTASKS`, défaut 4).
+- **Événements** (spec 09) : `plan_proposed`, `plan_committed`, `subtask_started` / `subtask_completed`, `tool_call_started` / `tool_call_finished` (corrélation sur la tâche racine quand l’exécution est un sous-agent), `session_state_snapshot`, `contract_violation`.
+- **Mémoire de session** : JSON dans `data_dir/session_state/<session_id>.json` ; `GET /api/session-state?session_id=…` ; mise à jour après réponses racine et après plan multi-agent.
+- **Contrats agent** : YAML optionnels dans `spec/agent_contracts/` (voir README du dossier).
 
 ### 5.2 Modèle technique (aligné avec l’existant)
 

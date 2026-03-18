@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
+import { preprocessDataUrlImages, preprocessDataUrlAudio } from "./preprocessDataUrlImages";
 import { preprocessMessagePaths } from "./preprocessMessagePaths";
 
 describe("preprocessDataUrlImages", () => {
@@ -69,6 +69,22 @@ describe("preprocessDataUrlImages", () => {
     const out = preprocessDataUrlImages(input);
     // Basic check: src attribute contains expected data URL
     expect(out).toContain('src="data:image/png;base64,ABC"');
+  });
+});
+
+describe("preprocessDataUrlAudio", () => {
+  it("converts markdown data URL audio to div wrap and audio controls", () => {
+    const input = "![Audio synthétisé](<data:audio/wav;base64,ABC>)";
+    const out = preprocessDataUrlAudio(input);
+    expect(out).toContain('<div class="markdown-data-audio-wrap">');
+    expect(out).toContain('<audio controls src="data:audio/wav;base64,ABC"');
+    expect(out).toContain('class="markdown-data-audio"');
+  });
+
+  it("returns string with no data audio match unchanged", () => {
+    const input = "Hello ![img](<data:image/png;base64,X>) world";
+    const out = preprocessDataUrlAudio(input);
+    expect(out).toBe(input);
   });
 });
 

@@ -28,6 +28,9 @@ Ce document décrit les points d’intégration stables pour utiliser Akasha com
 | GET | `/api/metrics/summary` | Métriques LLM par provider/model (P50/P95/P99 latence, coût). |
 | GET | `/api/router/metrics` | Métriques détaillées (option period=day|week|month|year). |
 | GET | `/api/update/status` | Dernière version connue (pour bannière de mise à jour). |
+| GET | `/api/voice/status` | Statut voix : `{ "tts_configured": bool, "stt_configured": bool }` (selon `voice_router.yaml`). |
+| POST | `/api/voice/tts` | Synthèse vocale : body `{ "text": "..." }` → `{ "message", "data_url": "data:audio/wav;base64,..." }`. |
+| POST | `/api/voice/stt` | Transcription : body `{ "data_url": "data:audio/...;base64,..." }` ou `{ "audio_base64": "..." }` → `{ "text": "..." }`. |
 
 Les réponses sont en JSON. Le daemon écoute par défaut sur le port 3876 (`AKASHA_PORT`).
 

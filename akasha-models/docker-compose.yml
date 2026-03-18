@@ -1,0 +1,72 @@
+# Akasha Models — services de modèles montés à la demande.
+# Usage:
+#   docker compose --profile ollama up -d        # LLM Ollama
+#   docker compose --profile bitnet up -d        # LLM BitNet (monter le volume models)
+#   docker compose --profile voice up -d         # TTS + STT (edge-tts + faster-whisper)
+# Voir README.md pour llm_router.yaml et voice_router.yaml.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: akasha-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    profiles:
+      - ollama
+    # Pour GPU (Linux) : décommenter et adapter
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  bitnet:
+    build:
+      context: ./bitnet
+      dockerfile: Dockerfile
+    container_name: akasha-bitnet
+    ports:
+      - "8080:8080"
+    volumes:
+      - bitnet_models:/models
+    environment:
+      - BITNET_MODEL_PATH=/models
+      - BITNET_THREADS=2
+    profiles:
+      - bitnet
+
+  tts:
+    build:
+      context: ./tts
+      dockerfile: Dockerfile
+    container_name: akasha-tts
+    ports:
+      - "8765:8765"
+    environment:
+      - TTS_HOST=0.0.0.0
+      - TTS_PORT=8765
+      - TTS_VOICE=fr-FR-DeniseNeural
+    profiles:
+      - voice
+
+  stt:
+    build:
+      context: ./stt
+      dockerfile: Dockerfile
+    container_name: akasha-stt
+    ports:
+      - "8766:8766"
+    environment:
+      - STT_HOST=0.0.0.0
+      - STT_PORT=8766
+      - WHISPER_MODEL=base
+    profiles:
+      - voice
+
+volumes:
+  ollama_data:
+  bitnet_models:

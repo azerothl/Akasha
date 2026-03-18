@@ -52,8 +52,8 @@ En premier lancement, l’UI peut proposer un guide court (premier objectif) ; o
 
 | Commande | Description |
 |----------|-------------|
-| `akasha init` | Assistant interactif : choix du provider LLM (**Ollama** ou **modèles locaux Akasha** Qwen3 0.6B / Baguettotron, puis OpenAI/OpenRouter), vault, connecteurs ; génère `llm_router.yaml` et `connectors.env`. Si vous choisissez Ollama et qu’il n’est pas détecté, l’app peut ouvrir la page de téléchargement et proposer de télécharger un modèle léger par défaut une fois Ollama installé. |
-| `akasha init --defaults` | Initialisation minimale sans questions : Ollama si disponible (avec modèle par défaut), sinon modèles locaux Akasha ; aucun connecteur |
+| `akasha init` | Assistant interactif : choix du provider LLM (**Ollama** ou **modèles locaux Akasha** Qwen3 0.6B / Baguettotron, puis OpenAI/OpenRouter), vault, connecteurs ; génère `llm_router.yaml` et `connectors.env`. En fin de wizard, proposition d'installer les services Docker (Ollama, TTS/STT, BitNet) si le répertoire akasha-models est trouvé (variable AKASHA_MODELS_DIR ou --compose-dir). Si vous choisissez Ollama et qu’il n’est pas détecté, l’app peut ouvrir la page de téléchargement et proposer de télécharger un modèle léger par défaut une fois Ollama installé. |
+| `akasha init --defaults` | Initialisation minimale sans questions : Ollama si disponible (avec modèle par défaut), sinon modèles locaux Akasha ; aucun connecteur ; pas de proposition Docker |
 
 ### Diagnostic
 
@@ -86,6 +86,22 @@ En premier lancement, l’UI peut proposer un guide court (premier objectif) ; o
 | `akasha config env list` | Affiche les variables dans `akasha.env` |
 | `akasha config env get KEY` | Affiche la valeur d'une variable |
 | `akasha config env set KEY [value]` | Définit une variable (valeur optionnelle, lue depuis stdin si omise) |
+
+### Services Docker (Ollama, TTS/STT, BitNet)
+
+Les services du projet **akasha-models** (Docker Compose) peuvent être installés et démarrés depuis le CLI ; les fichiers `llm_router.yaml` et `voice_router.yaml` sont alors mis à jour pour pointer vers localhost.
+
+| Commande | Description |
+|----------|-------------|
+| `akasha services install --ollama` | Démarre Ollama (port 11434) et met à jour `llm_router.yaml` |
+| `akasha services install --voice` | Démarre TTS + STT (8765, 8766) et crée/met à jour `voice_router.yaml` |
+| `akasha services install --bitnet` | Démarre BitNet (8080) et ajoute le provider dans `llm_router.yaml` |
+| `akasha services install --all` | Démarre tous les services et met à jour les configs |
+| `akasha services install --compose-dir CHEMIN` | Utilise le répertoire indiqué (contenant `docker-compose.yml`) au lieu de la découverte automatique |
+| `akasha services status` | Affiche l’état des conteneurs (`docker compose ps`) |
+| `akasha services stop` | Arrête les services (`docker compose down`) |
+
+**Répertoire compose** : le CLI cherche le dossier akasha-models dans l’ordre : variable d’environnement **`AKASHA_MODELS_DIR`**, répertoire du binaire + `akasha-models`, répertoire de travail courant + `akasha-models`. Si aucun n’est trouvé, utiliser `--compose-dir`. Voir [akasha-models/README.md](../akasha-models/README.md).
 
 ### Routeur LLM
 
@@ -174,6 +190,7 @@ Les variables définies via `akasha config env set` sont enregistrées dans `dat
 Pour les **formats, types de données et exemples** de chaque fichier, voir [35_configuration_reference.md](35_configuration_reference.md).
 
 - **llm_router.yaml** : recherché dans l'ordre : data_dir, puis racine du projet. Définit les providers (Ollama, OpenAI, OpenRouter) et les modèles par type de tâche. **Section `providers` vide** : ce n'est pas la cause de timeouts. Le daemon enregistre Ollama (URL = `OLLAMA_HOST` ou découverte auto), le modèle embarqué, et **OpenRouter/OpenAI dès qu’une clé API est disponible** (env `OPENROUTER_API_KEY` / `OPENAI_API_KEY` ou vault). Vous pouvez donc définir une route primary vers openrouter/openai (TUI ou fichier) sans ajouter `providers.openrouter` dans le YAML si la clé est en variable d’environnement. Pour les modèles avec « thinking » (ex. glm-4.7-flash) qui renvoient une réponse vide (done_reason: length), augmenter **AKASHA_SYSTEM_TASK_MAX_TOKENS** (défaut 4096). Voir `spec/llm_router.example.yaml`.
+- **voice_router.yaml** (dans le data_dir, optionnel) : configuration TTS/STT. Créé automatiquement par `akasha services install --voice` ou par `akasha init` si vous choisissez d’installer les services Docker (option Voice). Sinon, copier `spec/voice_router.example.yaml` vers `data_dir/voice_router.yaml` et renseigner `tts.base_url` et/ou `stt.base_url`. Lorsque STT est configuré, l’interface web affiche un bouton **Message vocal** (micro). Voir [35_configuration_reference.md](35_configuration_reference.md) et [akasha-models/README.md](../akasha-models/README.md).
 - **connectors.env** : variables d'activation des connecteurs (chargé par `akasha start`).
 - **akasha.env** : variables persistantes (chargé après connectors.env).
 - **tools_policy.yaml** (dans le data_dir) : politique de sécurité des **outils machine** (lecture/écriture de fichiers, commandes). Utilisé par l’agent pour `read_file`, `write_file`, `search_files`, `run_command`, etc. Si le fichier est absent, le daemon peut le créer à partir de `spec/tools_policy.example.yaml` au premier démarrage. Pour autoriser l’écriture de fichiers (ex. génération de code sur disque), éditez ce fichier et ajoutez les répertoires sous **allowed_write_paths** (et **allowed_read_paths** pour la lecture). Par défaut, tout est refusé si le fichier est vide ou manquant. Pour que l'agent utilise spontanément la recherche web (météo, actualités, etc.) au lieu de suggérer des sites, activez **web_search_enabled: true** et configurez une clé Brave (`BRAVE_API_KEY` ou vault `brave_api_key`).
@@ -239,11 +256,13 @@ L'UI se connecte au daemon sur le port 3876 (configurable via `AKASHA_PORT`). **
 
 **Pièces jointes (interface web uniquement)** : dans le Chat, le bouton « Joindre » permet d’ajouter des images ou des documents (texte, PDF). Les images sont envoyées au modèle (vision) ; les documents texte et PDF sont extraits et inclus dans le message pour l’agent. Utile pour « analyse ce document » ou pour fournir un fichier sans le copier-coller.
 
+**Message vocal (interface web, lorsque STT est configuré)** : si `voice_router.yaml` contient `stt.base_url`, un bouton micro (Message vocal) apparaît à côté du champ de saisie. Premier clic : démarrage de l’enregistrement au micro. Second clic : arrêt, transcription par le service STT, puis envoi du message comme un envoi classique. Les réponses de l’agent peuvent inclure des lecteurs audio lorsque l'agent utilise l'outil TTS (data URL audio dans le markdown). Si la question a été envoyée en vocal et que TTS est configuré (tts.base_url), la réponse est en outre lue automatiquement en audio.
+
 **RAG utilisateur (interface web uniquement)** : dans l’onglet Paramètres, la section « Mes documents (RAG utilisateur) » permet d’ajouter ou supprimer des documents (texte). Ces documents sont indexés et les extraits pertinents sont injectés dans le contexte des agents lors des réponses. En TUI ou sans interface web, le RAG utilisateur peut être géré via l’API : `GET/POST/DELETE /api/user-rag/documents`.
 
 **OpenRouter** : pour que l’application apparaisse dans le dashboard OpenRouter (usage, identification), définir `site_url` et `app_title` dans `providers.openrouter` du fichier `llm_router.yaml`, ou les variables d’environnement `OPENROUTER_SITE_URL` et `OPENROUTER_APP_TITLE`. Voir [35_configuration_reference.md](35_configuration_reference.md).
 
-**Différences TUI / Web** : la TUI propose les onglets Chat, Routeur, Doc, Tâches, Calendrier, Mémoire (pas d’onglet Paramètres). L’envoi de pièces jointes et la gestion du RAG utilisateur sont disponibles dans l’interface web uniquement ; en TUI, les messages sont envoyés sans pièces jointes et le RAG utilisateur se configure via l’API ou l’interface web.
+**Différences TUI / Web** : la TUI propose les onglets Chat, Routeur, Doc, Tâches, Calendrier, Mémoire (pas d’onglet Paramètres). L’envoi de pièces jointes, le **message vocal** (micro, lorsque STT est configuré) et la gestion du RAG utilisateur sont disponibles dans l’interface web uniquement ; en TUI, les messages sont envoyés sans pièces jointes ni message vocal, et le RAG utilisateur se configure via l’API ou l’interface web.
 
 ### Flux des demandes (orchestrateur)
 
@@ -258,28 +277,36 @@ Voir `spec/33_agents_tools_orchestrator_skills.md` pour la feuille de route (out
 
 ### Commandes slash (TUI et interface web)
 
-Dans le chat, les messages commençant par **/** sont interprétés comme des commandes (pas envoyés au LLM) :
+Dans le chat (TUI et interface web Tauri), les messages commençant par **/** sont interprétés comme des commandes (pas envoyés au LLM). **Les mêmes commandes sont disponibles dans les deux interfaces.** Tapez **/help** ou **/?** pour afficher la liste complète.
 
 | Commande | Description |
 |----------|-------------|
-| `/help`, `/?` | Aide des commandes |
-| `/status` | État du daemon |
-| `/doctor` | Diagnostic (daemon, Ollama, vault, spec, modèle embarqué) ; si le daemon tourne, affiche aussi les checks côté daemon (embedded_llm, etc.) |
-| `/advice` | Conseil diagnostic (RAG + modèle LLM) |
-| `/embedded` | Statut du modèle local embarqué (disponible, chargé ou non) |
-| `/embedded reload` | Décharge le modèle embarqué (rechargé au prochain appel) |
-| `/metrics` | Métriques du routeur LLM |
-| `/models` | Liste des modèles (tous les providers : Ollama, OpenAI, OpenRouter, akasha_embedded, etc.) |
-| `/models list` | Modèles par catégorie (primary + fallback) |
-| `/routes` | Idem : primary et fallback par catégorie |
-| `/models set CATÉGORIE PROVIDER MODÈLE` | Définit le modèle pour une catégorie (ex. `/models set conversation ollama llama3.2`) ; l'ancien primary passe en fallback ; pris en compte immédiatement et sauvegardé |
-| `/config list` | Variables (akasha.env) |
-| `/config get KEY` | Valeur d'une variable |
-| `/config set KEY value` | Définir une variable |
-| `/vault list` | Clés du vault (noms uniquement) |
-| `/plugins` | Liste des plugins installés |
-| `/reload` | Recharger les plugins |
-| `/restart` | Redémarrer le daemon (superviseur) |
+| `/help`, `/?` | Aide des commandes (liste complète). |
+| `/task create "message"` | Crée une tâche (envoie le message au daemon comme un message chat). |
+| `/schedule create NOM INTERVAL_SEC "description"` | Crée une récurrence (ex. rappel périodique). |
+| `/schedule delete SCHEDULE_ID` | Supprime une récurrence. |
+| `/stop TASK_ID`, `/cancel TASK_ID` | Annule une tâche (en cours ou en attente). |
+| `/newsession` | Nouvelle session : contexte court terme effacé, le prochain message repart de zéro. |
+| `/status` | État du daemon. |
+| `/doctor` | Diagnostic (daemon, Ollama, vault, spec, modèle embarqué) ; si le daemon tourne, affiche les checks côté daemon (embedded_llm, etc.). |
+| `/advice` | Conseil diagnostic (RAG + modèle LLM). |
+| `/embedded` | Statut du modèle local embarqué (disponible, chargé ou non). |
+| `/embedded reload` | Décharge le modèle embarqué (rechargé au prochain appel). |
+| `/metrics` | Métriques du routeur LLM. |
+| `/models` | Liste des modèles (tous les providers : Ollama, OpenAI, OpenRouter, akasha_embedded, etc.). |
+| `/models list` | Modèles par catégorie (primary + fallback). |
+| `/models set CATÉGORIE PROVIDER MODÈLE` | Définit le modèle pour une catégorie (ex. `/models set conversation ollama llama3.2`) ; l'ancien primary passe en fallback ; pris en compte immédiatement et sauvegardé. |
+| `/routes` | Primary et fallback par catégorie (identique à `/models list`). |
+| `/config list` | Variables (akasha.env). |
+| `/config get KEY` | Valeur d'une variable. |
+| `/config set KEY value` | Définir une variable. |
+| `/vault list` | Clés du vault (noms uniquement). |
+| `/plugins` | Liste des plugins installés. |
+| `/reload` | Recharger les plugins. |
+| `/skills`, `/skills list` | Liste des skills installés (nom et description). |
+| `/skills reload` | Recharger les skills (data_dir/skills, spec/skills) après ajout ou modification. |
+| `/skills uninstall <nom>` | Désinstaller un skill (ex. `/skills uninstall bankr`). |
+| `/restart` | Redémarrer le daemon (superviseur). |
 
 Pour ajouter une clé au vault : utiliser le CLI `akasha vault set KEY [value]`. Pour supprimer : `akasha vault delete KEY` ou `DELETE /api/vault` avec body `{"key": "KEY"}` (pas d’équivalent slash pour la sécurité).
 

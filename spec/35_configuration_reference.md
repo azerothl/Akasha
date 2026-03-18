@@ -95,6 +95,12 @@ Voir [llm_router.example.yaml](llm_router.example.yaml).
 | `allowed_skill_install_hosts` | liste de strings | Non (défaut : GitHub uniquement) | Hôtes autorisés pour `install_skill` (ex. `github.com`, `gitlab.com`, `raw.githubusercontent.com`, `mon-site.com`). Utiliser `["*"]` pour autoriser tout hôte HTTPS. Par défaut : GitHub seulement. |
 | `allowed_device_interfaces`   | liste de strings | Non (défaut : [])                | Interfaces appareil autorisées pour `device_discover` / `device_invoke` (caméra, micro, imprimantes, etc.). Valeurs possibles : `local_media`, `system`, `synthetic_input`, `usb`, etc. Utiliser `["*"]` pour tout autoriser (sous réserve de `blocked_device_interfaces`). |
 | `blocked_device_interfaces`   | liste de strings | Non (défaut : [])                | Interfaces appareil interdites ; prioritaire sur `allowed_device_interfaces`. Ex. `[usb]` pour tout autoriser sauf USB. |
+| `browser_enabled`             | booléen          | Non (défaut : false)             | Activer l’automation navigateur (outil `browser` : navigate, snapshot). Nécessite Node/npm, le runner `scripts/playwright-runner` (ou `AKASHA_PLAYWRIGHT_RUNNER`). Au premier usage, si Chromium Playwright est absent, le daemon lance automatiquement `npm install` puis `npx playwright install chromium` dans ce répertoire (désactiver : env `AKASHA_PLAYWRIGHT_AUTO_INSTALL=0`). |
+| `browser_allowed_domains`     | liste de strings | Non (défaut : [])                | Domaines autorisés pour `browser navigate`. Utiliser `["*"]` pour tout autoriser (sous réserve de `browser_blocked_domains`). |
+| `browser_blocked_domains`     | liste de strings | Non (défaut : [])                | Domaines interdits pour le navigateur ; prioritaire sur `browser_allowed_domains`. |
+| `browser_headless`            | booléen          | Non (défaut : true)              | Lancer le navigateur en mode headless (sans fenêtre). |
+| `browser_action_timeout_secs` | entier (u64)     | Non (défaut : 30)                | Timeout en secondes pour chaque action (navigate, etc.). |
+| `browser_session_timeout_secs` | entier (u64)   | Non (défaut : 300)               | Timeout de session (une instance par tâche ; session fermée à la fin de la tâche). |
 
 
 Les chemins peuvent être relatifs (ex. `.`) ou absolus ; sous Windows, utiliser des backslashes échappés ou des chemins normaux.
@@ -113,6 +119,7 @@ Voir [tools_policy.example.yaml](tools_policy.example.yaml).
 - **Initiative recherche web (météo, actualités)** : pour que l'agent utilise spontanément `web_search` pour répondre aux demandes d'information externes (météo, prévisions, actualités, horaires, etc.) au lieu de suggérer des sites à l'utilisateur, définir `web_search_enabled: true` et configurer une clé Brave (variable d'environnement `BRAVE_API_KEY` ou vault `brave_api_key`). Sans cela, l'agent pourra au mieux suggérer des sites ou expliquer comment activer la recherche web.
 - **Crawl web optionnel (Cloudflare)** : pour permettre à l'agent de lancer un crawl sur un site entier (ex. documentation, blog) et d'en récupérer le contenu (HTML, Markdown ou JSON), définir `web_crawl_enabled: true`, `cloudflare_account_id` et une clé API (vault ou `CLOUDFLARE_API_TOKEN`). Les domaines crawlables restent limités par `allowed_web_domains` et `blocked_web_domains`. Voir [53_web_crawl_cloudflare.md](53_web_crawl_cloudflare.md).
 - **Interfaces appareil (device)** : pour autoriser la découverte et l’invocation d’appareils (caméra, micro, imprimantes, etc.) via `device_discover` et `device_invoke`, définir `allowed_device_interfaces`. Ex. `["*"]` pour tout autoriser (avec `blocked_device_interfaces: [usb]` pour exclure l’USB) ; ou `[local_media, system]` pour uniquement média local et imprimantes ; ou `[local_media, synthetic_input]` pour ajouter les entrées synthétiques (raccourcis clavier, clics/déplacements souris — jeux, logiciels de dessin). Pour `synthetic_input`, il est recommandé d’ajouter `device_invoke` dans `require_approval` afin que l’utilisateur confirme chaque action (human-in-the-loop). Voir [tools_policy.example.yaml](tools_policy.example.yaml).
+- **Automation navigateur (spec 39)** : définir `browser_enabled: true` et optionnellement `browser_allowed_domains` / `browser_blocked_domains`. Le daemon peut installer automatiquement les dépendances npm et Chromium Playwright au premier appel à l’outil `browser` (sauf si `AKASHA_PLAYWRIGHT_AUTO_INSTALL=0`). En environnement restreint (sans réseau, sans npm), installer manuellement dans `scripts/playwright-runner` : `npm install` puis `npx playwright install chromium`. Voir [39_browser_automation.md](39_browser_automation.md).
 
 ---
 
@@ -168,6 +175,35 @@ Le daemon charge le profil au démarrage (et après chaque POST `/api/agent-prof
 ```
 
 Le champ `avatar` (optionnel) peut contenir une data URL d’image (ex. `data:image/png;base64,...`) pour l’affichage dans le chat.
+
+---
+
+## 2c. voice_router.yaml
+
+**Emplacement** : `data_dir/voice_router.yaml`.  
+**Format** : YAML.  
+**Utilisé par** : daemon (TTS/STT), API `GET /api/voice/status`, outils `speech_synthesize` et `speech_transcribe`. Fichier optionnel ; s’il est absent ou sans URL, TTS et STT sont désactivés.
+
+### Structure et types
+
+| Section / clé | Type   | Obligatoire | Description |
+|---------------|--------|-------------|-------------|
+| `tts`         | objet  | Non         | Configuration TTS (synthèse vocale). |
+| `tts.base_url` | string | Non        | URL de base du service TTS (ex. `http://localhost:8765`). Le daemon appelle `POST {base_url}/tts` avec body `{"text": "..."}`, réponse = corps binaire WAV. |
+| `stt`         | objet  | Non         | Configuration STT (transcription). |
+| `stt.base_url` | string | Non        | URL de base du service STT (ex. `http://localhost:8766`). Le daemon envoie l’audio en corps de requête à `POST {base_url}/stt`, réponse JSON `{"text": "..."}`. |
+
+TTS est considéré configuré si `tts.base_url` est défini et non vide ; idem pour STT avec `stt.base_url`. L’interface web affiche le bouton « Message vocal » (micro) dans le chat lorsque STT est configuré ; si TTS est aussi configuré, la réponse à un message vocal est affichée en texte et lue automatiquement en audio.
+
+### Exemple complet
+
+Voir [voice_router.example.yaml](voice_router.example.yaml).
+
+### Cas d’usage
+
+- **Activer TTS** : copier `spec/voice_router.example.yaml` vers `data_dir/voice_router.yaml`, renseigner `tts.base_url` (ex. Pocket TTS, moshi-server TTS sur le port 8765). Les réponses de l’agent peuvent alors inclure des pièces jointes audio (data URL) via l’outil `speech_synthesize`.
+- **Activer STT** : renseigner `stt.base_url` (ex. moshi-server STT sur le port 8766). Le bouton message vocal apparaît dans l’interface web ; l’utilisateur peut enregistrer au micro puis envoyer le message transcrit. L’outil `speech_transcribe` est disponible pour l’agent.
+- **Services externes** : TTS et STT sont des services HTTP externes (Kyutai, Pocket TTS, etc.) ; voir [akasha-models/README.md](../akasha-models/README.md) pour Docker Compose et URLs.
 
 ---
 
@@ -296,11 +332,12 @@ Voir [spec/skills/read_file_skill.yaml](skills/read_file_skill.yaml).
 
 | Fichier           | Exemple                                                         | Description                                          |
 | ----------------- | --------------------------------------------------------------- | ---------------------------------------------------- |
-| llm_router.yaml   | [llm_router.example.yaml](llm_router.example.yaml)              | Routeur LLM (global, providers, task_types, system). |
-| tools_policy.yaml | [tools_policy.example.yaml](tools_policy.example.yaml)          | Politique des outils (chemins, commandes, timeout).  |
-| cluster.yaml      | [cluster.example.yaml](cluster.example.yaml)                    | Cluster NATS (optionnel, mTLS).                      |
+| llm_router.yaml   | [llm_router.example.yaml](llm_router.example.yaml)              | Routeur LLM (global, providers, task_types, system).  |
+| tools_policy.yaml | [tools_policy.example.yaml](tools_policy.example.yaml)           | Politique des outils (chemins, commandes, timeout).  |
+| voice_router.yaml | [voice_router.example.yaml](voice_router.example.yaml)           | Voix TTS/STT (URLs des services synthèse et transcription). |
+| cluster.yaml      | [cluster.example.yaml](cluster.example.yaml)                     | Cluster NATS (optionnel, mTLS).                       |
 | akasha.env        | (voir section 3 ci‑dessus)                                      | Variables d’environnement (pas de fichier .example). |
-| skills            | [spec/skills/read_file_skill.yaml](skills/read_file_skill.yaml) | Exemple de skill (read_file).                        |
+| skills            | [spec/skills/read_file_skill.yaml](skills/read_file_skill.yaml)  | Exemple de skill (read_file).                         |
 
 
 ---
@@ -309,5 +346,5 @@ Voir [spec/skills/read_file_skill.yaml](skills/read_file_skill.yaml).
 
 - **data_dir** : par défaut `~/akasha` (Linux/macOS) ou `%USERPROFILE%\akasha` (Windows), sauf si `AKASHA_DATA_DIR` est défini. Affiché par `akasha paths`.
 - **llm_router.yaml** : recherché dans `data_dir` puis à la racine du projet.
-- **tools_policy.yaml**, **akasha.env**, **connectors.env**, **cluster.yaml** : dans `data_dir` uniquement.
+- **tools_policy.yaml**, **voice_router.yaml**, **akasha.env**, **connectors.env**, **cluster.yaml** : dans `data_dir` uniquement.
 

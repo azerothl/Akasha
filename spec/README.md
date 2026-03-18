@@ -122,6 +122,7 @@ Exemples de configuration :
 
 - [llm_router.example.yaml](llm_router.example.yaml) — Routeur LLM (global, providers, task_types, system)
 - [tools_policy.example.yaml](tools_policy.example.yaml) — Politique des outils machine (chemins, commandes, timeout)
+- [voice_router.example.yaml](voice_router.example.yaml) — Voix TTS/STT (URLs des services synthèse et transcription)
 - [cluster.example.yaml](cluster.example.yaml) — Configuration cluster (NATS, mTLS) si présent
 
 ---
@@ -169,4 +170,5 @@ Ces fichiers sont conservés pour référence mais pointent vers la version à j
 | Task Center, suivi des tâches en direct | [36_ui_architecture.md](36_ui_architecture.md) |
 | Calendrier, récurrences, scheduler | [37_scheduler_design.md](37_scheduler_design.md) |
 | Génération d’images, affichage dans le chat | [42_image_generation.md](42_image_generation.md) |
+| Voix (TTS/STT), message vocal, voice_router.yaml | [35_configuration_reference.md](35_configuration_reference.md) (§ 2c), [akasha-models/README.md](../akasha-models/README.md) |
 | Diagnostic / redémarrage | [runbooks/](runbooks/) |

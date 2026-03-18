@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AkashaExecutionPlan",
+  "type": "object",
+  "required": ["steps"],
+  "properties": {
+    "plan_id": { "type": "string", "format": "uuid" },
+    "steps": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "required": ["step_id", "agent_type", "intent"],
+        "properties": {
+          "step_id": { "type": "string" },
+          "agent_type": { "type": "string" },
+          "intent": { "type": "string" },
+          "depends_on": { "type": "array", "items": { "type": "string" } },
+          "parallel_group": { "type": "integer" }
+        }
+      }
+    }
+  }
+}

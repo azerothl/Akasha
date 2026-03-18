@@ -5,25 +5,27 @@ import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { useI18n } from "./useI18n";
-import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
+import { preprocessDataUrlImages, preprocessDataUrlAudio } from "./preprocessDataUrlImages";
 
-/** Sanitization schema: extends the safe default to allow the div/img elements
- *  injected by preprocessDataUrlImages, while blocking scripts and other dangerous tags.
- *  Security note: only the default safe protocols (e.g. http/https) are allowed for `src`;
- *  `data:` URLs are intentionally disallowed here to reduce the XSS surface area from
- *  SVG-in-image and similar edge cases. Event handlers (onerror, onclick, etc.) and
- *  <script> tags remain blocked by the schema. */
+const SAFE_DATA_IMAGE_RE = /^data:image\/[a-zA-Z0-9+\-]+(?:;[a-zA-Z0-9\-=]+)*;base64,[A-Za-z0-9+/]+={0,2}$/;
+const SAFE_DATA_AUDIO_RE = /^data:audio\/[a-zA-Z0-9+\-]+(?:;[a-zA-Z0-9\-=]+)*;base64,[A-Za-z0-9+/]+={0,2}$/;
+
+/** Sanitization schema: extends the safe default to allow the div/img/audio elements
+ *  injected by preprocessDataUrlImages and preprocessDataUrlAudio, while blocking scripts.
+ *  data: is allowed for src so that inline image and audio data URLs (from generate_image,
+ *  speech_synthesize, camera) render. Event handlers and <script> remain blocked. */
 const sanitizeSchema = {
   ...defaultSchema,
-  tagNames: [...(defaultSchema.tagNames ?? []), "div"],
+  tagNames: [...(defaultSchema.tagNames ?? []), "div", "audio"],
   attributes: {
     ...defaultSchema.attributes,
     div: ["className", "class"],
     img: ["src", "alt", "className", "class", "title", "width", "height"],
+    audio: ["src", "controls", "className", "class"],
   },
   protocols: {
     ...defaultSchema.protocols,
-    src: [...(defaultSchema.protocols?.src ?? ["http", "https"])],
+    src: [...(defaultSchema.protocols?.src ?? ["http", "https"]), "data"],
   },
 };
 
@@ -48,7 +50,7 @@ type MarkdownContentProps = { children?: string; className?: string; onPathClick
 /** Lazy-loaded markdown renderer to reduce initial bundle (react-markdown + remark-gfm in separate chunk). */
 export default function MarkdownContent({ children = "", className, onPathClick }: MarkdownContentProps) {
   const { t } = useI18n();
-  const processed = preprocessDataUrlImages(children);
+  const processed = preprocessDataUrlAudio(preprocessDataUrlImages(children));
   return (
     <div className={className ?? "markdown-rendered"}>
       <ReactMarkdown
@@ -57,7 +59,16 @@ export default function MarkdownContent({ children = "", className, onPathClick 
         components={{
           img: ({ src, alt, ...props }) => {
             if (!src || src.trim() === "") return null;
+            // Reject data: URLs that don't match a safe image pattern to prevent XSS.
+            if (src.startsWith("data:") && !SAFE_DATA_IMAGE_RE.test(src)) return null;
             return <img src={src} alt={alt ?? ""} className="markdown-data-image" {...props} />;
+          },
+          audio: ({ src, ...props }) => {
+            if (!src || src.trim() === "") return null;
+            // Only allow safe data:audio/* or https sources.
+            if (src.startsWith("data:") && !SAFE_DATA_AUDIO_RE.test(src)) return null;
+            if (!src.startsWith("data:") && !src.startsWith("https://")) return null;
+            return <audio src={src} controls className="markdown-data-audio" {...props} />;
           },
           a: ({ href, children: linkChildren, ...props }) => {
             if (href?.startsWith("path:") && onPathClick) {

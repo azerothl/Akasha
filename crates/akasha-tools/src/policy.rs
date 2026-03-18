@@ -54,6 +54,34 @@ pub struct ToolsPolicy {
     /// Optional: device interfaces blocked; takes precedence over allowed_device_interfaces.
     #[serde(default)]
     pub blocked_device_interfaces: Vec<String>,
+    /// Optional: enable browser automation (Playwright). If false or absent, all browser tool invocations are refused.
+    #[serde(default)]
+    pub browser_enabled: bool,
+    /// Optional: domains allowed for browser navigate. Use ["*"] to allow all (subject to browser_blocked_domains).
+    #[serde(default)]
+    pub browser_allowed_domains: Vec<String>,
+    /// Optional: domains blocked for browser; takes precedence over browser_allowed_domains.
+    #[serde(default)]
+    pub browser_blocked_domains: Vec<String>,
+    /// Optional: run browser headless (true) or show window (false). Default true.
+    #[serde(default = "default_browser_headless")]
+    pub browser_headless: bool,
+    /// Optional: timeout per action (navigate, click, etc.) in seconds. Default 30.
+    #[serde(default = "default_browser_action_timeout_secs")]
+    pub browser_action_timeout_secs: u64,
+    /// Optional: max session duration in seconds; after this the instance is closed. Default 300.
+    #[serde(default = "default_browser_session_timeout_secs")]
+    pub browser_session_timeout_secs: u64,
+}
+
+fn default_browser_headless() -> bool {
+    true
+}
+fn default_browser_action_timeout_secs() -> u64 {
+    30
+}
+fn default_browser_session_timeout_secs() -> u64 {
+    300
 }
 
 impl ToolsPolicy {
@@ -228,6 +256,36 @@ impl ToolsPolicy {
         self.allowed_device_interfaces
             .iter()
             .any(|a| a.trim().to_lowercase() == name)
+    }
+
+    /// Check if a host/domain is allowed for browser navigate.
+    /// Order: (1) block if host or parent in browser_blocked_domains; (2) allow if browser_allowed_domains contains "*"; (3) allow if host matches or is subdomain of an entry in browser_allowed_domains.
+    /// If browser_allowed_domains is empty, deny (unless "*").
+    pub fn can_use_browser_domain(&self, host: &str) -> bool {
+        let host_lower = host.trim().to_lowercase();
+        if host_lower.is_empty() {
+            return false;
+        }
+        for blocked in &self.browser_blocked_domains {
+            let b = blocked.trim().to_lowercase();
+            if host_lower == b || host_lower.ends_with(&format!(".{}", b)) {
+                return false;
+            }
+        }
+        if self
+            .browser_allowed_domains
+            .iter()
+            .any(|a| a.trim().eq_ignore_ascii_case("*"))
+        {
+            return true;
+        }
+        if self.browser_allowed_domains.is_empty() {
+            return false;
+        }
+        self.browser_allowed_domains.iter().any(|a| {
+            let allow = a.trim().to_lowercase();
+            host_lower == allow || host_lower.ends_with(&format!(".{}", allow))
+        })
     }
 
     /// Hosts allowed for install_skill. If None or empty, returns default GitHub hosts. If list contains "*", any host is allowed (caller must check).

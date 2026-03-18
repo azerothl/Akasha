@@ -362,6 +362,68 @@ async fn set_router_route(category: String, provider: String, model: String, por
     Ok(json)
 }
 
+/// GET /api/voice/status — whether TTS/STT are configured (voice_router.yaml).
+#[tauri::command]
+async fn get_voice_status(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/voice/status", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+#[derive(serde::Deserialize)]
+struct VoiceSttPayload {
+    #[serde(default)]
+    data_url: Option<String>,
+    #[serde(default)]
+    audio_base64: Option<String>,
+}
+
+/// POST /api/voice/stt — transcribe audio to text. Body: { "data_url" } or { "audio_base64" }.
+#[tauri::command]
+async fn voice_stt_transcribe(port: Option<u16>, payload: VoiceSttPayload) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/voice/stt", daemon_base_url(port));
+    let body = if let Some(ref u) = payload.data_url.filter(|s| !s.is_empty()) {
+        serde_json::json!({ "data_url": u })
+    } else if let Some(ref b) = payload.audio_base64.filter(|s| !s.is_empty()) {
+        serde_json::json!({ "audio_base64": b })
+    } else {
+        return Err("data_url or audio_base64 required".to_string());
+    };
+    let client = http_client();
+    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        let err_body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({ "error": status.to_string() }));
+        return Err(err_body.get("error").and_then(|v| v.as_str()).unwrap_or("STT failed").to_string());
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// POST /api/voice/tts — synthesize text to audio. Returns { "data_url": "data:audio/wav;base64,...", "message": "..." }.
+#[tauri::command]
+async fn voice_tts(port: Option<u16>, text: String) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/voice/tts", daemon_base_url(port));
+    let body = serde_json::json!({ "text": text.trim() });
+    let client = http_client();
+    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        let err_body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({ "error": status.to_string() }));
+        return Err(err_body.get("error").and_then(|v| v.as_str()).unwrap_or("TTS failed").to_string());
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// GET /api/router/embedded-status — embedded LLM status (for /embedded).
 #[tauri::command]
 async fn get_embedded_status(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -573,6 +635,20 @@ async fn reload_plugins(port: Option<u16>) -> Result<(), String> {
         return Err(format!("{}", resp.status()));
     }
     Ok(())
+}
+
+/// GET /api/skills — list installed skills. Returns array of { name, description, ... }.
+#[tauri::command]
+async fn get_skills(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/skills", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
 }
 
 /// POST /api/skills/reload — reload skills from disk (Agent Skills + YAML). Returns { count }.
@@ -1392,10 +1468,14 @@ pub fn run() {
             get_advice,
             get_plugins,
             reload_plugins,
+            get_skills,
             reload_skills,
             uninstall_skill,
             get_router_routes,
             set_router_route,
+            get_voice_status,
+            voice_stt_transcribe,
+            voice_tts,
             get_embedded_status,
             embedded_reload,
             get_device_pending,

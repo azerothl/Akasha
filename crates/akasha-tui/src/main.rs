@@ -1299,6 +1299,8 @@ impl App {
   /vault list       — clés du vault (noms uniquement)
   /plugins          — liste des plugins
   /reload           — recharger les plugins
+  /skills            — liste des skills installés
+  /skills list       — idem
   /skills reload     — recharger les skills (data_dir/skills, spec/skills)
   /skills uninstall <nom> — désinstaller un skill (ex. /skills uninstall bankr)
   /restart          — redémarrer le daemon (superviseur)
@@ -1534,6 +1536,28 @@ impl App {
             }
             "skills" => {
                 let sub = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+                if sub.is_empty() || sub == "list" {
+                    let url = format!("{}/api/skills", base);
+                    match client.get(&url).send() {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(list) = r.json::<Vec<serde_json::Value>>() {
+                                if list.is_empty() {
+                                    return "Aucun skill installé. Utilisez /skills reload après en avoir ajouté dans data_dir/skills ou spec/skills.".to_string();
+                                }
+                                let mut out = String::new();
+                                for s in &list {
+                                    let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                                    let desc = s.get("description").and_then(|v| v.as_str()).unwrap_or("").trim();
+                                    let desc = if desc.is_empty() { "(sans description)" } else { desc };
+                                    out.push_str(&format!("  • {} — {}\n", name, desc));
+                                }
+                                return out;
+                            }
+                        }
+                        _ => {}
+                    }
+                    return "Impossible de lister les skills (daemon ou erreur).".to_string();
+                }
                 if sub == "reload" {
                     let url = format!("{}/api/skills/reload", base);
                     match client.post(&url).send() {
@@ -1571,7 +1595,7 @@ impl App {
                         Err(e) => return format!("Erreur: {}", e),
                     }
                 }
-                return "Usage: /skills reload — recharger les skills ; /skills uninstall <nom> — désinstaller un skill.".to_string();
+                return "Usage: /skills [list] — lister les skills ; /skills reload — recharger ; /skills uninstall <nom> — désinstaller.".to_string();
             }
             "metrics" => {
                 let url = format!("{}/api/router/metrics", base);

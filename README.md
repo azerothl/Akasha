@@ -73,6 +73,8 @@ cargo build
 # 2. Premier lancement (recommandé)
 .\target\debug\akasha.exe init
 # Configure LLM (Ollama/OpenAI/OpenRouter), vault, connecteurs ; crée llm_router.yaml, connectors.env
+# En fin de wizard : option d'installer les services Docker (Ollama, TTS/STT, BitNet) depuis akasha-models
+# Ou plus tard : akasha services install --ollama --voice --bitnet (voir AKASHA_MODELS_DIR)
 
 # 3. Démarrer le daemon
 .\target\debug\akasha.exe start
@@ -103,7 +105,7 @@ akasha tui
 
 - **Onglets** : Chat, Routeur (métriques LLM), Doc (guide utilisateur servi par le daemon), Activité (tâches et événements).
 - **Chat** : envoi de messages au daemon ; réponses via l’orchestrateur (ack immédiat, traitement en arrière-plan). Défilement : ↑↓, PgUp/PgDn, Home/End.
-- **Commandes slash** (dans le chat) : `/help`, `/status`, `/doctor`, `/advice`, `/embedded` (statut modèle local), `/embedded reload`, `/metrics`, `/models` (liste), `/models set CATÉGORIE PROVIDER MODÈLE` (ex. `conversation ollama llama3.2`), `/config list`, `/vault list`, `/plugins`, `/reload`, `/restart`.
+- **Commandes slash** (dans le chat, identiques en TUI et Tauri) : `/help`, `/status`, `/doctor`, `/advice`, `/embedded`, `/embedded reload`, `/metrics`, `/models`, `/models list`, `/models set CATÉGORIE PROVIDER MODÈLE`, `/routes`, `/config list` / `get` / `set`, `/vault list`, `/plugins`, `/reload`, `/skills reload`, `/skills uninstall <nom>`, `/restart`, `/task create "msg"`, `/schedule create` / `delete`, `/stop TASK_ID`, `/cancel TASK_ID`, `/newsession`. Liste complète : taper `/help` dans le chat.
 - **Raccourcis** : Tab = changer d’onglet, R = rafraîchir (métriques ou doc), Échap / Ctrl+Q = quitter.
 
 ### Interface web (Tauri)
@@ -155,6 +157,7 @@ Feuille de route agents/outils/skills : [spec/33_agents_tools_orchestrator_skill
 - **connectors.env** : activation des canaux ; chargé par `akasha start`.
 - **akasha.env** : variables persistantes (config env).
 - **tools_policy.yaml** (data_dir, optionnel) : politique des outils machine (chemins/autorisations). Exemple : [spec/tools_policy.example.yaml](spec/tools_policy.example.yaml).
+- **voice_router.yaml** (data_dir, optionnel) : TTS/STT — URLs des services synthèse et transcription ; active le bouton message vocal dans l’interface web quand STT est configuré. Exemple : [spec/voice_router.example.yaml](spec/voice_router.example.yaml).
 
 Liste complète des commandes et options : [spec/user_guide.md](spec/user_guide.md) (également accessible dans la TUI et l’UI web via l’onglet Doc).
 
@@ -189,6 +192,7 @@ Quand le daemon tourne, le guide utilisateur est servi en markdown via **GET /ap
 - **Phase 8** — RAG (spec + runbooks), doctor --advice, evals (sécurité, runbooks, hallucinations) ✅  
 - **Phase 9** — Polish UI : TUI (Chat, Routeur, Doc, slash), UI Tauri (Chat, Routeur, Doc, Paramètres), commandes slash ✅  
 - **Agents / outils / skills** — Orchestrateur seul point d’entrée, délégation non bloquante, outils machine (akasha-tools), politique, skills chargeables, conteneur pour code, API /api/router/models, GET /api/tasks, /api/tasks/:id/events. Voir [spec/33_agents_tools_orchestrator_skills.md](spec/33_agents_tools_orchestrator_skills.md). ✅
+- **Voix (TTS/STT)** — Synthèse et transcription via services HTTP externes (voice_router.yaml) ; outils `speech_synthesize` / `speech_transcribe` ; API `/api/voice/status`, `/api/voice/tts`, `/api/voice/stt` ; bouton message vocal dans l’interface web lorsque STT est configuré ; réponse en texte + audio si la question est envoyée en vocal (TTS configuré). Voir [spec/35_configuration_reference.md](spec/35_configuration_reference.md) et [akasha-models/README.md](akasha-models/README.md). ✅
 - **Mémoire** — Court terme (session, compaction par résumé LLM), long terme (SQLite `memory.db`, embeddings **portés par l’app** via `akasha-embeddings` / fastembed, pas d’app tierce), promotion automatique des résumés, récupération par similarité. Voir [spec/06_memory_model.md](spec/06_memory_model.md). ✅
 
 ---

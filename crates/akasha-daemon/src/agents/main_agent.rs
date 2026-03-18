@@ -1,7 +1,7 @@
 //! Main Agent — entry point, ack < 500ms, task creation, routing to Orchestrator or Direct to conversation (Plan: Architecture agents et pipeline).
 
 use akasha_core::{EventEnvelope, EventType};
-use akasha_store::{Task, TaskStatus, TaskStore};
+use akasha_store::{Task, TaskStatus, TaskStore, TodoStatus};
 use chrono::Utc;
 use std::path::Path;
 use tokio::sync::mpsc;
@@ -208,5 +208,76 @@ impl MainAgent {
 
     pub fn bus(&self) -> &EventBus {
         &self.bus
+    }
+
+    /// Resume a Paused or Interrupted task: set status to Queued and re-inject into conversation worker (Phase 2 AI OS).
+    pub fn resume_task(&self, store_path: &Path, task_id: Uuid) -> anyhow::Result<()> {
+        let store = TaskStore::open(store_path)?;
+        let task = store.get(task_id)?.ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        let resumable = matches!(
+            task.status,
+            TaskStatus::Paused | TaskStatus::Interrupted
+        );
+        if !resumable {
+            anyhow::bail!("task not resumable (status: {})", task.status.as_str());
+        }
+        // Remember the original status so we can roll back on channel closure.
+        let original_status = task.status;
+        let message = match store.get_todos(task_id) {
+            Ok(todos)
+                if todos
+                    .iter()
+                    .any(|t| matches!(t.status, TodoStatus::Pending)) =>
+            {
+                "(Reprise automatique — poursuivre le plan d'étapes en cours ; ne pas repartir de zéro.)".to_string()
+            }
+            _ => task
+                .initial_message
+                .clone()
+                .unwrap_or_else(|| "(Reprise)".to_string()),
+        };
+        // Session and execution mode are not persisted in the task store; use a
+        // day-scoped session id and direct conversation mode when resuming.
+        let session_id = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
+        let execution_mode = None;
+        let tx = self
+            .direct_conversation_tx
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("conversation channel not available"))?;
+        let task_msg = OrchestratorTask {
+            task_id,
+            message,
+            session_id,
+            image_data_urls: None,
+            execution_mode,
+        };
+        // Update status to Queued BEFORE enqueuing so the conversation worker won't
+        // see a Paused/Interrupted status and silently drop the task.
+        store.update_status(task_id, TaskStatus::Queued)?;
+        if let Err(e) = tx.try_send(task_msg) {
+            match e {
+                mpsc::error::TrySendError::Full(_) => {
+                    // Channel is full: roll back status and return a clear error instead of blocking.
+                    let _ = store.update_status(task_id, original_status);
+                    anyhow::bail!("conversation queue full when resuming task")
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    // Channel is closed: attempt to roll back the status and report a clear error.
+                    let _ = store.update_status(task_id, original_status);
+                    anyhow::bail!("conversation channel closed when resuming task")
+                }
+            }
+        }
+        let _ = self.bus.send(
+            EventEnvelope::new(
+                EventType::TaskResumed,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "resumed": true
+                })),
+            )
+            .with_correlation(task_id),
+        );
+        Ok(())
     }
 }

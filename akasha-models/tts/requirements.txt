@@ -1,0 +1,4 @@
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+edge-tts>=6.1.0
+pydub>=0.25.1

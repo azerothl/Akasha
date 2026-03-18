@@ -33,3 +33,13 @@ events:
   - id: schedule_created
   - id: schedule_updated
   - id: schedule_deleted
+  # Rich stream / hybrid orchestration (spec 33)
+  - id: plan_proposed
+  - id: plan_committed
+  - id: subtask_started
+  - id: subtask_completed
+  - id: tool_call_started
+  - id: tool_call_finished
+  - id: session_state_snapshot
+  - id: session_state_delta
+  - id: contract_violation

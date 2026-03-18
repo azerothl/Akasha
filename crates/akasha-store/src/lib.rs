@@ -23,4 +23,6 @@ pub use schedules::{
     Schedule, ScheduleException, ScheduleExceptionType, ScheduleStore, TaskRun, TaskRunStatus,
 };
 pub use tasks::{Task, TaskStatus, TaskStore, MAX_PROGRESS_PER_TASK};
-pub use todos::{parse_todos_from_payload, TodoItem, TodoStatus};
+pub use todos::{
+    format_todos_plan_block, merge_todos_from_payload, parse_todos_from_payload, TodoItem, TodoStatus,
+};
