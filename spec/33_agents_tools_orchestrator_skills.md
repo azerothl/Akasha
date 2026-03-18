@@ -127,6 +127,14 @@ Activation : placer un fichier **tools_policy.yaml** dans le data_dir (voir `spe
 
 Tout le chemin « délégation → agent → sous-agents → résultat » est **non bloquant** : l’API et l’orchestrateur peuvent accepter d’autres messages et créer d’autres tâches en parallèle.
 
+### 5.1b Orchestration hybride, plan structuré, stream riche
+
+- **Règles** : fichier optionnel `data_dir/orchestration_rules.yaml` (voir `spec/orchestration_rules.example.yaml`) — correspondance par sous-chaîne ou regex → une étape forcée vers un agent, sans appel LLM décomposeur.
+- **Plan** : le décomposeur peut renvoyer du JSON `{ "steps": [ { "step_id", "agent_type", "intent", "depends_on"[] } ] }` (schéma `spec/schemas/execution_plan.schema.json`) ; sinon le format historique `agent|message` par ligne. Les étapes avec `depends_on` s’exécutent en vagues ; au sein d’une vague, les sous-tâches LLM peuvent tourner en parallèle (`AKASHA_MAX_PARALLEL_SUBTASKS`, défaut 4).
+- **Événements** (spec 09) : `plan_proposed`, `plan_committed`, `subtask_started` / `subtask_completed`, `tool_call_started` / `tool_call_finished` (corrélation sur la tâche racine quand l’exécution est un sous-agent), `session_state_snapshot`, `contract_violation`.
+- **Mémoire de session** : JSON dans `data_dir/session_state/<session_id>.json` ; `GET /api/session-state?session_id=…` ; mise à jour après réponses racine et après plan multi-agent.
+- **Contrats agent** : YAML optionnels dans `spec/agent_contracts/` (voir README du dossier).
+
 ### 5.2 Modèle technique (aligné avec l’existant)
 
 - **Entrée** : `POST /api/message` (ou équivalent canal) crée toujours une **tâche racine** et envoie son `task_id` à l’orchestrateur (via une file, ex. `orchestrator_tx`).

@@ -2753,6 +2753,9 @@ function App() {
                                               {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload ? (
                                                 <span className="chat-subagents-event-agent"> → {String((ev.payload as { agent?: string }).agent ?? "")}</span>
                                               ) : null}
+                                              {ev.payload && typeof ev.payload === "object" && (ev.event_type === "tool_call_started" || ev.event_type === "tool_call_finished") && "tool" in ev.payload ? (
+                                                <span className="chat-subagents-event-agent"> — {String((ev.payload as { tool?: string }).tool ?? "")}</span>
+                                              ) : null}
                                               {ev.payload && typeof ev.payload === "object" && (ev.event_type === "task_completed" || ev.event_type === "task_failed") && "model_used" in ev.payload && (ev.payload as { model_used?: string | null }).model_used ? (
                                                 <span className="chat-subagents-event-model"> — {t("tasks.model_used")}: {(ev.payload as { model_used: string }).model_used}</span>
                                               ) : null}
