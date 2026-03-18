@@ -122,6 +122,21 @@ impl TaskStore {
         crate::todos::get_todos(&self.conn, task_id)
     }
 
+    pub fn get_todos_with_updated_at(
+        &self,
+        task_id: Uuid,
+    ) -> anyhow::Result<(Vec<crate::todos::TodoItem>, Option<String>)> {
+        crate::todos::get_todos_with_updated_at(&self.conn, task_id)
+    }
+
+    pub fn merge_todos_from_payload(
+        &self,
+        task_id: Uuid,
+        payload: &str,
+    ) -> anyhow::Result<Vec<crate::todos::TodoItem>> {
+        crate::todos::merge_todos_from_payload(&self.conn, task_id, payload)
+    }
+
     /// Set the todo list for a task (replaces entire list). Emit TodoListUpdated from daemon after this.
     pub fn set_todos(&self, task_id: Uuid, todos: &[crate::todos::TodoItem]) -> anyhow::Result<()> {
         crate::todos::set_todos(&self.conn, task_id, todos)

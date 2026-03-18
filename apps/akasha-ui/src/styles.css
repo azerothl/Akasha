@@ -968,6 +968,31 @@ pre,
   border: 1px solid var(--akasha-error);
 }
 
+.message.message-streaming .text.markdown-rendered {
+  opacity: 0.97;
+}
+
+.message-streaming-caret {
+  display: inline-block;
+  width: 0.28em;
+  min-height: 1em;
+  margin-left: 3px;
+  background: var(--akasha-accent);
+  animation: message-streaming-blink 0.85s ease-in-out infinite;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+}
+
+@keyframes message-streaming-blink {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 .message-head {
   display: flex;
   align-items: center;
@@ -2350,24 +2375,137 @@ pre,
   margin-top: 0;
 }
 
-/* Task Center: list always visible, events detail scrollable */
+/* Task Center: corps du panneau remplit la hauteur sous le titre */
+.panel.activity-panel {
+  min-height: 0;
+}
+
 .activity-panel-body {
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 0;
+  gap: 0.2rem;
 }
 
-.activity-tasks-block {
+/* Tâches : sections ouvertes partagent la hauteur ; fermées = barre titre uniquement */
+.activity-panel-body > .task-panel-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.activity-panel-body > .task-panel-section--closed {
+  flex: 0 0 auto;
+  min-height: 0;
+  overflow: visible;
+}
+
+.activity-panel-body > .task-panel-section--open {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.task-panel-section--closed .task-panel-section-head {
+  margin-bottom: 0.2rem;
+}
+
+.task-panel-section--open .task-panel-section-head {
+  margin-bottom: 0.35rem;
   flex-shrink: 0;
+}
+
+.task-panel-section--open .task-panel-section-body {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.task-panel-section--open .task-panel-section-body > .activity-task-cards {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0;
+}
+
+.task-panel-section--open .task-panel-section-body > .activity-tasks-filters,
+.task-panel-section--open .task-panel-section-body > .activity-tasks-search-wrap {
+  flex-shrink: 0;
+}
+
+.task-panel-section--open .task-panel-section-body > .empty-state {
+  flex-shrink: 0;
+}
+
+.task-panel-section--open .task-panel-section-body > .task-steps-list {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  margin-bottom: 0;
+}
+
+.task-panel-section-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.task-panel-section-toggle {
+  flex-shrink: 0;
+  width: 2rem;
+  min-width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid var(--akasha-border);
+  border-radius: 4px;
+  background: var(--akasha-bg-elevated);
+  color: var(--akasha-fg);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.task-panel-section-toggle:hover {
+  background: var(--akasha-bg-hover);
+}
+
+.task-panel-chevron {
+  font-size: 0.65rem;
+  line-height: 1;
+  opacity: 0.85;
+}
+
+.task-panel-section-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.task-panel-section--open .task-panel-events-body {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.task-panel-events-body .activity-events-list {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .activity-tasks-block .activity-task-list {
   max-height: 14rem;
 }
 
-.activity-events-block {
+/* Hors panneau tâches pliable, garder le comportement ancien si besoin */
+.activity-events-block:not(.task-panel-section) {
   flex: 1;
   min-height: 0;
   display: flex;
@@ -2375,8 +2513,69 @@ pre,
   overflow: hidden;
 }
 
+.activity-panel-body .activity-events-block.task-panel-section {
+  /* flex géré par --open / --closed */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .activity-events-block h3 {
   flex-shrink: 0;
+}
+
+.task-steps-section .task-steps-empty {
+  margin: 0.25rem 0 0.75rem;
+  font-size: 0.9rem;
+  opacity: 0.85;
+}
+
+.task-steps-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 1rem;
+  border: 1px solid var(--akasha-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.task-steps-list .task-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.5rem 0.65rem;
+  border-bottom: 1px solid var(--akasha-border);
+  font-size: 0.9rem;
+}
+
+.task-steps-list .task-step:last-child {
+  border-bottom: none;
+}
+
+.task-step-check {
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+.task-step-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.task-step--done .task-step-title {
+  text-decoration: line-through;
+  opacity: 0.75;
+}
+
+.task-step--cancelled .task-step-title {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+
+.task-step-badge {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  opacity: 0.8;
 }
 
 .task-actions-row {

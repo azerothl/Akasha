@@ -1,7 +1,7 @@
 //! Main Agent — entry point, ack < 500ms, task creation, routing to Orchestrator or Direct to conversation (Plan: Architecture agents et pipeline).
 
 use akasha_core::{EventEnvelope, EventType};
-use akasha_store::{Task, TaskStatus, TaskStore};
+use akasha_store::{Task, TaskStatus, TaskStore, TodoStatus};
 use chrono::Utc;
 use std::path::Path;
 use tokio::sync::mpsc;
@@ -223,10 +223,19 @@ impl MainAgent {
         }
         // Remember the original status so we can roll back on channel closure.
         let original_status = task.status;
-        let message = task
-            .initial_message
-            .clone()
-            .unwrap_or_else(|| "(Reprise)".to_string());
+        let message = match store.get_todos(task_id) {
+            Ok(todos)
+                if todos
+                    .iter()
+                    .any(|t| matches!(t.status, TodoStatus::Pending)) =>
+            {
+                "(Reprise automatique — poursuivre le plan d'étapes en cours ; ne pas repartir de zéro.)".to_string()
+            }
+            _ => task
+                .initial_message
+                .clone()
+                .unwrap_or_else(|| "(Reprise)".to_string()),
+        };
         // Session and execution mode are not persisted in the task store; use a
         // day-scoped session id and direct conversation mode when resuming.
         let session_id = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));

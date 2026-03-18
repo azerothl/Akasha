@@ -65,6 +65,84 @@ pub fn get_todos(conn: &Connection, task_id: Uuid) -> anyhow::Result<Vec<TodoIte
     Ok(Vec::new())
 }
 
+/// Same as `get_todos` plus `updated_at` from the row when present.
+pub fn get_todos_with_updated_at(
+    conn: &Connection,
+    task_id: Uuid,
+) -> anyhow::Result<(Vec<TodoItem>, Option<String>)> {
+    let mut stmt = conn.prepare("SELECT todos_json, updated_at FROM task_todos WHERE task_id = ?1")?;
+    let mut rows = stmt.query([task_id.to_string()])?;
+    if let Some(row) = rows.next()? {
+        let json: String = row.get(0)?;
+        let updated: String = row.get(1)?;
+        let todos: Vec<TodoItem> = serde_json::from_str(&json).unwrap_or_default();
+        return Ok((todos, Some(updated)));
+    }
+    Ok((Vec::new(), None))
+}
+
+/// Text block injected into the user prompt when there is at least one pending step.
+pub fn format_todos_plan_block(todos: &[TodoItem]) -> Option<String> {
+    if todos.is_empty() {
+        return None;
+    }
+    if !todos
+        .iter()
+        .any(|t| matches!(t.status, TodoStatus::Pending))
+    {
+        return None;
+    }
+    let mut s = String::from(
+        "[Plan de la tâche — à respecter]\n\
+         (Execute the next pending step before redefining the plan. Use update_todo to mark steps done.)\n\n",
+    );
+    for (i, t) in todos.iter().enumerate() {
+        s.push_str(&format!(
+            "{}. [{}] {}\n",
+            i + 1,
+            t.status.as_str(),
+            t.title
+        ));
+    }
+    if let Some(next) = todos
+        .iter()
+        .find(|t| matches!(t.status, TodoStatus::Pending))
+    {
+        s.push_str("\nProchaine étape à exécuter : ");
+        s.push_str(&next.title);
+        s.push('\n');
+    }
+    Some(s)
+}
+
+/// Append parsed steps whose titles are not already present (case-insensitive trim). Preserves order of existing list.
+pub fn merge_todos_from_payload(
+    conn: &Connection,
+    task_id: Uuid,
+    payload: &str,
+) -> anyhow::Result<Vec<TodoItem>> {
+    let mut existing = get_todos(conn, task_id)?;
+    let new_items = parse_todos_from_payload(payload);
+    for t in new_items {
+        let title = t.title.trim();
+        if title.is_empty() {
+            continue;
+        }
+        let exists = existing
+            .iter()
+            .any(|e| e.title.trim().eq_ignore_ascii_case(title));
+        if !exists {
+            existing.push(TodoItem {
+                id: t.id,
+                title: t.title,
+                status: t.status,
+            });
+        }
+    }
+    set_todos(conn, task_id, &existing)?;
+    Ok(existing)
+}
+
 pub fn set_todos(conn: &Connection, task_id: Uuid, todos: &[TodoItem]) -> anyhow::Result<()> {
     let now = Utc::now().to_rfc3339();
     let json = serde_json::to_string(todos).unwrap_or_else(|_| "[]".to_string());
@@ -131,4 +209,51 @@ pub fn parse_todos_from_payload(payload: &str) -> Vec<TodoItem> {
             status: TodoStatus::Pending,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_todos_plan_block_none_when_empty() {
+        assert!(format_todos_plan_block(&[]).is_none());
+    }
+
+    #[test]
+    fn format_todos_plan_block_none_when_all_done() {
+        let todos = vec![
+            TodoItem {
+                id: None,
+                title: "A".into(),
+                status: TodoStatus::Done,
+            },
+            TodoItem {
+                id: None,
+                title: "B".into(),
+                status: TodoStatus::Done,
+            },
+        ];
+        assert!(format_todos_plan_block(&todos).is_none());
+    }
+
+    #[test]
+    fn format_todos_plan_block_shows_next_pending() {
+        let todos = vec![
+            TodoItem {
+                id: None,
+                title: "First".into(),
+                status: TodoStatus::Done,
+            },
+            TodoItem {
+                id: None,
+                title: "Second".into(),
+                status: TodoStatus::Pending,
+            },
+        ];
+        let b = format_todos_plan_block(&todos).expect("block");
+        assert!(b.contains("Second"));
+        assert!(b.contains("Prochaine étape"));
+        assert!(b.contains("[done] First"));
+    }
 }

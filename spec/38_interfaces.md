@@ -103,6 +103,15 @@ En production : lancer le binaire installé (ex. `akasha-ui.exe` sous Windows). 
 
 Pour une description détaillée des interfaces dans le guide utilisateur, voir la section « Interfaces » et « Lancement des interfaces et du daemon » de [user_guide.md](user_guide.md).
 
+### 6.1 API tâche : étapes (todos)
+
+**`GET /api/tasks/:task_id`** (même réponse que le statut de tâche) inclut :
+
+- **`todos`** : tableau `{ id?, title, status }` avec `status` ∈ `pending` | `done` | `cancelled` — liste persistée par l’agent (`write_todos`, `merge_todos`, `update_todo`).
+- **`todos_updated_at`** (optionnel) : horodatage ISO 8601 de la dernière écriture de la liste.
+
+L’onglet **Tâches** (interface web) affiche ces étapes et se rafraîchit sur l’événement SSE `todo_list_updated`.
+
 ---
 
 ## 7. Interfaces matérielles du poste client

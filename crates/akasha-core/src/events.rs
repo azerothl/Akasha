@@ -51,7 +51,7 @@ pub enum EventType {
     TaskEscalatedToHuman,
     /// Approval request for a sensitive tool expired before the user responded.
     ToolApprovalExpired,
-    /// Agent updated the task todo list (write_todos). Payload: { task_id, todos: [...] }.
+    /// Agent updated the task todo list (write_todos, merge_todos, update_todo). Payload: { task_id, todos: [...] }.
     TodoListUpdated,
     /// Request for user to approve, reject, or edit a tool call before execution. Payload: { tool, args_redacted, task_id }.
     ToolApprovalRequest,

@@ -17,6 +17,28 @@ export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_la
 
 const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "light_latte"];
 
+type ChatMessageRow = {
+  role: "user" | "assistant" | "system";
+  text: string;
+  error?: boolean;
+  streaming?: boolean;
+  taskId?: string;
+};
+
+function shouldChatStreamProgress(message: string): boolean {
+  const m = message?.trim() ?? "";
+  if (!m) return false;
+  if (m.includes("Analyzing your request") || m.includes("Analyse de votre demande")) return false;
+  if (/^\s*TOOL\s*:/im.test(m)) return false;
+  if (/\n\s*TOOL\s*:/i.test(m)) return false;
+  return true;
+}
+
+function isChatStreamToolPhase(message: string): boolean {
+  const s = message ?? "";
+  return /^\s*TOOL\s*:/im.test(s.trim()) || /\n\s*TOOL\s*:/i.test(s);
+}
+
 /** Graph colors per theme (aligned with styles.css [data-theme]) so the memory graph respects dark/light. */
 const GRAPH_THEME_COLORS: Record<
   ThemeId,
@@ -279,9 +301,7 @@ function App() {
   );
   const [health, setHealth] = useState<HealthState | null>(null);
   const [message, setMessage] = useState("");
-  const [messages, setMessages] = useState<
-    Array<{ role: "user" | "assistant" | "system"; text: string; error?: boolean }>
-  >([]);
+  const [messages, setMessages] = useState<ChatMessageRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [routerMetrics, setRouterMetrics] = useState<RouterMetrics | null>(null);
   const [routerLoading, setRouterLoading] = useState(false);
@@ -296,6 +316,37 @@ function App() {
   const [tasksSelected, setTasksSelected] = useState(0);
   const [tasksEvents, setTasksEvents] = useState<Array<{ event_type: string; payload?: unknown; at: string }>>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
+  /** Tâches : sections pliables (liste / étapes / événements), mémorisées localement. */
+  const [taskPanelSections, setTaskPanelSections] = useState(() => {
+    try {
+      const raw = localStorage.getItem("akasha_task_panel_sections");
+      if (raw) {
+        const j = JSON.parse(raw) as { list?: boolean; steps?: boolean; events?: boolean };
+        return {
+          list: j.list !== false,
+          steps: j.steps !== false,
+          events: j.events !== false,
+        };
+      }
+    } catch {
+      /* ignore */
+    }
+    return { list: true, steps: true, events: true };
+  });
+  const toggleTaskPanelSection = useCallback((key: "list" | "steps" | "events") => {
+    setTaskPanelSections((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      try {
+        localStorage.setItem("akasha_task_panel_sections", JSON.stringify(next));
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }, []);
+  const [taskStepsTodos, setTaskStepsTodos] = useState<Array<{ id?: string | null; title: string; status: string }>>([]);
+  const selectedTaskIdForTodosRef = useRef<string | null>(null);
+  const fetchTaskStepsRef = useRef<(taskId: string) => Promise<void>>(async () => {});
   const [runningTaskChips, setRunningTaskChips] = useState<Record<string, { pct?: number; message?: string }>>({});
   /** Events (sub_agent_spawned, progress_update, etc.) per running task for collapsible sub-agent panel. Each event may have task_id (root or child). */
   const [runningTaskEvents, setRunningTaskEvents] = useState<Record<string, Array<{ event_type: string; payload?: unknown; at: string; task_id?: string }>>>({});
@@ -321,6 +372,9 @@ function App() {
   const replyWithTtsRef = useRef(false);
   /** Ref to handleSend so handleVoiceMessageToggle can call it without being declared after. */
   const handleSendRef = useRef<(overrideMessage?: string, fromVoice?: boolean) => Promise<void>>(() => Promise.resolve());
+  /** Dernière tâche chat : seule elle met à jour la bulle assistant (stream + réponse finale). */
+  const lastChatTaskIdRef = useRef<string | null>(null);
+  const ackTextByTaskRef = useRef<Record<string, string>>({});
   const [humanInputFreeText, setHumanInputFreeText] = useState("");
   /** Reply text for the inline ask_user form in the chat (when modal is not used). */
   const [inlineHumanReplyText, setInlineHumanReplyText] = useState("");
@@ -1016,6 +1070,40 @@ function App() {
     }
   }, []);
 
+  const fetchTaskSteps = useCallback(async (taskId: string) => {
+    try {
+      const raw = await invoke<string>("get_task_status", { taskId, port: DAEMON_PORT });
+      const j = JSON.parse(raw) as {
+        todos?: Array<{ id?: string | null; title?: string; status?: string }>;
+      };
+      const rows = (j.todos ?? []).map((x) => ({
+        id: x.id,
+        title: x.title ?? "",
+        status: (x.status ?? "pending").toLowerCase(),
+      }));
+      if (selectedTaskIdForTodosRef.current === taskId) setTaskStepsTodos(rows);
+    } catch {
+      if (selectedTaskIdForTodosRef.current === taskId) setTaskStepsTodos([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchTaskStepsRef.current = fetchTaskSteps;
+  }, [fetchTaskSteps]);
+
+  useEffect(() => {
+    selectedTaskIdForTodosRef.current = tasksList[tasksSelected]?.id ?? null;
+  }, [tasksList, tasksSelected]);
+
+  useEffect(() => {
+    const id = tasksList[tasksSelected]?.id;
+    if (!id) {
+      setTaskStepsTodos([]);
+      return;
+    }
+    void fetchTaskSteps(id);
+  }, [tasksList, tasksSelected, fetchTaskSteps]);
+
   const fetchCalendar = useCallback(async () => {
     setCalendarLoading(true);
     try {
@@ -1092,6 +1180,35 @@ function App() {
     fetchTasksList();
   }, [tab, fetchTasksList]);
 
+  const applyChatStreamProgress = useCallback((taskId: string, msg: string) => {
+    if (!taskId || taskId !== lastChatTaskIdRef.current) return;
+    if (!msg.trim()) return;
+    if (isChatStreamToolPhase(msg)) {
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+        if (idx < 0) return prev;
+        const next = [...prev];
+        next[idx] = {
+          role: "assistant",
+          text: ackTextByTaskRef.current[taskId] ?? next[idx].text,
+          taskId,
+          streaming: false,
+        };
+        return next;
+      });
+      return;
+    }
+    if (shouldChatStreamProgress(msg)) {
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+        if (idx < 0) return prev;
+        const next = [...prev];
+        next[idx] = { role: "assistant", text: msg, taskId, streaming: true };
+        return next;
+      });
+    }
+  }, []);
+
   // SSE: subscribe to daemon events for real-time updates (< 1s) when daemon is healthy.
   useEffect(() => {
     if (!health?.ok) return;
@@ -1099,9 +1216,33 @@ function App() {
     let es: EventSource | null = null;
     try {
       es = new EventSource(url);
-      es.onmessage = () => {
+      es.onmessage = (msgEv) => {
         fetchTasksList();
         fetchPendingHumanInput();
+        try {
+          const d = JSON.parse(msgEv.data) as {
+            event_type?: string;
+            payload?: { task_id?: string; message?: string } | Record<string, unknown>;
+            correlation_id?: string | null;
+          };
+          if (d.event_type === "progress_update" && d.payload && typeof d.payload === "object") {
+            const p = d.payload as Record<string, unknown>;
+            const tid = typeof p.task_id === "string" ? p.task_id : "";
+            const streamMsg = typeof p.message === "string" ? p.message : "";
+            if (tid && streamMsg) applyChatStreamProgress(tid, streamMsg);
+          }
+          if (d.event_type === "todo_list_updated") {
+            const tid =
+              (typeof d.payload?.task_id === "string" && d.payload.task_id) ||
+              (typeof d.correlation_id === "string" ? d.correlation_id : "") ||
+              "";
+            if (tid && tid === selectedTaskIdForTodosRef.current) {
+              void fetchTaskStepsRef.current(tid);
+            }
+          }
+        } catch {
+          /* ignore */
+        }
       };
       es.onerror = () => {
         es?.close();
@@ -1113,7 +1254,7 @@ function App() {
     return () => {
       es?.close();
     };
-  }, [health?.ok, health?.port, fetchTasksList, fetchPendingHumanInput]);
+  }, [health?.ok, health?.port, fetchTasksList, fetchPendingHumanInput, applyChatStreamProgress]);
 
   useEffect(() => {
     const task = tasksList[tasksSelected];
@@ -1910,7 +2051,10 @@ function App() {
 
     if (fromVoice) replyWithTtsRef.current = true;
     const userMessage = content || "(Pièce(s) jointe(s))";
-    setMessages((prev) => [...prev, { role: "user", text: userMessage }]);
+    setMessages((prev) => {
+      const cleaned = prev.filter((m) => !(m.role === "assistant" && m.streaming));
+      return [...cleaned, { role: "user", text: userMessage }];
+    });
     if (overrideMessage === undefined) setMessage("");
     chatInputRef.current?.focus();
 
@@ -1957,7 +2101,14 @@ function App() {
         }
       }
       const ackText = ack?.message ?? "Request received. You can follow progress in the Tasks tab.";
-      setMessages((prev) => [...prev, { role: "assistant", text: ackText }]);
+      if (ack?.task_id) {
+        lastChatTaskIdRef.current = ack.task_id;
+        ackTextByTaskRef.current[ack.task_id] = ackText;
+        setMessages((prev) => [...prev, { role: "assistant", text: ackText, taskId: ack.task_id }]);
+      } else {
+        lastChatTaskIdRef.current = null;
+        setMessages((prev) => [...prev, { role: "assistant", text: ackText }]);
+      }
       if (ack?.task_id) {
         setRunningTaskChips((prev) => ({ ...prev, [ack.task_id]: { pct: 0, message: "en cours…" } }));
         setRunningTaskEvents((prev) => ({ ...prev, [ack.task_id]: [] }));
@@ -2018,6 +2169,9 @@ function App() {
                 });
                 humanInputAutoOpenedRef.current.delete(taskId);
               }
+              if (status?.status !== "completed" && status?.status !== "failed" && msg) {
+                applyChatStreamProgress(taskId, msg);
+              }
               if (status?.status === "completed") {
                 setRunningTaskChips((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
                 setRunningTaskEvents((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
@@ -2025,7 +2179,18 @@ function App() {
                 humanInputAutoOpenedRef.current.delete(taskId);
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 const finalMsg = status?.progress?.slice(-1)[0]?.message ?? "Terminé.";
-                setMessages((prev) => [...prev, { role: "assistant", text: finalMsg }]);
+                if (taskId === lastChatTaskIdRef.current) {
+                  setMessages((prev) => {
+                    const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+                    if (idx >= 0) {
+                      const next = [...prev];
+                      next[idx] = { role: "assistant", text: finalMsg };
+                      return next;
+                    }
+                    return [...prev, { role: "assistant", text: finalMsg }];
+                  });
+                  delete ackTextByTaskRef.current[taskId];
+                }
                 if (replyWithTtsRef.current && voiceStatus?.tts_configured && finalMsg?.trim()) {
                   replyWithTtsRef.current = false;
                   invoke<{ data_url?: string }>("voice_tts", { text: finalMsg, port: DAEMON_PORT })
@@ -2048,7 +2213,18 @@ function App() {
                 humanInputAutoOpenedRef.current.delete(taskId);
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 replyWithTtsRef.current = false;
-                setMessages((prev) => [...prev, { role: "assistant", text: "Tâche en échec.", error: true }]);
+                if (taskId === lastChatTaskIdRef.current) {
+                  setMessages((prev) => {
+                    const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+                    if (idx >= 0) {
+                      const next = [...prev];
+                      next[idx] = { role: "assistant", text: "Tâche en échec.", error: true };
+                      return next;
+                    }
+                    return [...prev, { role: "assistant", text: "Tâche en échec.", error: true }];
+                  });
+                  delete ackTextByTaskRef.current[taskId];
+                }
                 requestAnimationFrame(() => chatInputRef.current?.focus());
                 return;
               }
@@ -2066,7 +2242,18 @@ function App() {
             delete next[taskId];
             return next;
           });
-          setMessages((prev) => [...prev, { role: "assistant", text: "Délai dépassé. Consultez Tâches." }]);
+          if (taskId === lastChatTaskIdRef.current) {
+            setMessages((prev) => {
+              const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+              if (idx >= 0) {
+                const next = [...prev];
+                next[idx] = { role: "assistant", text: "Délai dépassé. Consultez Tâches." };
+                return next;
+              }
+              return [...prev, { role: "assistant", text: "Délai dépassé. Consultez Tâches." }];
+            });
+            delete ackTextByTaskRef.current[taskId];
+          }
           requestAnimationFrame(() => chatInputRef.current?.focus());
         };
         pollUntilDone();
@@ -2586,7 +2773,7 @@ function App() {
                     return (
                       <div
                         key={i}
-                        className={`message ${m.role} ${m.error ? "error" : ""} ${askUserData ? "message-ask-user" : ""}`}
+                        className={`message ${m.role} ${m.error ? "error" : ""} ${askUserData ? "message-ask-user" : ""} ${m.streaming ? "message-streaming" : ""}`}
                       >
                         <div className="message-head">
                           {m.role === "user" ? (userAvatar ? <img src={userAvatar} alt="" className="message-avatar message-avatar-user" /> : null) : m.role === "assistant" ? (agentProfile.avatar ? <img src={agentProfile.avatar} alt="" className="message-avatar message-avatar-assistant" /> : null) : null}
@@ -2642,6 +2829,7 @@ function App() {
                             <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent onPathClick={handlePathClick}>
                               {preprocessMessagePaths(preprocessDataUrlImages(m.text))}
                             </LazyMarkdownContent></Suspense>
+                            {m.streaming ? <span className="message-streaming-caret" aria-hidden /> : null}
                           </div>
                         )}
                       </div>
@@ -3116,117 +3304,241 @@ function App() {
             )}
             {!tasksLoading && (
               <div className="activity-panel-body">
-                <div className="activity-tasks-block">
-                  <h3>{t("tasks.list_heading")}</h3>
-                  {tasksList.length > 0 && (
-                    <>
-                      <div className="activity-tasks-filters" role="tablist" aria-label={t("tasks.filter_label")}>
-                        <button
-                          type="button"
-                          role="tab"
-                          aria-selected={taskListFilter === "active"}
-                          className={"activity-filter-tab" + (taskListFilter === "active" ? " active" : "")}
-                          onClick={() => setTaskListFilter("active")}
-                        >
-                          {t("tasks.filter_active")}
-                        </button>
-                        <button
-                          type="button"
-                          role="tab"
-                          aria-selected={taskListFilter === "completed"}
-                          className={"activity-filter-tab" + (taskListFilter === "completed" ? " active" : "")}
-                          onClick={() => setTaskListFilter("completed")}
-                        >
-                          {t("tasks.filter_completed")}
-                        </button>
-                      </div>
-                      <div className="activity-tasks-search-wrap">
-                        <input
-                          type="search"
-                          className="activity-tasks-search"
-                          placeholder={t("tasks.search_placeholder")}
-                          value={taskSearchQuery}
-                          onChange={(e) => setTaskSearchQuery(e.target.value)}
-                          aria-label={t("tasks.search_placeholder")}
-                        />
-                      </div>
-                    </>
-                  )}
-                  {tasksList.length === 0 ? (
-                    <p className="empty-state">{t("tasks.empty")}</p>
-                  ) : filteredTasksList.length === 0 ? (
-                    <p className="empty-state">{t("tasks.no_match_filter")}</p>
-                  ) : (
-                    <ul className="activity-task-cards" role="list">
-                      {filteredTasksList.map((task) => {
-                        const isSelected = tasksList[tasksSelected]?.id === task.id;
-                        const runningChip = task.status === "running" ? runningTaskChips[task.id] : undefined;
-                        const createdLabel = task.created_at ? (() => {
-                          try {
-                            const d = new Date(task.created_at);
-                            return d.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
-                          } catch {
-                            return task.created_at;
-                          }
-                        })() : null;
-                        return (
-                          <li key={task.id} className={"activity-task-card" + (isSelected ? " selected" : "")}>
-                            <div
-                              className="activity-task-card-inner"
-                              role="button"
-                              tabIndex={0}
-                              onClick={() => setTasksSelected(tasksList.findIndex((x) => x.id === task.id))}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter" || e.key === " ") {
-                                  e.preventDefault();
-                                  setTasksSelected(tasksList.findIndex((x) => x.id === task.id));
-                                }
-                                const idx = filteredTasksList.findIndex((x) => x.id === task.id);
-                                if (e.key === "ArrowDown" && idx < filteredTasksList.length - 1) {
-                                  const next = filteredTasksList[idx + 1];
-                                  setTasksSelected(tasksList.findIndex((x) => x.id === next.id));
-                                }
-                                if (e.key === "ArrowUp" && idx > 0) {
-                                  const prev = filteredTasksList[idx - 1];
-                                  setTasksSelected(tasksList.findIndex((x) => x.id === prev.id));
-                                }
-                              }}
+                <div
+                  className={
+                    "activity-tasks-block task-panel-section " +
+                    (taskPanelSections.list ? "task-panel-section--open" : "task-panel-section--closed")
+                  }
+                >
+                  <div className="task-panel-section-head">
+                    <button
+                      type="button"
+                      className="task-panel-section-toggle"
+                      aria-expanded={taskPanelSections.list}
+                      aria-controls="task-panel-body-list"
+                      onClick={() => toggleTaskPanelSection("list")}
+                      aria-label={
+                        (taskPanelSections.list ? t("tasks.section_collapse") : t("tasks.section_expand")) +
+                        ": " +
+                        t("tasks.list_heading")
+                      }
+                    >
+                      <span className="task-panel-chevron" aria-hidden>
+                        {taskPanelSections.list ? "▼" : "▶"}
+                      </span>
+                    </button>
+                    <h3 className="task-panel-section-title" id="task-panel-heading-list">
+                      {t("tasks.list_heading")}
+                    </h3>
+                  </div>
+                  {taskPanelSections.list && (
+                    <div
+                      id="task-panel-body-list"
+                      role="region"
+                      aria-labelledby="task-panel-heading-list"
+                      className="task-panel-section-body"
+                    >
+                      {tasksList.length > 0 && (
+                        <>
+                          <div className="activity-tasks-filters" role="tablist" aria-label={t("tasks.filter_label")}>
+                            <button
+                              type="button"
+                              role="tab"
+                              aria-selected={taskListFilter === "active"}
+                              className={"activity-filter-tab" + (taskListFilter === "active" ? " active" : "")}
+                              onClick={() => setTaskListFilter("active")}
                             >
-                              <div className="activity-task-card-head">
-                                <span className="activity-task-card-title" title={taskDisplayLabel(task)}>
-                                  {taskDisplayLabel(task)}
-                                </span>
-                                <span className={"activity-task-status-pill status-" + task.status}>
-                                  {task.status}
-                                </span>
-                              </div>
-                              {task.status === "running" && runningChip != null && (
-                                <div className="activity-task-progress">
-                                  <div className="activity-task-progress-bar" style={{ width: `${runningChip.pct ?? 0}%` }} />
-                                  <span className="activity-task-progress-pct">{runningChip.pct ?? 0}%</span>
+                              {t("tasks.filter_active")}
+                            </button>
+                            <button
+                              type="button"
+                              role="tab"
+                              aria-selected={taskListFilter === "completed"}
+                              className={"activity-filter-tab" + (taskListFilter === "completed" ? " active" : "")}
+                              onClick={() => setTaskListFilter("completed")}
+                            >
+                              {t("tasks.filter_completed")}
+                            </button>
+                          </div>
+                          <div className="activity-tasks-search-wrap">
+                            <input
+                              type="search"
+                              className="activity-tasks-search"
+                              placeholder={t("tasks.search_placeholder")}
+                              value={taskSearchQuery}
+                              onChange={(e) => setTaskSearchQuery(e.target.value)}
+                              aria-label={t("tasks.search_placeholder")}
+                            />
+                          </div>
+                        </>
+                      )}
+                      {tasksList.length === 0 ? (
+                        <p className="empty-state">{t("tasks.empty")}</p>
+                      ) : filteredTasksList.length === 0 ? (
+                        <p className="empty-state">{t("tasks.no_match_filter")}</p>
+                      ) : (
+                        <ul className="activity-task-cards" role="list">
+                          {filteredTasksList.map((task) => {
+                            const isSelected = tasksList[tasksSelected]?.id === task.id;
+                            const runningChip = task.status === "running" ? runningTaskChips[task.id] : undefined;
+                            const createdLabel = task.created_at ? (() => {
+                              try {
+                                const d = new Date(task.created_at);
+                                return d.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+                              } catch {
+                                return task.created_at;
+                              }
+                            })() : null;
+                            return (
+                              <li key={task.id} className={"activity-task-card" + (isSelected ? " selected" : "")}>
+                                <div
+                                  className="activity-task-card-inner"
+                                  role="button"
+                                  tabIndex={0}
+                                  onClick={() => setTasksSelected(tasksList.findIndex((x) => x.id === task.id))}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter" || e.key === " ") {
+                                      e.preventDefault();
+                                      setTasksSelected(tasksList.findIndex((x) => x.id === task.id));
+                                    }
+                                    const idx = filteredTasksList.findIndex((x) => x.id === task.id);
+                                    if (e.key === "ArrowDown" && idx < filteredTasksList.length - 1) {
+                                      const next = filteredTasksList[idx + 1];
+                                      setTasksSelected(tasksList.findIndex((x) => x.id === next.id));
+                                    }
+                                    if (e.key === "ArrowUp" && idx > 0) {
+                                      const prev = filteredTasksList[idx - 1];
+                                      setTasksSelected(tasksList.findIndex((x) => x.id === prev.id));
+                                    }
+                                  }}
+                                >
+                                  <div className="activity-task-card-head">
+                                    <span className="activity-task-card-title" title={taskDisplayLabel(task)}>
+                                      {taskDisplayLabel(task)}
+                                    </span>
+                                    <span className={"activity-task-status-pill status-" + task.status}>
+                                      {task.status}
+                                    </span>
+                                  </div>
+                                  {task.status === "running" && runningChip != null && (
+                                    <div className="activity-task-progress">
+                                      <div className="activity-task-progress-bar" style={{ width: `${runningChip.pct ?? 0}%` }} />
+                                      <span className="activity-task-progress-pct">{runningChip.pct ?? 0}%</span>
+                                    </div>
+                                  )}
+                                  <div className="activity-task-meta">
+                                    <span className="activity-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>
+                                    {createdLabel && <span className="activity-task-created">{createdLabel}</span>}
+                                    {task.assigned_agent && <span className="activity-task-agent">{task.assigned_agent}</span>}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="activity-task-view-btn"
+                                    onClick={(e) => { e.stopPropagation(); setTasksSelected(tasksList.findIndex((x) => x.id === task.id)); }}
+                                  >
+                                    {t("tasks.view_task")}
+                                  </button>
                                 </div>
-                              )}
-                              <div className="activity-task-meta">
-                                <span className="activity-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>
-                                {createdLabel && <span className="activity-task-created">{createdLabel}</span>}
-                                {task.assigned_agent && <span className="activity-task-agent">{task.assigned_agent}</span>}
-                              </div>
-                              <button
-                                type="button"
-                                className="activity-task-view-btn"
-                                onClick={(e) => { e.stopPropagation(); setTasksSelected(tasksList.findIndex((x) => x.id === task.id)); }}
-                              >
-                                {t("tasks.view_task")}
-                              </button>
-                            </div>
-                          </li>
-                        );
-                      })}
-                    </ul>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </div>
                   )}
                 </div>
-                <div className="activity-events-block">
-                  <h3>Événements</h3>
+                <div
+                  className={
+                    "activity-events-block task-steps-section task-panel-section " +
+                    (taskPanelSections.steps ? "task-panel-section--open" : "task-panel-section--closed")
+                  }
+                >
+                  <div className="task-panel-section-head">
+                    <button
+                      type="button"
+                      className="task-panel-section-toggle"
+                      aria-expanded={taskPanelSections.steps}
+                      aria-controls="task-panel-body-steps"
+                      onClick={() => toggleTaskPanelSection("steps")}
+                      aria-label={
+                        (taskPanelSections.steps ? t("tasks.section_collapse") : t("tasks.section_expand")) +
+                        ": " +
+                        t("tasks.steps_title")
+                      }
+                    >
+                      <span className="task-panel-chevron" aria-hidden>
+                        {taskPanelSections.steps ? "▼" : "▶"}
+                      </span>
+                    </button>
+                    <h3 className="task-panel-section-title" id="task-panel-heading-steps">
+                      {t("tasks.steps_title")}
+                    </h3>
+                  </div>
+                  {taskPanelSections.steps && (
+                    <div
+                      id="task-panel-body-steps"
+                      role="region"
+                      aria-labelledby="task-panel-heading-steps"
+                      className="task-panel-section-body"
+                    >
+                      {taskStepsTodos.length === 0 ? (
+                        <p className="empty-state task-steps-empty">{t("tasks.steps_empty")}</p>
+                      ) : (
+                        <ul className="task-steps-list" role="list" aria-label={t("tasks.steps_title")}>
+                          {taskStepsTodos.map((step, idx) => (
+                            <li key={`${step.id ?? idx}-${idx}`} className={`task-step task-step--${step.status}`}>
+                              <span className="task-step-check" aria-hidden>
+                                {step.status === "done" ? "☑" : step.status === "cancelled" ? "⊘" : "☐"}
+                              </span>
+                              <span className="task-step-title">{step.title}</span>
+                              <span className="task-step-badge">
+                                {step.status === "done"
+                                  ? t("tasks.step_done")
+                                  : step.status === "cancelled"
+                                    ? t("tasks.step_cancelled")
+                                    : t("tasks.step_pending")}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div
+                  className={
+                    "activity-events-block task-panel-section " +
+                    (taskPanelSections.events ? "task-panel-section--open" : "task-panel-section--closed")
+                  }
+                >
+                  <div className="task-panel-section-head">
+                    <button
+                      type="button"
+                      className="task-panel-section-toggle"
+                      aria-expanded={taskPanelSections.events}
+                      aria-controls="task-panel-body-events"
+                      onClick={() => toggleTaskPanelSection("events")}
+                      aria-label={
+                        (taskPanelSections.events ? t("tasks.section_collapse") : t("tasks.section_expand")) +
+                        ": " +
+                        t("tasks.events_title")
+                      }
+                    >
+                      <span className="task-panel-chevron" aria-hidden>
+                        {taskPanelSections.events ? "▼" : "▶"}
+                      </span>
+                    </button>
+                    <h3 className="task-panel-section-title" id="task-panel-heading-events">
+                      {t("tasks.events_title")}
+                    </h3>
+                  </div>
+                  {taskPanelSections.events && (
+                    <div
+                      id="task-panel-body-events"
+                      role="region"
+                      aria-labelledby="task-panel-heading-events"
+                      className="task-panel-section-body task-panel-events-body"
+                    >
                   {tasksList.length > 0 && tasksList[tasksSelected] && (() => {
                     const sel = tasksList[tasksSelected];
                     const canCancel = sel.status === "pending" || sel.status === "running";
@@ -3283,6 +3595,8 @@ function App() {
                         </li>
                       ))}
                     </ul>
+                  )}
+                    </div>
                   )}
                 </div>
               </div>

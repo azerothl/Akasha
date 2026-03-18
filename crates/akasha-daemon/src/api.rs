@@ -3,7 +3,10 @@
 use akasha_core::{EventEnvelope, EventType};
 use akasha_vault::Vault;
 use akasha_llm::CompletionRequest;
-use akasha_store::{parse_todos_from_payload, Schedule, ScheduleException, ScheduleExceptionType, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore, TodoStatus};
+use akasha_store::{
+    format_todos_plan_block, parse_todos_from_payload, Schedule, ScheduleException, ScheduleExceptionType,
+    ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore, TodoStatus,
+};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use crate::agent_profile::AgentProfile;
 use crate::user_profile::UserProfile;
@@ -629,7 +632,8 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("generate_image", "generate_image <prompt> [size] — générer une image par IA (ex. OpenAI DALL·E). Prompt en texte libre ; size optionnel (1024x1024, 512x512). Retourne l'image en data URL dans la réponse (spec 42)."),
     ("speech_synthesize", "speech_synthesize <text> — TTS: synthétiser le texte en audio (Kyutai Unmute/Pocket TTS). Retourne une data URL audio (voice_router.yaml tts.base_url)."),
     ("speech_transcribe", "speech_transcribe <data_url_audio> — STT: transcrire l'audio en texte. Passer la data URL de l'audio (ex. après device_invoke local_media microphone record). La data URL est obligatoire (voice_router.yaml stt.base_url)."),
-    ("write_todos", "write_todos <payload> — définir la liste d'étapes (todo) de la tâche. Payload: JSON array [{\"title\":\"...\", \"status\":\"pending\"|\"done\"|\"cancelled\"}] ou une ligne par étape. Remplace toute la liste. Utiliser pour décomposer une tâche complexe et suivre la progression."),
+    ("write_todos", "write_todos <payload> — définir la liste d'étapes (todo). Remplace toute la liste (plan initial ou re-découpage complet). Pour ajouter sans effacer : merge_todos. Payload: JSON array ou lignes."),
+    ("merge_todos", "merge_todos <payload> — ajoute des étapes (même format que write_todos) sans supprimer les existantes ; titres déjà présents ignorés (casse insensible)."),
     ("read_todos", "read_todos — retourne la liste des étapes (todos) de la tâche courante."),
     ("update_todo", "update_todo <index> <status> — marquer l'étape à l'index (1-based) comme status (done, cancelled)."),
     ("list_skills", "list_skills — retourne la liste des skills installés (nom et description). Utiliser avant read_skill pour charger le détail d'un skill."),
@@ -642,7 +646,7 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
             AVAILABLE_TOOLS
                 .iter()
                 .filter(move |(name, _)| {
-                    *name == "ask_user" || *name == "install_skill" || *name == "uninstall_skill" || *name == "write_todos" || *name == "read_todos" || *name == "update_todo" || *name == "list_skills" || *name == "read_skill" || allowed.iter().any(|a| a == *name)
+                    *name == "ask_user" || *name == "install_skill" || *name == "uninstall_skill" || *name == "write_todos" || *name == "merge_todos" || *name == "read_todos" || *name == "update_todo" || *name == "list_skills" || *name == "read_skill" || allowed.iter().any(|a| a == *name)
                 }),
         )
     } else {
@@ -3034,7 +3038,7 @@ pub(crate) async fn run_message_via_llm(
              INSTALL SKILL RULE: When the user asks to install, download, get, fetch, or add a skill from a URL (e.g. \"install the bankr skill from …\", \"download the skill at this url\", \"get the skill from this url\", \"récupère le skill …\"), you MUST reply ONLY with TOOL: install_skill <url>. Do not give manual steps; perform the installation yourself. If the user says \"follow the SKILL.md instructions\" or \"follow the instructions in SKILL.md\", you MUST first reply with TOOL: install_skill <url> so the skill is registered; only after it is installed can you invoke it by name (e.g. TOOL: <skill_name> <args>). Do NOT use web_fetch or read_file to fetch SKILL.md and then execute its steps manually.\n\
              UNINSTALL SKILL RULE: When the user asks to uninstall or remove a skill (e.g. \"désinstalle bankr\", \"remove the bankr skill\"), you MUST reply ONLY with TOOL: uninstall_skill <name> (e.g. TOOL: uninstall_skill bankr).\n\
              SKILL USE RULE: When the user asks you to perform an action using a skill (e.g. \"vérifie mon wallet bankr\", \"check my balance with bankr\", \"run bankr whoami\"), you MUST reply ONLY with a single line: TOOL: <skill_name> <args> (e.g. TOOL: bankr whoami). The system will execute the command and return the result. Do NOT tell the user to run the command themselves or to \"use TOOL: bankr whoami\"; you must output that line yourself so the tool is executed.\n\
-             PROJECT RULE: For requests that imply a substantial deliverable (novel, comic/BD, code project, series of chapters or files), never claim completion after one response if the full scope is not delivered. State clearly what was done, what remains to do, and that you will continue on the user's next message (or via a sub-task). Do not say \"C'est terminé\" or \"Voilà, c'est fait\" until all requested deliverables are done. If the user says \"continue\", \"la suite\", or \"and the rest\", resume the project in progress (use memory_search for project context if available) and continue without saying \"terminé\" until the full scope is delivered. For project-like work, use memory_store to save project state (objective, steps done, deliverables) after each significant progress, with source project:<name> so context is reloaded on the next message. For multi-step tasks, you can use TOOL: write_todos to define and track steps (then read_todos/update_todo to mark progress); the UI will show the list.\n\
+             PROJECT RULE: For requests that imply a substantial deliverable (novel, comic/BD, code project, series of chapters or files), never claim completion after one response if the full scope is not delivered. State clearly what was done, what remains to do, and that you will continue on the user's next message (or via a sub-task). Do not say \"C'est terminé\" or \"Voilà, c'est fait\" until all requested deliverables are done. If the user says \"continue\", \"la suite\", or \"and the rest\", resume the project in progress (use memory_search for project context if available) and continue without saying \"terminé\" until the full scope is delivered. For project-like work, use memory_store to save project state (objective, steps done, deliverables) after each significant progress, with source project:<name> so context is reloaded on the next message. For multi-step tasks, use TOOL: write_todos for the initial plan (or full replan only); use TOOL: merge_todos to add steps without wiping the list; use read_todos/update_todo to mark progress. If the user message is prefixed with a block [Plan de la tâche — à respecter], execute the \"Prochaine étape\" (next pending step) before broad replanning.\n\
              {}\
              If you need no tool, reply normally with your answer.\n\
              If write_file or read_file returns \"path not allowed by policy\" or \"denied\", tell the user that they CAN configure this: edit the file tools_policy.yaml \
@@ -3165,6 +3169,12 @@ pub(crate) async fn run_message_via_llm(
         if !short_ctx.is_empty() {
             user_prefix.push_str(short_ctx.trim_end());
             user_prefix.push_str("\n\n");
+        }
+    }
+    if let Ok(todos) = store.get_todos(task_id) {
+        if let Some(block) = format_todos_plan_block(&todos) {
+            user_prefix.push_str(&block);
+            user_prefix.push_str("\n");
         }
     }
     let intent_flags = compute_message_intent_flags(&message);
@@ -3714,6 +3724,24 @@ pub(crate) async fn run_message_via_llm(
                             }
                         }
                         Err(e) => (false, format!("[write_todos] store error: {}", e), None),
+                    }
+                } else if actual_tool == "merge_todos" {
+                    let payload = args.join(" ").trim().to_string();
+                    match TaskStore::open(&store_path) {
+                        Ok(store) => match store.merge_todos_from_payload(task_id, &payload) {
+                            Ok(todos) => {
+                                let payload_json = serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "todos": todos.iter().map(|t| serde_json::json!({ "id": t.id, "title": t.title, "status": t.status.as_str() })).collect::<Vec<_>>()
+                                });
+                                let _ = bus.send(
+                                    EventEnvelope::new(EventType::TodoListUpdated, Some(payload_json)).with_correlation(task_id),
+                                );
+                                (true, format!("[merge_todos] list now has {} step(s).", todos.len()), None)
+                            }
+                            Err(e) => (false, format!("[merge_todos] error: {}", e), None),
+                        },
+                        Err(e) => (false, format!("[merge_todos] store error: {}", e), None),
                     }
                 } else if actual_tool == "read_todos" {
                     match TaskStore::open(&store_path) {
@@ -6422,7 +6450,10 @@ pub(crate) fn is_pausable(status: &TaskStatus) -> bool {
 
 /// Returns true when a task in `status` can be resumed.
 pub(crate) fn is_resumable(status: &TaskStatus) -> bool {
-    matches!(status, TaskStatus::Paused | TaskStatus::Interrupted)
+    matches!(
+        status,
+        TaskStatus::Paused | TaskStatus::Interrupted | TaskStatus::Failed
+    )
 }
 
 async fn pause_task(
@@ -6550,7 +6581,20 @@ async fn get_task_status(store_path: &Path, progress: &ProgressCache, task_usage
         }
     }
     let (tokens_used, cost_usd) = task_usage_store.get_task(id).await.unwrap_or((0, 0.0));
-    let body = serde_json::json!({
+    let (todos, todos_updated_at) = store
+        .get_todos_with_updated_at(id)
+        .unwrap_or_else(|_| (Vec::new(), None));
+    let todos_json: Vec<serde_json::Value> = todos
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "id": t.id,
+                "title": t.title,
+                "status": t.status.as_str()
+            })
+        })
+        .collect();
+    let mut body = serde_json::json!({
         "task_id": task.id.to_string(),
         "status": task.status.as_str(),
         "assigned_agent": task.assigned_agent,
@@ -6558,8 +6602,12 @@ async fn get_task_status(store_path: &Path, progress: &ProgressCache, task_usage
         "updated_at": task.updated_at.to_rfc3339(),
         "progress": progress_list,
         "tokens_used": tokens_used,
-        "cost_usd": cost_usd
+        "cost_usd": cost_usd,
+        "todos": todos_json
     });
+    if let Some(u) = todos_updated_at {
+        body["todos_updated_at"] = serde_json::Value::String(u);
+    }
     json_response("200 OK", &body.to_string())
 }
 
@@ -7202,7 +7250,7 @@ mod tests {
         assert!(!is_resumable(&TaskStatus::Queued));
         assert!(!is_resumable(&TaskStatus::Running));
         assert!(!is_resumable(&TaskStatus::Completed));
-        assert!(!is_resumable(&TaskStatus::Failed));
+        assert!(is_resumable(&TaskStatus::Failed));
         assert!(!is_resumable(&TaskStatus::Cancelled));
         assert!(!is_resumable(&TaskStatus::WaitingUserInput));
     }
