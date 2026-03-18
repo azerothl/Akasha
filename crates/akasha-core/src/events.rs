@@ -55,6 +55,19 @@ pub enum EventType {
     TodoListUpdated,
     /// Request for user to approve, reject, or edit a tool call before execution. Payload: { tool, args_redacted, task_id }.
     ToolApprovalRequest,
+    /// Structured plan before execution (hybrid orchestration). Payload: schema_version, plan_id, steps[].
+    PlanProposed,
+    PlanCommitted,
+    SubtaskStarted,
+    SubtaskCompleted,
+    /// Before tool execution (args redacted). Payload: call_id, tool, subtask_id optional.
+    ToolCallStarted,
+    ToolCallFinished,
+    /// Session working memory (structured). Phase C.
+    SessionStateSnapshot,
+    SessionStateDelta,
+    /// Agent reply did not match declared contract (soft validation). Phase D.
+    ContractViolation,
 }
 
 impl EventType {
@@ -98,6 +111,15 @@ impl EventType {
             Self::ToolApprovalExpired => "tool_approval_expired",
             Self::TodoListUpdated => "todo_list_updated",
             Self::ToolApprovalRequest => "tool_approval_request",
+            Self::PlanProposed => "plan_proposed",
+            Self::PlanCommitted => "plan_committed",
+            Self::SubtaskStarted => "subtask_started",
+            Self::SubtaskCompleted => "subtask_completed",
+            Self::ToolCallStarted => "tool_call_started",
+            Self::ToolCallFinished => "tool_call_finished",
+            Self::SessionStateSnapshot => "session_state_snapshot",
+            Self::SessionStateDelta => "session_state_delta",
+            Self::ContractViolation => "contract_violation",
         }
     }
 
@@ -141,6 +163,15 @@ impl EventType {
             "tool_approval_expired" => Some(Self::ToolApprovalExpired),
             "todo_list_updated" => Some(Self::TodoListUpdated),
             "tool_approval_request" => Some(Self::ToolApprovalRequest),
+            "plan_proposed" => Some(Self::PlanProposed),
+            "plan_committed" => Some(Self::PlanCommitted),
+            "subtask_started" => Some(Self::SubtaskStarted),
+            "subtask_completed" => Some(Self::SubtaskCompleted),
+            "tool_call_started" => Some(Self::ToolCallStarted),
+            "tool_call_finished" => Some(Self::ToolCallFinished),
+            "session_state_snapshot" => Some(Self::SessionStateSnapshot),
+            "session_state_delta" => Some(Self::SessionStateDelta),
+            "contract_violation" => Some(Self::ContractViolation),
             _ => None,
         }
     }
