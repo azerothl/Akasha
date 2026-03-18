@@ -2921,6 +2921,12 @@ pub(crate) async fn run_message_via_llm(
         .flatten()
         .map(|t| t.assigned_agent.clone())
         .unwrap_or_else(|| "conversation".to_string());
+    let timeline_correlation = store
+        .get(task_id)
+        .ok()
+        .flatten()
+        .and_then(|t| t.parent_task_id)
+        .unwrap_or(task_id);
 
     let tools_executor_snapshot = match &tools_executor {
         Some(r) => Some((*r.read().await).clone()),
@@ -3516,7 +3522,7 @@ pub(crate) async fn run_message_via_llm(
                                     "approved": false
                                 });
                                 let _ = bus.send(
-                                    EventEnvelope::new(EventType::ToolInvoked, Some(payload)).with_correlation(task_id),
+                                    EventEnvelope::new(EventType::ToolInvoked, Some(payload)).with_correlation(timeline_correlation),
                                 );
                                 continue;
                             }
@@ -3527,6 +3533,36 @@ pub(crate) async fn run_message_via_llm(
                         }
                     }
                 }
+                let tool_t0 = std::time::Instant::now();
+                let call_id = Uuid::new_v4();
+                let args_preview_tc: String = {
+                    const L: usize = 100;
+                    args
+                        .iter()
+                        .take(3)
+                        .map(|a| {
+                            if a.len() > L {
+                                format!("{}…", &a[..a.floor_char_boundary(L)])
+                            } else {
+                                a.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ToolCallStarted,
+                        Some(serde_json::json!({
+                            "schema_version": 1,
+                            "task_id": task_id.to_string(),
+                            "call_id": call_id.to_string(),
+                            "tool": display_tool,
+                            "args_preview": args_preview_tc,
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
+                );
                 let (success, res, captured_image): (bool, String, Option<String>) = if actual_tool == "ask_user" {
                     // Human in the loop: register pending request, emit event, wait for user reply.
                     match &human_input_store {
@@ -3812,7 +3848,21 @@ pub(crate) async fn run_message_via_llm(
                     "explanation": serde_json::Value::Null
                 });
                 let _ = bus.send(
-                    EventEnvelope::new(EventType::ToolInvoked, Some(payload)).with_correlation(task_id),
+                    EventEnvelope::new(EventType::ToolInvoked, Some(payload)).with_correlation(timeline_correlation),
+                );
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ToolCallFinished,
+                        Some(serde_json::json!({
+                            "schema_version": 1,
+                            "task_id": task_id.to_string(),
+                            "call_id": call_id.to_string(),
+                            "tool": tool_display,
+                            "success": success,
+                            "duration_ms": tool_t0.elapsed().as_millis() as u64,
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
                 );
                 if success {
                     log_tool_journal_if_write(&actual_tool, args, &res).await;
@@ -4307,6 +4357,33 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     if !is_paused {
         let _ = store.update_status(task_id, TaskStatus::Completed);
         notify_task_completion(&task_completion_registry, task_id).await;
+        let data_dir_sess = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+        let is_root_task = store
+            .get(task_id)
+            .ok()
+            .flatten()
+            .map(|t| t.parent_task_id.is_none())
+            .unwrap_or(true);
+        if is_root_task {
+            if let Ok(st) = crate::session_state::merge(data_dir_sess, &session_id, |s| {
+                let fact = reply_text.chars().take(240).collect::<String>();
+                if !fact.trim().is_empty() {
+                    s.facts.push(fact);
+                }
+            }) {
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::SessionStateSnapshot,
+                        Some(serde_json::json!({
+                            "schema_version": 1,
+                            "session_id": session_id,
+                            "state": st,
+                        })),
+                    )
+                    .with_correlation(task_id),
+                );
+            }
+        }
         let summary_preview: String = reply_text.chars().take(300).collect();
         learn_from_task_outcome_async(
             long_term_client.clone(),
@@ -4484,6 +4561,41 @@ pub async fn handle_api(
     }
 
     // GET /api/update/status — cached result of latest.json from Akasha_app (for UI update banner)
+    if method == "GET" && path.starts_with("/api/session-state") {
+        let session_id = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| {
+                q.split('&').find_map(|p| {
+                    if let Some(v) = p.strip_prefix("session_id=") {
+                        Some(
+                            urlencoding::decode(v)
+                                .map(|c| c.into_owned())
+                                .unwrap_or_else(|_| v.to_string()),
+                        )
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or_default();
+        if session_id.is_empty() {
+            return json_response(
+                "400 Bad Request",
+                r#"{"error":"session_id query parameter required"}"#,
+            );
+        }
+        let st = crate::session_state::load(data_dir, &session_id);
+        return json_response(
+            "200 OK",
+            &serde_json::to_string(&serde_json::json!({
+                "session_id": session_id,
+                "state": st,
+            }))
+            .unwrap_or_else(|_| "{}".into()),
+        );
+    }
+
     if method == "GET" && path == "/api/update/status" {
         let status = update_cache.read().await;
         let body = serde_json::json!({
