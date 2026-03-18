@@ -597,10 +597,6 @@ async fn process_root_task(
         }
         let mut step_outputs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut wave_step_counter = 0usize;
-        let store = match TaskStore::open(&store_path_buf) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
         for wave in waves {
             let mut batch: Vec<(Uuid, Arc<tokio::sync::Notify>, String)> = Vec::new();
             for &idx in &wave {
@@ -634,8 +630,12 @@ async fn process_root_task(
                         }
                     },
                 };
-                if store.insert(&task).is_err() {
-                    continue;
+                // Open TaskStore in a short scope so it is dropped before any .await.
+                {
+                    let Ok(store) = TaskStore::open(&store_path_buf) else { continue };
+                    if store.insert(&task).is_err() {
+                        continue;
+                    }
                 }
                 let _ = bus.send(
                     EventEnvelope::new(
@@ -700,6 +700,19 @@ async fn process_root_task(
                 })
                 .collect();
             join_all(futs).await;
+            // Pre-collect child failed statuses in a synchronous scope before any further .await.
+            let child_failed: std::collections::HashMap<Uuid, bool> = {
+                match TaskStore::open(&store_path_buf) {
+                    Ok(s) => batch.iter().map(|(cid, _, _)| {
+                        let failed = matches!(
+                            s.get(*cid).ok().flatten().map(|t| t.status),
+                            Some(TaskStatus::Failed)
+                        );
+                        (*cid, failed)
+                    }).collect(),
+                    Err(_) => std::collections::HashMap::new(),
+                }
+            };
             for (child_id, _, sid) in batch {
                 task_completion.write().await.remove(&child_id);
                 let content = {
@@ -709,12 +722,7 @@ async fn process_root_task(
                         .unwrap_or_default()
                 };
                 step_outputs.insert(sid.clone(), content.clone());
-                let failed = store
-                    .get(child_id)
-                    .ok()
-                    .flatten()
-                    .map(|t| t.status == TaskStatus::Failed)
-                    .unwrap_or(false);
+                let failed = child_failed.get(&child_id).copied().unwrap_or(false);
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::SubtaskCompleted,
@@ -730,36 +738,41 @@ async fn process_root_task(
                 );
             }
         }
-        // Single store read to get final child statuses.
-        let store = match TaskStore::open(&store_path_buf) {
-            Ok(s) => s,
-            Err(_) => return,
+        // Collect final child statuses in a synchronous scope before the await-heavy aggregation.
+        // TaskStore wraps rusqlite::Connection which must not be held across .await points.
+        let children = {
+            let store = match TaskStore::open(&store_path_buf) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let children = match store.get_children(root_task_id) {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            if children.is_empty() {
+                return;
+            }
+            let all_done = children.iter().all(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Failed));
+            if !all_done {
+                // Some children timed out without completing; treat the root task as failed.
+                let _ = store.update_status(root_task_id, TaskStatus::Failed);
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::TaskFailed,
+                        Some(serde_json::json!({
+                            "task_id": root_task_id.to_string(),
+                            "status": "failed",
+                            "subtasks": steps_count,
+                            "model_used": Option::<String>::None
+                        })),
+                    )
+                    .with_correlation(root_task_id),
+                );
+                return;
+            }
+            children
+            // store dropped here, before any .await
         };
-        let children = match store.get_children(root_task_id) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        if children.is_empty() {
-            return;
-        }
-        let all_done = children.iter().all(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Failed));
-        if !all_done {
-            // Some children timed out without completing; treat the root task as failed.
-            let _ = store.update_status(root_task_id, TaskStatus::Failed);
-            let _ = bus.send(
-                EventEnvelope::new(
-                    EventType::TaskFailed,
-                    Some(serde_json::json!({
-                        "task_id": root_task_id.to_string(),
-                        "status": "failed",
-                        "subtasks": steps_count,
-                        "model_used": Option::<String>::None
-                    })),
-                )
-                .with_correlation(root_task_id),
-            );
-            return;
-        }
         let contracts = ContractRegistry::load(spec_dir_buf.as_path());
         let mut parts: Vec<String> = Vec::new();
         {
@@ -925,7 +938,13 @@ You must either: (1) produce a complete, direct response to the user's request b
                         .collect::<String>(),
                 ),
             };
-            if store.insert(&refinement_task).is_ok() {
+            // Open store in a short scope so it is dropped before the awaits below.
+            let refinement_inserted = {
+                TaskStore::open(&store_path_buf)
+                    .map(|s| s.insert(&refinement_task).is_ok())
+                    .unwrap_or(false)
+            };
+            if refinement_inserted {
                 let notify_refinement = Arc::new(tokio::sync::Notify::new());
                 task_completion.write().await.insert(refinement_child_id, notify_refinement.clone());
                 let _ = conversation_tx_aggregator
@@ -952,7 +971,9 @@ You must either: (1) produce a complete, direct response to the user's request b
                         final_aggregated = content;
                     }
                 }
-                let _ = store.update_status(refinement_child_id, TaskStatus::Completed);
+                if let Ok(s) = TaskStore::open(&store_path_buf) {
+                    let _ = s.update_status(refinement_child_id, TaskStatus::Completed);
+                }
             }
         }
         // Ensure the UI receives a readable message (never raw JSON): extract summary or strip trailing contract.
@@ -976,7 +997,9 @@ You must either: (1) produce a complete, direct response to the user's request b
                 let _ = pipeline.set_state(root_task_id, PipelineState::Livraison, Some(display_message.as_str()));
             }
         }
-        let _ = store.update_status(root_task_id, root_status);
+        if let Ok(s) = TaskStore::open(&store_path_buf) {
+            let _ = s.update_status(root_task_id, root_status);
+        }
         let summary_preview: String = display_message.chars().take(300).collect();
         let sid_merge = session_id_aggregator.clone();
         let plan_id_merge = root_plan_id.clone();

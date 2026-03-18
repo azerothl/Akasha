@@ -2047,6 +2047,7 @@ function App() {
                 setPendingHumanInput((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
                 humanInputAutoOpenedRef.current.delete(taskId);
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
+                replyWithTtsRef.current = false;
                 setMessages((prev) => [...prev, { role: "assistant", text: "Tâche en échec.", error: true }]);
                 requestAnimationFrame(() => chatInputRef.current?.focus());
                 return;

@@ -20,6 +20,8 @@ pub struct BrowserSession {
     _child: Child,
     stdin: Option<tokio::process::ChildStdin>,
     stdout: BufReader<tokio::process::ChildStdout>,
+    /// Wall-clock instant when this session was created, used to enforce `browser_session_timeout_secs`.
+    pub started_at: std::time::Instant,
 }
 
 impl BrowserSession {
@@ -145,7 +147,9 @@ pub fn find_playwright_runner_path() -> Option<std::path::PathBuf> {
         if run.is_file() {
             return Some(run);
         }
-        return Some(path.join("run.mjs"));
+        // Neither the exact path nor <dir>/run.mjs exists; return None to avoid
+        // spawning a runner with a non-existent script.
+        return None;
     }
     let cwd = std::env::current_dir().ok()?;
     let from_cwd = cwd.join("scripts").join("playwright-runner").join("run.mjs");
@@ -193,6 +197,7 @@ async fn create_browser_session_once(
         _child: child,
         stdin: Some(stdin),
         stdout: BufReader::new(stdout),
+        started_at: std::time::Instant::now(),
     };
 
     let init_result = session

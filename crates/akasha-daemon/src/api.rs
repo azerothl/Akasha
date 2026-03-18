@@ -239,10 +239,13 @@ pub type EventsCache =
     Arc<RwLock<std::collections::HashMap<Uuid, VecDeque<TaskEventEntry>>>>;
 
 /// Heap entry used for `/api/timeline` bounded min-heap of recent events.
-/// Ordering only depends on `at` (timestamp) and `counter` to avoid requiring
-/// `serde_json::Value: Ord` for the payload.
+/// Ordering uses `at_ms` (milliseconds since Unix epoch) to avoid relying on
+/// lexicographic comparison of RFC3339 strings, which can be unreliable when
+/// `to_rfc3339()` omits fractional seconds for timestamps at whole-second boundaries.
 struct TimelineHeapEntry {
     at: String,
+    /// Milliseconds since Unix epoch parsed from `at`; used for all comparisons.
+    at_ms: i64,
     counter: usize,
     task_id: String,
     event_type: String,
@@ -251,7 +254,7 @@ struct TimelineHeapEntry {
 
 impl PartialEq for TimelineHeapEntry {
     fn eq(&self, other: &Self) -> bool {
-        (self.at.as_str(), self.counter) == (other.at.as_str(), other.counter)
+        (self.at_ms, self.counter) == (other.at_ms, other.counter)
     }
 }
 
@@ -267,7 +270,7 @@ impl Ord for TimelineHeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // We want the *oldest* event to be considered "greatest" so that
         // `BinaryHeap::pop()` removes the oldest when the heap exceeds `limit`.
-        (other.at.as_str(), other.counter).cmp(&(self.at.as_str(), self.counter))
+        (other.at_ms, other.counter).cmp(&(self.at_ms, self.counter))
     }
 }
 
@@ -2043,6 +2046,21 @@ async fn execute_tool_call(
             };
             let headless = executor.policy.browser_headless;
             let action_timeout = executor.policy.browser_action_timeout_secs;
+            let session_timeout = executor.policy.browser_session_timeout_secs;
+
+            // Enforce per-session max duration: if the existing session has exceeded the
+            // configured timeout, close and evict it before dispatching the command.
+            {
+                let mut g = registry.write().await;
+                if let Some(s) = g.get(&task_id) {
+                    if s.started_at.elapsed().as_secs() >= session_timeout {
+                        tracing::info!(task_id = %task_id, timeout_secs = session_timeout, "[browser] session timed out, closing");
+                        if let Some(mut sess) = g.remove(&task_id) {
+                            let _ = sess.close().await;
+                        }
+                    }
+                }
+            }
 
             if sub == "navigate" {
                 let Some(url_arg) = args.get(1) else {
@@ -5166,11 +5184,17 @@ pub async fn handle_api(
                     // the *oldest* entry is the "greatest" and gets popped first when the heap exceeds `limit`.
                     // This keeps only the `limit` most-recent events without a full sort.
                     let at = e.at.clone();
+                    // Parse to milliseconds for correct ordering (lexicographic RFC3339 comparison
+                    // is unreliable when fractional seconds are omitted for whole-second values).
+                    let at_ms = chrono::DateTime::parse_from_rfc3339(&at)
+                        .map(|dt| dt.timestamp_millis())
+                        .unwrap_or(0);
                     let task_id = tid.to_string();
                     let event_type = e.event_type.clone();
                     let payload = e.payload.clone();
                     heap.push(TimelineHeapEntry {
                         at,
+                        at_ms,
                         counter,
                         task_id,
                         event_type,
@@ -5185,7 +5209,7 @@ pub async fn handle_api(
         }
 
         // Extract the top `limit` events and sort them chronologically (oldest to newest).
-        let mut selected: Vec<(String, String, Option<serde_json::Value>, String)> = heap
+        let mut selected: Vec<(String, String, Option<serde_json::Value>, String, i64)> = heap
             .into_iter()
             .map(|entry| {
                 (
@@ -5193,14 +5217,15 @@ pub async fn handle_api(
                     entry.event_type,
                     entry.payload,
                     entry.at,
+                    entry.at_ms,
                 )
             })
             .collect();
-        selected.sort_by(|a, b| a.3.cmp(&b.3));
+        selected.sort_by(|(_,_,_,_,a_ms), (_,_,_,_,b_ms)| a_ms.cmp(b_ms));
 
         let list: Vec<serde_json::Value> = selected
             .into_iter()
-            .map(|(task_id, event_type, payload, at)| {
+            .map(|(task_id, event_type, payload, at, _)| {
                 serde_json::json!({ "task_id": task_id, "event_type": event_type, "payload": payload, "at": at })
             })
             .collect();
