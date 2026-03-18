@@ -2,7 +2,9 @@
 
 mod bus;
 mod contract;
+mod execution_plan;
 mod interpretation;
+mod orchestration_rules;
 mod main_agent;
 pub mod orchestrator;
 mod progress_subscriber;

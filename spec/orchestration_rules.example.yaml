@@ -1,0 +1,9 @@
+# Copy to data_dir/orchestration_rules.yaml to enable deterministic routing before LLM decomposition.
+# Higher priority runs first. Use `contains` (case-insensitive substring) and/or `regex`.
+rules:
+  - contains: "météo"
+    agent_type: conversation
+    priority: 10
+  # - regex: '(?i)^/status\\b'
+  #   agent_type: system
+  #   priority: 20

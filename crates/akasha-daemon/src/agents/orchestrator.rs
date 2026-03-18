@@ -11,11 +11,16 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::contract::{parse_contract_from_response, user_facing_message, ContractStatus};
+use super::execution_plan::{parse_plan_json, ExecutionPlan};
+use super::orchestration_rules::OrchestrationRules;
 use super::prompts::build_task_prompt;
 use super::{EventBus, ExecutionMode, OrchestratorTask};
+use futures_util::future::join_all;
 use crate::agent_profile::AgentProfile;
 use crate::personality;
+use crate::agent_contracts::ContractRegistry;
 use crate::api::{learn_from_task_outcome_async, message_suggests_tool_only_action, ProgressCache, TaskCompletionRegistry};
+use crate::session_state;
 use crate::memory_actor::LongTermMemoryClient;
 
 /// Outcome of evaluating whether the aggregated sub-agent response satisfies the user request.
@@ -61,18 +66,71 @@ User request:
 
 "#;
 
+const JSON_PLAN_SUFFIX: &str = r#"
+
+You may output ONLY a JSON object (no markdown): {"steps":[{"step_id":"s0","agent_type":"conversation","intent":"…","depends_on":[],"parallel_group":0}]}. Use depends_on: ["s0"] if a step needs prior output. For recurring reminders one step: agent_type "schedule", intent "interval_seconds|name|message". Max 12 steps. If you do not use JSON, output one line per subtask as agent_type|message (legacy).
+"#;
+
 /// Builds the decomposer prompt string (template + message). Used by benchmarks and by decompose_request.
 pub fn build_decomposer_prompt(message: &str) -> String {
     format!("{}{}", DECOMPOSER_PROMPT_TEMPLATE, message)
 }
 
+fn parse_legacy_subtasks(text: &str, fallback_message: &str) -> Vec<Subtask> {
+    let mut steps = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('{') {
+            continue;
+        }
+        if let Some((agent_type, sub_message)) = line.split_once('|') {
+            let agent_type = agent_type.trim().to_lowercase();
+            const RECOGNIZED: &[&str] = &[
+                "code", "search", "schedule", "financial", "documentalist", "project_manager",
+                "technical_writer", "research", "security_audit", "creative",
+                "analyst", "architect", "frontend", "backend", "database", "integration", "qa", "system", "image_generation",
+            ];
+            let agent_type = if RECOGNIZED.contains(&agent_type.as_str()) {
+                agent_type
+            } else {
+                "conversation".to_string()
+            };
+            steps.push((agent_type, sub_message.trim().to_string()));
+        }
+    }
+    if steps.is_empty() {
+        vec![("conversation".to_string(), fallback_message.to_string())]
+    } else {
+        steps
+    }
+}
+
 /// Decompose a user request into one or more subtasks via LLM. Falls back to single "conversation" on error, timeout or empty.
+#[allow(dead_code)]
 async fn decompose_request(
     llm_router: &Arc<akasha_llm::LLMRouter>,
     message: &str,
 ) -> Vec<Subtask> {
-    let prompt = build_decomposer_prompt(message);
-    // Models with "thinking" (e.g. glm-4.7-flash) use output tokens for thinking then response; 512 is too low and yields empty response (done_reason: length).
+    decompose_to_plan(llm_router, message, Path::new("."))
+        .await
+        .to_subtasks()
+}
+
+async fn decompose_to_plan(
+    llm_router: &Arc<akasha_llm::LLMRouter>,
+    message: &str,
+    data_dir: &Path,
+) -> ExecutionPlan {
+    let rules = OrchestrationRules::load(data_dir);
+    if let Some((agent, msg)) = rules.match_message(message) {
+        return ExecutionPlan::from_legacy(&[(agent, msg)]);
+    }
+    let prompt = format!(
+        "{}{}{}",
+        DECOMPOSER_PROMPT_TEMPLATE,
+        message,
+        JSON_PLAN_SUFFIX
+    );
     let system_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
@@ -89,40 +147,19 @@ async fn decompose_request(
     match tokio::time::timeout(decompose_timeout, llm_router.complete(&request)).await {
         Ok(Ok(resp)) => {
             let text = resp.text.trim();
-            let mut steps = Vec::new();
-            for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                if let Some((agent_type, sub_message)) = line.split_once('|') {
-                    let agent_type = agent_type.trim().to_lowercase();
-                    const RECOGNIZED: &[&str] = &[
-                        "code", "search", "schedule", "financial", "documentalist", "project_manager",
-                        "technical_writer", "research", "security_audit", "creative",
-                        "analyst", "architect", "frontend", "backend", "database", "integration", "qa", "system", "image_generation",
-                    ];
-                    let agent_type = if RECOGNIZED.contains(&agent_type.as_str()) {
-                        agent_type
-                    } else {
-                        "conversation".to_string()
-                    };
-                    steps.push((agent_type, sub_message.trim().to_string()));
-                }
+            if let Some(plan) = parse_plan_json(text) {
+                return plan;
             }
-            if steps.is_empty() {
-                vec![("conversation".to_string(), message.to_string())]
-            } else {
-                steps
-            }
+            let steps = parse_legacy_subtasks(text, message);
+            ExecutionPlan::from_legacy(&steps)
         }
         Ok(Err(e)) => {
             tracing::debug!(error = %e, "Decompose LLM failed, using single conversation step");
-            vec![("conversation".to_string(), message.to_string())]
+            ExecutionPlan::from_legacy(&[("conversation".to_string(), message.to_string())])
         }
         Err(_) => {
             tracing::debug!("Decompose LLM timed out, using single conversation step");
-            vec![("conversation".to_string(), message.to_string())]
+            ExecutionPlan::from_legacy(&[("conversation".to_string(), message.to_string())])
         }
     }
 }
@@ -299,15 +336,35 @@ async fn process_root_task(
         .with_correlation(root_task_id),
     );
 
-    let mut steps = decompose_request(&llm_router, &message).await;
+    let mut plan = decompose_to_plan(&llm_router, &message, data_dir).await;
+    let mut steps = plan.to_subtasks();
     steps = apply_decomposition_override(&message, steps);
+    plan = ExecutionPlan::from_legacy(&steps);
     let _ = bus.send(
         EventEnvelope::new(
             EventType::TaskDecomposed,
             Some(serde_json::json!({
                 "task_id": root_task_id.to_string(),
                 "subtask_count": steps.len(),
-                "agents": steps.iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>()
+                "agents": steps.iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>(),
+                "plan_id": plan.plan_id.to_string()
+            })),
+        )
+        .with_correlation(root_task_id),
+    );
+    let _ = bus.send(
+        EventEnvelope::new(
+            EventType::PlanProposed,
+            Some(serde_json::json!({
+                "schema_version": 1,
+                "task_id": root_task_id.to_string(),
+                "plan_id": plan.plan_id.to_string(),
+                "steps": plan.steps.iter().map(|s| serde_json::json!({
+                    "step_id": s.step_id,
+                    "agent_type": s.agent_type,
+                    "intent_preview": s.intent.chars().take(200).collect::<String>(),
+                    "depends_on": s.depends_on,
+                })).collect::<Vec<_>>()
             })),
         )
         .with_correlation(root_task_id),
@@ -482,12 +539,17 @@ async fn process_root_task(
         return Ok(());
     }
 
-    // Checkpoint for resume (Phase 7): persist steps so we can recover after crash.
+    // Checkpoint for resume (Phase 7): persist plan so we can recover after crash.
     if execution_mode == Some(ExecutionMode::Orchestrated) {
         if let Ok(pipeline) = PipelineStore::open(store_path) {
             let checkpoint = serde_json::json!({
-                "steps": steps.iter().map(|(a, m)| serde_json::json!({ "agent_type": a, "message": m })).collect::<Vec<_>>(),
-                "last_subtask_index": 0usize,
+                "plan_id": plan.plan_id.to_string(),
+                "steps": plan.steps.iter().map(|s| serde_json::json!({
+                    "step_id": &s.step_id,
+                    "agent_type": &s.agent_type,
+                    "intent": &s.intent,
+                    "depends_on": &s.depends_on,
+                })).collect::<Vec<_>>(),
                 "aggregated_so_far": ""
             });
             if let Ok(s) = serde_json::to_string(&checkpoint) {
@@ -496,88 +558,176 @@ async fn process_root_task(
         }
     }
 
-    // Multiple subtasks: create child tasks and delegate each; aggregator below collects all replies into one response.
-    let mut child_notifies: Vec<(Uuid, Arc<tokio::sync::Notify>)> = Vec::new();
-    for (agent_type, sub_message) in &steps {
-        let child_id = Uuid::new_v4();
-        let task = Task {
-            id: child_id,
-            parent_task_id: Some(root_task_id),
-            status: TaskStatus::Pending,
-            assigned_agent: agent_type.clone(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            initial_message: {
-                const MAX: usize = 500;
-                if sub_message.chars().count() > MAX {
-                    Some(sub_message.chars().take(MAX).chain(std::iter::once('…')).collect::<String>())
-                } else if sub_message.is_empty() {
-                    None
-                } else {
-                    Some(sub_message.clone())
-                }
-            },
-        };
-        store.insert(&task)?;
-        let _ = bus.send(
-            EventEnvelope::new(
-                EventType::SubAgentSpawned,
-                Some(serde_json::json!({
-                    "task_id": child_id.to_string(),
-                    "parent_id": root_task_id.to_string(),
-                    "agent": agent_type,
-                    "delegation_reason": serde_json::Value::Null
-                })),
-            )
-            .with_correlation(root_task_id),
-        );
-        // Register notifier *before* sending to conv_tx so the worker can fire it immediately.
-        let notify = Arc::new(tokio::sync::Notify::new());
-        task_completion.write().await.insert(child_id, notify.clone());
-        // Delegate to conversation worker; wrap message in task prompt (layer 3) when not a simple conversation/code/search.
-        let child_message = if matches!(agent_type.as_str(), "analyst" | "architect" | "frontend" | "backend" | "database" | "integration" | "qa" | "image_generation") {
-            build_task_prompt(agent_type, sub_message, None, None)
-        } else {
-            sub_message.clone()
-        };
-        let _ = conversation_tx
-            .send(OrchestratorTask {
-                task_id: child_id,
-                message: child_message,
-                session_id: session_id.clone(),
-                image_data_urls: None,
-                execution_mode: None,
-            })
-            .await;
-        child_notifies.push((child_id, notify));
-    }
-    // Aggregator: wait for all child completion notifications (no polling), then synthesize.
+    let _ = bus.send(
+        EventEnvelope::new(
+            EventType::PlanCommitted,
+            Some(serde_json::json!({
+                "schema_version": 1,
+                "task_id": root_task_id.to_string(),
+                "plan_id": plan.plan_id.to_string(),
+                "step_count": plan.steps.len()
+            })),
+        )
+        .with_correlation(root_task_id),
+    );
+
+    // Multiple subtasks: waves (parallel within wave); aggregator collects all replies.
     let store_path_buf = store_path.to_path_buf();
     let spec_dir_buf = spec_dir.to_path_buf();
     let data_dir_buf = data_dir.to_path_buf();
-    let steps_count = steps.len();
+    let steps_count = plan.steps.len();
+    let plan_spawn = plan.clone();
+    let root_plan_id = plan.plan_id.to_string(); // captured by aggregator spawn
     let user_message = message.clone();
     let conversation_tx_aggregator = conversation_tx.clone();
     let session_id_aggregator = session_id.clone();
     let execution_mode_aggregator = execution_mode;
     const GENERIC_MESSAGES: &[&str] = &["Done.", "Failed.", "Cancelled."];
-    // Per-child timeout: mirrors the delegation handler's 5-minute limit.  Children are processed
-    // sequentially by the conversation worker, so total wait is bounded by N × PER_CHILD_TIMEOUT.
     const PER_CHILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
     tokio::spawn(async move {
-        // Wait for each child in turn; tokio::Notify buffers one pending notification so children
-        // that finish early are captured immediately when their slot comes.
-        for (child_id, notify) in &child_notifies {
-            if tokio::time::timeout(PER_CHILD_TIMEOUT, notify.notified()).await.is_err() {
-                tracing::warn!(child_id = %child_id, parent_id = %root_task_id, "Aggregator: child task timed out");
+        let mut waves = plan_spawn.execution_waves().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "execution_waves error");
+            Vec::new()
+        });
+        if waves.is_empty() {
+            if plan_spawn.steps.is_empty() {
+                return;
             }
-            task_completion.write().await.remove(child_id);
+            waves = vec![(0..plan_spawn.steps.len()).collect::<Vec<_>>()];
         }
-        // Ensure any remaining registry entries are cleaned up (timeout path).
-        {
-            let mut reg = task_completion.write().await;
-            for (child_id, _) in &child_notifies {
-                reg.remove(child_id);
+        let mut step_outputs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut wave_step_counter = 0usize;
+        let store = match TaskStore::open(&store_path_buf) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        for wave in waves {
+            let mut batch: Vec<(Uuid, Arc<tokio::sync::Notify>, String)> = Vec::new();
+            for &idx in &wave {
+                let step = match plan_spawn.steps.get(idx) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let mut sub_message = step.intent.clone();
+                for dep in &step.depends_on {
+                    if let Some(prev) = step_outputs.get(dep) {
+                        sub_message = format!("Output from step {}:\n{}\n\n{}", dep, prev, sub_message);
+                    }
+                }
+                let agent_type = step.agent_type.as_str();
+                let child_id = Uuid::new_v4();
+                let task = Task {
+                    id: child_id,
+                    parent_task_id: Some(root_task_id),
+                    status: TaskStatus::Pending,
+                    assigned_agent: step.agent_type.clone(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    initial_message: {
+                        const MAX: usize = 500;
+                        if sub_message.chars().count() > MAX {
+                            Some(sub_message.chars().take(MAX).chain(std::iter::once('…')).collect::<String>())
+                        } else if sub_message.is_empty() {
+                            None
+                        } else {
+                            Some(sub_message.clone())
+                        }
+                    },
+                };
+                if store.insert(&task).is_err() {
+                    continue;
+                }
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::SubAgentSpawned,
+                        Some(serde_json::json!({
+                            "task_id": child_id.to_string(),
+                            "parent_id": root_task_id.to_string(),
+                            "agent": agent_type,
+                            "step_id": &step.step_id,
+                            "delegation_reason": serde_json::Value::Null
+                        })),
+                    )
+                    .with_correlation(root_task_id),
+                );
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::SubtaskStarted,
+                        Some(serde_json::json!({
+                            "schema_version": 1,
+                            "root_task_id": root_task_id.to_string(),
+                            "subtask_id": child_id.to_string(),
+                            "step_id": &step.step_id,
+                            "agent_type": agent_type,
+                            "step_index": wave_step_counter,
+                        })),
+                    )
+                    .with_correlation(root_task_id),
+                );
+                wave_step_counter += 1;
+                let notify = Arc::new(tokio::sync::Notify::new());
+                task_completion.write().await.insert(child_id, notify.clone());
+                let child_message = if matches!(
+                    agent_type,
+                    "analyst" | "architect" | "frontend" | "backend" | "database" | "integration" | "qa" | "image_generation"
+                ) {
+                    build_task_prompt(agent_type, &sub_message, None, None)
+                } else {
+                    sub_message.clone()
+                };
+                if conversation_tx_aggregator
+                    .send(OrchestratorTask {
+                        task_id: child_id,
+                        message: child_message,
+                        session_id: session_id_aggregator.clone(),
+                        image_data_urls: None,
+                        execution_mode: None,
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::error!(child_id = %child_id, "orchestrator: conv channel closed");
+                }
+                batch.push((child_id, notify, step.step_id.clone()));
+            }
+            let futs: Vec<_> = batch
+                .iter()
+                .map(|(_, n, _)| {
+                    let n = n.clone();
+                    async move {
+                        let _ = tokio::time::timeout(PER_CHILD_TIMEOUT, n.notified()).await;
+                    }
+                })
+                .collect();
+            join_all(futs).await;
+            for (child_id, _, sid) in batch {
+                task_completion.write().await.remove(&child_id);
+                let content = {
+                    let g = progress.read().await;
+                    g.get(&child_id)
+                        .and_then(|q| q.back().map(|e| e.message.trim().to_string()))
+                        .unwrap_or_default()
+                };
+                step_outputs.insert(sid.clone(), content.clone());
+                let failed = store
+                    .get(child_id)
+                    .ok()
+                    .flatten()
+                    .map(|t| t.status == TaskStatus::Failed)
+                    .unwrap_or(false);
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::SubtaskCompleted,
+                        Some(serde_json::json!({
+                            "schema_version": 1,
+                            "root_task_id": root_task_id.to_string(),
+                            "subtask_id": child_id.to_string(),
+                            "step_id": sid,
+                            "success": !failed && !content.trim().is_empty(),
+                        })),
+                    )
+                    .with_correlation(root_task_id),
+                );
             }
         }
         // Single store read to get final child statuses.
@@ -610,6 +760,7 @@ async fn process_root_task(
             );
             return;
         }
+        let contracts = ContractRegistry::load(spec_dir_buf.as_path());
         let mut parts: Vec<String> = Vec::new();
         {
             let g = progress.read().await;
@@ -617,6 +768,20 @@ async fn process_root_task(
                 let content = g.get(&child.id).and_then(|q| q.back().map(|e| e.message.trim().to_string()));
                 let content = match content {
                     Some(ref s) if !s.is_empty() && !GENERIC_MESSAGES.contains(&s.as_str()) => {
+                        if let Some(violation) = contracts.check(&child.assigned_agent, s) {
+                            let _ = bus.send(
+                                EventEnvelope::new(
+                                    EventType::ContractViolation,
+                                    Some(serde_json::json!({
+                                        "schema_version": 1,
+                                        "agent_type": child.assigned_agent,
+                                        "subtask_id": child.id.to_string(),
+                                        "reason": violation,
+                                    })),
+                                )
+                                .with_correlation(root_task_id),
+                            );
+                        }
                         let mut out = s.clone();
                         if let Some(contract) = parse_contract_from_response(s) {
                             if contract.status == Some(ContractStatus::Blocked) {
@@ -813,6 +978,27 @@ You must either: (1) produce a complete, direct response to the user's request b
         }
         let _ = store.update_status(root_task_id, root_status);
         let summary_preview: String = display_message.chars().take(300).collect();
+        let sid_merge = session_id_aggregator.clone();
+        let plan_id_merge = root_plan_id.clone();
+        if let Ok(st) = session_state::merge(&data_dir_buf, &sid_merge, |s| {
+            s.last_plan_id = Some(plan_id_merge);
+            let g = user_message.trim().chars().take(200).collect::<String>();
+            if !g.is_empty() && s.goals.len() < 30 {
+                s.goals.push(g);
+            }
+        }) {
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::SessionStateSnapshot,
+                    Some(serde_json::json!({
+                        "schema_version": 1,
+                        "session_id": sid_merge,
+                        "state": st,
+                    })),
+                )
+                .with_correlation(root_task_id),
+            );
+        }
         learn_from_task_outcome_async(
             long_term_client.clone(),
             root_task_id,
