@@ -86,6 +86,7 @@ command_timeout_secs: 60
 # browser_headless: true
 # browser_action_timeout_secs: 30
 # browser_session_timeout_secs: 300
+# Désactiver l'installation auto de Chromium au premier appel browser : variable d'environnement AKASHA_PLAYWRIGHT_AUTO_INSTALL=0
 
 # Optionnel : outils pour lesquels une confirmation utilisateur est requise avant exécution (human-in-the-loop).
 # Quand un outil est dans cette liste, le daemon affiche un résumé d'intention (ex. « Écrire dans le fichier X », « Exécuter la commande Y »)

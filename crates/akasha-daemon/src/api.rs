@@ -565,13 +565,8 @@ pub fn parse_request(buf: &[u8]) -> (String, String, Option<Vec<u8>>, std::colle
             headers.insert(name, value);
         }
     }
-    const MAX_BODY_PARSE: usize = 10 * 1024 * 1024; // 10 MiB — refuse to allocate larger body (hypothesis B)
+    const MAX_BODY_PARSE: usize = 10 * 1024 * 1024; // 10 MiB — refuse to allocate larger body
     let will_allocate = content_length > 0 && content_length <= MAX_BODY_PARSE && rest.len() >= content_length;
-    // #region agent log
-    if content_length > 0 {
-        crate::debug_log::log("api.rs:parse_request", "body allocation check", &serde_json::json!({"content_length": content_length, "rest_len": rest.len(), "will_allocate": will_allocate, "max_body_parse": MAX_BODY_PARSE}), "B");
-    }
-    // #endregion
     let body = if will_allocate {
         Some(rest[..content_length].to_vec())
     } else {
@@ -659,11 +654,30 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
 struct MessageIntentFlags {
     save_file: bool,
     external_info: bool,
+    /// User wants posts/timeline from X, Twitter, or similar (inject SOCIAL_FEED_REMINDER).
+    social_feed_fetch: bool,
     camera_or_mic: bool,
     image_generation: bool,
     code_generation: bool,
     /// User asks for GitHub repo/API info and mentions vault or GITHUB_TOKEN.
     github_with_vault: bool,
+}
+
+/// Best-effort X handle from user text (e.g. `@akasha_anthiam` → `akasha_anthiam`).
+fn extract_x_profile_handle(message: &str) -> Option<String> {
+    for token in message.split_whitespace() {
+        let t = token.trim_end_matches(|c| matches!(c, '.' | ',' | ':' | ';'));
+        if let Some(rest) = t.strip_prefix('@') {
+            let handle: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if handle.len() >= 2 {
+                return Some(handle);
+            }
+        }
+    }
+    None
 }
 
 fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
@@ -684,6 +698,24 @@ fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
         ]
         .iter()
         .any(|k| m.contains(k)),
+        social_feed_fetch: {
+            let on_x_or_twitter = m.contains("x.com")
+                || m.contains("twitter.com")
+                || m.contains(" sur x")
+                || m.contains("sur x.")
+                || (m.contains("twitter") && m.contains('@'));
+            let wants_posts = m.contains("post")
+                || m.contains("tweet")
+                || m.contains("récup")
+                || m.contains("recup")
+                || m.contains("retrieve")
+                || m.contains("latest")
+                || m.contains("dernier")
+                || m.contains("timeline")
+                || m.contains("fil d'actualité")
+                || m.contains("actualité de @");
+            on_x_or_twitter && wants_posts
+        },
         camera_or_mic: [
             "webcam", "caméra", "camera", "prend une photo", "prends une photo", "prendre une photo",
             "take a photo", "take a picture", "prends moi en photo", "photo avec la webcam",
@@ -723,7 +755,11 @@ fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
 /// True if the user message suggests a tool-only action (camera, web search, save file, image gen) without asking for code generation. Used by the orchestrator to override mistaken "code" decomposition.
 pub fn message_suggests_tool_only_action(message: &str) -> bool {
     let flags = compute_message_intent_flags(message);
-    (flags.camera_or_mic || flags.save_file || flags.external_info || flags.image_generation)
+    (flags.camera_or_mic
+        || flags.save_file
+        || flags.external_info
+        || flags.social_feed_fetch
+        || flags.image_generation)
         && !flags.code_generation
 }
 
@@ -1243,6 +1279,9 @@ async fn do_uninstall_skill(
 const WRITE_FILE_REMINDER: &str = "\n[Reminder: the user is asking to save a file. You MUST reply ONLY with the line TOOL: write_file <full_path> then the file content on the following lines. Never say you cannot write to disk.]\n\n";
 
 const WEB_SEARCH_REMINDER: &str = "\n[Reminder: the user is asking for external information (weather/météo, news, etc.). You MUST use TOOL: web_search <query> to search — do NOT use bankr or portfolio for weather. Then reply with the results. Do not suggest visiting a site without having used web_search first.]\n\n";
+
+/// X/Twitter/social feed fetches: do not use ask_user for unrelated onboarding; use tools first.
+const SOCIAL_FEED_REMINDER: &str = "\n[Reminder: SOCIAL / X / TWITTER — PRIORITY: The user wants posts, tweets, or timeline content from X (Twitter) or similar. Do NOT use TOOL: ask_user for generic greetings or unrelated menu choices — fulfill this request with tools. First TOOL: web_search <query> (e.g. site:x.com handle latest posts). If results are empty or insufficient, use TOOL: browser navigate <profile URL> then TOOL: browser snapshot (if browser is enabled in policy). Do not answer \"no context\" or \"blocked\" without having called web_search or browser.]\n\n";
 
 const DEVICE_CAMERA_REMINDER: &str = "\n[Reminder: webcam/camera photo request. You MUST chain directly: TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture. Do NOT ask the user \"which device action?\" with ask_user — they already said they want a photo; call device_invoke camera capture. Do NOT suggest: file upload, open UI, AI image. Do NOT mention tools_policy.yaml or allowed_write_paths for this request: the user wants a camera photo, not to configure file writing. If the user asked to \"display the photo in the chat\", after capture reply ONLY with a short confirmation in their language (e.g. \"Photo captured. It is shown below.\"): do NOT suggest \"save to file\", \"get a description\", \"take another photo\" or \"What would you like to do next?\" — the image is added automatically below your reply. Reply in the same language as the user.]\n\n";
 const IMAGE_GENERATION_REMINDER: &str = "\n[Reminder: request to \"generate an image\", \"draw\", \"create an image\" (by AI, not webcam). You MUST use TOOL: generate_image <prompt> (e.g. TOOL: generate_image a cat on a sofa). Spec 42.]\n\n";
@@ -3120,6 +3159,15 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
+    let social_feed_reminder = if intent_flags.social_feed_fetch
+        && tools_executor_snapshot.as_ref().map_or(false, |e| {
+            e.policy.can_use_tool("web_search") || e.policy.can_use_tool("browser")
+        })
+    {
+        SOCIAL_FEED_REMINDER
+    } else {
+        ""
+    };
     let device_camera_reminder = if intent_flags.camera_or_mic
         && tools_executor_snapshot
             .as_ref()
@@ -3156,9 +3204,10 @@ pub(crate) async fn run_message_via_llm(
     };
     let mut current_prompt = if user_prefix.trim().is_empty() {
         format!(
-            "{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}User:\n{}",
             write_reminder,
             web_search_reminder,
+            social_feed_reminder,
             device_camera_reminder,
             image_generation_reminder,
             github_vault_reminder,
@@ -3166,10 +3215,11 @@ pub(crate) async fn run_message_via_llm(
         )
     } else {
         format!(
-            "{}{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}{}User:\n{}",
             user_prefix.trim_end(),
             write_reminder,
             web_search_reminder,
+            social_feed_reminder,
             device_camera_reminder,
             image_generation_reminder,
             github_vault_reminder,
@@ -3182,6 +3232,7 @@ pub(crate) async fn run_message_via_llm(
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(10);
     let mut round = 0u32;
+    let mut social_snapshot_seen = false;
     let mut tool_loop_history: Vec<(String, String)> = Vec::new();
     let mut last_tool_results_blob: Option<String> = None;
     let mut force_synthesis_attempted = false;
@@ -3271,17 +3322,11 @@ pub(crate) async fn run_message_via_llm(
             };
             match tokio::time::timeout(idle, tok_rx.recv()).await {
                 Ok(Some(chunk)) => {
-                    // #region agent log
-                    const MAX_ACCUMULATED: usize = 2 * 1024 * 1024; // 2 MiB cap to prevent unbounded allocation (hypothesis D)
+                    const MAX_ACCUMULATED: usize = 2 * 1024 * 1024; // 2 MiB cap to prevent unbounded allocation on long streams
                     if accumulated.len() + chunk.len() > MAX_ACCUMULATED {
-                        crate::debug_log::log("api.rs:stream_accumulated", "accumulated cap hit", &serde_json::json!({"accumulated_len": accumulated.len(), "chunk_len": chunk.len(), "max": MAX_ACCUMULATED}), "D");
                         accumulated.truncate(MAX_ACCUMULATED.saturating_sub(chunk.len()));
                     }
                     accumulated.push_str(&chunk);
-                    if accumulated.len() > 512 * 1024 {
-                        crate::debug_log::log("api.rs:stream_accumulated", "accumulated size", &serde_json::json!({"accumulated_len": accumulated.len(), "chunk_len": chunk.len()}), "D");
-                    }
-                    // #endregion
                     let _ = bus.send(
                         EventEnvelope::new(
                             EventType::ProgressUpdate,
@@ -3776,11 +3821,78 @@ pub(crate) async fn run_message_via_llm(
             }
             let results_blob = tool_results.join("\n");
             last_tool_results_blob = Some(results_blob.clone());
+            if results_blob.contains("[browser] Snapshot") {
+                social_snapshot_seen = true;
+            }
+            let round_had_ask_user = calls.iter().any(|(name, _)| name == "ask_user");
+            let msg_social = compute_message_intent_flags(&message).social_feed_fetch;
+            let had_web_search = tool_loop_history.iter().any(|(t, _)| t == "web_search");
+            let browser_ok = tools_executor_snapshot
+                .as_ref()
+                .map(|e| e.policy.can_use_tool("browser") && e.policy.browser_enabled)
+                .unwrap_or(false);
+            let can_ws = tools_executor_snapshot
+                .as_ref()
+                .map(|e| e.policy.can_use_tool("web_search"))
+                .unwrap_or(false);
+            let can_wf = tools_executor_snapshot
+                .as_ref()
+                .map(|e| e.policy.can_use_tool("web_fetch"))
+                .unwrap_or(false);
+            let had_web_fetch = tool_loop_history.iter().any(|(t, _)| t == "web_fetch");
+            let x_profile_url = extract_x_profile_handle(&message).map(|h| format!("https://x.com/{}", h));
+            let browser_line = results_blob.contains("[browser]");
+            let navigated_ok = results_blob.contains("[browser] Navigated");
+            // Social/X: after web_search (any prior round), chain browser navigate → snapshot; ws retry if browser fails or disabled.
+            let social_pending = msg_social && had_web_search && !social_snapshot_seen;
+            let ws_count = tool_loop_history.iter().filter(|(t, _)| t == "web_search").count();
             // Re-inject the user's request so the model always knows what to answer (avoids treating another demand or losing context).
-            current_prompt = format!(
-                "User request: {}\n\nYour previous reply:\n{}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, answer the user's request now. Do NOT reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"). The task ends after this message — give the actual answer (e.g. weather forecast, search summary). No TOOL: lines.",
-                user_message, response, results_blob
-            );
+            current_prompt = if round_had_ask_user {
+                format!(
+                    "User request (PRIMARY — you must still fulfill this): {}\n\nYour previous assistant reply:\n{}\n\nask_user step result (user's choice; may be unrelated to the primary request):\n{}\n\nContinue the task. If the PRIMARY request is not satisfied yet, you MUST emit TOOL: lines next (web_search, web_fetch, browser navigate + browser snapshot, etc.). Do not reply \"blocked\" or \"no information\" without trying web_search first. When the primary request is fully answered, reply in plain text only (no TOOL: lines).",
+                    user_message, response, results_blob
+                )
+            } else if social_pending && browser_ok && navigated_ok {
+                format!(
+                    "User request: {}\n\nYour previous reply:\n{}\n\nTool results (this round):\n{}\n\nThe profile page is open. Run TOOL: browser snapshot now, then answer in plain text with the latest posts visible in the snapshot.",
+                    user_message, response, results_blob
+                )
+            } else if social_pending && browser_ok && !browser_line {
+                format!(
+                    "User request: {}\n\nYour previous reply:\n{}\n\nTool results so far:\n{}\n\nSearch snippets may be the wrong account. Run TOOL: browser navigate https://x.com/<handle> (exact @handle from the user message) then TOOL: browser snapshot. Plain-text answer only after snapshot.",
+                    user_message, response, results_blob
+                )
+            } else if social_pending && browser_ok && browser_line && !navigated_ok && can_ws {
+                format!(
+                    "User request: {}\n\nYour previous reply:\n{}\n\nTool results:\n{}\n\nBrowser step failed or was blocked. Emit TOOL: web_search with the exact handle (e.g. site:x.com akasha_anthiam). If web_search already failed twice ({} calls), answer in plain text with limitations.",
+                    user_message, response, results_blob, ws_count
+                )
+            } else if social_pending && !browser_ok && can_wf && x_profile_url.is_some() && !had_web_fetch {
+                format!(
+                    "User request: {}\n\nYour previous reply:\n{}\n\nTool results so far:\n{}\n\nWeb search often returns the wrong X account. Fetch the exact profile HTML: TOOL: web_fetch {}\nThen, if the HTML is a login wall or has no post text, say so. Otherwise quote only text that appears in the fetch result. Emit TOOL: web_fetch now (one URL only).",
+                    user_message,
+                    response,
+                    results_blob,
+                    x_profile_url.as_deref().unwrap_or("https://x.com/")
+                )
+            } else if social_pending && !browser_ok && can_ws && ws_count < 2 {
+                format!(
+                    "User request: {}\n\nYour previous reply:\n{}\n\nTool results:\n{}\n\nEmit TOOL: web_search including the EXACT @handle (e.g. site:x.com handle posts). Then answer from results or explain if impossible.",
+                    user_message, response, results_blob
+                )
+            } else if social_pending && !browser_ok && ws_count >= 2 {
+                format!(
+                    "User request: {}\n\nTool attempts (summary):\n{}\n\nSTOP: Do NOT invent or fabricate tweet/post text. Reply in plain text ONLY (no TOOL: lines):\n- State that automated retrieval did not reliably return the 3 latest posts for the handle the user asked for (X blocks many scrapers; search snippets often mismatch the account).\n- To get a real timeline in Akasha: set browser_enabled: true in tools_policy.yaml, install Playwright (npx playwright install chromium in scripts/playwright-runner), then ask again — the agent can use browser navigate + snapshot.\n- Optionally give the direct link https://x.com/{} for manual viewing.\n- You may list only URLs or titles that literally appeared in the tool output above — never make up post bodies.",
+                    user_message,
+                    results_blob,
+                    extract_x_profile_handle(&message).as_deref().unwrap_or("handle")
+                )
+            } else {
+                format!(
+                    "User request: {}\n\nYour previous reply:\n{}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, answer the user's request now. Do NOT reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"). The task ends after this message — give the actual answer (e.g. weather forecast, search summary). No TOOL: lines.",
+                    user_message, response, results_blob
+                )
+            };
             if round >= max_tool_rounds {
                 let response_for_user = response
                     .lines()

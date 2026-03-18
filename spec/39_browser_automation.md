@@ -80,6 +80,17 @@ Le format exact des arguments (séparateurs, échappement) est à fixer lors de 
 - **V1** : privilégier **Playwright** (sous-processus ou crate) pour réduire le temps de développement et bénéficier de la maturité de l’écosystème. La décision finale (Node vs Python vs crate Rust) pourra être prise selon les contraintes de déploiement (éviter Node/Python si l’écosystème Akasha est 100 % Rust).
 - **Emplacement du code** : logique dans le **daemon** (module dédié ou crate `akasha-browser`) ; le flux d’orchestration existant reste inchangé : l’agent appelle l’outil `browser` comme les autres outils, le daemon délègue à un exécuteur (Playwright ou CDP) et renvoie le résultat dans le message de l’outil.
 
+### 3.4 Installation automatique des navigateurs (daemon)
+
+Lorsque l’initialisation Chromium échoue faute de binaire Playwright (message d’erreur typique : exécutable introuvable), le daemon exécute **une fois** (verrou global si plusieurs tâches concurent) dans le répertoire du runner (`scripts/playwright-runner`, parent de `run.mjs`) :
+
+1. `npm install --no-audit --no-fund`
+2. `npx playwright install chromium`
+
+Puis il **réessaie** la création de session. Nécessite **Node.js** et **npm** sur la machine hôte et un accès réseau pour le téléchargement.
+
+- **Désactivation** : variable d’environnement `AKASHA_PLAYWRIGHT_AUTO_INSTALL=0` — dans ce cas, seul le message d’erreur initial est retourné (comportement manuel : `npm install` + `npx playwright install chromium` dans le répertoire du runner).
+
 ---
 
 ## 4. Sécurité et politique
