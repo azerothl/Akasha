@@ -81,3 +81,13 @@ task_types:
     fallback:
       - provider: akasha_core
         model: core
+
+  # Décomposition orchestrateur (optionnel mais recommandé pour demandes longues/projet).
+  # Si absent, l'orchestrateur retombe sur task_type: system.
+  orchestrator:
+    primary:
+      provider: akasha_embedded
+      model: default
+    fallback:
+      - provider: akasha_core
+        model: core
