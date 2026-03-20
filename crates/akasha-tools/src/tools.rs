@@ -41,9 +41,18 @@ pub async fn read_file(path: &Path, policy: &ToolsPolicy) -> Result<(String, Too
             },
         ));
     }
-    let content = tokio::fs::read_to_string(path)
+    let bytes = tokio::fs::read(path)
         .await
-        .with_context(|| format!("read_file {}", path.display()))?;
+        .with_context(|| format!("read_file bytes {}", path.display()))?;
+    let content = match String::from_utf8(bytes.clone()) {
+        Ok(s) => s,
+        Err(_) => {
+            // Common on Windows: many CSV exports are in Windows-1252 (ANSI / cp1252),
+            // not UTF-8. Windows-1252 provides a best-effort decoding for arbitrary byte data.
+            let (cow, _, _) = encoding_rs::WINDOWS_1252.decode(&bytes);
+            cow.into_owned()
+        }
+    };
     let len = content.len();
     Ok((
         content,
@@ -444,8 +453,10 @@ pub async fn search_files(
 }
 
 fn match_glob(glob: &str, path: &str) -> bool {
-    let g = glob.to_lowercase();
-    let p = path.to_lowercase();
+    // Windows paths use `\` in globs from Path::join but scanned paths are often normalized to `/`;
+    // without this, `dir\*.csv` never matches `dir/file.csv` and search_files returns zero hits.
+    let g = glob.replace('\\', "/").to_lowercase();
+    let p = path.replace('\\', "/").to_lowercase();
     if g.ends_with('*') {
         let prefix = g.trim_end_matches('*');
         p.starts_with(prefix) || p.contains(prefix)

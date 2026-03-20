@@ -34,6 +34,65 @@ export { preprocessDataUrlImages } from "./preprocessDataUrlImages";
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;
 
+function autoFormatLongUnstructuredPlainText(input: string): string {
+  const text = input ?? "";
+  const trimmed = text.trim();
+  if (trimmed.length < 1200) return text;
+  // If the content already has line breaks, don't guess formatting.
+  if (text.includes("\n") || text.includes("\r")) return text;
+  // Avoid touching obvious Markdown/code/data-url content.
+  if (trimmed.includes("```") || trimmed.includes("##") || trimmed.includes("TOOL:") || trimmed.includes("data:") || trimmed.includes("http")) return text;
+
+  let candidate = trimmed;
+
+  // 1) Detect and expand ordered lists like: "1) ... 2) ..." into Markdown list:
+  // Note: we only do this when we see multiple list-like markers to reduce false positives.
+  const orderedMarkerCount = Array.from(candidate.matchAll(/\b\d+[\.\)]\s+/g)).length;
+  if (orderedMarkerCount >= 2) {
+    // Convert "1) " to "1. "
+    candidate = candidate.replace(/\b(\d+)\)\s+/g, "$1. ");
+    // Insert line breaks before " 2. " occurrences.
+    candidate = candidate.replace(/\s(\d+)\.\s+/g, "\n\n$1. ");
+  }
+
+  // 2) Detect and expand bullet lists like: "- item1 • item2 * item3"
+  const bulletMarkerCount = Array.from(candidate.matchAll(/(?:^|\s)[\-•\*]\s+/g)).length;
+  if (bulletMarkerCount >= 2) {
+    candidate = candidate.replace(/(?:^|\s)[\-•\*]\s+/g, "\n- ");
+  }
+
+  // 3) Detect section headers like "Résumé: ..." or "Conclusion: ..." and turn them into "## Header"
+  const headingRe = /\b(?:Résumé|Summary|Conclusion|Plan|Étapes|Approche|Proposition|Étape)\b\s*:\s*/i;
+  if (headingRe.test(candidate)) {
+    candidate = candidate.replace(
+      headingRe,
+      (m) => {
+        // Extract matched header word (first capturing group isn't available here, so re-run simpler)
+        const wordMatch = m.match(/\b(?:Résumé|Summary|Conclusion|Plan|Étapes|Approche|Proposition|Étape)\b/i);
+        const word = wordMatch?.[0] ?? "Section";
+        return `\n\n## ${word}\n`;
+      }
+    );
+  }
+
+  // If we already created meaningful structure with newlines, keep it.
+  const nonEmptyLines = candidate.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (nonEmptyLines.length >= 4) return candidate;
+
+  // 4) Fallback: split into sentences and group into short paragraphs.
+  // Heuristic: avoid unbroken paragraphs; keep only when we detect multiple sentence boundaries.
+  const parts = candidate.split(/(?<=[.!?])\s+/);
+  if (parts.length < 4) return text;
+
+  const paragraphs: string[] = [];
+  for (let i = 0; i < parts.length; i += 2) {
+    const chunk = parts.slice(i, i + 2).join(" ").trim();
+    if (chunk) paragraphs.push(chunk);
+  }
+  if (paragraphs.length < 2) return text;
+  return paragraphs.join("\n\n");
+}
+
 function ImageThumbnail({ path }: { path: string }) {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
@@ -51,6 +110,7 @@ type MarkdownContentProps = { children?: string; className?: string; onPathClick
 export default function MarkdownContent({ children = "", className, onPathClick }: MarkdownContentProps) {
   const { t } = useI18n();
   const processed = preprocessDataUrlAudio(preprocessDataUrlImages(children));
+  const pretty = autoFormatLongUnstructuredPlainText(processed);
   return (
     <div className={className ?? "markdown-rendered"}>
       <ReactMarkdown
@@ -142,7 +202,7 @@ export default function MarkdownContent({ children = "", className, onPathClick 
           },
         }}
       >
-        {processed}
+        {pretty}
       </ReactMarkdown>
     </div>
   );

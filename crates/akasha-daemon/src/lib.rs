@@ -10,7 +10,6 @@ pub mod agent_contracts;
 pub mod api;
 pub mod session_state;
 pub mod browser;
-pub mod debug_log;
 pub mod channels;
 pub mod daemon;
 pub mod replication;

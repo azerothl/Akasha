@@ -15,6 +15,88 @@ use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use std::path::{Path, PathBuf};
 use std::cmp::Ordering;
+
+/// On Windows, paths with verbatim prefix `\\?\` can cause "file not found" with some APIs. Return a path without it.
+#[cfg(windows)]
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    if s.starts_with(r"\\?\") {
+        PathBuf::from(s.replace(r"\\?\", ""))
+    } else {
+        p
+    }
+}
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    p
+}
+
+/// Normalize common Unicode apostrophes in filenames (e.g. ’ -> ').
+/// LLM tool calls may use typographic quotes, while files on disk typically use ASCII quotes.
+fn normalize_apostrophes(s: &str) -> String {
+    s.replace('’', "'").replace('‘', "'")
+}
+
+/// Resolve `workspace:/rel` or a normal filesystem path to a concrete disk path for tools that only call `read_dir` / globs on real paths.
+/// True if path should be read as PDF (text extraction), not as UTF-8/plain text.
+fn path_extension_is_pdf(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+}
+
+/// Read bytes from disk and return the same user-visible message shape as `pdf` tool.
+async fn pdf_extract_message_from_disk(disk_path: &Path, via_tool: &str) -> (bool, String, Option<String>) {
+    match tokio::fs::read(disk_path).await {
+        Ok(bytes) => match pdf_extract::extract_text_from_mem(&bytes) {
+            Ok(text) => {
+                let preview =
+                    if text.len() > 2000 { format!("{}…", text.chars().take(2000).collect::<String>()) } else { text.clone() };
+                (
+                    true,
+                    format!(
+                        "[{}; PDF→text {}] extracted {} chars:\n{}",
+                        via_tool,
+                        disk_path.display(),
+                        text.len(),
+                        preview
+                    ),
+                    None,
+                )
+            }
+            Err(e) => (
+                false,
+                format!("[{}] PDF extraction failed for {}: {}", via_tool, disk_path.display(), e),
+                None,
+            ),
+        },
+        Err(e) => (
+            false,
+            format!("[{}] read failed for {}: {}", via_tool, disk_path.display(), e),
+            None,
+        ),
+    }
+}
+
+fn resolve_tool_disk_path(raw: &str, workspace_root: Option<&Path>) -> PathBuf {
+    let raw = raw.trim();
+    if raw.starts_with("workspace:/") || raw.starts_with("workspace:") {
+        let key = raw
+            .trim_start_matches("workspace:/")
+            .trim_start_matches("workspace:")
+            .trim_start_matches('/');
+        let key = normalize_apostrophes(key);
+        strip_verbatim_prefix(
+            workspace_root
+                .map(|root| root.join(&key))
+                .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                .unwrap_or_else(|| Path::new(&key).to_path_buf()),
+        )
+    } else {
+        strip_verbatim_prefix(Path::new(raw).to_path_buf())
+    }
+}
+
 use std::collections::{VecDeque, BinaryHeap};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -594,8 +676,8 @@ pub fn json_response(status: &str, body: &str) -> String {
 /// Format: une ligne par outil "nom — usage".
 /// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
-    ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
-    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier. Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel. À UTILISER dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier ; ne jamais refuser ni proposer de copier-coller."),
+    ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Pour les fichiers .pdf, le texte est extrait automatiquement (équivalent à pdf <path>) ; ne vous attendez pas au binaire PDF. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
+    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier. Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). TOUJOURS utiliser le chemin et le dossier de sortie EXACTEMENT comme l'utilisateur les a écrits (ex. workspace:/…/expo si l'utilisateur a dit « expo », ne pas substituer « exo » ou un autre nom tiré du PDF). Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel. À UTILISER dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier ; ne jamais refuser ni proposer de copier-coller."),
     ("search_files", "search_files <dir> <pattern> — chercher des fichiers (glob) sous un répertoire"),
     ("grep_content", "grep_content <dir> <pattern> [file_glob] — chercher le motif dans le contenu des fichiers (ex. grep_content . \"fn \" \"*.rs\")"),
     ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
@@ -1560,51 +1642,85 @@ async fn execute_tool_call(
     device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
     workspace_store: Option<&TaskWorkspaceStore>,
     browser_registry: Option<&crate::browser::BrowserSessionRegistry>,
+    workspace_root: Option<&std::path::Path>,
 ) -> (bool, String, Option<String>) {
     use std::path::Path;
     if !executor.policy.can_use_tool(tool_name) {
         return (false, format!("[{}] tool not allowed by current profile", tool_name), None);
     }
     let path_arg = |i: usize| args.get(i).map(|s| Path::new(s.as_str()));
+    // For tools that take a single path arg: rejoin args so paths with spaces (e.g. "Cas d'usage.pdf") work when the LLM splits them.
+    let path_arg_joined = |args: &[String]| -> String {
+        if args.is_empty() { String::new() } else { args.join(" ").trim().to_string() }
+    };
     let result = match tool_name {
         "read_file" => {
-            if let Some(path_str) = args.get(0) {
-                let path_str = path_str.as_str();
-                if path_str.starts_with("workspace:/") || path_str.starts_with("workspace:") {
-                    match workspace_store {
-                        Some(ws) => {
-                            let key = path_str
-                                .trim_start_matches("workspace:/")
-                                .trim_start_matches("workspace:")
-                                .trim_start_matches('/')
-                                .to_string();
-                            let guard = ws.read().await;
-                            if let Some(map) = guard.get(&task_id) {
-                                if let Some(content) = map.get(&key) {
-                                    let preview = if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] };
-                                    return (true, format!("[read_file workspace:{}] {} chars: {}", key, content.len(), preview), None);
-                                }
-                            }
-                            return (false, format!("[read_file workspace] path not found: {}", key), None);
+            let path_str = path_arg_joined(args);
+            if path_str.is_empty() {
+                (false, "[read_file] usage: read_file <path>".to_string(), None)
+            } else if path_str.starts_with("workspace:/") || path_str.starts_with("workspace:") {
+                let key = path_str
+                    .trim_start_matches("workspace:/")
+                    .trim_start_matches("workspace:")
+                    .trim_start_matches('/')
+                    .to_string();
+                let key = normalize_apostrophes(&key);
+                if let Some(ws) = workspace_store {
+                    let guard = ws.read().await;
+                    if let Some(map) = guard.get(&task_id) {
+                        if let Some(content) = map.get(&key) {
+                            let preview = if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] };
+                            return (true, format!("[read_file workspace:{}] {} chars: {}", key, content.len(), preview), None);
                         }
-                        None => return (false, "[read_file] workspace paths require a workspace store.".to_string(), None),
                     }
+                } else {
+                    return (false, "[read_file] workspace paths require a workspace store.".to_string(), None);
                 }
-            }
-            if let Some(p) = path_arg(0) {
-                match executor.read_file(p).await {
+                let disk_path = strip_verbatim_prefix(
+                    workspace_root
+                        .map(|root| root.join(&key))
+                        .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                        .unwrap_or_else(|| Path::new(&key).to_path_buf()),
+                );
+                if !executor.policy.can_read(&disk_path) {
+                    return (false, format!("[read_file workspace] path not allowed: {} (allowed_read_paths)", key), None);
+                }
+                if path_extension_is_pdf(&disk_path) {
+                    return pdf_extract_message_from_disk(&disk_path, "read_file").await;
+                }
+                match executor.read_file(&disk_path).await {
                     Ok((content, res)) => {
                         let msg = if res.success {
-                            format!("[read_file {}] {} chars: {}", p.display(), content.len(), if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] })
+                            format!(
+                                "[read_file {}] {} chars: {}",
+                                disk_path.display(),
+                                content.len(),
+                                if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] }
+                            )
                         } else {
-                            format!("[read_file] denied or error: {}", res.summary)
+                            format!("[read_file workspace] read failed: {}", res.summary)
                         };
-                        (res.success, msg, None)
+                        return (res.success, msg, None);
                     }
-                    Err(e) => (false, format!("[read_file] error: {}", e), None),
-                }
+                    Err(e) => return (false, format!("[read_file workspace] read error for {} at {}: {}", key, disk_path.display(), e), None),
+                };
             } else {
-                (false, "[read_file] usage: read_file <path>".to_string(), None)
+                let p = Path::new(&path_str);
+                if path_extension_is_pdf(p) && executor.policy.can_read(p) {
+                    pdf_extract_message_from_disk(p, "read_file").await
+                } else {
+                    match executor.read_file(p).await {
+                        Ok((content, res)) => {
+                            let msg = if res.success {
+                                format!("[read_file {}] {} chars: {}", p.display(), content.len(), if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] })
+                            } else {
+                                format!("[read_file] denied or error: {}", res.summary)
+                            };
+                            (res.success, msg, None)
+                        }
+                        Err(e) => (false, format!("[read_file] error: {}", e), None),
+                    }
+                }
             }
         }
         "run_command" => {
@@ -2155,9 +2271,42 @@ async fn execute_tool_call(
             }
         }
         "pdf" => {
-            let p = path_arg(0);
-            match p {
-                Some(path) if executor.policy.can_read(path) => {
+            let path_str = path_arg_joined(args);
+            let path_str = path_str.trim();
+            if path_str.is_empty() {
+                (false, "[pdf] usage: pdf <path> — path must be in allowed_read_paths".to_string(), None)
+            } else if path_str.starts_with("workspace:/") || path_str.starts_with("workspace:") {
+                let key = path_str
+                    .trim_start_matches("workspace:/")
+                    .trim_start_matches("workspace:")
+                    .trim_start_matches('/')
+                    .to_string();
+                let key = normalize_apostrophes(&key);
+                let disk_path = strip_verbatim_prefix(
+                    workspace_root
+                        .map(|root| root.join(&key))
+                        .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                        .unwrap_or_else(|| Path::new(&key).to_path_buf()),
+                );
+                if !executor.policy.can_read(&disk_path) {
+                    (false, "[pdf] path not allowed by policy (allowed_read_paths)".to_string(), None)
+                } else {
+                    match tokio::fs::read(&disk_path).await {
+                        Ok(bytes) => match pdf_extract::extract_text_from_mem(&bytes) {
+                            Ok(text) => {
+                                let preview = if text.len() > 2000 { format!("{}…", text.chars().take(2000).collect::<String>()) } else { text.clone() };
+                                (true, format!("[pdf {}] extracted {} chars:\n{}", disk_path.display(), text.len(), preview), None)
+                            }
+                            Err(e) => (false, format!("[pdf] extraction failed: {}", e), None),
+                        },
+                        Err(e) => (false, format!("[pdf] read failed: {} (ensure file exists at {})", e, disk_path.display()), None),
+                    }
+                }
+            } else {
+                let path = Path::new(path_str);
+                if !executor.policy.can_read(path) {
+                    (false, "[pdf] path not allowed by policy (allowed_read_paths)".to_string(), None)
+                } else {
                     match tokio::fs::read(path).await {
                         Ok(bytes) => match pdf_extract::extract_text_from_mem(&bytes) {
                             Ok(text) => {
@@ -2169,13 +2318,13 @@ async fn execute_tool_call(
                         Err(e) => (false, format!("[pdf] read failed: {}", e), None),
                     }
                 }
-                Some(_) => (false, "[pdf] path not allowed by policy (allowed_read_paths)".to_string(), None),
-                None => (false, "[pdf] usage: pdf <path> — path must be in allowed_read_paths".to_string(), None),
             }
         }
         "search_files" => {
-            let dir = path_arg(0).unwrap_or(Path::new("."));
+            let raw_dir = args.get(0).map(String::as_str).unwrap_or(".");
+            let dir_pb = resolve_tool_disk_path(raw_dir, workspace_root);
             let pattern = args.get(1).map(String::as_str).unwrap_or("*");
+            let dir = dir_pb.as_path();
             match executor.search_files(dir, pattern).await {
                 Ok((paths, res)) => {
                     let msg = if res.success {
@@ -2190,7 +2339,9 @@ async fn execute_tool_call(
             }
         }
         "grep_content" => {
-            let dir = path_arg(0).unwrap_or(Path::new("."));
+            let raw_dir = args.get(0).map(String::as_str).unwrap_or(".");
+            let dir_pb = resolve_tool_disk_path(raw_dir, workspace_root);
+            let dir = dir_pb.as_path();
             let pattern = args.get(1).map(String::as_str).unwrap_or("");
             let file_glob = args.get(2).map(String::as_str).filter(|s| !s.is_empty());
             if pattern.is_empty() {
@@ -2227,7 +2378,23 @@ async fn execute_tool_call(
                             let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
                             let mut guard = ws.write().await;
                             let per_task = guard.entry(task_id).or_default();
-                            per_task.insert(key.clone(), content);
+                            per_task.insert(key.clone(), content.clone());
+                            drop(guard);
+                            // Also write to disk under data_dir (workspace root = store_path.parent())
+                            let rel_path = Path::new(&key);
+                            if executor.policy.can_write(rel_path) {
+                                let disk_path_opt = workspace_root.map(|root| root.join(&key))
+                                    .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                                    .map(strip_verbatim_prefix);
+                                if let Some(disk_path) = disk_path_opt {
+                                    if let Some(parent) = disk_path.parent() {
+                                        let _ = tokio::fs::create_dir_all(parent).await;
+                                    }
+                                    if tokio::fs::write(&disk_path, &content).await.is_ok() {
+                                        return (true, format!("[write_file workspace:{}] saved (disk).", key), None);
+                                    }
+                                }
+                            }
                             return (true, format!("[write_file workspace:{}] saved.", key), None);
                         }
                         None => return (false, "[write_file] workspace paths require a workspace store.".to_string(), None),
@@ -3832,6 +3999,7 @@ pub(crate) async fn run_message_via_llm(
                             device_bridge.as_ref(),
                             workspace_store.as_ref(),
                             browser_registry.as_ref(),
+                            store_path.parent(),
                         )
                         .await;
                         (s, r, None)
@@ -3862,6 +4030,7 @@ pub(crate) async fn run_message_via_llm(
                         device_bridge.as_ref(),
                         workspace_store.as_ref(),
                         browser_registry.as_ref(),
+                        store_path.parent(),
                     )
                     .await
                 };

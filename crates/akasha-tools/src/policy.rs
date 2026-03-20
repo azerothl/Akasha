@@ -34,6 +34,9 @@ pub struct ToolsPolicy {
     /// Brave Search API key (set by daemon from vault "brave_api_key"; not in YAML). Takes precedence over BRAVE_API_KEY env.
     #[serde(skip)]
     pub brave_api_key: Option<String>,
+    /// Project root for resolving workspace:/ paths (set by daemon from spec_dir.parent()). Paths under this are allowed when "." is in allowed_read_paths/allowed_write_paths.
+    #[serde(skip)]
+    pub workspace_root: Option<PathBuf>,
     /// Optional: tool profiles (profile_name -> list of tool names). If default_profile is set, only tools in that profile are allowed.
     #[serde(default)]
     pub tool_profiles: HashMap<String, Vec<String>>,
@@ -139,19 +142,78 @@ impl ToolsPolicy {
     }
 
     /// Check if a path is allowed for read (path must be under one of allowed_read_paths).
+    /// When prefix is "." or "", any relative path (not absolute) is allowed (current directory).
     pub fn can_read(&self, path: &Path) -> bool {
         let path_n = path_normalize(path);
+        let path_str = path_n.to_string_lossy();
         self.allowed_read_paths.iter().any(|prefix| {
             let p = path_normalize(Path::new(prefix));
+            let p_str = p.to_string_lossy();
+            if p_str.is_empty() || p_str == "." || p_str == "./" {
+                // "." or "" means current dir: allow relative path or absolute path under current_dir()
+                if path_str.is_empty() {
+                    return false;
+                }
+                // Relative path: no ".." escape, not absolute
+                if !path_str.starts_with('/') && (path_str.len() < 2 || path_str.chars().nth(1) != Some(':')) {
+                    if !path_str.contains("/../") && !path_str.starts_with("..") {
+                        return true;
+                    }
+                }
+                // Absolute path: allow if under process current_dir or under policy.workspace_root (daemon sets spec_dir.parent())
+                if let Ok(cwd) = std::env::current_dir() {
+                    let cwd_n = path_normalize(&cwd);
+                    let cwd_s = cwd_n.to_string_lossy();
+                    if path_str.starts_with(cwd_s.as_ref()) {
+                        return true;
+                    }
+                }
+                if let Some(ref root) = self.workspace_root {
+                    let root_n = path_normalize(root);
+                    let root_s = root_n.to_string_lossy();
+                    if path_str.starts_with(root_s.as_ref()) {
+                        return true;
+                    }
+                }
+                return false;
+            }
             path_n.starts_with(&p) || path_n == p
         })
     }
 
     /// Check if a path is allowed for write.
+    /// When prefix is "." or "", any relative path is allowed (same as can_read).
     pub fn can_write(&self, path: &Path) -> bool {
         let path_n = path_normalize(path);
+        let path_str = path_n.to_string_lossy();
         self.allowed_write_paths.iter().any(|prefix| {
             let p = path_normalize(Path::new(prefix));
+            let p_str = p.to_string_lossy();
+            if p_str.is_empty() || p_str == "." || p_str == "./" {
+                if path_str.is_empty() {
+                    return false;
+                }
+                if !path_str.starts_with('/') && (path_str.len() < 2 || path_str.chars().nth(1) != Some(':')) {
+                    if !path_str.contains("/../") && !path_str.starts_with("..") {
+                        return true;
+                    }
+                }
+                if let Ok(cwd) = std::env::current_dir() {
+                    let cwd_n = path_normalize(&cwd);
+                    let cwd_s = cwd_n.to_string_lossy();
+                    if path_str.starts_with(cwd_s.as_ref()) {
+                        return true;
+                    }
+                }
+                if let Some(ref root) = self.workspace_root {
+                    let root_n = path_normalize(root);
+                    let root_s = root_n.to_string_lossy();
+                    if path_str.starts_with(root_s.as_ref()) {
+                        return true;
+                    }
+                }
+                return false;
+            }
             path_n.starts_with(&p) || path_n == p
         })
     }

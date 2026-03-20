@@ -62,11 +62,21 @@ pub fn parse_contract_from_response(response: &str) -> Option<AgentOutputContrac
             }
         }
     }
-    // Try last {...} in the last 2K chars
-    let tail = if trimmed.len() > 2000 {
-        &trimmed[trimmed.len() - 2000..]
-    } else {
-        trimmed
+    // Try last {...} in the last ~2K chars.
+    // IMPORTANT: slicing by byte offsets on UTF-8 strings must start at a valid char boundary,
+    // otherwise Rust will panic ("byte index is not a char boundary").
+    let tail = {
+        let start = trimmed.len().saturating_sub(2000);
+        let start = if trimmed.is_char_boundary(start) {
+            start
+        } else {
+            trimmed[..start]
+                .char_indices()
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0)
+        };
+        &trimmed[start..]
     };
     let open = tail.rfind('{')?;
     // Find the matching closing brace for the last '{' by tracking nesting depth.
@@ -111,10 +121,18 @@ fn strip_trailing_contract(response: &str) -> String {
         }
     }
     // Remove last {...} that parses as contract (search from end, try parsing)
-    let tail = if trimmed.len() > 2500 {
-        &trimmed[trimmed.len() - 2500..]
-    } else {
-        trimmed
+    let tail = {
+        let start = trimmed.len().saturating_sub(2500);
+        let start = if trimmed.is_char_boundary(start) {
+            start
+        } else {
+            trimmed[..start]
+                .char_indices()
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0)
+        };
+        &trimmed[start..]
     };
     if let Some(open_rel) = tail.rfind('{') {
         let json_candidate = &tail[open_rel..];

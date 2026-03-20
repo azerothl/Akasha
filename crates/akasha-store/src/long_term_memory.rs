@@ -48,43 +48,7 @@ const MAX_EMBEDDING_BYTES: usize = 4 * 1024 * 1024;
 /// Returns empty vec if blob is oversized (corrupt or wrong data); callers treat empty as no embedding.
 pub fn decode_embedding_bytes(b: &[u8]) -> Vec<f32> {
     let n = b.len() / 4;
-    // #region agent log
-    if b.len() > 100_000 {
-        let log_path = std::env::var("AKASHA_DEBUG_LOG_PATH").unwrap_or_else(|_| "debug-8aa6f9.log".to_string());
-        let payload = serde_json::json!({
-            "sessionId": "8aa6f9",
-            "hypothesisId": "A",
-            "location": "long_term_memory.rs:decode_embedding_bytes",
-            "message": "large embedding blob",
-            "data": { "b_len": b.len(), "n_capacity": n, "alloc_bytes": n.saturating_mul(4) },
-            "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
-        });
-        if let Ok(line) = serde_json::to_string(&payload) {
-            let _ = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).and_then(|mut f| {
-                use std::io::Write;
-                f.write_all(line.as_bytes()).and_then(|_| f.write_all(b"\n"))
-            });
-        }
-    }
-    // #endregion
     if b.len() > MAX_EMBEDDING_BYTES {
-        // #region agent log
-        let log_path = std::env::var("AKASHA_DEBUG_LOG_PATH").unwrap_or_else(|_| "debug-8aa6f9.log".to_string());
-        let payload = serde_json::json!({
-            "sessionId": "8aa6f9",
-            "hypothesisId": "A",
-            "location": "long_term_memory.rs:decode_embedding_bytes",
-            "message": "embedding blob capped",
-            "data": { "b_len": b.len(), "max_allowed": MAX_EMBEDDING_BYTES },
-            "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
-        });
-        if let Ok(line) = serde_json::to_string(&payload) {
-            let _ = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).and_then(|mut f| {
-                use std::io::Write;
-                f.write_all(line.as_bytes()).and_then(|_| f.write_all(b"\n"))
-            });
-        }
-        // #endregion
         return Vec::new();
     }
     let mut out = Vec::with_capacity(n);

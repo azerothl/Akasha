@@ -13,7 +13,7 @@ use uuid::Uuid;
 use super::contract::{parse_contract_from_response, user_facing_message, ContractStatus};
 use super::execution_plan::{parse_plan_json, ExecutionPlan};
 use super::orchestration_rules::OrchestrationRules;
-use super::prompts::build_task_prompt;
+use super::prompts::compose_orchestrated_child_message;
 use super::{EventBus, ExecutionMode, OrchestratorTask};
 use futures_util::future::join_all;
 use crate::agent_profile::AgentProfile;
@@ -68,12 +68,25 @@ User request:
 
 const JSON_PLAN_SUFFIX: &str = r#"
 
-You may output ONLY a JSON object (no markdown): {"steps":[{"step_id":"s0","agent_type":"conversation","intent":"…","depends_on":[],"parallel_group":0}]}. Use depends_on: ["s0"] if a step needs prior output. For recurring reminders one step: agent_type "schedule", intent "interval_seconds|name|message". Max 12 steps. If you do not use JSON, output one line per subtask as agent_type|message (legacy).
+You may output ONLY a JSON object (no markdown): {"steps":[{"step_id":"s0","agent_type":"documentalist","intent":"Full multi-sentence instructions for this step (not a one-liner)","depends_on":[],"parallel_group":0,"acceptance_criteria":"Optional: definition of done for this step","deliverables":["workspace:/optional/path.md"]}]}. 
+Each step MUST use a complete "intent" (clear actions, paths, constraints). When the user gave workspace paths (e.g. workspace:/folder/file), repeat them EXACTLY — do not rename folders (expo vs exo).
+Use depends_on: ["s0"] when a step needs prior step output. For recurring reminders one step: agent_type "schedule", intent "interval_seconds|name|message".
+Include acceptance_criteria and deliverables when they reduce ambiguity. Max 32 steps. If you do not use JSON, output one line per subtask as agent_type|message (legacy).
 "#;
 
-/// Builds the decomposer prompt string (template + message). Used by benchmarks and by decompose_request.
+/// True if parsed agent contract marks the response as blocked.
+fn response_indicates_blocked(content: &str) -> bool {
+    if let Some(c) = parse_contract_from_response(content) {
+        if c.status == Some(ContractStatus::Blocked) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Builds the decomposer prompt string (template + message + JSON suffix). Used by benchmarks and parity with `decompose_to_plan`.
 pub fn build_decomposer_prompt(message: &str) -> String {
-    format!("{}{}", DECOMPOSER_PROMPT_TEMPLATE, message)
+    format!("{}{}{}", DECOMPOSER_PROMPT_TEMPLATE, message, JSON_PLAN_SUFFIX)
 }
 
 fn parse_legacy_subtasks(text: &str, fallback_message: &str) -> Vec<Subtask> {
@@ -337,9 +350,12 @@ async fn process_root_task(
     );
 
     let mut plan = decompose_to_plan(&llm_router, &message, data_dir).await;
-    let mut steps = plan.to_subtasks();
-    steps = apply_decomposition_override(&message, steps);
-    plan = ExecutionPlan::from_legacy(&steps);
+    let steps_before = plan.to_subtasks();
+    let steps_after = apply_decomposition_override(&message, steps_before.clone());
+    if steps_after != steps_before {
+        plan = ExecutionPlan::from_legacy(&steps_after);
+    }
+    let steps = plan.to_subtasks();
     let _ = bus.send(
         EventEnvelope::new(
             EventType::TaskDecomposed,
@@ -362,8 +378,10 @@ async fn process_root_task(
                 "steps": plan.steps.iter().map(|s| serde_json::json!({
                     "step_id": s.step_id,
                     "agent_type": s.agent_type,
-                    "intent_preview": s.intent.chars().take(200).collect::<String>(),
+                    "intent_preview": s.intent.chars().take(400).collect::<String>(),
                     "depends_on": s.depends_on,
+                    "acceptance_criteria_preview": s.acceptance_criteria.as_ref().map(|a| a.chars().take(300).collect::<String>()),
+                    "deliverables": s.deliverables,
                 })).collect::<Vec<_>>()
             })),
         )
@@ -526,10 +544,16 @@ async fn process_root_task(
 
     // Single subtask (conversation): delegate to conversation worker for root (user sees reply on root_id).
     if steps.len() == 1 && steps[0].0 == "conversation" {
+        let conv_body = if let Some(s0) = plan.steps.first() {
+            let shared = plan.shared_context_markdown(&message, s0);
+            compose_orchestrated_child_message("conversation", &s0.intent, &shared)
+        } else {
+            steps[0].1.clone()
+        };
         conversation_tx
             .send(OrchestratorTask {
                 task_id: root_task_id,
-                message: steps[0].1.clone(),
+                message: conv_body,
                 session_id,
                 image_data_urls,
                 execution_mode: None,
@@ -549,6 +573,8 @@ async fn process_root_task(
                     "agent_type": &s.agent_type,
                     "intent": &s.intent,
                     "depends_on": &s.depends_on,
+                    "acceptance_criteria": &s.acceptance_criteria,
+                    "deliverables": &s.deliverables,
                 })).collect::<Vec<_>>(),
                 "aggregated_so_far": ""
             });
@@ -597,20 +623,37 @@ async fn process_root_task(
         }
         let mut step_outputs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut wave_step_counter = 0usize;
-        for wave in waves {
+        let mut recovery_used = false;
+        let mut cumulative_problem_sids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (wave_idx, wave) in waves.iter().enumerate() {
             let mut batch: Vec<(Uuid, Arc<tokio::sync::Notify>, String)> = Vec::new();
-            for &idx in &wave {
+            for &idx in wave {
                 let step = match plan_spawn.steps.get(idx) {
                     Some(s) => s,
                     None => continue,
                 };
                 let mut sub_message = step.intent.clone();
+                if let Some(note) = step_outputs.get("__orchestrator_recovery__") {
+                    if step
+                        .depends_on
+                        .iter()
+                        .any(|d| cumulative_problem_sids.contains(d))
+                    {
+                        sub_message = format!(
+                            "Orchestrator recovery note (use to unblock or narrow the next actions):\n\n{}\n\n---\n\n{}",
+                            note, sub_message
+                        );
+                    }
+                }
                 for dep in &step.depends_on {
                     if let Some(prev) = step_outputs.get(dep) {
                         sub_message = format!("Output from step {}:\n{}\n\n{}", dep, prev, sub_message);
                     }
                 }
                 let agent_type = step.agent_type.as_str();
+                let shared = plan_spawn.shared_context_markdown(&user_message, step);
+                let child_message =
+                    compose_orchestrated_child_message(agent_type, &sub_message, &shared);
                 let child_id = Uuid::new_v4();
                 let task = Task {
                     id: child_id,
@@ -621,12 +664,12 @@ async fn process_root_task(
                     updated_at: Utc::now(),
                     initial_message: {
                         const MAX: usize = 500;
-                        if sub_message.chars().count() > MAX {
-                            Some(sub_message.chars().take(MAX).chain(std::iter::once('…')).collect::<String>())
-                        } else if sub_message.is_empty() {
+                        if child_message.chars().count() > MAX {
+                            Some(child_message.chars().take(MAX).chain(std::iter::once('…')).collect::<String>())
+                        } else if child_message.is_empty() {
                             None
                         } else {
-                            Some(sub_message.clone())
+                            Some(child_message.clone())
                         }
                     },
                 };
@@ -667,14 +710,6 @@ async fn process_root_task(
                 wave_step_counter += 1;
                 let notify = Arc::new(tokio::sync::Notify::new());
                 task_completion.write().await.insert(child_id, notify.clone());
-                let child_message = if matches!(
-                    agent_type,
-                    "analyst" | "architect" | "frontend" | "backend" | "database" | "integration" | "qa" | "image_generation"
-                ) {
-                    build_task_prompt(agent_type, &sub_message, None, None)
-                } else {
-                    sub_message.clone()
-                };
                 if conversation_tx_aggregator
                     .send(OrchestratorTask {
                         task_id: child_id,
@@ -713,6 +748,8 @@ async fn process_root_task(
                     Err(_) => std::collections::HashMap::new(),
                 }
             };
+            let mut problematic_this_wave: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             for (child_id, _, sid) in batch {
                 task_completion.write().await.remove(&child_id);
                 let content = {
@@ -723,6 +760,9 @@ async fn process_root_task(
                 };
                 step_outputs.insert(sid.clone(), content.clone());
                 let failed = child_failed.get(&child_id).copied().unwrap_or(false);
+                if failed || response_indicates_blocked(&content) {
+                    problematic_this_wave.insert(sid.clone());
+                }
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::SubtaskCompleted,
@@ -736,6 +776,111 @@ async fn process_root_task(
                     )
                     .with_correlation(root_task_id),
                 );
+            }
+            cumulative_problem_sids.extend(problematic_this_wave.iter().cloned());
+
+            if !recovery_used
+                && !problematic_this_wave.is_empty()
+                && wave_idx + 1 < waves.len()
+            {
+                let mut has_future_dependent = false;
+                for w2 in waves.iter().skip(wave_idx + 1) {
+                    for &idx2 in w2 {
+                        if let Some(st2) = plan_spawn.steps.get(idx2) {
+                            if st2
+                                .depends_on
+                                .iter()
+                                .any(|d| problematic_this_wave.contains(d))
+                            {
+                                has_future_dependent = true;
+                                break;
+                            }
+                        }
+                    }
+                    if has_future_dependent {
+                        break;
+                    }
+                }
+                if has_future_dependent {
+                    recovery_used = true;
+                    let summary: String = problematic_this_wave
+                        .iter()
+                        .map(|psid| {
+                            let c = step_outputs
+                                .get(psid)
+                                .map(String::as_str)
+                                .unwrap_or("(no text)");
+                            format!(
+                                "- {}: {}",
+                                psid,
+                                c.chars().take(1200).collect::<String>()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let recovery_prompt = format!(
+                        r#"You are helping an orchestrator. Some sub-steps failed or reported blocked status.
+
+User request (summary): « {} »
+
+Problematic step outputs (excerpt):
+{}
+
+Reply with SHORT actionable guidance only: what the user should provide, which path or tool to retry, or how downstream steps should narrow scope. Do not output a JSON contract block. French or English: match the user request language."#,
+                        user_message.chars().take(1500).collect::<String>(),
+                        summary
+                    );
+                    let recovery_id = Uuid::new_v4();
+                    let recovery_task = Task {
+                        id: recovery_id,
+                        parent_task_id: Some(root_task_id),
+                        status: TaskStatus::Pending,
+                        assigned_agent: "conversation".to_string(),
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                        initial_message: Some(
+                            recovery_prompt
+                                .chars()
+                                .take(500)
+                                .chain(std::iter::once('…'))
+                                .collect::<String>(),
+                        ),
+                    };
+                    let recovery_ok = TaskStore::open(&store_path_buf)
+                        .map(|s| s.insert(&recovery_task).is_ok())
+                        .unwrap_or(false);
+                    if recovery_ok {
+                        let notify_r = Arc::new(tokio::sync::Notify::new());
+                        task_completion
+                            .write()
+                            .await
+                            .insert(recovery_id, notify_r.clone());
+                        let _ = conversation_tx_aggregator
+                            .send(OrchestratorTask {
+                                task_id: recovery_id,
+                                message: recovery_prompt,
+                                session_id: session_id_aggregator.clone(),
+                                image_data_urls: None,
+                                execution_mode: None,
+                            })
+                            .await;
+                        let _ =
+                            tokio::time::timeout(PER_CHILD_TIMEOUT, notify_r.notified()).await;
+                        task_completion.write().await.remove(&recovery_id);
+                        let recovery_text = {
+                            let g = progress.read().await;
+                            g.get(&recovery_id)
+                                .and_then(|q| q.back().map(|e| e.message.trim().to_string()))
+                                .filter(|s| !s.is_empty() && !GENERIC_MESSAGES.contains(&s.as_str()))
+                        };
+                        if let Ok(s) = TaskStore::open(&store_path_buf) {
+                            let _ = s.update_status(recovery_id, TaskStatus::Completed);
+                        }
+                        if let Some(t) = recovery_text {
+                            step_outputs.insert("__orchestrator_recovery__".to_string(), t);
+                        }
+                    }
+                }
             }
         }
         // Collect final child statuses in a synchronous scope before the await-heavy aggregation.
@@ -834,6 +979,8 @@ async fn process_root_task(
             }
         }
         let raw_responses = parts.join("\n\n");
+        // Kept for later UI failure context building (raw_responses might be moved into synthesis closures).
+        let raw_responses_for_failure = raw_responses.clone();
         let mut synthesis_model_used: Option<String> = None;
         let aggregated = if raw_responses.is_empty() || raw_responses.trim() == "(No response)" {
             "No response from sub-agents.".to_string()
@@ -842,7 +989,7 @@ async fn process_root_task(
             // Use the agent's personality (tone, formal/informal, name) so the synthesis speaks as the agent.
             let profile = AgentProfile::load(&data_dir_buf);
             let synthesis_system_prompt = format!(
-                "{}\n\nYou synthesize sub-agent replies into a single response for the user. Reply in your name, with the same tone and form of address (formal/informal as configured). Reply in the SAME LANGUAGE as the user's question (French → French, English → English). Do not produce a JSON block at the end of your response.",
+                "{}\n\nYou synthesize sub-agent replies into a single response for the user. Reply in your name, with the same tone and form of address (formal/informal as configured). Reply in the SAME LANGUAGE as the user's question (French → French, English → English). Do not produce a JSON block at the end of your response.\n\nFor readability: format your final answer in Markdown and avoid a single unbroken paragraph when the answer is long. If the response is long (>800 characters), use multiple short paragraphs plus at least 2 Markdown sections with headings (## ...) and bullet lists for any multi-item info.",
                 personality::build_personality_prompt(&spec_dir_buf, &profile, Some("conversation")).trim_end()
             );
             let synthesis_prompt = format!(
@@ -855,6 +1002,11 @@ Here are the replies from specialized agents:
 {}
 
 Produce a single structured, clear response that answers the question. Integrate useful elements from the replies above without listing or citing agents; rephrase in a natural and direct way.
+
+Formatting rules (Markdown):
+- Use short paragraphs and blank lines.
+- If the answer is long, include at least 2 sections with headings (## ...) and use bullet lists or numbered steps for sequences.
+
 Reply in the SAME LANGUAGE as the user's question above. Do not add any information not present in the agents' replies. If the replies do not allow answering, simply say you did not find the information."#,
                 user_message.trim(),
                 raw_responses
@@ -918,7 +1070,12 @@ Current sub-agent replies (incomplete or insufficient):
 
 {}
 
-You must either: (1) produce a complete, direct response to the user's request based on the above, or (2) clearly state that you cannot perform the task and explain why (missing information, tool unavailable, etc.). Do not just promise to do something — either respond or clearly say you cannot."#,
+You must either: (1) produce a complete, direct response to the user's request based on the above, or (2) clearly state that you cannot perform the task and explain why (missing information, tool unavailable, etc.). Do not just promise to do something — either respond or clearly say you cannot.
+
+Formatting rules (Markdown):
+- Use short paragraphs and blank lines.
+- If the answer is long, include Markdown headings (## ...) and bullet lists / numbered steps.
+- Avoid a single unbroken paragraph for long answers."#,
                 user_message.trim(),
                 aggregated.trim()
             );
@@ -977,7 +1134,52 @@ You must either: (1) produce a complete, direct response to the user's request b
             }
         }
         // Ensure the UI receives a readable message (never raw JSON): extract summary or strip trailing contract.
-        let display_message = user_facing_message(&final_aggregated);
+        let display_message_original = user_facing_message(&final_aggregated);
+        let any_failed = children.iter().any(|t| t.status == TaskStatus::Failed);
+
+        // If the root fails because we have "No response..." (often after long-running work), provide a richer
+        // progress message for the UI so the user is not stuck with a generic "Tâche en échec".
+        let msg_trim_original = display_message_original.trim();
+        let mut display_message = display_message_original.clone();
+        if any_failed && (msg_trim_original.is_empty() || msg_trim_original == "No response from sub-agents.") {
+            let failure_context_max_chars = std::env::var("AKASHA_FAILURE_CONTEXT_MAX_CHARS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(2000);
+
+            let likely_french = user_message
+                .chars()
+                .any(|c| matches!(c, 'é' | 'è' | 'ê' | 'à' | 'ç' | 'ù' | 'î' | 'ô' | 'â' | 'É' | 'È' | 'Ê' | 'À' | 'Ç' | 'Ù' | 'Î' | 'Ô' | 'Â'));
+
+            let header = if likely_french {
+                "Échec de la tâche (aucune réponse exploitable synthétisée)."
+            } else {
+                "Task failed (no usable synthesized response)."
+            };
+
+            let user_snip: String = user_message.trim().chars().take(240).collect();
+
+            let raw_clean = raw_responses_for_failure.trim();
+            let mut iter = raw_clean.chars();
+            let mut raw_snip: String = iter.by_ref().take(failure_context_max_chars).collect();
+            if iter.next().is_some() {
+                raw_snip.push('…');
+            }
+            if raw_snip.is_empty() {
+                raw_snip = String::from("(empty sub-agent replies)");
+            }
+
+            display_message = if likely_french {
+                format!(
+                    "{header}\n\nDemande utilisateur: « {user_snip} »\n\nDerniers retours des sous-agents (troncation <= {failure_context_max_chars} caractères):\n{raw_snip}"
+                )
+            } else {
+                format!(
+                    "{header}\n\nUser request: \"{user_snip}\"\n\nLast sub-agent replies (truncated <= {failure_context_max_chars} chars):\n{raw_snip}"
+                )
+            };
+        }
+
         let _ = bus.send(
             EventEnvelope::new(
                 EventType::ProgressUpdate,
@@ -989,9 +1191,22 @@ You must either: (1) produce a complete, direct response to the user's request b
             )
             .with_correlation(root_task_id),
         );
-        let any_failed = children.iter().any(|t| t.status == TaskStatus::Failed);
-        let root_status = if any_failed { TaskStatus::Failed } else { TaskStatus::Completed };
+        // If some subtasks failed but we have a usable aggregated message (e.g. timeout/partial), still complete the root so the user sees the synthesis instead of a global "failed".
+        let root_status = if any_failed {
+            if msg_trim_original.is_empty() || msg_trim_original == "No response from sub-agents." {
+                TaskStatus::Failed
+            } else {
+                TaskStatus::Completed
+            }
+        } else {
+            TaskStatus::Completed
+        };
         let status_str = root_status.as_str();
+        let event_type = if root_status == TaskStatus::Failed {
+            EventType::TaskFailed
+        } else {
+            EventType::TaskCompleted
+        };
         if root_status == TaskStatus::Completed && execution_mode_aggregator == Some(ExecutionMode::Orchestrated) {
             if let Ok(pipeline) = PipelineStore::open(&store_path_buf) {
                 let _ = pipeline.set_state(root_task_id, PipelineState::Livraison, Some(display_message.as_str()));
@@ -1032,7 +1247,6 @@ You must either: (1) produce a complete, direct response to the user's request b
             None,
         )
         .await;
-        let event_type = if any_failed { EventType::TaskFailed } else { EventType::TaskCompleted };
         let _ = bus.send(
             EventEnvelope::new(
                 event_type,

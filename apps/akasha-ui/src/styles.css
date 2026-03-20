@@ -1360,6 +1360,63 @@ pre,
   border-top: 1px solid var(--akasha-border);
 }
 
+.chat-subagents-plan {
+  margin-bottom: 1rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--akasha-border);
+}
+
+.chat-subagents-plan-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--akasha-text);
+}
+
+.chat-subagents-plan-steps {
+  margin: 0;
+  padding-left: 1.25rem;
+  list-style: decimal;
+}
+
+.chat-subagents-plan-step {
+  margin-bottom: 0.35rem;
+  color: var(--akasha-text-muted);
+}
+
+.chat-subagents-plan-agent {
+  display: inline-block;
+  margin-right: 0.5rem;
+  font-weight: 500;
+  color: var(--akasha-accent);
+}
+
+.chat-subagents-plan-intent {
+  color: var(--akasha-text);
+}
+
+.chat-subagents-plan-step-id {
+  display: inline-block;
+  margin-right: 0.35rem;
+  font-size: 0.75rem;
+  font-family: ui-monospace, monospace;
+  color: var(--akasha-text-dim);
+}
+
+.chat-subagents-plan-meta {
+  margin-top: 0.25rem;
+  font-size: 0.8125rem;
+  color: var(--akasha-text-muted);
+  white-space: pre-wrap;
+}
+
+.chat-subagents-plan-deliverables {
+  margin: 0.25rem 0 0;
+  padding-left: 1.25rem;
+  font-size: 0.8125rem;
+  color: var(--akasha-text-muted);
+}
+
 .chat-subagents-task {
   margin-bottom: 0.75rem;
 }

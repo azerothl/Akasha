@@ -2131,7 +2131,12 @@ function App() {
                 invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> }>("get_task_events", { taskId, port: DAEMON_PORT }).catch(() => ({ events: [] })),
                 invoke<{ question?: string; context?: string; choices?: string[] }>("get_task_human_input", { taskId, port: DAEMON_PORT }).catch(() => null),
               ]);
-              const status = JSON.parse(raw) as { status?: string; progress?: Array<{ progress_pct?: number; message?: string }> };
+              const status = JSON.parse(raw) as {
+                status?: string;
+                progress?: Array<{ progress_pct?: number; message?: string }>;
+                tokens_used?: number;
+                cost_usd?: number;
+              };
               const pct = status?.progress?.slice(-1)[0]?.progress_pct ?? 0;
               const msg = status?.progress?.slice(-1)[0]?.message ?? "";
               const currentStatus = status?.status ?? "";
@@ -2218,10 +2223,30 @@ function App() {
                     const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
                     if (idx >= 0) {
                       const next = [...prev];
-                      next[idx] = { role: "assistant", text: "Tâche en échec.", error: true };
+                      const MAX_FAILURE_CHAT_CHARS = 2500;
+                      const baseMsg = msg?.trim() ? msg.trim() : "Tâche en échec.";
+                      const tokensUsed = status?.tokens_used;
+                      const costUsd = status?.cost_usd;
+                      const suffixParts: string[] = [];
+                      if (typeof tokensUsed === "number") suffixParts.push(`Tokens: ${tokensUsed}`);
+                      if (typeof costUsd === "number" && Number.isFinite(costUsd) && Math.abs(costUsd) > 0) suffixParts.push(`Coût: ${costUsd.toFixed(4)} USD`);
+                      const suffix = suffixParts.length > 0 ? `\n\n${suffixParts.join(" · ")}` : "";
+                      const composed = `${baseMsg}${suffix}`;
+                      const finalMsg = composed.length > MAX_FAILURE_CHAT_CHARS ? composed.slice(0, MAX_FAILURE_CHAT_CHARS).trimEnd() + "…" : composed;
+                      next[idx] = { role: "assistant", text: finalMsg, error: true };
                       return next;
                     }
-                    return [...prev, { role: "assistant", text: "Tâche en échec.", error: true }];
+                    const MAX_FAILURE_CHAT_CHARS = 2500;
+                    const baseMsg = msg?.trim() ? msg.trim() : "Tâche en échec.";
+                    const tokensUsed = status?.tokens_used;
+                    const costUsd = status?.cost_usd;
+                    const suffixParts: string[] = [];
+                    if (typeof tokensUsed === "number") suffixParts.push(`Tokens: ${tokensUsed}`);
+                    if (typeof costUsd === "number" && Number.isFinite(costUsd) && Math.abs(costUsd) > 0) suffixParts.push(`Coût: ${costUsd.toFixed(4)} USD`);
+                    const suffix = suffixParts.length > 0 ? `\n\n${suffixParts.join(" · ")}` : "";
+                    const composed = `${baseMsg}${suffix}`;
+                    const finalMsg = composed.length > MAX_FAILURE_CHAT_CHARS ? composed.slice(0, MAX_FAILURE_CHAT_CHARS).trimEnd() + "…" : composed;
+                    return [...prev, { role: "assistant", text: finalMsg, error: true }];
                   });
                   delete ackTextByTaskRef.current[taskId];
                 }
@@ -2924,13 +2949,52 @@ function App() {
                               {!isCollapsed && (
                                 <div id={`subagents-discussion-${rootTaskId}`} className="chat-subagents-discussion-body">
                                   {(() => {
+                                    const planEv = events.find((e) => (e.event_type === "plan_proposed" || e.event_type === "plan_committed") && e.payload && typeof e.payload === "object" && "steps" in e.payload);
+                                    let steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> = planEv?.payload && typeof planEv.payload === "object" && Array.isArray((planEv.payload as { steps?: unknown }).steps)
+                                      ? (planEv.payload as { steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> }).steps
+                                      : [];
+                                    if (steps.length === 0) {
+                                      const decomposed = events.find((e) => e.event_type === "task_decomposed" && e.payload && typeof e.payload === "object" && "agents" in e.payload);
+                                      const agents = decomposed?.payload && typeof decomposed.payload === "object" && Array.isArray((decomposed.payload as { agents?: unknown }).agents)
+                                        ? (decomposed.payload as { agents: string[] }).agents
+                                        : [];
+                                      steps = agents.map((agent_type, i) => ({ step_id: `s${i}`, agent_type, intent_preview: "" }));
+                                    }
                                     const byTask: Record<string, typeof events> = {};
                                     for (const ev of events) {
                                       const tid = ev.task_id ?? rootTaskId;
                                       if (!byTask[tid]) byTask[tid] = [];
                                       byTask[tid].push(ev);
                                     }
-                                    return Object.entries(byTask).map(([tid, evs]) => (
+                                    return (
+                                      <>
+                                        {steps.length > 0 && (
+                                          <div className="chat-subagents-plan" role="region" aria-label={t("events.plan_proposed")}>
+                                            <h4 className="chat-subagents-plan-title">{t("events.plan_proposed")}</h4>
+                                            <ol className="chat-subagents-plan-steps">
+                                              {steps.map((s, i) => (
+                                                <li key={s.step_id ?? i} className="chat-subagents-plan-step">
+                                                  {s.agent_type && <span className="chat-subagents-plan-agent">{s.agent_type}</span>}
+                                                  {s.step_id != null && s.step_id !== "" && (
+                                                    <span className="chat-subagents-plan-step-id">{s.step_id}</span>
+                                                  )}
+                                                  <span className="chat-subagents-plan-intent">{s.intent_preview || s.intent || ""}</span>
+                                                  {s.acceptance_criteria_preview != null && s.acceptance_criteria_preview.trim() !== "" && (
+                                                    <div className="chat-subagents-plan-meta">{s.acceptance_criteria_preview}</div>
+                                                  )}
+                                                  {Array.isArray(s.deliverables) && s.deliverables.length > 0 && (
+                                                    <ul className="chat-subagents-plan-deliverables">
+                                                      {s.deliverables.map((d, j) => (
+                                                        <li key={j}>{d}</li>
+                                                      ))}
+                                                    </ul>
+                                                  )}
+                                                </li>
+                                              ))}
+                                            </ol>
+                                          </div>
+                                        )}
+                                        {Object.entries(byTask).map(([tid, evs]) => (
                                       <div key={`${rootTaskId}-${tid}`} className="chat-subagents-task">
                                         <div className="chat-subagents-task-id">
                                           {tid === rootTaskId ? `${t("chat.root_task")}${tid.slice(-8)}` : `${t("chat.sub_task")}${tid.slice(-8)}`}
@@ -2953,7 +3017,9 @@ function App() {
                                           ))}
                                         </ul>
                                       </div>
-                                    ));
+                                    ))}
+                                      </>
+                                    );
                                   })()}
                                 </div>
                               )}
@@ -3582,6 +3648,46 @@ function App() {
                       {tasksList.length > 0 ? t("tasks.no_events") : t("tasks.select_task")}
                     </p>
                   ) : (
+                    <>
+                      {(() => {
+                        const planEv = tasksEvents.find((e) => (e.event_type === "plan_proposed" || e.event_type === "plan_committed") && e.payload && typeof e.payload === "object" && "steps" in e.payload);
+                        let steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> = planEv?.payload && typeof planEv.payload === "object" && Array.isArray((planEv.payload as { steps?: unknown }).steps)
+                          ? (planEv.payload as { steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> }).steps
+                          : [];
+                        if (steps.length === 0) {
+                          const decomposed = tasksEvents.find((e) => e.event_type === "task_decomposed" && e.payload && typeof e.payload === "object" && "agents" in e.payload);
+                          const agents = decomposed?.payload && typeof decomposed.payload === "object" && Array.isArray((decomposed.payload as { agents?: unknown }).agents)
+                            ? (decomposed.payload as { agents: string[] }).agents
+                            : [];
+                          steps = agents.map((agent_type, i) => ({ step_id: `s${i}`, agent_type, intent_preview: "" }));
+                        }
+                        return steps.length > 0 ? (
+                          <div className="chat-subagents-plan task-panel-plan" role="region" aria-label={t("events.plan_proposed")}>
+                            <h4 className="chat-subagents-plan-title">{t("events.plan_proposed")}</h4>
+                            <ol className="chat-subagents-plan-steps">
+                              {steps.map((s, i) => (
+                                <li key={s.step_id ?? i} className="chat-subagents-plan-step">
+                                  {s.agent_type && <span className="chat-subagents-plan-agent">{s.agent_type}</span>}
+                                  {s.step_id != null && s.step_id !== "" && (
+                                    <span className="chat-subagents-plan-step-id">{s.step_id}</span>
+                                  )}
+                                  <span className="chat-subagents-plan-intent">{s.intent_preview || s.intent || ""}</span>
+                                  {s.acceptance_criteria_preview != null && s.acceptance_criteria_preview.trim() !== "" && (
+                                    <div className="chat-subagents-plan-meta">{s.acceptance_criteria_preview}</div>
+                                  )}
+                                  {Array.isArray(s.deliverables) && s.deliverables.length > 0 && (
+                                    <ul className="chat-subagents-plan-deliverables">
+                                      {s.deliverables.map((d, j) => (
+                                        <li key={j}>{d}</li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </li>
+                              ))}
+                            </ol>
+                          </div>
+                        ) : null;
+                      })()}
                     <ul className="activity-events-list" role="list">
                       {tasksEvents.map((e, i) => (
                         <li key={i}>
@@ -3595,6 +3701,7 @@ function App() {
                         </li>
                       ))}
                     </ul>
+                    </>
                   )}
                     </div>
                   )}
@@ -5111,8 +5218,8 @@ function App() {
                   const { content_base64, mime_type } = await readFileAsBase64(file);
                   await invoke("add_user_rag_document", {
                     name: file.name,
-                    content_base64,
-                    mime_type,
+                    contentBase64: content_base64,
+                    mimeType: mime_type,
                     port: DAEMON_PORT,
                   });
                   fetchUserRagDocuments();

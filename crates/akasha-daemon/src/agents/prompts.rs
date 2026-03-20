@@ -21,6 +21,7 @@ pub fn build_task_prompt(
         }
     }
     out.push_str("Success criteria: respond in a complete and actionable way; if blocked, state cause, impact and workaround proposal.\n");
+    out.push_str("You may list internal substeps (bullet list) before executing work, as long as you stay aligned with the shared plan and your step_id; complete those substeps in your response or tools.\n");
     if let Some(fmt) = output_format_hint {
         if !fmt.trim().is_empty() {
             out.push_str("Output format: ");
@@ -44,6 +45,27 @@ fn is_production_or_qa_agent(agent_type: &str) -> bool {
     )
 }
 
+/// Hint for orchestrated children that must not be forced into the JSON contract block (e.g. code, documentalist).
+pub const ORCHESTRATOR_SOFT_OUTPUT_HINT: &str = "Use TOOL: lines when the user needs concrete actions. Plain narrative is fine; no mandatory trailing ```json``` contract block unless your agent profile already requires it.";
+
+/// Build the full message for a sub-agent: shared plan as Context, objective = sub-message (+ contract rules by agent kind).
+pub fn compose_orchestrated_child_message(
+    agent_type: &str,
+    sub_message: &str,
+    shared_plan_markdown: &str,
+) -> String {
+    if is_production_or_qa_agent(agent_type) {
+        build_task_prompt(agent_type, sub_message, Some(shared_plan_markdown), None)
+    } else {
+        build_task_prompt(
+            agent_type,
+            sub_message,
+            Some(shared_plan_markdown),
+            Some(ORCHESTRATOR_SOFT_OUTPUT_HINT),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,5 +76,34 @@ mod tests {
         assert!(s.contains("Objective:"));
         assert!(s.contains("Create a login button"));
         assert!(s.contains("Output format"));
+    }
+
+    #[test]
+    fn task_prompt_includes_internal_substeps_guidance() {
+        let s = build_task_prompt("frontend", "Do X", None, None);
+        assert!(s.contains("internal substeps"));
+    }
+
+    #[test]
+    fn compose_orchestrated_soft_hint_for_documentalist() {
+        let s = compose_orchestrated_child_message(
+            "documentalist",
+            "Read files",
+            "## Plan\n\n| s0 | doc |",
+        );
+        assert!(s.contains("Context:"));
+        assert!(s.contains("## Plan"));
+        assert!(s.contains(ORCHESTRATOR_SOFT_OUTPUT_HINT));
+    }
+
+    #[test]
+    fn compose_orchestrated_json_contract_for_architect() {
+        let s = compose_orchestrated_child_message(
+            "architect",
+            "Design pipeline",
+            "## Plan\nall steps",
+        );
+        assert!(s.contains("```json```"));
+        assert!(s.contains("Design pipeline"));
     }
 }
