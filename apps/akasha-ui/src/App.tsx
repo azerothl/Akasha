@@ -3013,22 +3013,24 @@ function App() {
                                                 <span className="chat-subagents-event-model"> — {t("tasks.model_used")}: {(ev.payload as { model_used: string }).model_used}</span>
                                               ) : null}
                                               {ev.payload && typeof ev.payload === "object" && ev.event_type === "task_decomposed" ? (
-                                                <span className="chat-subagents-event-agent">
-                                                  {" — "}
-                                                  {(() => {
-                                                    const p = ev.payload as {
-                                                      decompose_model_task_type?: string;
-                                                      decompose_reason?: string;
-                                                      decompose_attempt?: string;
-                                                    };
-                                                    const parts = [
-                                                      p.decompose_model_task_type ? `task_type=${p.decompose_model_task_type}` : null,
-                                                      p.decompose_attempt ? `attempt=${p.decompose_attempt}` : null,
-                                                      p.decompose_reason ? `reason=${p.decompose_reason}` : null,
-                                                    ].filter(Boolean);
-                                                    return parts.length > 0 ? parts.join(" · ") : "";
-                                                  })()}
-                                                </span>
+                                                (() => {
+                                                  const p = ev.payload as {
+                                                    decompose_model_task_type?: string;
+                                                    decompose_reason?: string;
+                                                    decompose_attempt?: string;
+                                                  };
+                                                  const parts = [
+                                                    p.decompose_model_task_type ? `task_type=${p.decompose_model_task_type}` : null,
+                                                    p.decompose_attempt ? `attempt=${p.decompose_attempt}` : null,
+                                                    p.decompose_reason ? `reason=${p.decompose_reason}` : null,
+                                                  ].filter(Boolean);
+                                                  return parts.length > 0 ? (
+                                                    <span className="chat-subagents-event-agent">
+                                                      {" — "}
+                                                      {parts.join(" · ")}
+                                                    </span>
+                                                  ) : null;
+                                                })()
                                               ) : null}
                                               {ev.at && <span className="chat-subagents-event-at"> {ev.at.slice(0, 19)}</span>}
                                             </li>

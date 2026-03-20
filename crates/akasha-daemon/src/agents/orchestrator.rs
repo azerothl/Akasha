@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::contract::{parse_contract_from_response, user_facing_message, ContractStatus};
-use super::execution_plan::{parse_plan_json, ExecutionPlan};
+use super::execution_plan::{parse_plan_json, ExecutionPlan, PlanStep};
 use super::orchestration_rules::OrchestrationRules;
 use super::prompts::compose_orchestrated_child_message;
 use super::{EventBus, ExecutionMode, OrchestratorTask};
@@ -87,29 +87,72 @@ fn project_min_steps() -> usize {
 }
 
 fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
-    let brief: String = message.trim().chars().take(2000).collect();
-    ExecutionPlan::from_legacy(&[
-        (
-            "analyst".to_string(),
-            format!("Formalise the request into a concrete execution backlog, acceptance criteria, and deliverables. Keep workspace paths exactly as provided.\n\nRequest:\n{}", brief),
-        ),
-        (
-            "documentalist".to_string(),
-            "Extract and structure mandatory documentation sections, constraints, ethics/RGPD points, and required artifacts from the request. Produce a clear checklist tied to deliverables.".to_string(),
-        ),
-        (
-            "backend".to_string(),
-            "Implement core technical deliverables (scripts/API/project structure) matching the requested artifacts and dataset workflow. Create concrete files in workspace paths when provided.".to_string(),
-        ),
-        (
-            "qa".to_string(),
-            "Validate coverage against mandatory sections and deliverables. Report missing files/sections and propose exact fixes prioritized by severity.".to_string(),
-        ),
-        (
-            "conversation".to_string(),
-            "Provide a concise final handoff summary: what was produced, where files are located, what's missing, and exact next steps for completion.".to_string(),
-        ),
-    ])
+    // Use a head+tail strategy so that workspace paths and constraints
+    // listed anywhere in a long request are not silently dropped.
+    const HEAD: usize = 1500;
+    const TAIL: usize = 500;
+    let msg = message.trim();
+    let char_count = msg.chars().count();
+    let brief: String = if char_count <= HEAD + TAIL {
+        msg.to_string()
+    } else {
+        let head: String = msg.chars().take(HEAD).collect();
+        let tail: String = msg.chars().skip(char_count - TAIL).collect();
+        format!("{}\n[…]\n{}", head, tail)
+    };
+    // Build a sequential chain so each step runs after the previous one finishes.
+    // Without dependencies, execution_waves() would schedule all steps in wave 0
+    // (parallel), meaning qa could verify before backend has produced any files.
+    ExecutionPlan {
+        plan_id: Uuid::new_v4(),
+        steps: vec![
+            PlanStep {
+                step_id: "s0".to_string(),
+                agent_type: "analyst".to_string(),
+                intent: format!("Formalise the request into a concrete execution backlog, acceptance criteria, and deliverables. Keep workspace paths exactly as provided.\n\nRequest:\n{}", brief),
+                depends_on: vec![],
+                parallel_group: None,
+                acceptance_criteria: None,
+                deliverables: None,
+            },
+            PlanStep {
+                step_id: "s1".to_string(),
+                agent_type: "documentalist".to_string(),
+                intent: "Extract and structure mandatory documentation sections, constraints, ethics/RGPD points, and required artifacts from the request. Produce a clear checklist tied to deliverables.".to_string(),
+                depends_on: vec!["s0".to_string()],
+                parallel_group: None,
+                acceptance_criteria: None,
+                deliverables: None,
+            },
+            PlanStep {
+                step_id: "s2".to_string(),
+                agent_type: "backend".to_string(),
+                intent: "Implement core technical deliverables (scripts/API/project structure) matching the requested artifacts and dataset workflow. Create concrete files in workspace paths when provided.".to_string(),
+                depends_on: vec!["s1".to_string()],
+                parallel_group: None,
+                acceptance_criteria: None,
+                deliverables: None,
+            },
+            PlanStep {
+                step_id: "s3".to_string(),
+                agent_type: "qa".to_string(),
+                intent: "Validate coverage against mandatory sections and deliverables. Report missing files/sections and propose exact fixes prioritized by severity.".to_string(),
+                depends_on: vec!["s2".to_string()],
+                parallel_group: None,
+                acceptance_criteria: None,
+                deliverables: None,
+            },
+            PlanStep {
+                step_id: "s4".to_string(),
+                agent_type: "conversation".to_string(),
+                intent: "Provide a concise final handoff summary: what was produced, where files are located, what's missing, and exact next steps for completion.".to_string(),
+                depends_on: vec!["s3".to_string()],
+                parallel_group: None,
+                acceptance_criteria: None,
+                deliverables: None,
+            },
+        ],
+    }
 }
 
 fn parse_plan_or_legacy(text: &str, fallback_message: &str) -> ExecutionPlan {
@@ -360,7 +403,7 @@ async fn decompose_to_plan(
                 ExecutionPlan::from_legacy(&[("conversation".to_string(), message.to_string())]),
                 DecomposeDiagnostics {
                     task_type_used: preferred_task_type,
-                    reason: "invalid_plan_json".to_string(),
+                    reason: "guardrail_or_retry_failure".to_string(),
                     attempt: "primary".to_string(),
                 },
             )
