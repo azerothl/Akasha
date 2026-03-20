@@ -3012,6 +3012,24 @@ function App() {
                                               {ev.payload && typeof ev.payload === "object" && (ev.event_type === "task_completed" || ev.event_type === "task_failed") && "model_used" in ev.payload && (ev.payload as { model_used?: string | null }).model_used ? (
                                                 <span className="chat-subagents-event-model"> — {t("tasks.model_used")}: {(ev.payload as { model_used: string }).model_used}</span>
                                               ) : null}
+                                              {ev.payload && typeof ev.payload === "object" && ev.event_type === "task_decomposed" ? (
+                                                <span className="chat-subagents-event-agent">
+                                                  {" — "}
+                                                  {(() => {
+                                                    const p = ev.payload as {
+                                                      decompose_model_task_type?: string;
+                                                      decompose_reason?: string;
+                                                      decompose_attempt?: string;
+                                                    };
+                                                    const parts = [
+                                                      p.decompose_model_task_type ? `task_type=${p.decompose_model_task_type}` : null,
+                                                      p.decompose_attempt ? `attempt=${p.decompose_attempt}` : null,
+                                                      p.decompose_reason ? `reason=${p.decompose_reason}` : null,
+                                                    ].filter(Boolean);
+                                                    return parts.length > 0 ? parts.join(" · ") : "";
+                                                  })()}
+                                                </span>
+                                              ) : null}
                                               {ev.at && <span className="chat-subagents-event-at"> {ev.at.slice(0, 19)}</span>}
                                             </li>
                                           ))}
