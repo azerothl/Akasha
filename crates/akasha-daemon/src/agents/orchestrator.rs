@@ -37,11 +37,99 @@ enum SatisfactionOutcome {
 /// One subtask from decomposition: (agent_type, message for that agent).
 pub type Subtask = (String, String);
 
+#[derive(Debug, Clone)]
+struct DecomposeDiagnostics {
+    task_type_used: String,
+    reason: String,
+    attempt: String,
+}
+
+fn resolve_decompose_task_type(llm_router: &akasha_llm::LLMRouter) -> String {
+    let routes = llm_router.routes_by_category();
+    if routes.contains_key("orchestrator") {
+        "orchestrator".to_string()
+    } else {
+        "system".to_string()
+    }
+}
+
+fn is_project_like_request(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    let long = lower.chars().count() >= 600;
+    let keywords = [
+        "livrables",
+        "notebook",
+        "industrialisation",
+        "ci/cd",
+        "architecture",
+        "plusieurs",
+        "étapes",
+        "soutenance",
+        "dataset",
+        "workspace:/",
+        ".ipynb",
+        "api sécurisée",
+        "monitoring",
+    ];
+    let hits = keywords.iter().filter(|k| lower.contains(**k)).count();
+    long || hits >= 3
+}
+
+fn plan_is_single_conversation(plan: &ExecutionPlan) -> bool {
+    plan.steps.len() == 1 && plan.steps[0].agent_type == "conversation"
+}
+
+fn project_min_steps() -> usize {
+    std::env::var("AKASHA_ORCH_MIN_STEPS_PROJECT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(3)
+}
+
+fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
+    let brief: String = message.trim().chars().take(2000).collect();
+    ExecutionPlan::from_legacy(&[
+        (
+            "analyst".to_string(),
+            format!("Formalise the request into a concrete execution backlog, acceptance criteria, and deliverables. Keep workspace paths exactly as provided.\n\nRequest:\n{}", brief),
+        ),
+        (
+            "documentalist".to_string(),
+            "Extract and structure mandatory documentation sections, constraints, ethics/RGPD points, and required artifacts from the request. Produce a clear checklist tied to deliverables.".to_string(),
+        ),
+        (
+            "backend".to_string(),
+            "Implement core technical deliverables (scripts/API/project structure) matching the requested artifacts and dataset workflow. Create concrete files in workspace paths when provided.".to_string(),
+        ),
+        (
+            "qa".to_string(),
+            "Validate coverage against mandatory sections and deliverables. Report missing files/sections and propose exact fixes prioritized by severity.".to_string(),
+        ),
+        (
+            "conversation".to_string(),
+            "Provide a concise final handoff summary: what was produced, where files are located, what's missing, and exact next steps for completion.".to_string(),
+        ),
+    ])
+}
+
+fn parse_plan_or_legacy(text: &str, fallback_message: &str) -> ExecutionPlan {
+    if let Some(plan) = parse_plan_json(text) {
+        plan
+    } else {
+        let steps = parse_legacy_subtasks(text, fallback_message);
+        ExecutionPlan::from_legacy(&steps)
+    }
+}
+
 /// Applies the tool-only override: if the decomposer returned a single "code" step but the
 /// step message suggests a tool-only action (camera, web search, save file, image gen),
 /// re-route to conversation so the agent uses TOOL: instead of generating a script.
 /// Exposed for unit tests.
-pub(crate) fn apply_decomposition_override(_message: &str, steps: Vec<Subtask>) -> Vec<Subtask> {
+pub(crate) fn apply_decomposition_override(message: &str, steps: Vec<Subtask>) -> Vec<Subtask> {
+    // Do not collapse project-like requests; keep specialist decomposition intact.
+    if is_project_like_request(message) {
+        return steps;
+    }
     if steps.len() == 1
         && steps[0].0 == "code"
         && message_suggests_tool_only_action(&steps[0].1)
@@ -126,6 +214,7 @@ async fn decompose_request(
 ) -> Vec<Subtask> {
     decompose_to_plan(llm_router, message, Path::new("."))
         .await
+        .0
         .to_subtasks()
 }
 
@@ -133,11 +222,20 @@ async fn decompose_to_plan(
     llm_router: &Arc<akasha_llm::LLMRouter>,
     message: &str,
     data_dir: &Path,
-) -> ExecutionPlan {
+) -> (ExecutionPlan, DecomposeDiagnostics) {
     let rules = OrchestrationRules::load(data_dir);
     if let Some((agent, msg)) = rules.match_message(message) {
-        return ExecutionPlan::from_legacy(&[(agent, msg)]);
+        return (
+            ExecutionPlan::from_legacy(&[(agent, msg)]),
+            DecomposeDiagnostics {
+                task_type_used: "rules".to_string(),
+                reason: "rules_match".to_string(),
+                attempt: "primary".to_string(),
+            },
+        );
     }
+    let project_like = is_project_like_request(message);
+    let preferred_task_type = resolve_decompose_task_type(llm_router);
     let prompt = format!(
         "{}{}{}",
         DECOMPOSER_PROMPT_TEMPLATE,
@@ -152,27 +250,120 @@ async fn decompose_to_plan(
         prompt,
         max_tokens: Some(system_max_tokens),
         temperature: Some(0.2),
-        preferred_task_type: Some("system".to_string()),
+        preferred_task_type: Some(preferred_task_type.clone()),
         system_prompt: None,
         image_data_urls: None,
     };
     let decompose_timeout = std::time::Duration::from_secs(120);
-    match tokio::time::timeout(decompose_timeout, llm_router.complete(&request)).await {
-        Ok(Ok(resp)) => {
-            let text = resp.text.trim();
-            if let Some(plan) = parse_plan_json(text) {
-                return plan;
-            }
-            let steps = parse_legacy_subtasks(text, message);
-            ExecutionPlan::from_legacy(&steps)
+    let primary = tokio::time::timeout(decompose_timeout, llm_router.complete(&request)).await;
+    if let Ok(Ok(ref resp)) = primary {
+        let plan = parse_plan_or_legacy(resp.text.trim(), message);
+        let reject_single = project_like
+            && plan_is_single_conversation(&plan)
+            && plan.steps.len() < project_min_steps();
+        if !reject_single {
+            return (
+                plan,
+                DecomposeDiagnostics {
+                    task_type_used: preferred_task_type,
+                    reason: "ok".to_string(),
+                    attempt: "primary".to_string(),
+                },
+            );
         }
+    }
+
+    // Retry with condensed prompt to reduce failure rate on very long requests.
+    let condensed_req: String = message.chars().take(5000).collect();
+    let retry_prompt = format!(
+        "{}\n{}\n\n{}\n\nRetry rules: output strict JSON with >= {} steps for project-like requests; avoid single conversation fallback unless user explicitly asks only for a conversational summary.",
+        DECOMPOSER_PROMPT_TEMPLATE,
+        condensed_req,
+        JSON_PLAN_SUFFIX,
+        project_min_steps()
+    );
+    let retry_request = CompletionRequest {
+        prompt: retry_prompt,
+        max_tokens: Some(system_max_tokens),
+        temperature: Some(0.1),
+        preferred_task_type: Some(preferred_task_type.clone()),
+        system_prompt: None,
+        image_data_urls: None,
+    };
+    let retry_timeout = std::time::Duration::from_secs(60);
+    let retry = tokio::time::timeout(retry_timeout, llm_router.complete(&retry_request)).await;
+    if let Ok(Ok(resp)) = retry {
+        let plan = parse_plan_or_legacy(resp.text.trim(), message);
+        let reject_single = project_like
+            && plan_is_single_conversation(&plan)
+            && plan.steps.len() < project_min_steps();
+        if !reject_single {
+            return (
+                plan,
+                DecomposeDiagnostics {
+                    task_type_used: preferred_task_type,
+                    reason: "retry_ok".to_string(),
+                    attempt: "retry".to_string(),
+                },
+            );
+        } else {
+            let plan = build_deterministic_project_fallback_plan(message);
+            return (
+                plan,
+                DecomposeDiagnostics {
+                    task_type_used: preferred_task_type,
+                    reason: "guardrail_reject_single_conversation".to_string(),
+                    attempt: "deterministic_fallback".to_string(),
+                },
+            );
+        }
+    }
+
+    if project_like {
+        let plan = build_deterministic_project_fallback_plan(message);
+        return (
+            plan,
+            DecomposeDiagnostics {
+                task_type_used: preferred_task_type,
+                reason: "retry_failed".to_string(),
+                attempt: "deterministic_fallback".to_string(),
+            },
+        );
+    }
+
+    match primary {
         Ok(Err(e)) => {
             tracing::debug!(error = %e, "Decompose LLM failed, using single conversation step");
-            ExecutionPlan::from_legacy(&[("conversation".to_string(), message.to_string())])
+            (
+                ExecutionPlan::from_legacy(&[("conversation".to_string(), message.to_string())]),
+                DecomposeDiagnostics {
+                    task_type_used: preferred_task_type,
+                    reason: "llm_error".to_string(),
+                    attempt: "primary".to_string(),
+                },
+            )
         }
         Err(_) => {
             tracing::debug!("Decompose LLM timed out, using single conversation step");
-            ExecutionPlan::from_legacy(&[("conversation".to_string(), message.to_string())])
+            (
+                ExecutionPlan::from_legacy(&[("conversation".to_string(), message.to_string())]),
+                DecomposeDiagnostics {
+                    task_type_used: preferred_task_type,
+                    reason: "timeout".to_string(),
+                    attempt: "primary".to_string(),
+                },
+            )
+        }
+        Ok(Ok(_)) => {
+            // Primary returned but violated guardrails and retry failed.
+            (
+                ExecutionPlan::from_legacy(&[("conversation".to_string(), message.to_string())]),
+                DecomposeDiagnostics {
+                    task_type_used: preferred_task_type,
+                    reason: "invalid_plan_json".to_string(),
+                    attempt: "primary".to_string(),
+                },
+            )
         }
     }
 }
@@ -349,7 +540,7 @@ async fn process_root_task(
         .with_correlation(root_task_id),
     );
 
-    let mut plan = decompose_to_plan(&llm_router, &message, data_dir).await;
+    let (mut plan, decompose_diag) = decompose_to_plan(&llm_router, &message, data_dir).await;
     let steps_before = plan.to_subtasks();
     let steps_after = apply_decomposition_override(&message, steps_before.clone());
     if steps_after != steps_before {
@@ -363,7 +554,10 @@ async fn process_root_task(
                 "task_id": root_task_id.to_string(),
                 "subtask_count": steps.len(),
                 "agents": steps.iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>(),
-                "plan_id": plan.plan_id.to_string()
+                "plan_id": plan.plan_id.to_string(),
+                "decompose_model_task_type": decompose_diag.task_type_used,
+                "decompose_reason": decompose_diag.reason,
+                "decompose_attempt": decompose_diag.attempt
             })),
         )
         .with_correlation(root_task_id),
@@ -1265,7 +1459,7 @@ Formatting rules (Markdown):
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_decomposition_override, Subtask};
+    use super::{apply_decomposition_override, build_deterministic_project_fallback_plan, is_project_like_request, Subtask};
 
     fn step(agent: &str, msg: &str) -> Subtask {
         (agent.to_string(), msg.to_string())
@@ -1304,5 +1498,31 @@ mod tests {
         let out = apply_decomposition_override("Quelle météo ?", steps);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0, "search");
+    }
+
+    #[test]
+    fn override_does_not_collapse_project_like_single_code() {
+        let steps = vec![step("code", "Prends une photo et crée tout le projet complet")];
+        let out = apply_decomposition_override(
+            "Dans ce projet, crée plusieurs livrables, un notebook et une API sécurisée dans workspace:/certification_ai/exo/",
+            steps,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "code");
+    }
+
+    #[test]
+    fn project_like_detection_for_long_delivery_request() {
+        assert!(is_project_like_request(
+            "Construis un notebook .ipynb, des scripts, une API, du monitoring et place les livrables dans workspace:/certification_ai/exo/"
+        ));
+    }
+
+    #[test]
+    fn deterministic_project_fallback_has_multiple_specialist_steps() {
+        let p = build_deterministic_project_fallback_plan("request");
+        assert!(p.steps.len() >= 5);
+        assert_eq!(p.steps.first().map(|s| s.agent_type.as_str()), Some("analyst"));
+        assert_eq!(p.steps.last().map(|s| s.agent_type.as_str()), Some("conversation"));
     }
 }
