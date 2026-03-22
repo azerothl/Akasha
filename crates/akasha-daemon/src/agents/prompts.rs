@@ -38,11 +38,6 @@ pub fn build_task_prompt(
         out.push_str(
             "Output format: at the end of your response you MUST produce a valid ```json``` block containing exactly: status (done | blocked | needs_review), summary (string), files_created (array of paths), issues_found (array of strings). Optional: blocked (object with cause, information_missing, impact, workaround_proposal). No other text after this block. Example: ```json\n{\"status\": \"done\", \"summary\": \"...\", \"files_created\": [], \"issues_found\": []}\n```\n",
         );
-        if disk_deliverables_required {
-            out.push_str(
-                "The files_created array MUST include every orchestrated deliverable path you were assigned (as workspace paths or relative paths that were written).\n",
-            );
-        }
     }
     out.push_str("\n---\n\n");
     out.push_str(objective);

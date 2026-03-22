@@ -1063,9 +1063,6 @@ function App() {
         planEvent && planEvent.payload && typeof planEvent.payload === "object" && Array.isArray((planEvent.payload as { steps?: unknown }).steps)
           ? (planEvent.payload as { steps: unknown[] }).steps.length
           : 0;
-      // #region agent log
-      fetch('http://127.0.0.1:7790/ingest/83a7f7de-74a3-4ba3-8a97-b0169801051e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'905d69'},body:JSON.stringify({sessionId:'905d69',runId:'pre-fix-restore',hypothesisId:'H9',location:'App.tsx:fetchTasksEvents',message:'Fetched task events and extracted plan metadata',data:{taskId,eventsCount:list.length,planStepsCount},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       setTasksEvents(
         list.map((e) => ({
           event_type: e.event_type ?? "?",
@@ -1089,9 +1086,6 @@ function App() {
         title: x.title ?? "",
         status: (x.status ?? "pending").toLowerCase(),
       }));
-      // #region agent log
-      fetch('http://127.0.0.1:7790/ingest/83a7f7de-74a3-4ba3-8a97-b0169801051e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'905d69'},body:JSON.stringify({sessionId:'905d69',runId:'pre-fix-restore',hypothesisId:'H10',location:'App.tsx:fetchTaskSteps',message:'Fetched task todos used by steps panel',data:{taskId,todosCount:rows.length},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       if (selectedTaskIdForTodosRef.current === taskId) setTaskStepsTodos(rows);
     } catch {
       if (selectedTaskIdForTodosRef.current === taskId) setTaskStepsTodos([]);
