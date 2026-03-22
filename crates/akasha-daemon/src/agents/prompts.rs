@@ -28,6 +28,7 @@ pub fn build_task_prompt(
         );
     }
     out.push_str("You may list internal substeps (bullet list) before executing work, as long as you stay aligned with the shared plan and your step_id; complete those substeps in your response or tools.\n");
+    out.push_str("Self-check before finishing: (1) does your response directly answer the objective? (2) are all required deliverables created on disk? (3) if files were required, confirm TOOL: write_file was used for each one.\n");
     if let Some(fmt) = output_format_hint {
         if !fmt.trim().is_empty() {
             out.push_str("Output format: ");
