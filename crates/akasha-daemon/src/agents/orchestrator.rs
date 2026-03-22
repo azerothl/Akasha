@@ -5,6 +5,7 @@ use akasha_core::{EventEnvelope, EventType};
 use akasha_llm::CompletionRequest;
 use akasha_store::{PipelineState, PipelineStore, Schedule, ScheduleStore, Task, TaskStatus, TaskStore};
 use chrono::Utc;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -247,6 +248,371 @@ fn parse_legacy_subtasks(text: &str, fallback_message: &str) -> Vec<Subtask> {
     } else {
         steps
     }
+}
+
+fn plan_trace_rel_path(root_task_id: Uuid) -> String {
+    format!(".akasha/plan_{}.md", root_task_id)
+}
+
+/// Preserves **Fait (agent):** / **Reste (agent):** bodies per `### step_id` when the orchestrator rewrites the plan file.
+fn parse_agent_fait_reste_from_plan(content: &str) -> HashMap<String, (String, String)> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mode {
+        Neutral,
+        Fait,
+        Reste,
+    }
+    let mut out: HashMap<String, (String, String)> = HashMap::new();
+    let mut cur_step: Option<String> = None;
+    let mut mode = Mode::Neutral;
+    let mut fait = String::new();
+    let mut reste = String::new();
+
+    let flush = |out: &mut HashMap<String, (String, String)>,
+                     cur_step: &Option<String>,
+                     fait: &mut String,
+                     reste: &mut String| {
+        if let Some(sid) = cur_step {
+            if !fait.trim().is_empty() || !reste.trim().is_empty() {
+                out.insert(
+                    sid.clone(),
+                    (fait.trim().to_string(), reste.trim().to_string()),
+                );
+            }
+        }
+        fait.clear();
+        reste.clear();
+    };
+
+    for line in content.lines() {
+        if let Some(h) = line.strip_prefix("### ") {
+            flush(&mut out, &cur_step, &mut fait, &mut reste);
+            mode = Mode::Neutral;
+            cur_step = h.split_whitespace().next().map(std::string::ToString::to_string);
+            continue;
+        }
+        match line.trim() {
+            "**Fait (agent):**" => {
+                mode = Mode::Fait;
+                continue;
+            }
+            "**Reste (agent):**" => {
+                mode = Mode::Reste;
+                continue;
+            }
+            _ => {}
+        }
+        match mode {
+            Mode::Fait => {
+                if !fait.is_empty() {
+                    fait.push('\n');
+                }
+                fait.push_str(line);
+            }
+            Mode::Reste => {
+                if !reste.is_empty() {
+                    reste.push('\n');
+                }
+                reste.push_str(line);
+            }
+            Mode::Neutral => {}
+        }
+    }
+    flush(&mut out, &cur_step, &mut fait, &mut reste);
+    out
+}
+
+async fn load_agent_fait_reste_from_disk(workspace_root: &Path, rel_path: &str) -> HashMap<String, (String, String)> {
+    let path = workspace_root.join(rel_path);
+    let Ok(bytes) = tokio::fs::read(&path).await else {
+        return HashMap::new();
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        return HashMap::new();
+    };
+    parse_agent_fait_reste_from_plan(&text)
+}
+
+fn missing_deliverables_for_step(step: &PlanStep, workspace_root: &Path) -> Vec<String> {
+    let Some(list) = step.deliverables.as_ref() else {
+        return Vec::new();
+    };
+    let mut missing = Vec::new();
+    for d in list {
+        let raw = d.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        if !workspace_deliverable_satisfied(workspace_root, raw) {
+            missing.push(raw.to_string());
+        }
+    }
+    missing
+}
+
+fn render_plan_trace_markdown(
+    root_task_id: Uuid,
+    user_message: &str,
+    plan: &ExecutionPlan,
+    step_states: &std::collections::HashMap<String, String>,
+    step_notes: &std::collections::HashMap<String, String>,
+    agent_fait_reste: &HashMap<String, (String, String)>,
+) -> String {
+    const DEFAULT_FAIT: &str = "_(À remplir : ce qui est réellement accompli pour cette étape, après `read_file` sur ce plan.)_";
+    const DEFAULT_RESTE: &str = "_(À remplir : ce qu'il reste à faire. Indiquer « rien » ou laisser vide seulement si l'étape est à 100 % — l'orchestrateur vérifie les livrables sur disque.)_";
+
+    let mut out = String::new();
+    out.push_str("# Orchestrator Plan Trace\n\n");
+    out.push_str(&format!("- root_task_id: `{}`\n", root_task_id));
+    out.push_str(&format!("- updated_at: `{}`\n\n", Utc::now().to_rfc3339()));
+    out.push_str("## User request (excerpt)\n\n");
+    out.push_str(&user_message.chars().take(1200).collect::<String>());
+    out.push_str("\n\n## Steps\n\n");
+    for s in &plan.steps {
+        let status = step_states
+            .get(&s.step_id)
+            .cloned()
+            .unwrap_or_else(|| "pending".to_string());
+        out.push_str(&format!("### {} ({})\n\n", s.step_id, s.agent_type));
+        out.push_str(&format!("- status: `{}`\n", status));
+        if !s.depends_on.is_empty() {
+            out.push_str(&format!("- depends_on: {}\n", s.depends_on.join(", ")));
+        }
+        if let Some(ref d) = s.deliverables {
+            if !d.is_empty() {
+                out.push_str("- deliverables:\n");
+                for item in d {
+                    out.push_str(&format!("  - `{}`\n", item));
+                }
+            }
+        }
+        let note = step_notes.get(&s.step_id).cloned().unwrap_or_default();
+        if !note.is_empty() {
+            out.push_str(&format!("- note: {}\n", note));
+        }
+        let (fait_body, reste_body) = agent_fait_reste
+            .get(&s.step_id)
+            .cloned()
+            .unwrap_or_default();
+        let fait_display = if fait_body.trim().is_empty() {
+            DEFAULT_FAIT.to_string()
+        } else {
+            fait_body
+        };
+        let reste_display = if reste_body.trim().is_empty() {
+            DEFAULT_RESTE.to_string()
+        } else {
+            reste_body
+        };
+        out.push_str("\n#### Suivi agent (maintenir via `read_file` / `edit_file` / `search_replace` sur ce fichier)\n\n");
+        out.push_str("**Fait (agent):**\n");
+        out.push_str(&fait_display);
+        out.push_str("\n\n**Reste (agent):**\n");
+        out.push_str(&reste_display);
+        out.push_str("\n\n");
+    }
+    out
+}
+
+async fn persist_plan_trace(workspace_root: &Path, rel_path: &str, content: &str) {
+    let path = workspace_root.join(rel_path);
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let _ = tokio::fs::write(path, content).await;
+}
+
+/// Re-reads the plan file from disk so agent edits under **Fait (agent):** / **Reste (agent):** are preserved across orchestrator refreshes.
+async fn persist_plan_trace_merged(
+    workspace_root: &Path,
+    plan_trace_rel: &str,
+    root_task_id: Uuid,
+    user_message: &str,
+    plan: &ExecutionPlan,
+    step_states: &std::collections::HashMap<String, String>,
+    step_notes: &std::collections::HashMap<String, String>,
+) {
+    let merged = load_agent_fait_reste_from_disk(workspace_root, plan_trace_rel).await;
+    let md = render_plan_trace_markdown(
+        root_task_id,
+        user_message,
+        plan,
+        step_states,
+        step_notes,
+        &merged,
+    );
+    persist_plan_trace(workspace_root, plan_trace_rel, &md).await;
+}
+
+fn deliverable_workspace_rel(d: &str) -> String {
+    d.trim()
+        .trim_start_matches("workspace:/")
+        .trim_start_matches("workspace:")
+        .trim_start_matches('/')
+        .replace('\\', "/")
+}
+
+/// Deliverable lists a directory when the path ends with `/` or `\` (e.g. `workspace:/proj/scripts/`).
+fn deliverable_targets_directory(raw: &str, rel: &str) -> bool {
+    let t = raw.trim();
+    t.ends_with('/') || t.ends_with('\\') || rel.ends_with('/') || rel.ends_with('\\')
+}
+
+fn deliverable_rel_normalized_dir(rel: &str) -> String {
+    rel.trim_end_matches('/')
+        .trim_end_matches('\\')
+        .replace('\\', "/")
+}
+
+fn workspace_deliverable_satisfied(workspace_root: &Path, raw: &str) -> bool {
+    let rel = deliverable_workspace_rel(raw);
+    if rel.trim().is_empty() {
+        return false;
+    }
+    let norm = deliverable_rel_normalized_dir(&rel);
+    let path = workspace_root.join(&norm);
+    if deliverable_targets_directory(raw, &rel) {
+        path.is_dir()
+    } else {
+        path.exists()
+    }
+}
+
+/// Deduplicated missing deliverable paths from the plan (first spelling wins); keys normalized for case-insensitive dedup.
+fn collect_missing_plan_deliverables(plan: &ExecutionPlan, workspace_root: &Path) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut seen_keys = HashSet::new();
+    let mut missing = Vec::new();
+    for step in &plan.steps {
+        let Some(deliverables) = step.deliverables.as_ref() else {
+            continue;
+        };
+        for d in deliverables {
+            let raw = d.trim();
+            if raw.is_empty() {
+                continue;
+            }
+            let rel = deliverable_workspace_rel(raw);
+            let key = deliverable_rel_normalized_dir(&rel).to_lowercase();
+            if key.is_empty() {
+                continue;
+            }
+            if !seen_keys.insert(key) {
+                continue;
+            }
+            if !workspace_deliverable_satisfied(workspace_root, raw) {
+                missing.push(raw.to_string());
+            }
+        }
+    }
+    missing
+}
+
+/// When LLM remediation does not emit write_file, create minimal on-disk files
+/// so orchestration does not report missing deliverables and the user can edit/replace content.
+async fn write_missing_deliverables_fs_fallback(
+    workspace_root: &Path,
+    deliverables: &[String],
+    root_task_id: Uuid,
+) -> Vec<String> {
+    fn stub_body(rel_lower: &str, root: Uuid) -> String {
+        let rid = root.to_string();
+        if rel_lower.ends_with(".ipynb") {
+            return serde_json::json!({
+                "nbformat": 4,
+                "nbformat_minor": 5,
+                "metadata": {
+                    "akasha_auto_deliverable": true,
+                    "root_task_id": rid,
+                },
+                "cells": [{
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["_(Akasha placeholder — replace with notebook content.)_"],
+                }],
+            })
+            .to_string();
+        }
+        if rel_lower.ends_with(".json") {
+            return serde_json::json!({
+                "_akasha_auto_deliverable": true,
+                "root_task_id": rid,
+                "note": "Placeholder JSON — replace with real data.",
+                "items": [],
+            })
+            .to_string();
+        }
+        if rel_lower.ends_with(".py") {
+            return format!(
+                r#"# Akasha auto-deliverable (root_task_id={rid})
+"""Placeholder: agent did not write this file before aggregation."""
+raise NotImplementedError("Replace with implementation from the project plan.")
+"#
+            );
+        }
+        if rel_lower.ends_with(".pdf") {
+            return format!(
+                "Akasha auto-deliverable (root_task_id={rid})\n\nThis file is a UTF-8 text placeholder at a .pdf path. Replace with a real PDF export if needed.\n"
+            );
+        }
+        if rel_lower.ends_with(".pptx") {
+            return format!(
+                "Akasha auto-deliverable (root_task_id={rid})\n\nUTF-8 text placeholder at a .pptx path. Replace with a real PowerPoint export if needed.\n"
+            );
+        }
+        if rel_lower.ends_with(".yaml") || rel_lower.ends_with(".yml") {
+            return format!(
+                "# Akasha auto-deliverable root_task_id: {rid}\nplaceholder: true\n"
+            );
+        }
+        // .md and default
+        format!(
+            "# Deliverable (auto)\n\n\
+             **Root task:** `{rid}`\n\n\
+             This file was created by the Akasha orchestrator because the planned step did not write it before final aggregation. \
+             Replace this placeholder with the intended content.\n"
+        )
+    }
+
+    let mut written = Vec::new();
+    for d in deliverables {
+        let raw = d.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let rel = deliverable_workspace_rel(raw);
+        if rel.trim().is_empty() {
+            continue;
+        }
+        let norm = deliverable_rel_normalized_dir(&rel);
+        if norm.is_empty() {
+            continue;
+        }
+        let path = workspace_root.join(&norm);
+        if deliverable_targets_directory(raw, &rel) {
+            if tokio::fs::create_dir_all(&path).await.is_ok() {
+                let marker = path.join(".akasha_deliverable_dir");
+                let note = format!(
+                    "Akasha auto-created deliverable directory (root_task_id={})\n",
+                    root_task_id
+                );
+                let _ = tokio::fs::write(&marker, note.as_bytes()).await;
+                written.push(norm);
+            }
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            if tokio::fs::create_dir_all(parent).await.is_err() {
+                continue;
+            }
+        }
+        let lower = norm.to_lowercase();
+        let body = stub_body(&lower, root_task_id);
+        if tokio::fs::write(&path, body.as_bytes()).await.is_ok() {
+            written.push(norm);
+        }
+    }
+    written
 }
 
 /// Decompose a user request into one or more subtasks via LLM. Falls back to single "conversation" on error, timeout or empty.
@@ -783,7 +1149,17 @@ async fn process_root_task(
     if steps.len() == 1 && steps[0].0 == "conversation" {
         let conv_body = if let Some(s0) = plan.steps.first() {
             let shared = plan.shared_context_markdown(&message, s0);
-            compose_orchestrated_child_message("conversation", &s0.intent, &shared)
+            let deliverables_required = s0
+                .deliverables
+                .as_ref()
+                .map(|d| !d.is_empty())
+                .unwrap_or(false);
+            compose_orchestrated_child_message(
+                "conversation",
+                &s0.intent,
+                &shared,
+                deliverables_required,
+            )
         } else {
             steps[0].1.clone()
         };
@@ -845,9 +1221,31 @@ async fn process_root_task(
     let conversation_tx_aggregator = conversation_tx.clone();
     let session_id_aggregator = session_id.clone();
     let execution_mode_aggregator = execution_mode;
+    let plan_trace_rel = plan_trace_rel_path(root_task_id);
     const GENERIC_MESSAGES: &[&str] = &["Done.", "Failed.", "Cancelled."];
     const PER_CHILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
     tokio::spawn(async move {
+        let workspace_root = store_path_buf
+            .parent()
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let mut step_states: std::collections::HashMap<String, String> = plan_spawn
+            .steps
+            .iter()
+            .map(|s| (s.step_id.clone(), "pending".to_string()))
+            .collect();
+        let mut step_notes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        persist_plan_trace_merged(
+            &workspace_root,
+            &plan_trace_rel,
+            root_task_id,
+            &user_message,
+            &plan_spawn,
+            &step_states,
+            &step_notes,
+        )
+        .await;
         let mut waves = plan_spawn.execution_waves().unwrap_or_else(|e| {
             tracing::warn!(error = %e, "execution_waves error");
             Vec::new()
@@ -863,7 +1261,7 @@ async fn process_root_task(
         let mut recovery_used = false;
         let mut cumulative_problem_sids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (wave_idx, wave) in waves.iter().enumerate() {
-            let mut batch: Vec<(Uuid, Arc<tokio::sync::Notify>, String)> = Vec::new();
+            let mut batch: Vec<(Uuid, Arc<tokio::sync::Notify>, String, Vec<String>)> = Vec::new();
             for &idx in wave {
                 let step = match plan_spawn.steps.get(idx) {
                     Some(s) => s,
@@ -887,10 +1285,48 @@ async fn process_root_task(
                         sub_message = format!("Output from step {}:\n{}\n\n{}", dep, prev, sub_message);
                     }
                 }
+                if let Some(deliverables) = step.deliverables.as_ref() {
+                    if !deliverables.is_empty() {
+                        let deliverables_list = deliverables
+                            .iter()
+                        .map(|d| format!("- {}", d))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                        sub_message = format!(
+                            "{}\n\nMandatory deliverables for this step (create/update each path explicitly with TOOL: write_file):\n{}\n\nDo not only describe files: actually write them.",
+                            sub_message, deliverables_list
+                        );
+                    }
+                }
+                sub_message = format!(
+                    r#"{base}
+
+## Ordre obligatoire (étape `{step_id}`)
+
+1. **Lire** le plan partagé avec `read_file` sur `workspace:/{plan_rel}` pour voir le contexte global et votre section **Fait (agent)** / **Reste (agent)** sous `### {step_id}`.
+2. **Mettre à jour ce fichier** avec `edit_file` ou `search_replace` : remplir **Fait (agent)** et **Reste (agent)** avec ce qui est réellement fait et ce qu'il reste (y compris *avant* ou *pendant* la production des livrables).
+3. **Puis** créer ou mettre à jour chaque livrable listé (`write_file` ou édition partielle) aux chemins exacts indiqués.
+
+L'orchestrateur ne marque cette étape **terminée (done)** que si **tous** les livrables de l'étape existent sur disque à la fin. Sinon l'étape est marquée **échec** même si vous avez répondu en texte.
+
+Shared trace file: `workspace:/{plan_rel}` — préférer des éditions partielles ; éviter de réécrire tout le fichier sauf création initiale."#,
+                    base = sub_message,
+                    step_id = step.step_id,
+                    plan_rel = plan_trace_rel
+                );
                 let agent_type = step.agent_type.as_str();
                 let shared = plan_spawn.shared_context_markdown(&user_message, step);
-                let child_message =
-                    compose_orchestrated_child_message(agent_type, &sub_message, &shared);
+                let deliverables_required = step
+                    .deliverables
+                    .as_ref()
+                    .map(|d| !d.is_empty())
+                    .unwrap_or(false);
+                let child_message = compose_orchestrated_child_message(
+                    agent_type,
+                    &sub_message,
+                    &shared,
+                    deliverables_required,
+                );
                 let child_id = Uuid::new_v4();
                 let task = Task {
                     id: child_id,
@@ -945,6 +1381,18 @@ async fn process_root_task(
                     .with_correlation(root_task_id),
                 );
                 wave_step_counter += 1;
+                step_states.insert(step.step_id.clone(), "running".to_string());
+                step_notes.insert(step.step_id.clone(), format!("Spawned subtask {}", child_id));
+                persist_plan_trace_merged(
+                    &workspace_root,
+                    &plan_trace_rel,
+                    root_task_id,
+                    &user_message,
+                    &plan_spawn,
+                    &step_states,
+                    &step_notes,
+                )
+                .await;
                 let notify = Arc::new(tokio::sync::Notify::new());
                 task_completion.write().await.insert(child_id, notify.clone());
                 if conversation_tx_aggregator
@@ -960,22 +1408,32 @@ async fn process_root_task(
                 {
                     tracing::error!(child_id = %child_id, "orchestrator: conv channel closed");
                 }
-                batch.push((child_id, notify, step.step_id.clone()));
+                let deliverables_for_batch = step.deliverables.clone().unwrap_or_default();
+                batch.push((child_id, notify, step.step_id.clone(), deliverables_for_batch));
             }
             let futs: Vec<_> = batch
                 .iter()
-                .map(|(_, n, _)| {
+                .map(|(cid, n, sid, _)| {
                     let n = n.clone();
+                    let cid = *cid;
+                    let sid = sid.clone();
                     async move {
-                        let _ = tokio::time::timeout(PER_CHILD_TIMEOUT, n.notified()).await;
+                        let timed_out = tokio::time::timeout(PER_CHILD_TIMEOUT, n.notified())
+                            .await
+                            .is_err();
+                        (cid, sid, timed_out)
                     }
                 })
                 .collect();
-            join_all(futs).await;
+            let timeout_results = join_all(futs).await;
+            let timeout_by_child: std::collections::HashMap<Uuid, bool> = timeout_results
+                .into_iter()
+                .map(|(cid, _sid, timed_out)| (cid, timed_out))
+                .collect();
             // Pre-collect child failed statuses in a synchronous scope before any further .await.
             let child_failed: std::collections::HashMap<Uuid, bool> = {
                 match TaskStore::open(&store_path_buf) {
-                    Ok(s) => batch.iter().map(|(cid, _, _)| {
+                    Ok(s) => batch.iter().map(|(cid, _, _, _)| {
                         let failed = matches!(
                             s.get(*cid).ok().flatten().map(|t| t.status),
                             Some(TaskStatus::Failed)
@@ -987,7 +1445,11 @@ async fn process_root_task(
             };
             let mut problematic_this_wave: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
-            for (child_id, _, sid) in batch {
+            for (child_id, _, sid, _deliverables) in batch {
+                let step_ref = plan_spawn.steps.iter().find(|s| s.step_id == sid);
+                let missing_deliverables = step_ref
+                    .map(|st| missing_deliverables_for_step(st, &workspace_root))
+                    .unwrap_or_default();
                 task_completion.write().await.remove(&child_id);
                 let content = {
                     let g = progress.read().await;
@@ -996,10 +1458,49 @@ async fn process_root_task(
                         .unwrap_or_default()
                 };
                 step_outputs.insert(sid.clone(), content.clone());
-                let failed = child_failed.get(&child_id).copied().unwrap_or(false);
+                let mut failed = child_failed.get(&child_id).copied().unwrap_or(false);
+                let timed_out = timeout_by_child.get(&child_id).copied().unwrap_or(false);
+                if timed_out {
+                    failed = true;
+                }
+                let deliverables_incomplete = !missing_deliverables.is_empty();
+                if deliverables_incomplete {
+                    failed = true;
+                    if let Ok(store) = TaskStore::open(&store_path_buf) {
+                        let _ = store.update_status(child_id, TaskStatus::Failed);
+                    }
+                }
+                step_states.insert(
+                    sid.clone(),
+                    if failed { "failed".to_string() } else { "done".to_string() },
+                );
+                step_notes.insert(
+                    sid.clone(),
+                    format!(
+                        "Completed subtask {} (failed: {}, timed_out: {}, deliverables_missing: {:?}, content_chars: {})",
+                        child_id,
+                        failed,
+                        timed_out,
+                        missing_deliverables,
+                        content.chars().count()
+                    ),
+                );
+                persist_plan_trace_merged(
+                    &workspace_root,
+                    &plan_trace_rel,
+                    root_task_id,
+                    &user_message,
+                    &plan_spawn,
+                    &step_states,
+                    &step_notes,
+                )
+                .await;
                 if failed || response_indicates_blocked(&content) {
                     problematic_this_wave.insert(sid.clone());
                 }
+                let success = !failed
+                    && !content.trim().is_empty()
+                    && missing_deliverables.is_empty();
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::SubtaskCompleted,
@@ -1008,7 +1509,7 @@ async fn process_root_task(
                             "root_task_id": root_task_id.to_string(),
                             "subtask_id": child_id.to_string(),
                             "step_id": sid,
-                            "success": !failed && !content.trim().is_empty(),
+                            "success": success,
                         })),
                     )
                     .with_correlation(root_task_id),
@@ -1118,6 +1619,83 @@ Reply with SHORT actionable guidance only: what the user should provide, which p
                         }
                     }
                 }
+            }
+        }
+        let mut missing_deliverables = collect_missing_plan_deliverables(&plan_spawn, &workspace_root);
+        if !missing_deliverables.is_empty() {
+            const REMEDIATION_ROUNDS: usize = 2;
+            for _round in 0..REMEDIATION_ROUNDS {
+                if missing_deliverables.is_empty() {
+                    break;
+                }
+                let remediation_body = format!(
+                    r#"Fix missing orchestrated deliverables. These paths are still ABSENT on disk (create each now):
+
+{}
+
+You MUST use TOOL: write_file once per missing path with the EXACT prefix shown (e.g. workspace:/folder/file.md). Use multiple write_file calls in this turn. Create real, substantive content (not a single-line stub). For .ipynb output valid JSON notebook text. For paths ending in .pdf or .pptx, write_file to that exact path using UTF-8 text (placeholder is OK; file must exist). For paths ending with / (directory deliverables), create the directory tree (e.g. TOOL: run_command with mkdir) then optionally add a marker file inside.
+
+Do not only describe the files — execute the tools."#,
+                    missing_deliverables
+                        .iter()
+                        .map(|d| format!("- {}", d))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                let remediation_shared = format!(
+                    "## Orchestrator remediation\n\n- root_task_id: `{}`\n- Create every listed path under the task workspace; this run uses the same disk checks as normal subtasks.\n",
+                    root_task_id
+                );
+                let remediation_message = compose_orchestrated_child_message(
+                    "code",
+                    &remediation_body,
+                    &remediation_shared,
+                    true,
+                );
+                let remediation_id = Uuid::new_v4();
+                let remediation_task = Task {
+                    id: remediation_id,
+                    parent_task_id: Some(root_task_id),
+                    status: TaskStatus::Pending,
+                    assigned_agent: "code".to_string(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    initial_message: Some(remediation_message.chars().take(500).collect()),
+                };
+                let remediation_ok = TaskStore::open(&store_path_buf)
+                    .map(|s| s.insert(&remediation_task).is_ok())
+                    .unwrap_or(false);
+                if remediation_ok {
+                    let notify_r = Arc::new(tokio::sync::Notify::new());
+                    task_completion
+                        .write()
+                        .await
+                        .insert(remediation_id, notify_r.clone());
+                    let _ = conversation_tx_aggregator
+                        .send(OrchestratorTask {
+                            task_id: remediation_id,
+                            message: remediation_message,
+                            session_id: session_id_aggregator.clone(),
+                            image_data_urls: None,
+                            execution_mode: None,
+                        })
+                        .await;
+                    let _ = tokio::time::timeout(PER_CHILD_TIMEOUT, notify_r.notified()).await;
+                    task_completion.write().await.remove(&remediation_id);
+                    if let Ok(s) = TaskStore::open(&store_path_buf) {
+                        let _ = s.update_status(remediation_id, TaskStatus::Completed);
+                    }
+                }
+                missing_deliverables = collect_missing_plan_deliverables(&plan_spawn, &workspace_root);
+            }
+            if !missing_deliverables.is_empty() {
+                let snapshot_missing = missing_deliverables.clone();
+                let _written_rel = write_missing_deliverables_fs_fallback(
+                    &workspace_root,
+                    &snapshot_missing,
+                    root_task_id,
+                )
+                .await;
             }
         }
         // Collect final child statuses in a synchronous scope before the await-heavy aggregation.
@@ -1265,9 +1843,14 @@ Reply in the SAME LANGUAGE as the user's question above. Do not add any informat
                 Ok(Ok(resp)) if !resp.text.trim().is_empty() => {
                     synthesis_model_used = Some(resp.model_used.clone());
                     let text = resp.text.trim().to_string();
-                    // If synthesis is suspiciously short vs sub-agent content, model likely truncated; show full replies so user gets script/CSV/content
+                    // If synthesis is significantly shorter than raw sub-agent outputs, it tends to drop
+                    // critical file/script details. Fall back to raw replies to preserve deliverables.
                     const MIN_SYNTHESIS_CHARS: usize = 600;
-                    if text.len() < MIN_SYNTHESIS_CHARS && raw_responses.len() > text.len() * 2 {
+                    const MAX_COMPRESSION_RATIO: usize = 4;
+                    let suspiciously_short_absolute = text.len() < MIN_SYNTHESIS_CHARS;
+                    let suspiciously_short_relative =
+                        raw_responses.len() > text.len().saturating_mul(MAX_COMPRESSION_RATIO);
+                    if suspiciously_short_absolute || suspiciously_short_relative {
                         format!("Réponses des agents :\n\n{}", raw_responses)
                     } else {
                         text

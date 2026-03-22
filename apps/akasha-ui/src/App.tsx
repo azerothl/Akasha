@@ -1058,6 +1058,14 @@ function App() {
         { taskId, port: DAEMON_PORT }
       );
       const list = data?.events ?? [];
+      const planEvent = list.find((e) => (e.event_type === "plan_proposed" || e.event_type === "plan_committed") && e.payload && typeof e.payload === "object" && "steps" in e.payload);
+      const planStepsCount =
+        planEvent && planEvent.payload && typeof planEvent.payload === "object" && Array.isArray((planEvent.payload as { steps?: unknown }).steps)
+          ? (planEvent.payload as { steps: unknown[] }).steps.length
+          : 0;
+      // #region agent log
+      fetch('http://127.0.0.1:7790/ingest/83a7f7de-74a3-4ba3-8a97-b0169801051e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'905d69'},body:JSON.stringify({sessionId:'905d69',runId:'pre-fix-restore',hypothesisId:'H9',location:'App.tsx:fetchTasksEvents',message:'Fetched task events and extracted plan metadata',data:{taskId,eventsCount:list.length,planStepsCount},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       setTasksEvents(
         list.map((e) => ({
           event_type: e.event_type ?? "?",
@@ -1081,6 +1089,9 @@ function App() {
         title: x.title ?? "",
         status: (x.status ?? "pending").toLowerCase(),
       }));
+      // #region agent log
+      fetch('http://127.0.0.1:7790/ingest/83a7f7de-74a3-4ba3-8a97-b0169801051e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'905d69'},body:JSON.stringify({sessionId:'905d69',runId:'pre-fix-restore',hypothesisId:'H10',location:'App.tsx:fetchTaskSteps',message:'Fetched task todos used by steps panel',data:{taskId,todosCount:rows.length},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       if (selectedTaskIdForTodosRef.current === taskId) setTaskStepsTodos(rows);
     } catch {
       if (selectedTaskIdForTodosRef.current === taskId) setTaskStepsTodos([]);
@@ -3567,6 +3578,45 @@ function App() {
                       aria-labelledby="task-panel-heading-steps"
                       className="task-panel-section-body"
                     >
+                      {(() => {
+                        const planEv = tasksEvents.find((e) => (e.event_type === "plan_proposed" || e.event_type === "plan_committed") && e.payload && typeof e.payload === "object" && "steps" in e.payload);
+                        let steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> = planEv?.payload && typeof planEv.payload === "object" && Array.isArray((planEv.payload as { steps?: unknown }).steps)
+                          ? (planEv.payload as { steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> }).steps
+                          : [];
+                        if (steps.length === 0) {
+                          const decomposed = tasksEvents.find((e) => e.event_type === "task_decomposed" && e.payload && typeof e.payload === "object" && "agents" in e.payload);
+                          const agents = decomposed?.payload && typeof decomposed.payload === "object" && Array.isArray((decomposed.payload as { agents?: unknown }).agents)
+                            ? (decomposed.payload as { agents: string[] }).agents
+                            : [];
+                          steps = agents.map((agent_type, i) => ({ step_id: `s${i}`, agent_type, intent_preview: "" }));
+                        }
+                        return steps.length > 0 ? (
+                          <div className="chat-subagents-plan task-panel-plan" role="region" aria-label={t("events.plan_proposed")}>
+                            <h4 className="chat-subagents-plan-title">{t("events.plan_proposed")}</h4>
+                            <ol className="chat-subagents-plan-steps">
+                              {steps.map((s, i) => (
+                                <li key={s.step_id ?? i} className="chat-subagents-plan-step">
+                                  {s.agent_type && <span className="chat-subagents-plan-agent">{s.agent_type}</span>}
+                                  {s.step_id != null && s.step_id !== "" && (
+                                    <span className="chat-subagents-plan-step-id">{s.step_id}</span>
+                                  )}
+                                  <span className="chat-subagents-plan-intent">{s.intent_preview || s.intent || ""}</span>
+                                  {s.acceptance_criteria_preview != null && s.acceptance_criteria_preview.trim() !== "" && (
+                                    <div className="chat-subagents-plan-meta">{s.acceptance_criteria_preview}</div>
+                                  )}
+                                  {Array.isArray(s.deliverables) && s.deliverables.length > 0 && (
+                                    <ul className="chat-subagents-plan-deliverables">
+                                      {s.deliverables.map((d, j) => (
+                                        <li key={j}>{d}</li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </li>
+                              ))}
+                            </ol>
+                          </div>
+                        ) : null;
+                      })()}
                       {taskStepsTodos.length === 0 ? (
                         <p className="empty-state task-steps-empty">{t("tasks.steps_empty")}</p>
                       ) : (
@@ -3669,45 +3719,6 @@ function App() {
                     </p>
                   ) : (
                     <>
-                      {(() => {
-                        const planEv = tasksEvents.find((e) => (e.event_type === "plan_proposed" || e.event_type === "plan_committed") && e.payload && typeof e.payload === "object" && "steps" in e.payload);
-                        let steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> = planEv?.payload && typeof planEv.payload === "object" && Array.isArray((planEv.payload as { steps?: unknown }).steps)
-                          ? (planEv.payload as { steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> }).steps
-                          : [];
-                        if (steps.length === 0) {
-                          const decomposed = tasksEvents.find((e) => e.event_type === "task_decomposed" && e.payload && typeof e.payload === "object" && "agents" in e.payload);
-                          const agents = decomposed?.payload && typeof decomposed.payload === "object" && Array.isArray((decomposed.payload as { agents?: unknown }).agents)
-                            ? (decomposed.payload as { agents: string[] }).agents
-                            : [];
-                          steps = agents.map((agent_type, i) => ({ step_id: `s${i}`, agent_type, intent_preview: "" }));
-                        }
-                        return steps.length > 0 ? (
-                          <div className="chat-subagents-plan task-panel-plan" role="region" aria-label={t("events.plan_proposed")}>
-                            <h4 className="chat-subagents-plan-title">{t("events.plan_proposed")}</h4>
-                            <ol className="chat-subagents-plan-steps">
-                              {steps.map((s, i) => (
-                                <li key={s.step_id ?? i} className="chat-subagents-plan-step">
-                                  {s.agent_type && <span className="chat-subagents-plan-agent">{s.agent_type}</span>}
-                                  {s.step_id != null && s.step_id !== "" && (
-                                    <span className="chat-subagents-plan-step-id">{s.step_id}</span>
-                                  )}
-                                  <span className="chat-subagents-plan-intent">{s.intent_preview || s.intent || ""}</span>
-                                  {s.acceptance_criteria_preview != null && s.acceptance_criteria_preview.trim() !== "" && (
-                                    <div className="chat-subagents-plan-meta">{s.acceptance_criteria_preview}</div>
-                                  )}
-                                  {Array.isArray(s.deliverables) && s.deliverables.length > 0 && (
-                                    <ul className="chat-subagents-plan-deliverables">
-                                      {s.deliverables.map((d, j) => (
-                                        <li key={j}>{d}</li>
-                                      ))}
-                                    </ul>
-                                  )}
-                                </li>
-                              ))}
-                            </ol>
-                          </div>
-                        ) : null;
-                      })()}
                     <ul className="activity-events-list" role="list">
                       {tasksEvents.map((e, i) => (
                         <li key={i}>

@@ -37,6 +37,9 @@ fn normalize_apostrophes(s: &str) -> String {
     s.replace('’', "'").replace('‘', "'")
 }
 
+/// Banner injected by `compose_orchestrated_child_message(..., deliverables_required: true)` for subtasks and remediation.
+const ORCH_DISK_DELIVERABLES_MARKER: &str = "[Orchestrated — disk deliverables REQUIRED]";
+
 /// Resolve `workspace:/rel` or a normal filesystem path to a concrete disk path for tools that only call `read_dir` / globs on real paths.
 /// True if path should be read as PDF (text extraction), not as UTF-8/plain text.
 fn path_extension_is_pdf(p: &Path) -> bool {
@@ -676,8 +679,8 @@ pub fn json_response(status: &str, body: &str) -> String {
 /// Format: une ligne par outil "nom — usage".
 /// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
-    ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Pour les fichiers .pdf, le texte est extrait automatiquement (équivalent à pdf <path>) ; ne vous attendez pas au binaire PDF. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
-    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier. Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). TOUJOURS utiliser le chemin et le dossier de sortie EXACTEMENT comme l'utilisateur les a écrits (ex. workspace:/…/expo si l'utilisateur a dit « expo », ne pas substituer « exo » ou un autre nom tiré du PDF). Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel. À UTILISER dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier ; ne jamais refuser ni proposer de copier-coller."),
+    ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Pour les fichiers .pdf, le texte est extrait automatiquement (équivalent à pdf <path>) ; ne vous attendez pas au binaire PDF. Pour les gros fichiers, lire d'abord le fichier puis cibler seulement les sections utiles avec grep_content/search_files avant d'éditer. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
+    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (création/remplacement complet). Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). TOUJOURS utiliser le chemin EXACT fourni par l'utilisateur. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace plutôt que de tout réécrire. Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel."),
     ("search_files", "search_files <dir> <pattern> — chercher des fichiers (glob) sous un répertoire"),
     ("grep_content", "grep_content <dir> <pattern> [file_glob] — chercher le motif dans le contenu des fichiers (ex. grep_content . \"fn \" \"*.rs\")"),
     ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
@@ -722,13 +725,37 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_skill", "read_skill <name> — charge le contenu (instructions, usage) du skill. À utiliser quand tu as besoin du détail d'un skill avant de l'invoquer par son nom."),
 ];
 
-fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
+fn available_tools_instruction(allowed_tools: Option<&[String]>, orch_disk_deliverables: bool) -> String {
+    // Workspace file tools: keep in the "Available:" list for orchestrated deliverables even if tool_profile omitted them.
+    fn is_orch_workspace_file_tool(name: &str) -> bool {
+        matches!(
+            name,
+            "write_file"
+                | "read_file"
+                | "edit_file"
+                | "search_replace"
+                | "grep_content"
+                | "search_files"
+                | "apply_patch"
+        )
+    }
     let iter: Box<dyn Iterator<Item = &(&str, &str)>> = if let Some(allowed) = allowed_tools {
         Box::new(
             AVAILABLE_TOOLS
                 .iter()
                 .filter(move |(name, _)| {
-                    *name == "ask_user" || *name == "install_skill" || *name == "uninstall_skill" || *name == "write_todos" || *name == "merge_todos" || *name == "read_todos" || *name == "update_todo" || *name == "list_skills" || *name == "read_skill" || allowed.iter().any(|a| a == *name)
+                    let always_misc = *name == "ask_user"
+                        || *name == "install_skill"
+                        || *name == "uninstall_skill"
+                        || *name == "write_todos"
+                        || *name == "merge_todos"
+                        || *name == "read_todos"
+                        || *name == "update_todo"
+                        || *name == "list_skills"
+                        || *name == "read_skill";
+                    let in_profile = allowed.iter().any(|a| a == *name);
+                    let force_files = orch_disk_deliverables && is_orch_workspace_file_tool(name);
+                    always_misc || in_profile || force_files
                 }),
         )
     } else {
@@ -1505,8 +1532,183 @@ fn split_whitespace_respecting_quotes(s: &str) -> Vec<String> {
     out
 }
 
+/// Strip `- ` / `* ` / `1. ` list prefixes so tool lines can be detected.
+fn strip_optional_list_prefix(line: &str) -> &str {
+    let mut s = line.trim_start();
+    for p in ["- ", "* ", "+ ", "• "] {
+        if let Some(r) = s.strip_prefix(p) {
+            s = r.trim_start();
+            break;
+        }
+    }
+    if s.is_empty() {
+        return s;
+    }
+    if s.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        if let Some(dot) = s.find('.') {
+            if dot > 0 && s[..dot].chars().all(|c| c.is_ascii_digit()) {
+                return s[dot + 1..].trim_start();
+            }
+        }
+    }
+    s
+}
+
+/// Strip ATX heading hashes (`### Title` → `Title`).
+fn strip_markdown_heading_hashes(line: &str) -> &str {
+    let mut s = line.trim_start();
+    let mut n = 0usize;
+    while s.starts_with('#') && n < 7 {
+        n += 1;
+        s = &s[1..];
+    }
+    if n > 0 {
+        s = s.trim_start();
+    }
+    s
+}
+
+/// Leading markdown noise before `TOOL` (table pipes, headings, lists, bold, backticks).
+fn strip_leading_tool_line_noise(line: &str) -> &str {
+    let mut s = line.trim_start();
+    while s.starts_with('|') {
+        s = s[1..].trim_start();
+    }
+    s = strip_markdown_heading_hashes(s);
+    s = strip_optional_list_prefix(s);
+    s = s.trim_start_matches(|c: char| matches!(c, '*' | '`')).trim_start();
+    s
+}
+
+/// True if `prefix` is only whitespace and common markdown punctuation (no letters/words — avoids matching prose before `TOOL:`).
+fn tool_line_prefix_is_markdown_junk_only(prefix: &str) -> bool {
+    prefix.trim().chars().all(|c| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '#' | '*' | '`' | '|' | '•' | '-' | '+' | ':' | '.' | ';' | ',' | '/' | '\\'
+                    | '(' | ')' | '[' | ']'
+            )
+            || c.is_ascii_digit()
+    })
+}
+
+/// First word after `TOOL:` must match a real tool when using the "inline" heuristic (avoids prose `… TOOL: …`).
+const ORCH_INLINE_TOOL_FIRST_WORDS: &[&str] = &[
+    "write_file",
+    "read_file",
+    "edit_file",
+    "search_replace",
+    "apply_patch",
+    "list_dir",
+    "grep_content",
+    "web_search",
+    "web_fetch",
+    "run_command",
+    "browser",
+    "read_skill",
+    "memory_store",
+    "device_invoke",
+    "ask_user",
+    "generate_image",
+    "pdf",
+];
+
+fn prefix_alphabetic_char_count(prefix: &str) -> usize {
+    prefix.chars().filter(|c| c.is_alphabetic()).count()
+}
+
+/// `### Step — TOOL: write_file`, table junk, or other lines where `TOOL:` is not at column 0 after strips.
+fn inline_ascii_tool_colon_rest(line: &str) -> Option<&str> {
+    let t = line.trim();
+    let mut search = t;
+    let mut last_ok: Option<&str> = None;
+    while let Some(pos) = search.find("TOOL:") {
+        let abs = t.len() - search.len() + pos;
+        let prefix = &t[..abs];
+        let rest = t[abs + 5..].trim_start();
+        if let Some(tok) = rest.split_whitespace().next() {
+            let tl = tok.to_lowercase();
+            if ORCH_INLINE_TOOL_FIRST_WORDS
+                .iter()
+                .any(|&n| n == tl.as_str())
+            {
+                let junk = tool_line_prefix_is_markdown_junk_only(prefix);
+                let short_label = prefix.len() <= 180 && prefix_alphabetic_char_count(prefix) <= 28;
+                if junk || short_label {
+                    last_ok = Some(rest);
+                }
+            }
+        }
+        search = &t[abs + 5..];
+    }
+    last_ok
+}
+
+/// If the line begins with `tool` (case-insensitive) as a keyword followed by optional `*` / `` ` `` and `:`, return the rest.
+/// Handles models that emit `- Tool:`, `**TOOL:**`, table cells `| TOOL: ... |`, etc., when substring `TOOL:` is present but strict parse failed.
+fn line_rest_after_leading_tool(line: &str) -> Option<&str> {
+    line_rest_after_leading_tool_at_start(line).or_else(|| inline_ascii_tool_colon_rest(line))
+}
+
+fn line_rest_after_leading_tool_at_start(line: &str) -> Option<&str> {
+    let s = strip_leading_tool_line_noise(line);
+    if s.len() < 4 {
+        return None;
+    }
+    if !s.get(0..4)?.eq_ignore_ascii_case("tool") {
+        return None;
+    }
+    // Reject `tools:` / `toolkit:` — fifth char must not be ASCII letter.
+    if s
+        .as_bytes()
+        .get(4)
+        .is_some_and(|b| b.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    let mut rest = &s[4..];
+    rest = rest.trim_start();
+    while rest.starts_with('*') || rest.starts_with('`') {
+        rest = &rest[1..];
+    }
+    rest = rest.strip_prefix(':')?;
+    rest = rest.trim_start();
+    while rest.starts_with('*') || rest.starts_with('`') {
+        rest = &rest[1..];
+    }
+    // Drop trailing table pipe from first cell
+    let rest = rest.trim_end();
+    let rest = rest.strip_suffix('|').map(|x| x.trim_end()).unwrap_or(rest);
+    Some(rest.trim_start())
+}
+
+/// Rewrite lines so strict `TOOL:` prefix parsing succeeds (see `parse_tool_calls`).
+fn normalize_response_tool_prefixes(response: &str) -> String {
+    response
+        .lines()
+        .map(|raw| {
+            if raw.trim().starts_with("```") {
+                return raw.to_string();
+            }
+            if let Some(rest) = line_rest_after_leading_tool(raw) {
+                format!("TOOL: {}", rest)
+            } else {
+                raw.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
 fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
+    let normalized = normalize_response_tool_prefixes(response);
+    parse_tool_calls_strict(&normalized)
+}
+
+/// Parse already-normalized tool lines (internal).
+fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
     let lines: Vec<&str> = response.lines().collect();
     let mut i = 0;
@@ -1628,6 +1830,49 @@ fn parse_device_invoke_params(args: &[String]) -> serde_json::Value {
     }
 }
 
+/// Root task id for the `workspace:/` virtual store (same bucket as `write_file`).
+/// Orchestrated children must read the lineage root map; otherwise they miss files written under the parent id.
+fn workspace_lineage_root_task_id(task_id: Uuid, store_path: Option<&std::path::Path>) -> Uuid {
+    store_path
+        .and_then(|sp| TaskStore::open(sp).ok())
+        .map(|s| {
+            let mut current = task_id;
+            for _ in 0..8 {
+                let parent = s
+                    .get(current)
+                    .ok()
+                    .flatten()
+                    .and_then(|t| t.parent_task_id);
+                match parent {
+                    Some(p) => current = p,
+                    None => break,
+                }
+            }
+            current
+        })
+        .unwrap_or(task_id)
+}
+
+/// LLMs often paste a **stale** root id into `workspace:/.akasha/plan_<uuid>.md` (e.g. from an older run).
+/// Rewrite to this task's lineage root so reads/writes target the live orchestration plan.
+fn rewrite_workspace_plan_key_to_lineage_root(key: &str, lineage_root: Uuid) -> (String, Option<Uuid>) {
+    const PREFIX: &str = ".akasha/plan_";
+    const SUFFIX: &str = ".md";
+    let k = key.replace('\\', "/");
+    if !k.starts_with(PREFIX) || !k.ends_with(SUFFIX) {
+        return (key.to_string(), None);
+    }
+    let mid = &k[PREFIX.len()..k.len() - SUFFIX.len()];
+    let Ok(parsed) = Uuid::parse_str(mid) else {
+        return (key.to_string(), None);
+    };
+    if parsed == lineage_root {
+        return (k, None);
+    }
+    let new_key = format!("{PREFIX}{lineage_root}{SUFFIX}");
+    (new_key, Some(parsed))
+}
+
 /// Execute one tool call via ToolExecutor. Returns `(success, display_string)` for structured events.
 async fn execute_tool_call(
     executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
@@ -1665,12 +1910,35 @@ async fn execute_tool_call(
                     .trim_start_matches('/')
                     .to_string();
                 let key = normalize_apostrophes(&key);
+                let lineage_id = workspace_lineage_root_task_id(task_id, store_path);
+                let (key, _) = rewrite_workspace_plan_key_to_lineage_root(&key, lineage_id);
                 if let Some(ws) = workspace_store {
                     let guard = ws.read().await;
-                    if let Some(map) = guard.get(&task_id) {
+                    // Prefer lineage root (where write_file stores); fall back to this task id.
+                    let mem_map = guard
+                        .get(&lineage_id)
+                        .or_else(|| guard.get(&task_id));
+                    if let Some(map) = mem_map {
                         if let Some(content) = map.get(&key) {
-                            let preview = if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] };
-                            return (true, format!("[read_file workspace:{}] {} chars: {}", key, content.len(), preview), None);
+                            // Empty in-memory entry must not mask the real file on disk (orchestrator
+                            // writes `.akasha/plan_*.md` with tokio::fs, not via this map).
+                            if !content.is_empty() {
+                                let preview = if content.len() <= 500 {
+                                    content.as_str()
+                                } else {
+                                    &content[..content.floor_char_boundary(500)]
+                                };
+                                return (
+                                    true,
+                                    format!(
+                                        "[read_file workspace:{}] {} chars: {}",
+                                        key,
+                                        content.len(),
+                                        preview
+                                    ),
+                                    None,
+                                );
+                            }
                         }
                     }
                 } else {
@@ -2375,10 +2643,25 @@ async fn execute_tool_call(
                                 .trim_start_matches("workspace:")
                                 .trim_start_matches('/')
                                 .to_string();
+                            let mut key = key.trim().trim_matches('`').trim_matches('"').to_string();
+                            if key.ends_with('#') {
+                                key.pop();
+                            }
+                            let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
+                            let (key, _) =
+                                rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
                             let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
                             let mut guard = ws.write().await;
-                            let per_task = guard.entry(task_id).or_default();
-                            per_task.insert(key.clone(), content.clone());
+                            let per_task = guard.entry(lineage_task_id).or_default();
+                            let previous_mem = per_task.get(&key).cloned().unwrap_or_default();
+                            let effective_content = if !previous_mem.is_empty()
+                                && content.chars().count() < previous_mem.chars().count()
+                            {
+                                previous_mem.clone()
+                            } else {
+                                content.clone()
+                            };
+                            per_task.insert(key.clone(), effective_content.clone());
                             drop(guard);
                             // Also write to disk under data_dir (workspace root = store_path.parent())
                             let rel_path = Path::new(&key);
@@ -2390,7 +2673,7 @@ async fn execute_tool_call(
                                     if let Some(parent) = disk_path.parent() {
                                         let _ = tokio::fs::create_dir_all(parent).await;
                                     }
-                                    if tokio::fs::write(&disk_path, &content).await.is_ok() {
+                                    if tokio::fs::write(&disk_path, &effective_content).await.is_ok() {
                                         return (true, format!("[write_file workspace:{}] saved (disk).", key), None);
                                     }
                                 }
@@ -3117,6 +3400,8 @@ pub(crate) async fn run_message_via_llm(
         .and_then(|t| t.parent_task_id)
         .unwrap_or(task_id);
 
+    let orch_disk_deliverables = message.contains(ORCH_DISK_DELIVERABLES_MARKER);
+
     let tools_executor_snapshot = match &tools_executor {
         Some(r) => Some((*r.read().await).clone()),
         None => None,
@@ -3161,7 +3446,17 @@ pub(crate) async fn run_message_via_llm(
                 allowed_tools = Some(list);
             }
         }
-        let base = available_tools_instruction(allowed_tools.as_deref());
+        if orch_disk_deliverables {
+            if let Some(ref list) = allowed_tools {
+                if !list.iter().any(|t| t == "write_file") {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        "Orchestrated deliverables: tools_policy default_profile omits write_file; prompt still lists workspace file tools — check allowed_write_paths / tool_profiles."
+                    );
+                }
+            }
+        }
+        let base = available_tools_instruction(allowed_tools.as_deref(), orch_disk_deliverables);
         let (skills_part, skills_rule) = match &skill_registry {
             Some(reg) => {
                 let list = reg.list().await;
@@ -3432,11 +3727,23 @@ pub(crate) async fn run_message_via_llm(
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(10);
+    // Orchestrated subtasks / remediation: extra tool rounds (models often read/search first).
+    if orch_disk_deliverables {
+        let floor = std::env::var("AKASHA_MAX_TOOL_ROUNDS_ORCH_DELIVERABLES")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(24);
+        if max_tool_rounds < floor {
+            max_tool_rounds = floor;
+        }
+    }
     let mut round = 0u32;
     let mut social_snapshot_seen = false;
     let mut tool_loop_history: Vec<(String, String)> = Vec::new();
     let mut last_tool_results_blob: Option<String> = None;
     let mut force_synthesis_attempted = false;
+    // Orchestrated deliverables: re-prompts when the model returns no parseable TOOL lines.
+    let mut orch_disk_write_nags = 0u32;
     let mut last_captured_image_base64: Option<String> = None;
     let mut last_llm_model_used: Option<String> = None;
 
@@ -3593,18 +3900,28 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
         };
-        if !accumulated.is_empty() && response.is_empty() {
-            // Stream sent chunks but final response empty; use accumulated
-            reply_text = accumulated.trim().to_string();
-            break;
-        }
+        // Some providers return the full text only in stream chunks while `resp.text` is empty, or drop `TOOL:` lines
+        // from the final body. Parsing tools only from `resp.text` then skips execution entirely (user sees text, no disk writes).
+        let r = response.trim();
+        let a = accumulated.trim();
+        let merged_for_tools = if r.is_empty() && !a.is_empty() {
+            a.to_string()
+        } else if !a.is_empty() && a.contains("TOOL:") && !r.contains("TOOL:") {
+            a.to_string()
+        } else if !r.is_empty() {
+            r.to_string()
+        } else {
+            a.to_string()
+        };
+        let response = merged_for_tools;
 
-        let tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
+        let parsed_tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
             let calls = parse_tool_calls(&response);
             if calls.is_empty() { None } else { Some(calls) }
         });
+        let no_parseable_tools_this_round = parsed_tool_calls.is_none();
 
-        if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), tool_calls) {
+        if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls) {
             round += 1;
             let mut tool_results = Vec::new();
             for (name, args) in &calls {
@@ -4264,6 +4581,30 @@ pub(crate) async fn run_message_via_llm(
                 continue;
             }
             continue;
+        }
+
+        // When the model returns prose / JSON only, this loop would exit with zero tool rounds — UI shows an
+        // answer but nothing is written. For orchestrated disk deliverables, nudge additional LLM rounds until
+        // a write-like tool appears in history.
+        const MAX_ORCH_DISK_WRITE_NAGS: u32 = 8;
+        if orch_disk_deliverables
+            && tools_executor_snapshot.is_some()
+            && no_parseable_tools_this_round
+        {
+            let disk_write_attempted = tool_loop_history.iter().any(|(t, _)| {
+                matches!(
+                    t.as_str(),
+                    "write_file" | "edit_file" | "search_replace" | "apply_patch"
+                )
+            });
+            if !disk_write_attempted && orch_disk_write_nags < MAX_ORCH_DISK_WRITE_NAGS {
+                orch_disk_write_nags += 1;
+                current_prompt = format!(
+                    "{}\n\n[Orchestrator — disk deliverables] Your last assistant message did not include any executable TOOL: lines (or they were not parsed). This step MUST call tools: use TOOL: read_file on the shared plan trace if needed, then TOOL: write_file / edit_file / search_replace for every mandatory workspace path and update the plan sections **Fait (agent)** / **Reste (agent)**. Do not finish with prose-only or ```json``` — emit TOOL lines now.",
+                    current_prompt
+                );
+                continue;
+            }
         }
 
         let response_for_user = response
@@ -7248,8 +7589,10 @@ mod tests {
         agent_role_system_prompt, build_image_markdown, ensure_no_open_code_block,
         is_pausable, is_resumable,
         message_suggests_tool_only_action, parse_content_length, parse_device_invoke_params,
+        parse_tool_calls, rewrite_workspace_plan_key_to_lineage_root,
     };
     use akasha_store::TaskStatus;
+    use uuid::Uuid;
 
     #[test]
     fn parse_content_length_returns_header_end_and_content_length() {
@@ -7337,6 +7680,90 @@ mod tests {
     fn tool_only_action_false_when_code_intent_dominates() {
         // Explicit code request even if it mentions photo → do not override to conversation
         assert!(!message_suggests_tool_only_action("écris un script qui prend une photo"));
+    }
+
+    // --- parse_tool_calls (normalized markdown / list TOOL lines) ---
+
+    #[test]
+    fn parse_tool_calls_markdown_list_and_title_case_tool() {
+        let s = "- Tool: write_file workspace:/out.md hello world";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, "write_file");
+        assert!(c[0].1[0].contains("workspace:"), "{:?}", c[0].1);
+    }
+
+    #[test]
+    fn parse_tool_calls_bold_wrapped_tool_keyword() {
+        let s = "**TOOL:** write_file workspace:/x.md\nhello block";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, "write_file");
+        assert_eq!(c[0].1[0], "workspace:/x.md");
+        assert_eq!(c[0].1[1], "hello block");
+    }
+
+    #[test]
+    fn parse_tool_calls_table_cell_with_leading_pipe() {
+        let s = "| TOOL: read_file workspace:/plan.md |";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, "read_file");
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_tools_plain_word() {
+        let s = "tools: hammer and nail";
+        let c = parse_tool_calls(s);
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_calls_heading_then_tool_on_same_line() {
+        let s = "### Step 4 — TOOL: write_file workspace:/out.md hello";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, "write_file");
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_tool_in_long_prose_line() {
+        let s = "According to the documentation and the specification we note that TOOL: write_file workspace:/x y";
+        let c = parse_tool_calls(s);
+        assert!(
+            c.is_empty(),
+            "long alphabetic prefix before TOOL: must not become a false tool call"
+        );
+    }
+
+    // --- rewrite_workspace_plan_key_to_lineage_root ---
+
+    #[test]
+    fn rewrite_plan_key_stale_uuid_rewritten_to_lineage_root() {
+        let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
+        let stale = Uuid::parse_str("216364b2-9308-47a7-9c2b-1c3b84c55c8c").unwrap();
+        let (k, bad) = rewrite_workspace_plan_key_to_lineage_root(
+            &format!(".akasha/plan_{stale}.md"),
+            root,
+        );
+        assert_eq!(bad, Some(stale));
+        assert_eq!(k, format!(".akasha/plan_{root}.md"));
+    }
+
+    #[test]
+    fn rewrite_plan_key_matching_root_unchanged() {
+        let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
+        let (k, bad) = rewrite_workspace_plan_key_to_lineage_root(&format!(".akasha/plan_{root}.md"), root);
+        assert!(bad.is_none());
+        assert_eq!(k, format!(".akasha/plan_{root}.md"));
+    }
+
+    #[test]
+    fn rewrite_plan_key_non_plan_paths_passthrough() {
+        let root = Uuid::nil();
+        let (k, bad) = rewrite_workspace_plan_key_to_lineage_root("certification_ai/exo/x.md", root);
+        assert!(bad.is_none());
+        assert_eq!(k, "certification_ai/exo/x.md");
     }
 
     // --- agent_role_system_prompt ---
