@@ -452,6 +452,32 @@ fn deliverable_workspace_rel(d: &str) -> String {
         .replace('\\', "/")
 }
 
+/// Returns `true` when a deliverable-relative path is safe to use under the workspace root.
+/// Rejects absolute paths, paths with `..` components, and Windows drive-letter prefixes.
+fn deliverable_rel_is_safe(rel: &str) -> bool {
+    if rel.trim().is_empty() {
+        return false;
+    }
+    // Reject absolute paths (starts with / or \)
+    if rel.starts_with('/') || rel.starts_with('\\') {
+        return false;
+    }
+    // Reject Windows drive-letter prefixes like C: or c: (both upper and lower case)
+    if rel.len() >= 2 {
+        let bytes = rel.as_bytes();
+        if bytes[1] == b':' && bytes[0].to_ascii_lowercase().is_ascii_alphabetic() {
+            return false;
+        }
+    }
+    // Reject any `..` path component; split on both `/` and `\` for defence in depth
+    for component in rel.split(['/', '\\']) {
+        if component == ".." {
+            return false;
+        }
+    }
+    true
+}
+
 /// Deliverable lists a directory when the path ends with `/` or `\` (e.g. `workspace:/proj/scripts/`).
 fn deliverable_targets_directory(raw: &str, rel: &str) -> bool {
     let t = raw.trim();
@@ -467,6 +493,9 @@ fn deliverable_rel_normalized_dir(rel: &str) -> String {
 fn workspace_deliverable_satisfied(workspace_root: &Path, raw: &str) -> bool {
     let rel = deliverable_workspace_rel(raw);
     if rel.trim().is_empty() {
+        return false;
+    }
+    if !deliverable_rel_is_safe(&rel) {
         return false;
     }
     let norm = deliverable_rel_normalized_dir(&rel);
@@ -493,6 +522,9 @@ fn collect_missing_plan_deliverables(plan: &ExecutionPlan, workspace_root: &Path
                 continue;
             }
             let rel = deliverable_workspace_rel(raw);
+            if !deliverable_rel_is_safe(&rel) {
+                continue;
+            }
             let key = deliverable_rel_normalized_dir(&rel).to_lowercase();
             if key.is_empty() {
                 continue;
@@ -582,6 +614,9 @@ raise NotImplementedError("Replace with implementation from the project plan.")
         }
         let rel = deliverable_workspace_rel(raw);
         if rel.trim().is_empty() {
+            continue;
+        }
+        if !deliverable_rel_is_safe(&rel) {
             continue;
         }
         let norm = deliverable_rel_normalized_dir(&rel);

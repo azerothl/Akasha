@@ -1633,9 +1633,7 @@ fn inline_ascii_tool_colon_rest(line: &str) -> Option<&str> {
                 .iter()
                 .any(|&n| n == tl.as_str())
             {
-                let junk = tool_line_prefix_is_markdown_junk_only(prefix);
-                let short_label = prefix.len() <= 180 && prefix_alphabetic_char_count(prefix) <= 28;
-                if junk || short_label {
+                if tool_line_prefix_is_markdown_junk_only(prefix) {
                     last_ok = Some(rest);
                 }
             }
@@ -1685,20 +1683,32 @@ fn line_rest_after_leading_tool_at_start(line: &str) -> Option<&str> {
 
 /// Rewrite lines so strict `TOOL:` prefix parsing succeeds (see `parse_tool_calls`).
 fn normalize_response_tool_prefixes(response: &str) -> String {
-    response
-        .lines()
-        .map(|raw| {
-            if raw.trim().starts_with("```") {
-                return raw.to_string();
-            }
-            if let Some(rest) = line_rest_after_leading_tool(raw) {
-                format!("TOOL: {}", rest)
-            } else {
-                raw.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut in_fence = false;
+    let mut out_lines = Vec::new();
+
+    for raw in response.lines() {
+        let trimmed = raw.trim();
+
+        // Track fenced code blocks (``` or ```lang) — never normalize inside them.
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            out_lines.push(raw.to_string());
+            continue;
+        }
+
+        if in_fence {
+            out_lines.push(raw.to_string());
+            continue;
+        }
+
+        if let Some(rest) = line_rest_after_leading_tool(raw) {
+            out_lines.push(format!("TOOL: {}", rest));
+        } else {
+            out_lines.push(raw.to_string());
+        }
+    }
+
+    out_lines.join("\n")
 }
 
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
@@ -2654,7 +2664,13 @@ async fn execute_tool_call(
                             let mut guard = ws.write().await;
                             let per_task = guard.entry(lineage_task_id).or_default();
                             let previous_mem = per_task.get(&key).cloned().unwrap_or_default();
-                            let effective_content = if !previous_mem.is_empty()
+                            // Only prefer the longer previous content for plan-trace files
+                            // (.akasha/plan_*.md) where provider truncation is a known risk.
+                            // For all other files, always use the new content so legitimate
+                            // shortening edits (e.g. removing placeholder sections) are honoured.
+                            let is_plan_trace = key.starts_with(".akasha/plan_") && key.ends_with(".md");
+                            let effective_content = if is_plan_trace
+                                && !previous_mem.is_empty()
                                 && content.chars().count() < previous_mem.chars().count()
                             {
                                 previous_mem.clone()
