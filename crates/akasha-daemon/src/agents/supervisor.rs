@@ -76,12 +76,25 @@ pub fn classify_execution_mode(message: &str) -> ExecutionMode {
         }
     }
 
-    // Direct: single question, lookup, translation, short answer
+    // Direct: single question, lookup, translation, short answer, or conversational
     let direct_patterns = [
         "météo", "meteo", "weather", "traduis", "translate", "définition", "definition",
         "quelle heure", "what time", "résume", "resume", "summarize", "résumé",
         "donne-moi", "donne moi", "give me", "trouve-moi", "trouve moi", "find me",
         "combien", "how much", "how many", "où ", "where ", "quand ", "when ",
+        // Conversational greetings and social queries
+        "salut", "bonjour", "bonsoir", "bonne nuit", "hello", "hi ", "hey ",
+        "ça va", "ca va", "comment vas-tu", "comment tu vas", "comment allez-vous",
+        "how are you", "how r u",
+        // Simple weather phrasing (French)
+        "quel temps", "il fait quel", "il va faire", "temps dehors", "temps aujourd",
+        // Simple agenda / calendar queries
+        "prévu demain", "prévu aujourd", "trucs de prévu", "choses de prévu",
+        "j'ai des trucs", "j'ai des choses", "rendez-vous", "agenda", "planned for",
+        "do i have", "est-ce que j'ai",
+        // Quick factual / identity questions
+        "c'est quoi", "qu'est-ce que", "qu'est-ce qui", "c'est qui", "who is ", "what is ",
+        "rappelle-moi", "rappelle moi", "remind me",
     ];
     for kw in &direct_patterns {
         if lower.contains(kw) {
@@ -107,6 +120,15 @@ mod tests {
         assert_eq!(classify_execution_mode("Quelle heure est-il ?"), ExecutionMode::Direct);
         assert_eq!(classify_execution_mode("Donne-moi la météo demain à Paris"), ExecutionMode::Direct);
         assert_eq!(classify_execution_mode("Traduis cette phrase en anglais"), ExecutionMode::Direct);
+    }
+
+    #[test]
+    fn test_direct_conversational() {
+        assert_eq!(classify_execution_mode("salut, ça va ?"), ExecutionMode::Direct);
+        assert_eq!(classify_execution_mode("quel temps il va faire aujourd'hui ?"), ExecutionMode::Direct);
+        assert_eq!(classify_execution_mode("j'ai des trucs de prévu demain ?"), ExecutionMode::Direct);
+        assert_eq!(classify_execution_mode("bonjour, comment vas-tu ?"), ExecutionMode::Direct);
+        assert_eq!(classify_execution_mode("est-ce que j'ai des rendez-vous demain matin ?"), ExecutionMode::Direct);
     }
 
     #[test]

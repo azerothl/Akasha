@@ -1498,7 +1498,64 @@ Shared trace file: `workspace:/{plan_rel}` — préférer des éditions partiell
                 if timed_out {
                     failed = true;
                 }
-                let deliverables_incomplete = !missing_deliverables.is_empty();
+                // One-shot per-step retry: when deliverables are missing but the step
+                // didn't time out, give the agent a second targeted attempt to create
+                // the required files before declaring the step failed.
+                // This allows downstream dependent steps to work with real files
+                // rather than end-of-pipeline stubs.
+                const DELIVERABLE_RETRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150);
+                let missing_after_retry: Vec<String> = if !missing_deliverables.is_empty() && !timed_out {
+                    let retry_agent_type = step_ref
+                        .map(|s| s.agent_type.clone())
+                        .unwrap_or_else(|| "conversation".to_string());
+                    let retry_prompt = format!(
+                        "[Deliverable retry — step {sid}] Your previous response did not create the required files.\n\n\
+You MUST now use TOOL: write_file (or TOOL: run_command for directories) to create each of the following paths before you finish. Do not stop until every file exists on disk.\n\n\
+Missing deliverables:\n{}\n\n\
+Use TOOL: write_file <exact_path> with real, substantive content for each entry above.",
+                        missing_deliverables.iter().map(|d| format!("- {d}")).collect::<Vec<_>>().join("\n")
+                    );
+                    let retry_id = Uuid::new_v4();
+                    let retry_task = Task {
+                        id: retry_id,
+                        parent_task_id: Some(root_task_id),
+                        status: TaskStatus::Pending,
+                        assigned_agent: retry_agent_type,
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                        initial_message: Some(format!("[deliverable-retry {sid}]")),
+                    };
+                    let retry_inserted = {
+                        TaskStore::open(&store_path_buf)
+                            .map(|s| s.insert(&retry_task).is_ok())
+                            .unwrap_or(false)
+                    };
+                    if retry_inserted {
+                        let notify_retry = Arc::new(tokio::sync::Notify::new());
+                        task_completion.write().await.insert(retry_id, notify_retry.clone());
+                        let _ = conversation_tx_aggregator
+                            .send(OrchestratorTask {
+                                task_id: retry_id,
+                                message: retry_prompt,
+                                session_id: session_id_aggregator.clone(),
+                                image_data_urls: None,
+                                execution_mode: None,
+                            })
+                            .await;
+                        let _ = tokio::time::timeout(DELIVERABLE_RETRY_TIMEOUT, notify_retry.notified()).await;
+                        task_completion.write().await.remove(&retry_id);
+                        if let Ok(s) = TaskStore::open(&store_path_buf) {
+                            let _ = s.update_status(retry_id, TaskStatus::Completed);
+                        }
+                    }
+                    // Re-check deliverables after the retry attempt.
+                    step_ref
+                        .map(|st| missing_deliverables_for_step(st, &workspace_root))
+                        .unwrap_or_default()
+                } else {
+                    missing_deliverables
+                };
+                let deliverables_incomplete = !missing_after_retry.is_empty();
                 if deliverables_incomplete {
                     failed = true;
                     if let Ok(store) = TaskStore::open(&store_path_buf) {
@@ -1516,7 +1573,7 @@ Shared trace file: `workspace:/{plan_rel}` — préférer des éditions partiell
                         child_id,
                         failed,
                         timed_out,
-                        missing_deliverables,
+                        missing_after_retry,
                         content.chars().count()
                     ),
                 );
@@ -1535,7 +1592,7 @@ Shared trace file: `workspace:/{plan_rel}` — préférer des éditions partiell
                 }
                 let success = !failed
                     && !content.trim().is_empty()
-                    && missing_deliverables.is_empty();
+                    && missing_after_retry.is_empty();
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::SubtaskCompleted,
