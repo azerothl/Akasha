@@ -73,7 +73,10 @@ fn is_project_like_request(message: &str) -> bool {
         "monitoring",
     ];
     let hits = keywords.iter().filter(|k| lower.contains(**k)).count();
-    long || hits >= 3
+    // A message must show explicit project signals — length alone is not enough.
+    // This prevents long-but-ordinary requests (e.g. "summarise this pasted document")
+    // from being misrouted into the multi-step specialist pipeline.
+    hits >= 3 || (long && hits >= 1)
 }
 
 fn plan_is_single_conversation(plan: &ExecutionPlan) -> bool {
@@ -2248,6 +2251,45 @@ mod tests {
     fn project_like_detection_for_long_delivery_request() {
         assert!(is_project_like_request(
             "Construis un notebook .ipynb, des scripts, une API, du monitoring et place les livrables dans workspace:/certification_ai/exo/"
+        ));
+    }
+
+    #[test]
+    fn long_but_keyword_free_message_is_not_project_like() {
+        // A 600+ char message that contains no project keywords must NOT be treated as
+        // project-like; doing so would send a simple "summarise this document" request
+        // through the multi-step analyst/backend/qa pipeline instead of answering directly.
+        let long_summary_request = format!(
+            "Please summarise the following article for me: {}",
+            "This is filler text without any project keywords. ".repeat(15)
+        );
+        assert!(
+            long_summary_request.chars().count() >= 600,
+            "test message must be at least 600 chars"
+        );
+        assert!(!is_project_like_request(&long_summary_request));
+    }
+
+    #[test]
+    fn long_message_with_one_keyword_is_project_like() {
+        // A 600+ char message that mentions at least one project keyword (e.g. "monitoring")
+        // should still be treated as project-like.
+        let long_with_keyword = format!(
+            "We need monitoring for our system. {}",
+            "Additional context and detailed requirements follow here. ".repeat(12)
+        );
+        assert!(
+            long_with_keyword.chars().count() >= 600,
+            "test message must be at least 600 chars"
+        );
+        assert!(is_project_like_request(&long_with_keyword));
+    }
+
+    #[test]
+    fn short_message_with_three_keywords_is_project_like() {
+        // 3+ keyword hits are sufficient regardless of length.
+        assert!(is_project_like_request(
+            "Crée un notebook avec monitoring et livrables dans workspace:/"
         ));
     }
 
