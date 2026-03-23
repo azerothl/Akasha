@@ -1909,6 +1909,27 @@ fn rewrite_workspace_plan_key_to_lineage_root(key: &str, lineage_root: Uuid) -> 
     (new_key, Some(parsed))
 }
 
+/// Rewrite a full `workspace:/...` path string so that any stale plan UUID is replaced by the
+/// lineage-root UUID.  Non-workspace paths and non-plan-trace paths are returned unchanged.
+/// Used before calling `resolve_tool_disk_path` for partial-edit tools (`search_replace`,
+/// `edit_file`, `apply_patch`) so they operate on the live plan file rather than a stale copy.
+fn rewrite_workspace_plan_path_str(
+    path_str: &str,
+    task_id: Uuid,
+    store_path: Option<&std::path::Path>,
+) -> String {
+    if !(path_str.starts_with("workspace:/") || path_str.starts_with("workspace:")) {
+        return path_str.to_string();
+    }
+    let key = path_str
+        .trim_start_matches("workspace:/")
+        .trim_start_matches("workspace:")
+        .trim_start_matches('/');
+    let lineage_id = workspace_lineage_root_task_id(task_id, store_path);
+    let (new_key, _) = rewrite_workspace_plan_key_to_lineage_root(key, lineage_id);
+    format!("workspace:/{new_key}")
+}
+
 /// After a successful partial edit (`edit_file`, `search_replace`, `apply_patch`) on a `workspace:/` path,
 /// re-read the updated disk file and insert it into the in-memory workspace store so that subsequent
 /// `read_file workspace:/` calls return the latest content.
@@ -2772,6 +2793,8 @@ async fn execute_tool_call(
                 None => return (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None),
             };
             let is_workspace = path_str.starts_with("workspace:/") || path_str.starts_with("workspace:");
+            let path_str_rewritten = rewrite_workspace_plan_path_str(path_str, task_id, store_path);
+            let path_str = path_str_rewritten.as_str();
             let disk_path = resolve_tool_disk_path(path_str, workspace_root);
             let rest = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
             let Some((search, replace)) = rest
@@ -2801,6 +2824,8 @@ async fn execute_tool_call(
                 None => return (false, "[edit_file] usage: edit_file <path> <start_line> <end_line> <new_content>".to_string(), None),
             };
             let is_workspace = path_str.starts_with("workspace:/") || path_str.starts_with("workspace:");
+            let path_str_rewritten = rewrite_workspace_plan_path_str(path_str, task_id, store_path);
+            let path_str = path_str_rewritten.as_str();
             let disk_path = resolve_tool_disk_path(path_str, workspace_root);
             let start_line = args.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
             let end_line = args.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
@@ -2826,6 +2851,8 @@ async fn execute_tool_call(
                 None => return (false, "[apply_patch] usage: apply_patch <path> <patch_content>".to_string(), None),
             };
             let is_workspace = path_str.starts_with("workspace:/") || path_str.starts_with("workspace:");
+            let path_str_rewritten = rewrite_workspace_plan_path_str(path_str, task_id, store_path);
+            let path_str = path_str_rewritten.as_str();
             let disk_path = resolve_tool_disk_path(path_str, workspace_root);
             let patch_content = args.get(1..).map(|a| a.join("\n")).unwrap_or_default();
             match executor.apply_patch(&disk_path, &patch_content).await {
@@ -7670,6 +7697,7 @@ mod tests {
         is_pausable, is_resumable,
         message_suggests_tool_only_action, parse_content_length, parse_device_invoke_params,
         parse_tool_calls, rewrite_workspace_plan_key_to_lineage_root,
+        rewrite_workspace_plan_path_str,
     };
     use akasha_store::TaskStatus;
     use uuid::Uuid;
@@ -7988,6 +8016,39 @@ mod tests {
         let (k, bad) = rewrite_workspace_plan_key_to_lineage_root("certification_ai/exo/x.md", root);
         assert!(bad.is_none());
         assert_eq!(k, "certification_ai/exo/x.md");
+    }
+
+    // --- rewrite_workspace_plan_path_str ---
+
+    #[test]
+    fn rewrite_workspace_plan_path_str_stale_uuid_rewritten() {
+        let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
+        let stale = Uuid::parse_str("216364b2-9308-47a7-9c2b-1c3b84c55c8c").unwrap();
+        // rewrite_workspace_plan_path_str calls workspace_lineage_root_task_id which needs a real
+        // store, so we test the path-string wrapper via a nil store_path (lineage = task_id = root).
+        let result = rewrite_workspace_plan_path_str(
+            &format!("workspace:/.akasha/plan_{stale}.md"),
+            root,
+            None,
+        );
+        assert_eq!(result, format!("workspace:/.akasha/plan_{root}.md"));
+    }
+
+    #[test]
+    fn rewrite_workspace_plan_path_str_non_workspace_unchanged() {
+        let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
+        let stale = Uuid::parse_str("216364b2-9308-47a7-9c2b-1c3b84c55c8c").unwrap();
+        let input = format!("/abs/path/.akasha/plan_{stale}.md");
+        let result = rewrite_workspace_plan_path_str(&input, root, None);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn rewrite_workspace_plan_path_str_non_plan_workspace_path_unchanged() {
+        let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
+        let result =
+            rewrite_workspace_plan_path_str("workspace:/certification_ai/exo/x.md", root, None);
+        assert_eq!(result, "workspace:/certification_ai/exo/x.md");
     }
 
     // --- agent_role_system_prompt ---
