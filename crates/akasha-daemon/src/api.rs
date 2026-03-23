@@ -3986,11 +3986,15 @@ pub(crate) async fn run_message_via_llm(
         };
         // Some providers return the full text only in stream chunks while `resp.text` is empty, or drop `TOOL:` lines
         // from the final body. Parsing tools only from `resp.text` then skips execution entirely (user sees text, no disk writes).
+        // Use `parse_tool_calls` (which normalizes sloppy prefixes like `- Tool:` / `**TOOL:**`) instead of a raw
+        // `contains("TOOL:")` check so that any provider-specific formatting is handled consistently.
         let r = response.trim();
         let a = accumulated.trim();
+        let a_has_tools = !a.is_empty() && !parse_tool_calls(a).is_empty();
+        let r_has_tools = !r.is_empty() && !parse_tool_calls(r).is_empty();
         let merged_for_tools = if r.is_empty() && !a.is_empty() {
             a.to_string()
-        } else if !a.is_empty() && a.contains("TOOL:") && !r.contains("TOOL:") {
+        } else if a_has_tools && !r_has_tools {
             a.to_string()
         } else if !r.is_empty() {
             r.to_string()
@@ -7859,6 +7863,7 @@ mod tests {
         assert_eq!(c[1].0, "read_file");
     }
 
+
     #[test]
     fn parse_tool_calls_sloppy_provider_all_headers_after_multiline_tool() {
         // Providers that always emit sloppy "- Tool: …" headers must not lose tool calls
@@ -7888,6 +7893,71 @@ mod tests {
         assert_eq!(c.len(), 2, "expected write_file + read_file, got {:?}", c);
         assert_eq!(c[0].0, "write_file");
         assert_eq!(c[1].0, "read_file");
+    }
+
+    // --- merged_for_tools selection logic ---
+    // These tests mirror the merge branch `a_has_tools && !r_has_tools`
+    // introduced to fix the sloppy-prefix streaming case.
+
+    /// Helper that reproduces the merge logic from `run_message_via_llm`.
+    fn merged_for_tools(response_text: &str, accumulated: &str) -> String {
+        let r = response_text.trim();
+        let a = accumulated.trim();
+        let a_has_tools = !a.is_empty() && !parse_tool_calls(a).is_empty();
+        let r_has_tools = !r.is_empty() && !parse_tool_calls(r).is_empty();
+        if r.is_empty() && !a.is_empty() {
+            a.to_string()
+        } else if a_has_tools && !r_has_tools {
+            a.to_string()
+        } else if !r.is_empty() {
+            r.to_string()
+        } else {
+            a.to_string()
+        }
+    }
+
+    #[test]
+    fn merge_prefers_accumulated_when_streamed_has_title_case_tool_and_resp_does_not() {
+        // Provider streams `- Tool: write_file …` but the final body omits tool lines.
+        let accumulated = "- Tool: write_file workspace:/out.md hello";
+        let resp_text = "I will write the file for you.";
+        let merged = merged_for_tools(resp_text, accumulated);
+        assert_eq!(merged, accumulated);
+        // The merged string must still parse as a tool call.
+        let calls = parse_tool_calls(&merged);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "write_file");
+    }
+
+    #[test]
+    fn merge_prefers_accumulated_when_streamed_has_bold_tool_and_resp_does_not() {
+        // Provider streams `**TOOL:** write_file …` but the final body is plain text.
+        let accumulated = "**TOOL:** write_file workspace:/x.md\nhello block";
+        let resp_text = "Here is your file.";
+        let merged = merged_for_tools(resp_text, accumulated);
+        assert_eq!(merged, accumulated);
+        let calls = parse_tool_calls(&merged);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "write_file");
+    }
+
+    #[test]
+    fn merge_uses_resp_text_when_both_have_tool_calls() {
+        // When both accumulated and resp_text have parseable tool calls, prefer resp_text (the
+        // final body is authoritative as long as it contains tools).
+        let accumulated = "TOOL: write_file workspace:/a.txt\nfoo";
+        let resp_text = "TOOL: write_file workspace:/b.txt\nbar";
+        let merged = merged_for_tools(resp_text, accumulated);
+        assert_eq!(merged, resp_text);
+    }
+
+    #[test]
+    fn merge_uses_resp_text_when_accumulated_has_no_tool_calls() {
+        // If the streamed chunk contains no parseable tools at all, use resp_text.
+        let accumulated = "Thinking about what to do…";
+        let resp_text = "TOOL: read_file workspace:/plan.md";
+        let merged = merged_for_tools(resp_text, accumulated);
+        assert_eq!(merged, resp_text);
     }
 
     // --- rewrite_workspace_plan_key_to_lineage_root ---

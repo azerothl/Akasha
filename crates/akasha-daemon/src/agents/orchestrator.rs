@@ -106,6 +106,26 @@ fn condense_message_head_tail(message: &str, max_chars: usize) -> String {
     format!("{}\n[…]\n{}", head, tail)
 }
 
+/// Extracts `workspace:/…` paths mentioned anywhere in a user message.
+/// Used to seed deliverables in the deterministic fallback plan so that the
+/// TOOL-first prompt, per-step retry, and final disk checks are activated even
+/// when the LLM decomposer failed to produce a structured plan.
+fn extract_workspace_paths_from_message(message: &str) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for token in message.split_whitespace() {
+        // Strip common trailing punctuation/delimiters that would corrupt the path.
+        let token = token.trim_end_matches([',', '.', ';', ')', '"', '\'', '`', ':', '!', '?', ']', '}', '>']);
+        if token.starts_with("workspace:/") {
+            let key = token.to_lowercase();
+            if seen.insert(key) {
+                paths.push(token.to_string());
+            }
+        }
+    }
+    paths
+}
+
 fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
     // Use a head+tail strategy so that workspace paths and constraints
     // listed anywhere in a long request are not silently dropped.
@@ -120,6 +140,20 @@ fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
         let tail: String = msg.chars().skip(char_count - TAIL).collect();
         format!("{}\n[…]\n{}", head, tail)
     };
+
+    // Extract workspace paths from the full original message so the backend step
+    // gets a non-empty deliverables list.  A non-empty list activates:
+    //   • compose_orchestrated_child_message(…, deliverables_required=true) → TOOL-first prompt
+    //   • per-step deliverable retry on missing files
+    //   • collect_missing_plan_deliverables() final disk check
+    let step_deliverables: Option<Vec<String>> = {
+        let paths = extract_workspace_paths_from_message(msg);
+        if paths.is_empty() { None } else { Some(paths) }
+    };
+    // QA verifies what backend produced, so it receives the same list.
+    let backend_deliverables = step_deliverables.clone();
+    let qa_deliverables = step_deliverables;
+
     // Build a sequential chain so each step runs after the previous one finishes.
     // Without dependencies, execution_waves() would schedule all steps in wave 0
     // (parallel), meaning qa could verify before backend has produced any files.
@@ -151,7 +185,7 @@ fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
                 depends_on: vec!["s1".to_string()],
                 parallel_group: None,
                 acceptance_criteria: None,
-                deliverables: None,
+                deliverables: backend_deliverables,
             },
             PlanStep {
                 step_id: "s3".to_string(),
@@ -160,7 +194,7 @@ fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
                 depends_on: vec!["s2".to_string()],
                 parallel_group: None,
                 acceptance_criteria: None,
-                deliverables: None,
+                deliverables: qa_deliverables,
             },
             PlanStep {
                 step_id: "s4".to_string(),
@@ -1009,7 +1043,19 @@ async fn process_root_task(
     let steps_before = plan.to_subtasks();
     let steps_after = apply_decomposition_override(&message, steps_before.clone());
     if steps_after != steps_before {
-        plan = ExecutionPlan::from_legacy(&steps_after);
+        if steps_after.len() == plan.steps.len() {
+            // Preserve step metadata (depends_on, acceptance_criteria, deliverables); only
+            // patch the agent_type (and intent, if changed) for each step in-place.
+            for (plan_step, (new_agent, new_intent)) in
+                plan.steps.iter_mut().zip(steps_after.iter())
+            {
+                plan_step.agent_type = new_agent.clone();
+                plan_step.intent = new_intent.clone();
+            }
+        } else {
+            // Step count changed (defensive fallback; shouldn't happen with current overrides).
+            plan = ExecutionPlan::from_legacy(&steps_after);
+        }
     }
     let steps = plan.to_subtasks();
     let _ = bus.send(
@@ -2216,7 +2262,9 @@ Formatting rules (Markdown):
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_decomposition_override, build_deterministic_project_fallback_plan, is_project_like_request, Subtask};
+    use super::{apply_decomposition_override, build_deterministic_project_fallback_plan, extract_workspace_paths_from_message, is_project_like_request, Subtask};
+    use super::super::execution_plan::{ExecutionPlan, PlanStep};
+    use uuid::Uuid;
 
     fn step(agent: &str, msg: &str) -> Subtask {
         (agent.to_string(), msg.to_string())
@@ -2320,5 +2368,114 @@ mod tests {
         assert!(p.steps.len() >= 5);
         assert_eq!(p.steps.first().map(|s| s.agent_type.as_str()), Some("analyst"));
         assert_eq!(p.steps.last().map(|s| s.agent_type.as_str()), Some("conversation"));
+    }
+
+    /// When apply_decomposition_override reroutes a `code` step to `conversation`, the
+    /// original PlanStep metadata (depends_on, acceptance_criteria, deliverables) must be
+    /// preserved by patching agent_type in-place rather than rebuilding via from_legacy.
+    #[test]
+    fn override_preserves_plan_step_metadata_on_code_to_conversation() {
+        let mut plan = ExecutionPlan {
+            plan_id: Uuid::nil(),
+            steps: vec![PlanStep {
+                step_id: "s0".into(),
+                agent_type: "code".into(),
+                intent: "Prends une photo".into(),
+                depends_on: vec!["prev_step".into()],
+                parallel_group: None,
+                acceptance_criteria: Some("Photo saved at workspace:/out.jpg".into()),
+                deliverables: Some(vec!["workspace:/out.jpg".into()]),
+            }],
+        };
+
+        let steps_before = plan.to_subtasks();
+        let steps_after =
+            apply_decomposition_override("Prends une photo", steps_before.clone());
+
+        // Override must have fired (code → conversation).
+        assert_ne!(steps_after, steps_before);
+        assert_eq!(steps_after[0].0, "conversation");
+
+        // Apply the in-place patch (mirrors orchestrator.rs fix).
+        assert_eq!(steps_after.len(), plan.steps.len());
+        for (plan_step, (new_agent, new_intent)) in
+            plan.steps.iter_mut().zip(steps_after.iter())
+        {
+            plan_step.agent_type = new_agent.clone();
+            plan_step.intent = new_intent.clone();
+        }
+
+        // Agent type updated.
+        assert_eq!(plan.steps[0].agent_type, "conversation");
+        // Deliverables preserved (not discarded as from_legacy would have done).
+        assert_eq!(
+            plan.steps[0].deliverables.as_deref().map(|d| d.iter().map(String::as_str).collect::<Vec<_>>()),
+            Some(vec!["workspace:/out.jpg"])
+        );
+        // Acceptance criteria preserved.
+        assert_eq!(
+            plan.steps[0].acceptance_criteria.as_deref(),
+            Some("Photo saved at workspace:/out.jpg")
+        );
+        // depends_on preserved.
+        assert_eq!(plan.steps[0].depends_on, vec!["prev_step"]);
+    }
+
+    #[test]
+    fn extract_workspace_paths_finds_paths_in_message() {
+        let paths = extract_workspace_paths_from_message(
+            "Crée un notebook dans workspace:/proj/notebook.ipynb et une API dans workspace:/proj/api/",
+        );
+        assert_eq!(paths, vec!["workspace:/proj/notebook.ipynb", "workspace:/proj/api/"]);
+    }
+
+    #[test]
+    fn extract_workspace_paths_strips_trailing_punctuation() {
+        let paths = extract_workspace_paths_from_message("Place files in workspace:/out/, workspace:/data.csv.");
+        assert_eq!(paths, vec!["workspace:/out/", "workspace:/data.csv"]);
+    }
+
+    #[test]
+    fn extract_workspace_paths_deduplicates() {
+        let paths = extract_workspace_paths_from_message(
+            "workspace:/proj/file.py and workspace:/proj/file.py again",
+        );
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "workspace:/proj/file.py");
+    }
+
+    #[test]
+    fn extract_workspace_paths_empty_when_no_paths() {
+        let paths = extract_workspace_paths_from_message("Just a plain request with no workspace paths");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn deterministic_fallback_backend_step_has_deliverables_when_workspace_paths_present() {
+        let p = build_deterministic_project_fallback_plan(
+            "Construis un notebook dans workspace:/proj/notebook.ipynb et une API dans workspace:/proj/api/",
+        );
+        let backend = p.steps.iter().find(|s| s.agent_type == "backend").expect("backend step missing");
+        let deliverables = backend.deliverables.as_ref().expect("backend deliverables must be Some");
+        assert!(deliverables.contains(&"workspace:/proj/notebook.ipynb".to_string()));
+        assert!(deliverables.contains(&"workspace:/proj/api/".to_string()));
+    }
+
+    #[test]
+    fn deterministic_fallback_qa_step_has_deliverables_when_workspace_paths_present() {
+        let p = build_deterministic_project_fallback_plan(
+            "Crée un script dans workspace:/scripts/run.py",
+        );
+        let qa = p.steps.iter().find(|s| s.agent_type == "qa").expect("qa step missing");
+        let deliverables = qa.deliverables.as_ref().expect("qa deliverables must be Some");
+        assert!(deliverables.contains(&"workspace:/scripts/run.py".to_string()));
+    }
+
+    #[test]
+    fn deterministic_fallback_no_deliverables_when_no_workspace_paths() {
+        let p = build_deterministic_project_fallback_plan("Build a monitoring API with several deliverables");
+        let backend = p.steps.iter().find(|s| s.agent_type == "backend").expect("backend step missing");
+        // Without explicit workspace:/ paths, deliverables stay None — no false disk checks.
+        assert!(backend.deliverables.is_none());
     }
 }
