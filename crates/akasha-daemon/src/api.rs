@@ -1865,7 +1865,30 @@ fn rewrite_workspace_plan_key_to_lineage_root(key: &str, lineage_root: Uuid) -> 
     (new_key, Some(parsed))
 }
 
-/// Execute one tool call via ToolExecutor. Returns `(success, display_string)` for structured events.
+/// After a successful partial edit (`edit_file`, `search_replace`, `apply_patch`) on a `workspace:/` path,
+/// re-read the updated disk file and insert it into the in-memory workspace store so that subsequent
+/// `read_file workspace:/` calls return the latest content.
+async fn sync_workspace_store_from_disk(
+    workspace_store: Option<&TaskWorkspaceStore>,
+    task_id: Uuid,
+    store_path: Option<&std::path::Path>,
+    workspace_path_str: &str,
+    disk_path: &std::path::Path,
+) {
+    let Some(ws) = workspace_store else { return };
+    let key = workspace_path_str
+        .trim_start_matches("workspace:/")
+        .trim_start_matches("workspace:")
+        .trim_start_matches('/')
+        .to_string();
+    let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
+    let (key, _) = rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
+    if let Ok(updated) = tokio::fs::read_to_string(disk_path).await {
+        let mut guard = ws.write().await;
+        guard.entry(lineage_task_id).or_default().insert(key, updated);
+    }
+}
+
 async fn execute_tool_call(
     executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
     tool_name: &str,
@@ -2700,7 +2723,12 @@ async fn execute_tool_call(
             }
         }
         "search_replace" => {
-            let path = path_arg(0);
+            let path_str = match args.get(0) {
+                Some(s) => s.as_str(),
+                None => return (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None),
+            };
+            let is_workspace = path_str.starts_with("workspace:/") || path_str.starts_with("workspace:");
+            let disk_path = resolve_tool_disk_path(path_str, workspace_root);
             let rest = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
             let Some((search, replace)) = rest
                 .split_once('|')
@@ -2708,76 +2736,88 @@ async fn execute_tool_call(
             else {
                 return (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None);
             };
-            match path {
-                Some(p) => match executor.search_replace(p, &search, &replace).await {
-                    Ok(res) => {
-                        let msg = if res.success {
-                            format!("[search_replace {}] {}", p.display(), res.summary)
-                        } else {
-                            format!("[search_replace] {}", res.summary)
-                        };
-                        (res.success, msg, None)
+            match executor.search_replace(&disk_path, &search, &replace).await {
+                Ok(res) => {
+                    if res.success && is_workspace {
+                        sync_workspace_store_from_disk(workspace_store, task_id, store_path, path_str, &disk_path).await;
                     }
-                    Err(e) => (false, format!("[search_replace] error: {}", e), None),
-                },
-                None => (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None),
+                    let msg = if res.success {
+                        format!("[search_replace {}] {}", disk_path.display(), res.summary)
+                    } else {
+                        format!("[search_replace] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[search_replace] error: {}", e), None),
             }
         }
         "edit_file" => {
-            let path = path_arg(0);
+            let path_str = match args.get(0) {
+                Some(s) => s.as_str(),
+                None => return (false, "[edit_file] usage: edit_file <path> <start_line> <end_line> <new_content>".to_string(), None),
+            };
+            let is_workspace = path_str.starts_with("workspace:/") || path_str.starts_with("workspace:");
+            let disk_path = resolve_tool_disk_path(path_str, workspace_root);
             let start_line = args.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
             let end_line = args.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
             let new_content = args.get(3..).map(|a| a.join("\n")).unwrap_or_default();
-            match path {
-                Some(p) => match executor.edit_file(p, start_line, end_line, &new_content).await {
-                    Ok(res) => {
-                        let msg = if res.success {
-                            format!("[edit_file {}] {}", p.display(), res.summary)
-                        } else {
-                            format!("[edit_file] {}", res.summary)
-                        };
-                        (res.success, msg, None)
+            match executor.edit_file(&disk_path, start_line, end_line, &new_content).await {
+                Ok(res) => {
+                    if res.success && is_workspace {
+                        sync_workspace_store_from_disk(workspace_store, task_id, store_path, path_str, &disk_path).await;
                     }
-                    Err(e) => (false, format!("[edit_file] error: {}", e), None),
-                },
-                None => (false, "[edit_file] usage: edit_file <path> <start_line> <end_line> <new_content>".to_string(), None),
+                    let msg = if res.success {
+                        format!("[edit_file {}] {}", disk_path.display(), res.summary)
+                    } else {
+                        format!("[edit_file] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[edit_file] error: {}", e), None),
             }
         }
         "apply_patch" => {
-            let path = path_arg(0);
+            let path_str = match args.get(0) {
+                Some(s) => s.as_str(),
+                None => return (false, "[apply_patch] usage: apply_patch <path> <patch_content>".to_string(), None),
+            };
+            let is_workspace = path_str.starts_with("workspace:/") || path_str.starts_with("workspace:");
+            let disk_path = resolve_tool_disk_path(path_str, workspace_root);
             let patch_content = args.get(1..).map(|a| a.join("\n")).unwrap_or_default();
-            match path {
-                Some(p) => match executor.apply_patch(p, &patch_content).await {
-                    Ok(res) => {
-                        let msg = if res.success {
-                            format!("[apply_patch {}] {}", p.display(), res.summary)
-                        } else {
-                            format!("[apply_patch] {}", res.summary)
-                        };
-                        (res.success, msg, None)
+            match executor.apply_patch(&disk_path, &patch_content).await {
+                Ok(res) => {
+                    if res.success && is_workspace {
+                        sync_workspace_store_from_disk(workspace_store, task_id, store_path, path_str, &disk_path).await;
                     }
-                    Err(e) => (false, format!("[apply_patch] error: {}", e), None),
-                },
-                None => (false, "[apply_patch] usage: apply_patch <path> <patch_content>".to_string(), None),
+                    let msg = if res.success {
+                        format!("[apply_patch {}] {}", disk_path.display(), res.summary)
+                    } else {
+                        format!("[apply_patch] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[apply_patch] error: {}", e), None),
             }
         }
         "file_diff" => {
-            let path_a = path_arg(0);
-            let path_b = path_arg(1);
-            match (path_a, path_b) {
-                (Some(a), Some(b)) => match executor.file_diff(a, b).await {
-                    Ok((diff, res)) => {
-                        let msg = if res.success {
-                            let preview = if diff.len() <= 400 { diff.as_str() } else { &diff[..diff.floor_char_boundary(400)] };
-                            format!("[file_diff] {} — {}", res.summary, preview)
-                        } else {
-                            format!("[file_diff] {}", res.summary)
-                        };
-                        (res.success, msg, None)
-                    }
-                    Err(e) => (false, format!("[file_diff] error: {}", e), None),
-                },
-                _ => (false, "[file_diff] usage: file_diff <path_a> <path_b>".to_string(), None),
+            let path_a_str = args.get(0).map(String::as_str).unwrap_or("");
+            let path_b_str = args.get(1).map(String::as_str).unwrap_or("");
+            if path_a_str.is_empty() || path_b_str.is_empty() {
+                return (false, "[file_diff] usage: file_diff <path_a> <path_b>".to_string(), None);
+            }
+            let disk_a = resolve_tool_disk_path(path_a_str, workspace_root);
+            let disk_b = resolve_tool_disk_path(path_b_str, workspace_root);
+            match executor.file_diff(&disk_a, &disk_b).await {
+                Ok((diff, res)) => {
+                    let msg = if res.success {
+                        let preview = if diff.len() <= 400 { diff.as_str() } else { &diff[..diff.floor_char_boundary(400)] };
+                        format!("[file_diff] {} — {}", res.summary, preview)
+                    } else {
+                        format!("[file_diff] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[file_diff] error: {}", e), None),
             }
         }
         "web_fetch" => {

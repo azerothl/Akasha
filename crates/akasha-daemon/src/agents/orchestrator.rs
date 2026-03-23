@@ -1359,13 +1359,16 @@ async fn process_root_task(
 
 ## Ordre obligatoire (étape `{step_id}`)
 
-1. **Lire** le plan partagé avec `read_file` sur `workspace:/{plan_rel}` pour voir le contexte global et votre section **Fait (agent)** / **Reste (agent)** sous `### {step_id}`.
-2. **Mettre à jour ce fichier** avec `edit_file` ou `search_replace` : remplir **Fait (agent)** et **Reste (agent)** avec ce qui est réellement fait et ce qu'il reste (y compris *avant* ou *pendant* la production des livrables).
-3. **Puis** créer ou mettre à jour chaque livrable listé (`write_file` ou édition partielle) aux chemins exacts indiqués.
+1. **Lire** le plan partagé : `read_file workspace:/{plan_rel}` — voir le contexte global et votre section **Fait (agent)** / **Reste (agent)** sous `### {step_id}`.
+2. **Mettre à jour le fichier de trace** :
+   - a. Modifier les sections **Fait (agent)** et **Reste (agent)** (ce qui est fait, ce qu'il reste).
+   - b. Réécrire avec `write_file workspace:/{plan_rel} <contenu complet>`.
+   - (`edit_file workspace:/{plan_rel}` et `search_replace workspace:/{plan_rel}` sont également acceptés — les chemins `workspace:/` sont résolus vers le disque.)
+3. **Créer ou mettre à jour chaque livrable** listé ci-dessous avec `write_file`, `edit_file`, ou `search_replace` aux chemins exacts indiqués.
 
 L'orchestrateur ne marque cette étape **terminée (done)** que si **tous** les livrables de l'étape existent sur disque à la fin. Sinon l'étape est marquée **échec** même si vous avez répondu en texte.
 
-Shared trace file: `workspace:/{plan_rel}` — préférer des éditions partielles ; éviter de réécrire tout le fichier sauf création initiale."#,
+Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file workspace:/{plan_rel}` pour mettre à jour le fichier de trace."#,
                     base = sub_message,
                     step_id = step.step_id,
                     plan_rel = plan_trace_rel
