@@ -1663,9 +1663,21 @@ fn line_rest_after_leading_tool_at_start(line: &str) -> Option<&str> {
     Some(rest.trim_start())
 }
 
+/// Returns true if `tool_name` (already lower-cased) takes a multiline body argument.
+fn tool_supports_multiline_body(tool_name: &str) -> bool {
+    matches!(tool_name, "apply_patch" | "edit_file" | "write_file" | "ask_user")
+}
+
 /// Rewrite lines so strict `TOOL:` prefix parsing succeeds (see `parse_tool_calls`).
+///
+/// Lines that are inside the body of a multiline tool (`write_file`, `edit_file`,
+/// `apply_patch`, `ask_user`) are **not** normalized — only a canonical `TOOL: …`
+/// line (already in strict form) can terminate a body.  This prevents file/doc
+/// content that happens to contain phrases like `- Tool: read_file` from being
+/// rewritten into a false tool invocation that truncates the body.
 fn normalize_response_tool_prefixes(response: &str) -> String {
     let mut in_fence = false;
+    let mut in_multiline_body = false;
     let mut out_lines = Vec::new();
 
     for raw in response.lines() {
@@ -1683,9 +1695,39 @@ fn normalize_response_tool_prefixes(response: &str) -> String {
             continue;
         }
 
+        // Inside a multiline body, do NOT apply sloppy-prefix normalization.
+        // Body content (docs, generated files, specs …) may contain phrases like
+        // "- Tool: read_file" or "### TOOL: …" that must not become tool headers.
+        // Only a line that is already in strict canonical "TOOL: …" form can end
+        // the body and start a new tool invocation.
+        if in_multiline_body {
+            if raw.trim_start().starts_with("TOOL:") {
+                // Canonical tool header — exit body mode and fall through to process.
+                in_multiline_body = false;
+            } else {
+                out_lines.push(raw.to_string());
+                continue;
+            }
+        }
+
         if let Some(rest) = line_rest_after_leading_tool(raw) {
-            out_lines.push(format!("TOOL: {}", rest));
+            let normalized = format!("TOOL: {}", rest);
+            // If this tool supports a multiline body, subsequent lines are body content.
+            if let Some(name) = rest.split_whitespace().next() {
+                if tool_supports_multiline_body(&name.to_lowercase()) {
+                    in_multiline_body = true;
+                }
+            }
+            out_lines.push(normalized);
         } else {
+            // Already canonical TOOL: line — still need to track body-mode entry.
+            if let Some(rest) = trimmed.strip_prefix("TOOL:") {
+                if let Some(name) = rest.trim().split_whitespace().next() {
+                    if tool_supports_multiline_body(&name.to_lowercase()) {
+                        in_multiline_body = true;
+                    }
+                }
+            }
             out_lines.push(raw.to_string());
         }
     }
@@ -1714,10 +1756,7 @@ fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String>)> {
                 let mut args = fixed_args.to_vec();
                 // Only certain tools support a multi-line body argument.
                 let tool_name_lc = name.to_lowercase();
-                let supports_body = matches!(
-                    tool_name_lc.as_str(),
-                    "apply_patch" | "edit_file" | "write_file" | "ask_user"
-                );
+                let supports_body = tool_supports_multiline_body(&tool_name_lc);
 
                 if supports_body {
                     // Collect subsequent non-TOOL: lines as a raw multi-line body (for
@@ -7726,6 +7765,49 @@ mod tests {
             c.is_empty(),
             "long alphabetic prefix before TOOL: must not become a false tool call"
         );
+    }
+
+    // Body lines containing sloppy "- Tool: …" / "### TOOL: …" must not be treated as new tool calls.
+    #[test]
+    fn parse_tool_calls_body_with_tool_mention_list_item_not_truncated() {
+        // write_file body contains "- Tool: read_file …" — must NOT start a new tool.
+        let s = "TOOL: write_file workspace:/docs/tools.md\n# Available tools\n\n- Tool: read_file — reads a file\n- Tool: write_file — writes a file\n\nEnd of list";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1, "only one tool call expected, got {:?}", c);
+        assert_eq!(c[0].0, "write_file");
+        let body = &c[0].1[1];
+        assert!(
+            body.contains("- Tool: read_file"),
+            "body should contain the tool mention verbatim, got: {:?}",
+            body
+        );
+        assert!(body.contains("End of list"), "body should not be truncated, got: {:?}", body);
+    }
+
+    #[test]
+    fn parse_tool_calls_body_with_heading_tool_mention_not_truncated() {
+        // edit_file body contains "### Step — TOOL: read_file …" — must NOT split here.
+        let s = "- Tool: edit_file workspace:/spec.md\n### Step — TOOL: read_file some args\nmore content\nTOOL: read_file workspace:/next.md";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 2, "expected edit_file + read_file, got {:?}", c);
+        assert_eq!(c[0].0, "edit_file");
+        let body = &c[0].1[1];
+        assert!(
+            body.contains("### Step — TOOL: read_file"),
+            "body should contain the heading tool mention verbatim, got: {:?}",
+            body
+        );
+        assert_eq!(c[1].0, "read_file");
+    }
+
+    #[test]
+    fn parse_tool_calls_body_terminated_by_canonical_tool_line() {
+        // After a body-supporting tool, a canonical TOOL: line correctly ends the body.
+        let s = "TOOL: write_file workspace:/a.txt\nsome content\nTOOL: read_file workspace:/b.txt";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].0, "write_file");
+        assert_eq!(c[1].0, "read_file");
     }
 
     // --- rewrite_workspace_plan_key_to_lineage_root ---
