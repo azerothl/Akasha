@@ -7828,12 +7828,16 @@ mod tests {
         assert!(c.is_empty());
     }
 
+    // Headings with textual content before `TOOL:` are not treated as tool calls.
+    // Only markdown "junk" (e.g. `#` heading markers, list bullets) may precede `TOOL:`.
     #[test]
     fn parse_tool_calls_heading_then_tool_on_same_line() {
         let s = "### Step 4 — TOOL: write_file workspace:/out.md hello";
         let c = parse_tool_calls(s);
-        assert_eq!(c.len(), 1);
-        assert_eq!(c[0].0, "write_file");
+        assert!(
+            c.is_empty(),
+            "alphabetic heading text before `TOOL:` must not be parsed as a tool call"
+        );
     }
 
     #[test]

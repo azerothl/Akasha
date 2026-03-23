@@ -206,16 +206,6 @@ User message:\n{}",
         let session_id = if session_id.is_empty() { "default" } else { session_id };
         let task_id = Uuid::new_v4();
 
-        // Use task_id as correlation so GET /api/tasks/{task_id}/events returns these events.
-        let _ = self.bus.send(EventEnvelope::new(EventType::UserRequestReceived, Some(serde_json::json!({ "message": message }))).with_correlation(task_id));
-        let _ = self.bus.send(
-            EventEnvelope::new(
-                EventType::AcknowledgmentSent,
-                Some(serde_json::json!({ "task_id": task_id.to_string() })),
-            )
-            .with_correlation(task_id),
-        );
-
         const MAX_INITIAL_MESSAGE: usize = 500;
         let initial_message = if message.is_empty() {
             None
@@ -227,13 +217,47 @@ User message:\n{}",
             })
         };
 
-        let selector_decision = if forward_to_orchestrator {
-            self.system_selector_decision(message).await
+        // Determine a preliminary assigned_agent (without LLM) so the task can be persisted
+        // immediately, satisfying the "ack < 500ms" guarantee and ensuring the task_id is in
+        // the DB before any events that carry it as a correlation ID.
+        let execution_mode = if forward_to_orchestrator {
+            Some(classify_execution_mode(message))
         } else {
             None
         };
-        let execution_mode = if forward_to_orchestrator {
-            Some(classify_execution_mode(message))
+        let preliminary_agent = if !forward_to_orchestrator {
+            "llm"
+        } else {
+            "orchestrator"
+        };
+
+        // Insert the task into the store before any network/LLM call so events can be
+        // correlated against a task that actually exists.
+        let store = TaskStore::open(store_path)?;
+        let task = Task {
+            id: task_id,
+            parent_task_id: None,
+            status: TaskStatus::Pending,
+            assigned_agent: preliminary_agent.to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            initial_message,
+        };
+        store.insert(&task)?;
+
+        // Use task_id as correlation so GET /api/tasks/{task_id}/events returns these events.
+        let _ = self.bus.send(EventEnvelope::new(EventType::UserRequestReceived, Some(serde_json::json!({ "message": message }))).with_correlation(task_id));
+        let _ = self.bus.send(
+            EventEnvelope::new(
+                EventType::AcknowledgmentSent,
+                Some(serde_json::json!({ "task_id": task_id.to_string() })),
+            )
+            .with_correlation(task_id),
+        );
+
+        // Run the LLM selector (up to 8 s) after the task is safely persisted.
+        let selector_decision = if forward_to_orchestrator {
+            self.system_selector_decision(message).await
         } else {
             None
         };
@@ -265,24 +289,20 @@ User message:\n{}",
             "orchestrator".to_string()
         };
 
-        let store = TaskStore::open(store_path)?;
-        let task = Task {
-            id: task_id,
-            parent_task_id: None,
-            status: TaskStatus::Pending,
-            assigned_agent: assigned_agent.clone(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            initial_message,
-        };
-        store.insert(&task)?;
+        // Update the assigned_agent if the selector changed it from our preliminary value.
+        if assigned_agent != preliminary_agent {
+            if let Err(e) = store.update_assigned_agent(task_id, &assigned_agent) {
+                tracing::warn!(task_id = %task_id, assigned_agent = %assigned_agent, err = %e, "failed to update assigned_agent after selector");
+            }
+        }
+
         let _ = self.bus.send(
             EventEnvelope::new(
                 EventType::TaskCreated,
                 Some(serde_json::json!({
                     "task_id": task_id.to_string(),
                     "parent_task_id": null,
-                    "assigned_agent": task.assigned_agent,
+                    "assigned_agent": assigned_agent,
                     "execution_mode": execution_mode.map(|e| e.as_str()),
                     "selector_used": selector_used,
                     "selector_mode": selector_mode,
