@@ -540,8 +540,13 @@ fn collect_missing_plan_deliverables(plan: &ExecutionPlan, workspace_root: &Path
     missing
 }
 
-/// When LLM remediation does not emit write_file, create minimal on-disk files
-/// so orchestration does not report missing deliverables and the user can edit/replace content.
+/// When LLM remediation does not emit write_file, create minimal on-disk stubs for
+/// text-based deliverables so the user can edit/replace content.
+///
+/// Binary-format deliverables (e.g. `.pdf`, `.pptx`) are intentionally skipped: writing a
+/// UTF-8 text stub to a binary-format path would create a file that standard readers cannot
+/// open, and `workspace_deliverable_satisfied` would incorrectly treat the deliverable as
+/// complete.  Those formats are left missing so the caller can surface the failure to the user.
 async fn write_missing_deliverables_fs_fallback(
     workspace_root: &Path,
     deliverables: &[String],
@@ -580,16 +585,6 @@ async fn write_missing_deliverables_fs_fallback(
 """Placeholder: agent did not write this file before aggregation."""
 raise NotImplementedError("Replace with implementation from the project plan.")
 "#
-            );
-        }
-        if rel_lower.ends_with(".pdf") {
-            return format!(
-                "Akasha auto-deliverable (root_task_id={rid})\n\nThis file is a UTF-8 text placeholder at a .pdf path. Replace with a real PDF export if needed.\n"
-            );
-        }
-        if rel_lower.ends_with(".pptx") {
-            return format!(
-                "Akasha auto-deliverable (root_task_id={rid})\n\nUTF-8 text placeholder at a .pptx path. Replace with a real PowerPoint export if needed.\n"
             );
         }
         if rel_lower.ends_with(".yaml") || rel_lower.ends_with(".yml") {
@@ -642,6 +637,11 @@ raise NotImplementedError("Replace with implementation from the project plan.")
             }
         }
         let lower = norm.to_lowercase();
+        // Binary-format deliverables cannot be represented as UTF-8 text stubs.
+        // Skip them so the caller reports the missing artifact instead of masking failure.
+        if lower.ends_with(".pdf") || lower.ends_with(".pptx") {
+            continue;
+        }
         let body = stub_body(&lower, root_task_id);
         if tokio::fs::write(&path, body.as_bytes()).await.is_ok() {
             written.push(norm);
