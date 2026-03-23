@@ -1976,12 +1976,12 @@ Reply in the SAME LANGUAGE as the user's question above. Do not add any informat
                     let text = resp.text.trim().to_string();
                     // If synthesis is significantly shorter than raw sub-agent outputs, it tends to drop
                     // critical file/script details. Fall back to raw replies to preserve deliverables.
-                    const MIN_SYNTHESIS_CHARS: usize = 600;
+                    // Only use the relative-size check: an absolute minimum would incorrectly discard
+                    // brief but complete syntheses for naturally short multi-step tasks.
                     const MAX_COMPRESSION_RATIO: usize = 4;
-                    let suspiciously_short_absolute = text.len() < MIN_SYNTHESIS_CHARS;
                     let suspiciously_short_relative =
                         raw_responses.len() > text.len().saturating_mul(MAX_COMPRESSION_RATIO);
-                    if suspiciously_short_absolute || suspiciously_short_relative {
+                    if suspiciously_short_relative {
                         format!("Réponses des agents :\n\n{}", raw_responses)
                     } else {
                         text
