@@ -1009,7 +1009,19 @@ async fn process_root_task(
     let steps_before = plan.to_subtasks();
     let steps_after = apply_decomposition_override(&message, steps_before.clone());
     if steps_after != steps_before {
-        plan = ExecutionPlan::from_legacy(&steps_after);
+        if steps_after.len() == plan.steps.len() {
+            // Preserve step metadata (depends_on, acceptance_criteria, deliverables); only
+            // patch the agent_type (and intent, if changed) for each step in-place.
+            for (plan_step, (new_agent, new_intent)) in
+                plan.steps.iter_mut().zip(steps_after.iter())
+            {
+                plan_step.agent_type = new_agent.clone();
+                plan_step.intent = new_intent.clone();
+            }
+        } else {
+            // Step count changed (defensive fallback; shouldn't happen with current overrides).
+            plan = ExecutionPlan::from_legacy(&steps_after);
+        }
     }
     let steps = plan.to_subtasks();
     let _ = bus.send(
@@ -2217,6 +2229,8 @@ Formatting rules (Markdown):
 #[cfg(test)]
 mod tests {
     use super::{apply_decomposition_override, build_deterministic_project_fallback_plan, is_project_like_request, Subtask};
+    use super::super::execution_plan::{ExecutionPlan, PlanStep};
+    use uuid::Uuid;
 
     fn step(agent: &str, msg: &str) -> Subtask {
         (agent.to_string(), msg.to_string())
@@ -2320,5 +2334,56 @@ mod tests {
         assert!(p.steps.len() >= 5);
         assert_eq!(p.steps.first().map(|s| s.agent_type.as_str()), Some("analyst"));
         assert_eq!(p.steps.last().map(|s| s.agent_type.as_str()), Some("conversation"));
+    }
+
+    /// When apply_decomposition_override reroutes a `code` step to `conversation`, the
+    /// original PlanStep metadata (depends_on, acceptance_criteria, deliverables) must be
+    /// preserved by patching agent_type in-place rather than rebuilding via from_legacy.
+    #[test]
+    fn override_preserves_plan_step_metadata_on_code_to_conversation() {
+        let mut plan = ExecutionPlan {
+            plan_id: Uuid::nil(),
+            steps: vec![PlanStep {
+                step_id: "s0".into(),
+                agent_type: "code".into(),
+                intent: "Prends une photo".into(),
+                depends_on: vec!["prev_step".into()],
+                parallel_group: None,
+                acceptance_criteria: Some("Photo saved at workspace:/out.jpg".into()),
+                deliverables: Some(vec!["workspace:/out.jpg".into()]),
+            }],
+        };
+
+        let steps_before = plan.to_subtasks();
+        let steps_after =
+            apply_decomposition_override("Prends une photo", steps_before.clone());
+
+        // Override must have fired (code → conversation).
+        assert_ne!(steps_after, steps_before);
+        assert_eq!(steps_after[0].0, "conversation");
+
+        // Apply the in-place patch (mirrors orchestrator.rs fix).
+        assert_eq!(steps_after.len(), plan.steps.len());
+        for (plan_step, (new_agent, new_intent)) in
+            plan.steps.iter_mut().zip(steps_after.iter())
+        {
+            plan_step.agent_type = new_agent.clone();
+            plan_step.intent = new_intent.clone();
+        }
+
+        // Agent type updated.
+        assert_eq!(plan.steps[0].agent_type, "conversation");
+        // Deliverables preserved (not discarded as from_legacy would have done).
+        assert_eq!(
+            plan.steps[0].deliverables.as_deref().map(|d| d.iter().map(String::as_str).collect::<Vec<_>>()),
+            Some(vec!["workspace:/out.jpg"])
+        );
+        // Acceptance criteria preserved.
+        assert_eq!(
+            plan.steps[0].acceptance_criteria.as_deref(),
+            Some("Photo saved at workspace:/out.jpg")
+        );
+        // depends_on preserved.
+        assert_eq!(plan.steps[0].depends_on, vec!["prev_step"]);
     }
 }
