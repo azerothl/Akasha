@@ -1614,10 +1614,6 @@ const ORCH_INLINE_TOOL_FIRST_WORDS: &[&str] = &[
     "pdf",
 ];
 
-fn prefix_alphabetic_char_count(prefix: &str) -> usize {
-    prefix.chars().filter(|c| c.is_alphabetic()).count()
-}
-
 /// `### Step — TOOL: write_file`, table junk, or other lines where `TOOL:` is not at column 0 after strips.
 fn inline_ascii_tool_colon_rest(line: &str) -> Option<&str> {
     let t = line.trim();
@@ -5833,23 +5829,8 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
-    // GET /api/plugins — list loaded skills/plugins (Phase 6 AI OS cockpit).
-    if method == "GET" && path == "/api/plugins" {
-        let list: Vec<serde_json::Value> = skill_registry
-            .list()
-            .await
-            .into_iter()
-            .map(|s| {
-                serde_json::json!({
-                    "name": s.name,
-                    "description": s.description,
-                    "parameters": s.parameters,
-                })
-            })
-            .collect();
-        let body_json = serde_json::json!({ "plugins": list });
-        return json_response("200 OK", &body_json.to_string());
-    }
+    // GET /api/plugins — voir plus bas (Phase 5 PluginRegistry) : tableau JSON pour CLI/Tauri/TUI.
+    // Les skills chargeables pour agents sont sur GET /api/skills (pas de doublon ici).
 
     // GET /api/doctor — health checks from daemon (for slash /doctor)
     if method == "GET" && path == "/api/doctor" {
