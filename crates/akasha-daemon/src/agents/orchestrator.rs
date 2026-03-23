@@ -723,7 +723,7 @@ async fn decompose_request(
     llm_router: &Arc<akasha_llm::LLMRouter>,
     message: &str,
 ) -> Vec<Subtask> {
-    decompose_to_plan(llm_router, message, Path::new("."))
+    decompose_to_plan(llm_router, message, Path::new("."), None)
         .await
         .0
         .to_subtasks()
@@ -733,6 +733,7 @@ async fn decompose_to_plan(
     llm_router: &Arc<akasha_llm::LLMRouter>,
     message: &str,
     data_dir: &Path,
+    preferred_task_type_override: Option<&str>,
 ) -> (ExecutionPlan, DecomposeDiagnostics) {
     let rules = OrchestrationRules::load(data_dir);
     if let Some((agent, msg)) = rules.match_message(message) {
@@ -746,7 +747,10 @@ async fn decompose_to_plan(
         );
     }
     let project_like = is_project_like_request(message);
-    let preferred_task_type = resolve_decompose_task_type(llm_router);
+    let preferred_task_type = preferred_task_type_override
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| resolve_decompose_task_type(llm_router));
     let prompt = format!(
         "{}{}{}",
         DECOMPOSER_PROMPT_TEMPLATE,
@@ -987,6 +991,7 @@ impl Orchestrator {
             let session_id = task.session_id;
             let image_data_urls = task.image_data_urls;
             let execution_mode = task.execution_mode;
+            let preferred_task_type = task.preferred_task_type;
             tokio::spawn(async move {
                 if let Err(e) = process_root_task(
                     bus,
@@ -1003,6 +1008,7 @@ impl Orchestrator {
                     task_completion,
                     long_term_client,
                     execution_mode,
+                    preferred_task_type,
                 )
                 .await
                 {
@@ -1028,6 +1034,7 @@ async fn process_root_task(
     task_completion: TaskCompletionRegistry,
     long_term_client: Option<LongTermMemoryClient>,
     execution_mode: Option<ExecutionMode>,
+    preferred_task_type: Option<String>,
 ) -> anyhow::Result<()> {
     if !akasha_core::Role::OrchestratorAgent.can_spawn_agents() {
         anyhow::bail!("RBAC: orchestrator not allowed to spawn agents");
@@ -1053,7 +1060,13 @@ async fn process_root_task(
         .with_correlation(root_task_id),
     );
 
-    let (mut plan, decompose_diag) = decompose_to_plan(&llm_router, &message, data_dir).await;
+    let (mut plan, decompose_diag) = decompose_to_plan(
+        &llm_router,
+        &message,
+        data_dir,
+        preferred_task_type.as_deref(),
+    )
+    .await;
     let steps_before = plan.to_subtasks();
     let steps_after = apply_decomposition_override(&message, steps_before.clone());
     if steps_after != steps_before {
@@ -1286,6 +1299,7 @@ async fn process_root_task(
                 session_id,
                 image_data_urls,
                 execution_mode: None,
+                preferred_task_type: None,
             })
             .await
             .map_err(|_| anyhow::anyhow!("conversation channel closed"))?;
@@ -1521,6 +1535,7 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                         session_id: session_id_aggregator.clone(),
                         image_data_urls: None,
                         execution_mode: None,
+                        preferred_task_type: None,
                     })
                     .await
                     .is_err()
@@ -1639,6 +1654,7 @@ Use TOOL: write_file <exact_path> with real, substantive content for each entry 
                                 session_id: session_id_aggregator.clone(),
                                 image_data_urls: None,
                                 execution_mode: None,
+                                preferred_task_type: None,
                             })
                             .await;
                         let _ = tokio::time::timeout(DELIVERABLE_RETRY_TIMEOUT, notify_retry.notified()).await;
@@ -1791,6 +1807,7 @@ Reply with SHORT actionable guidance only: what the user should provide, which p
                                 session_id: session_id_aggregator.clone(),
                                 image_data_urls: None,
                                 execution_mode: None,
+                                preferred_task_type: None,
                             })
                             .await;
                         let _ =
@@ -1869,6 +1886,7 @@ Do not only describe the files — execute the tools."#,
                             session_id: session_id_aggregator.clone(),
                             image_data_urls: None,
                             execution_mode: None,
+                            preferred_task_type: None,
                         })
                         .await;
                     let _ = tokio::time::timeout(PER_CHILD_TIMEOUT, notify_r.notified()).await;
@@ -2122,6 +2140,7 @@ Formatting rules (Markdown):
                         session_id: session_id_aggregator.clone(),
                         image_data_urls: None,
                         execution_mode: None,
+                        preferred_task_type: None,
                     })
                     .await;
                 if tokio::time::timeout(PER_CHILD_TIMEOUT, notify_refinement.notified())

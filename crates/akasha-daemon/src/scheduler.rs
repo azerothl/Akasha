@@ -156,6 +156,7 @@ async fn tick(
                 session_id: session_id.clone(),
                 image_data_urls: None,
                 execution_mode: None,
+                preferred_task_type: None,
             })
             .await
         {

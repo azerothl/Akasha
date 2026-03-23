@@ -521,6 +521,7 @@ pub async fn run_delegation_handler(
                 session_id: String::new(),
                 image_data_urls: None,
                 execution_mode: None,
+                preferred_task_type: None,
             })
             .await
             .is_err()
@@ -2453,6 +2454,7 @@ async fn execute_tool_call(
                                     session_id: sid,
                                     image_data_urls: None,
                                     execution_mode: None,
+                                    preferred_task_type: None,
                                 })
                                 .await
                                 .is_err()
@@ -6290,7 +6292,7 @@ pub async fn handle_api(
         // Build acknowledgment message before moving `message` into the envelope.
         let ack_message = build_ack_message(&message);
         let envelope = crate::gateway::MessageEnvelope::api(session_id.clone(), message, image_data_urls, priority);
-        match crate::gateway::handle_envelope(main_agent, store_path, envelope) {
+        match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
             Ok(task_id) => {
                 let body = serde_json::json!({
                     "ack": true,
