@@ -498,21 +498,31 @@ async fn persist_plan_trace_merged(
 }
 
 fn deliverable_workspace_rel(d: &str) -> String {
-    d.trim()
-        .trim_start_matches("workspace:/")
-        .trim_start_matches("workspace:")
-        .trim_start_matches('/')
-        .replace('\\', "/")
+    let t = d.trim();
+    // Strip `workspace:/` prefix → path is workspace-relative (no leading slash expected after it)
+    if let Some(rest) = t.strip_prefix("workspace:/") {
+        return rest.replace('\\', "/");
+    }
+    // Strip `workspace:` prefix, then any leading slash that follows it
+    if let Some(rest) = t.strip_prefix("workspace:") {
+        return rest.trim_start_matches('/').replace('\\', "/");
+    }
+    // For all other paths (relative *or* absolute) preserve the path as-is.
+    // Absolute paths like `/tmp/report.md` must not have their leading `/` stripped;
+    // `workspace_root.join("/tmp/report.md")` on Unix correctly returns `/tmp/report.md`.
+    t.replace('\\', "/")
 }
 
-/// Returns `true` when a deliverable-relative path is safe to use under the workspace root.
-/// Rejects absolute paths, paths with `..` components, and Windows drive-letter prefixes.
+/// Returns `true` when a deliverable path is safe to use (workspace-relative or absolute).
+/// Rejects paths containing `..` components, backslash-rooted paths, and Windows drive-letter
+/// prefixes.  Absolute Unix paths (starting with `/`) are allowed; `workspace_root.join` handles
+/// them correctly by returning the absolute path unchanged.
 fn deliverable_rel_is_safe(rel: &str) -> bool {
     if rel.trim().is_empty() {
         return false;
     }
-    // Reject absolute paths (starts with / or \)
-    if rel.starts_with('/') || rel.starts_with('\\') {
+    // Reject backslash-rooted paths (Windows-style absolute paths)
+    if rel.starts_with('\\') {
         return false;
     }
     // Reject Windows drive-letter prefixes like C: or c: (both upper and lower case)
@@ -665,6 +675,10 @@ raise NotImplementedError("Replace with implementation from the project plan.")
             continue;
         }
         if !deliverable_rel_is_safe(&rel) {
+            continue;
+        }
+        // Do not auto-create stubs at absolute filesystem paths; only write inside the workspace.
+        if std::path::Path::new(&rel).is_absolute() {
             continue;
         }
         let norm = deliverable_rel_normalized_dir(&rel);
@@ -2477,5 +2491,85 @@ mod tests {
         let backend = p.steps.iter().find(|s| s.agent_type == "backend").expect("backend step missing");
         // Without explicit workspace:/ paths, deliverables stay None — no false disk checks.
         assert!(backend.deliverables.is_none());
+    }
+
+    // ── deliverable_workspace_rel ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn deliverable_workspace_rel_strips_workspace_slash_prefix() {
+        use super::deliverable_workspace_rel;
+        assert_eq!(deliverable_workspace_rel("workspace:/proj/report.md"), "proj/report.md");
+        assert_eq!(deliverable_workspace_rel("workspace:proj/report.md"), "proj/report.md");
+        assert_eq!(deliverable_workspace_rel("workspace:/report.md"), "report.md");
+    }
+
+    #[test]
+    fn deliverable_workspace_rel_preserves_absolute_paths() {
+        use super::deliverable_workspace_rel;
+        // Absolute paths must NOT have their leading `/` stripped.
+        assert_eq!(deliverable_workspace_rel("/tmp/report.md"), "/tmp/report.md");
+        assert_eq!(deliverable_workspace_rel("/home/user/out.txt"), "/home/user/out.txt");
+    }
+
+    #[test]
+    fn deliverable_workspace_rel_preserves_relative_paths() {
+        use super::deliverable_workspace_rel;
+        assert_eq!(deliverable_workspace_rel("output/report.md"), "output/report.md");
+        assert_eq!(deliverable_workspace_rel("report.md"), "report.md");
+    }
+
+    // ── deliverable_rel_is_safe ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn deliverable_rel_is_safe_allows_absolute_unix_paths() {
+        use super::deliverable_rel_is_safe;
+        // Absolute Unix paths are now allowed so workspace_root.join() can return them unchanged.
+        assert!(deliverable_rel_is_safe("/tmp/report.md"));
+        assert!(deliverable_rel_is_safe("/home/user/output.txt"));
+    }
+
+    #[test]
+    fn deliverable_rel_is_safe_rejects_dotdot() {
+        use super::deliverable_rel_is_safe;
+        assert!(!deliverable_rel_is_safe("../escape.txt"));
+        assert!(!deliverable_rel_is_safe("/tmp/../etc/passwd"));
+        assert!(!deliverable_rel_is_safe("a/../../b"));
+    }
+
+    #[test]
+    fn deliverable_rel_is_safe_rejects_windows_paths() {
+        use super::deliverable_rel_is_safe;
+        assert!(!deliverable_rel_is_safe("C:\\Users\\report.txt"));
+        assert!(!deliverable_rel_is_safe("c:/users/report.txt"));
+        assert!(!deliverable_rel_is_safe("\\\\server\\share\\file"));
+    }
+
+    // ── workspace_deliverable_satisfied ───────────────────────────────────────────────────────
+
+    #[test]
+    fn workspace_deliverable_satisfied_checks_absolute_path_directly() {
+        use super::workspace_deliverable_satisfied;
+        use std::path::Path;
+        // A path that cannot exist (clearly absent) but is absolute should be checked as-is.
+        // We just verify it does NOT incorrectly return true when the path is absent.
+        assert!(!workspace_deliverable_satisfied(
+            Path::new("/nonexistent_workspace_root_xyz"),
+            "/nonexistent_absolute_deliverable_xyz/report.md"
+        ));
+    }
+
+    #[test]
+    fn workspace_deliverable_satisfied_returns_true_for_existing_absolute_path() {
+        use super::workspace_deliverable_satisfied;
+        use std::path::Path;
+        // Create a real temp file and verify it is found via its absolute path,
+        // regardless of what workspace_root is set to.
+        let dir = std::env::temp_dir();
+        let tmp = dir.join("akasha_test_deliverable_abs.txt");
+        std::fs::write(&tmp, b"test").expect("write temp file");
+        let abs = tmp.to_str().expect("valid utf8 path");
+        let result = workspace_deliverable_satisfied(Path::new("/some/unrelated/workspace"), abs);
+        let _ = std::fs::remove_file(&tmp);
+        assert!(result, "absolute deliverable that exists on disk must be satisfied");
     }
 }
