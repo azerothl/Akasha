@@ -90,6 +90,22 @@ fn project_min_steps() -> usize {
         .unwrap_or(3)
 }
 
+/// Condense a message to at most `max_chars` characters using a head+tail strategy
+/// so that workspace paths and constraints near the end of a long brief are preserved.
+fn condense_message_head_tail(message: &str, max_chars: usize) -> String {
+    let msg = message.trim();
+    let char_count = msg.chars().count();
+    if char_count <= max_chars {
+        return msg.to_string();
+    }
+    // Reserve 20% of the budget for the tail, the rest for the head.
+    let tail_chars = max_chars / 5;
+    let head_chars = max_chars - tail_chars;
+    let head: String = msg.chars().take(head_chars).collect();
+    let tail: String = msg.chars().skip(char_count - tail_chars).collect();
+    format!("{}\n[…]\n{}", head, tail)
+}
+
 fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
     // Use a head+tail strategy so that workspace paths and constraints
     // listed anywhere in a long request are not silently dropped.
@@ -721,7 +737,9 @@ async fn decompose_to_plan(
     }
 
     // Retry with condensed prompt to reduce failure rate on very long requests.
-    let condensed_req: String = message.chars().take(5000).collect();
+    // Use head+tail so workspace paths and deliverables near the end of the brief
+    // are not silently dropped even when the retry succeeds.
+    let condensed_req = condense_message_head_tail(message, 5000);
     let retry_prompt = format!(
         "{}\n{}\n\n{}\n\nRetry rules: output strict JSON with >= {} steps for project-like requests; avoid single conversation fallback unless user explicitly asks only for a conversational summary.",
         DECOMPOSER_PROMPT_TEMPLATE,
