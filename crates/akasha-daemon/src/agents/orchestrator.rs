@@ -106,6 +106,26 @@ fn condense_message_head_tail(message: &str, max_chars: usize) -> String {
     format!("{}\n[…]\n{}", head, tail)
 }
 
+/// Extracts `workspace:/…` paths mentioned anywhere in a user message.
+/// Used to seed deliverables in the deterministic fallback plan so that the
+/// TOOL-first prompt, per-step retry, and final disk checks are activated even
+/// when the LLM decomposer failed to produce a structured plan.
+fn extract_workspace_paths_from_message(message: &str) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for token in message.split_whitespace() {
+        // Strip common trailing punctuation/delimiters that would corrupt the path.
+        let token = token.trim_end_matches([',', '.', ';', ')', '"', '\'', '`', ':', '!', '?', ']', '}', '>']);
+        if token.starts_with("workspace:/") {
+            let key = token.to_lowercase();
+            if seen.insert(key) {
+                paths.push(token.to_string());
+            }
+        }
+    }
+    paths
+}
+
 fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
     // Use a head+tail strategy so that workspace paths and constraints
     // listed anywhere in a long request are not silently dropped.
@@ -120,6 +140,20 @@ fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
         let tail: String = msg.chars().skip(char_count - TAIL).collect();
         format!("{}\n[…]\n{}", head, tail)
     };
+
+    // Extract workspace paths from the full original message so the backend step
+    // gets a non-empty deliverables list.  A non-empty list activates:
+    //   • compose_orchestrated_child_message(…, deliverables_required=true) → TOOL-first prompt
+    //   • per-step deliverable retry on missing files
+    //   • collect_missing_plan_deliverables() final disk check
+    let step_deliverables: Option<Vec<String>> = {
+        let paths = extract_workspace_paths_from_message(msg);
+        if paths.is_empty() { None } else { Some(paths) }
+    };
+    // QA verifies what backend produced, so it receives the same list.
+    let backend_deliverables = step_deliverables.clone();
+    let qa_deliverables = step_deliverables;
+
     // Build a sequential chain so each step runs after the previous one finishes.
     // Without dependencies, execution_waves() would schedule all steps in wave 0
     // (parallel), meaning qa could verify before backend has produced any files.
@@ -151,7 +185,7 @@ fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
                 depends_on: vec!["s1".to_string()],
                 parallel_group: None,
                 acceptance_criteria: None,
-                deliverables: None,
+                deliverables: backend_deliverables,
             },
             PlanStep {
                 step_id: "s3".to_string(),
@@ -160,7 +194,7 @@ fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
                 depends_on: vec!["s2".to_string()],
                 parallel_group: None,
                 acceptance_criteria: None,
-                deliverables: None,
+                deliverables: qa_deliverables,
             },
             PlanStep {
                 step_id: "s4".to_string(),
@@ -2216,7 +2250,7 @@ Formatting rules (Markdown):
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_decomposition_override, build_deterministic_project_fallback_plan, is_project_like_request, Subtask};
+    use super::{apply_decomposition_override, build_deterministic_project_fallback_plan, extract_workspace_paths_from_message, is_project_like_request, Subtask};
 
     fn step(agent: &str, msg: &str) -> Subtask {
         (agent.to_string(), msg.to_string())
@@ -2320,5 +2354,63 @@ mod tests {
         assert!(p.steps.len() >= 5);
         assert_eq!(p.steps.first().map(|s| s.agent_type.as_str()), Some("analyst"));
         assert_eq!(p.steps.last().map(|s| s.agent_type.as_str()), Some("conversation"));
+    }
+
+    #[test]
+    fn extract_workspace_paths_finds_paths_in_message() {
+        let paths = extract_workspace_paths_from_message(
+            "Crée un notebook dans workspace:/proj/notebook.ipynb et une API dans workspace:/proj/api/",
+        );
+        assert_eq!(paths, vec!["workspace:/proj/notebook.ipynb", "workspace:/proj/api/"]);
+    }
+
+    #[test]
+    fn extract_workspace_paths_strips_trailing_punctuation() {
+        let paths = extract_workspace_paths_from_message("Place files in workspace:/out/, workspace:/data.csv.");
+        assert_eq!(paths, vec!["workspace:/out/", "workspace:/data.csv"]);
+    }
+
+    #[test]
+    fn extract_workspace_paths_deduplicates() {
+        let paths = extract_workspace_paths_from_message(
+            "workspace:/proj/file.py and workspace:/proj/file.py again",
+        );
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "workspace:/proj/file.py");
+    }
+
+    #[test]
+    fn extract_workspace_paths_empty_when_no_paths() {
+        let paths = extract_workspace_paths_from_message("Just a plain request with no workspace paths");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn deterministic_fallback_backend_step_has_deliverables_when_workspace_paths_present() {
+        let p = build_deterministic_project_fallback_plan(
+            "Construis un notebook dans workspace:/proj/notebook.ipynb et une API dans workspace:/proj/api/",
+        );
+        let backend = p.steps.iter().find(|s| s.agent_type == "backend").expect("backend step missing");
+        let deliverables = backend.deliverables.as_ref().expect("backend deliverables must be Some");
+        assert!(deliverables.contains(&"workspace:/proj/notebook.ipynb".to_string()));
+        assert!(deliverables.contains(&"workspace:/proj/api/".to_string()));
+    }
+
+    #[test]
+    fn deterministic_fallback_qa_step_has_deliverables_when_workspace_paths_present() {
+        let p = build_deterministic_project_fallback_plan(
+            "Crée un script dans workspace:/scripts/run.py",
+        );
+        let qa = p.steps.iter().find(|s| s.agent_type == "qa").expect("qa step missing");
+        let deliverables = qa.deliverables.as_ref().expect("qa deliverables must be Some");
+        assert!(deliverables.contains(&"workspace:/scripts/run.py".to_string()));
+    }
+
+    #[test]
+    fn deterministic_fallback_no_deliverables_when_no_workspace_paths() {
+        let p = build_deterministic_project_fallback_plan("Build a monitoring API with several deliverables");
+        let backend = p.steps.iter().find(|s| s.agent_type == "backend").expect("backend step missing");
+        // Without explicit workspace:/ paths, deliverables stay None — no false disk checks.
+        assert!(backend.deliverables.is_none());
     }
 }
