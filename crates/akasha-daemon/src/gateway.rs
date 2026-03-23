@@ -105,12 +105,13 @@ impl MessageEnvelope {
 
 /// Single entry point: create task and push to Main Agent from a normalized envelope.
 /// Returns the created task_id on success.
-pub fn handle_envelope(
+pub async fn handle_envelope(
     main_agent: &MainAgent,
     store_path: &Path,
     envelope: MessageEnvelope,
 ) -> anyhow::Result<Uuid> {
-    main_agent.handle_message(
+    main_agent
+        .handle_message(
         store_path,
         &envelope.raw_message,
         Uuid::nil(),
@@ -119,4 +120,5 @@ pub fn handle_envelope(
         envelope.image_data_urls,
         envelope.priority,
     )
+        .await
 }

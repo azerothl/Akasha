@@ -76,12 +76,25 @@ pub fn classify_execution_mode(message: &str) -> ExecutionMode {
         }
     }
 
-    // Direct: single question, lookup, translation, short answer
+    // Direct: single question, lookup, translation, short answer, or conversational
     let direct_patterns = [
         "météo", "meteo", "weather", "traduis", "translate", "définition", "definition",
         "quelle heure", "what time", "résume", "resume", "summarize", "résumé",
         "donne-moi", "donne moi", "give me", "trouve-moi", "trouve moi", "find me",
         "combien", "how much", "how many", "où ", "where ", "quand ", "when ",
+        // Conversational greetings and social queries
+        "salut", "bonjour", "bonsoir", "bonne nuit", "hello", "hi ", "hey ",
+        "ça va", "ca va", "comment vas-tu", "comment tu vas", "comment allez-vous",
+        "how are you", "how r u",
+        // Simple weather phrasing (French)
+        "quel temps", "il fait quel", "il va faire", "temps dehors", "temps aujourd",
+        // Simple agenda / calendar queries
+        "prévu demain", "prévu aujourd", "trucs de prévu", "choses de prévu",
+        "j'ai des trucs", "j'ai des choses", "rendez-vous", "planned for",
+        "do i have", "est-ce que j'ai",
+        // Quick factual / identity questions
+        "c'est quoi", "qu'est-ce que", "qu'est-ce qui", "c'est qui", "who is ", "what is ",
+        "rappelle-moi", "rappelle moi", "remind me",
     ];
     for kw in &direct_patterns {
         if lower.contains(kw) {
@@ -110,9 +123,26 @@ mod tests {
     }
 
     #[test]
+    fn test_direct_conversational() {
+        assert_eq!(classify_execution_mode("salut, ça va ?"), ExecutionMode::Direct);
+        assert_eq!(classify_execution_mode("quel temps il va faire aujourd'hui ?"), ExecutionMode::Direct);
+        assert_eq!(classify_execution_mode("j'ai des trucs de prévu demain ?"), ExecutionMode::Direct);
+        assert_eq!(classify_execution_mode("bonjour, comment vas-tu ?"), ExecutionMode::Direct);
+        assert_eq!(classify_execution_mode("est-ce que j'ai des rendez-vous demain matin ?"), ExecutionMode::Direct);
+    }
+
+    #[test]
     fn test_orchestrated_keywords() {
         assert_eq!(classify_execution_mode("Crée-moi un site web complet avec blog et auth"), ExecutionMode::Orchestrated);
         assert_eq!(classify_execution_mode("Migration de l'application vers le cloud"), ExecutionMode::Orchestrated);
+        // "agenda" as a bare noun in a project request must NOT be treated as Direct.
+        // Use a message long enough (>80 chars) to bypass the short-message fallback.
+        assert_ne!(
+            classify_execution_mode(
+                "Build an agenda application with reminder notifications, recurring events, and calendar sync"
+            ),
+            ExecutionMode::Direct
+        );
     }
 
     #[test]

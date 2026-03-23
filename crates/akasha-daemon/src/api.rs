@@ -37,6 +37,9 @@ fn normalize_apostrophes(s: &str) -> String {
     s.replace('’', "'").replace('‘', "'")
 }
 
+/// Banner injected by `compose_orchestrated_child_message(..., deliverables_required: true)` for subtasks and remediation.
+const ORCH_DISK_DELIVERABLES_MARKER: &str = "[Orchestrated — disk deliverables REQUIRED]";
+
 /// Resolve `workspace:/rel` or a normal filesystem path to a concrete disk path for tools that only call `read_dir` / globs on real paths.
 /// True if path should be read as PDF (text extraction), not as UTF-8/plain text.
 fn path_extension_is_pdf(p: &Path) -> bool {
@@ -518,6 +521,7 @@ pub async fn run_delegation_handler(
                 session_id: String::new(),
                 image_data_urls: None,
                 execution_mode: None,
+                preferred_task_type: None,
             })
             .await
             .is_err()
@@ -676,8 +680,8 @@ pub fn json_response(status: &str, body: &str) -> String {
 /// Format: une ligne par outil "nom — usage".
 /// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
-    ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Pour les fichiers .pdf, le texte est extrait automatiquement (équivalent à pdf <path>) ; ne vous attendez pas au binaire PDF. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
-    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier. Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). TOUJOURS utiliser le chemin et le dossier de sortie EXACTEMENT comme l'utilisateur les a écrits (ex. workspace:/…/expo si l'utilisateur a dit « expo », ne pas substituer « exo » ou un autre nom tiré du PDF). Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel. À UTILISER dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier ; ne jamais refuser ni proposer de copier-coller."),
+    ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Pour les fichiers .pdf, le texte est extrait automatiquement (équivalent à pdf <path>) ; ne vous attendez pas au binaire PDF. Pour les gros fichiers, lire d'abord le fichier puis cibler seulement les sections utiles avec grep_content/search_files avant d'éditer. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
+    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (création/remplacement complet). Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). TOUJOURS utiliser le chemin EXACT fourni par l'utilisateur. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace plutôt que de tout réécrire. Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel."),
     ("search_files", "search_files <dir> <pattern> — chercher des fichiers (glob) sous un répertoire"),
     ("grep_content", "grep_content <dir> <pattern> [file_glob] — chercher le motif dans le contenu des fichiers (ex. grep_content . \"fn \" \"*.rs\")"),
     ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
@@ -728,7 +732,17 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
             AVAILABLE_TOOLS
                 .iter()
                 .filter(move |(name, _)| {
-                    *name == "ask_user" || *name == "install_skill" || *name == "uninstall_skill" || *name == "write_todos" || *name == "merge_todos" || *name == "read_todos" || *name == "update_todo" || *name == "list_skills" || *name == "read_skill" || allowed.iter().any(|a| a == *name)
+                    let always_misc = *name == "ask_user"
+                        || *name == "install_skill"
+                        || *name == "uninstall_skill"
+                        || *name == "write_todos"
+                        || *name == "merge_todos"
+                        || *name == "read_todos"
+                        || *name == "update_todo"
+                        || *name == "list_skills"
+                        || *name == "read_skill";
+                    let in_profile = allowed.iter().any(|a| a == *name);
+                    always_misc || in_profile
                 }),
         )
     } else {
@@ -1505,8 +1519,236 @@ fn split_whitespace_respecting_quotes(s: &str) -> Vec<String> {
     out
 }
 
+/// Strip `- ` / `* ` / `1. ` list prefixes so tool lines can be detected.
+fn strip_optional_list_prefix(line: &str) -> &str {
+    let mut s = line.trim_start();
+    for p in ["- ", "* ", "+ ", "• "] {
+        if let Some(r) = s.strip_prefix(p) {
+            s = r.trim_start();
+            break;
+        }
+    }
+    if s.is_empty() {
+        return s;
+    }
+    if s.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        if let Some(dot) = s.find('.') {
+            if dot > 0 && s[..dot].chars().all(|c| c.is_ascii_digit()) {
+                return s[dot + 1..].trim_start();
+            }
+        }
+    }
+    s
+}
+
+/// Strip ATX heading hashes (`### Title` → `Title`).
+fn strip_markdown_heading_hashes(line: &str) -> &str {
+    let mut s = line.trim_start();
+    let mut n = 0usize;
+    while s.starts_with('#') && n < 7 {
+        n += 1;
+        s = &s[1..];
+    }
+    if n > 0 {
+        s = s.trim_start();
+    }
+    s
+}
+
+/// Leading markdown noise before `TOOL` (table pipes, headings, lists, bold, backticks).
+fn strip_leading_tool_line_noise(line: &str) -> &str {
+    let mut s = line.trim_start();
+    while s.starts_with('|') {
+        s = s[1..].trim_start();
+    }
+    s = strip_markdown_heading_hashes(s);
+    s = strip_optional_list_prefix(s);
+    s = s.trim_start_matches(|c: char| matches!(c, '*' | '`')).trim_start();
+    s
+}
+
+/// True if `prefix` is only whitespace and common markdown punctuation (no letters/words — avoids matching prose before `TOOL:`).
+fn tool_line_prefix_is_markdown_junk_only(prefix: &str) -> bool {
+    prefix.trim().chars().all(|c| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '#' | '*' | '`' | '|' | '•' | '-' | '+' | ':' | '.' | ';' | ',' | '/' | '\\'
+                    | '(' | ')' | '[' | ']'
+            )
+            || c.is_ascii_digit()
+    })
+}
+
+/// First word after `TOOL:` must match a real tool when using the "inline" heuristic (avoids prose `… TOOL: …`).
+const ORCH_INLINE_TOOL_FIRST_WORDS: &[&str] = &[
+    "write_file",
+    "read_file",
+    "edit_file",
+    "search_replace",
+    "apply_patch",
+    "list_dir",
+    "grep_content",
+    "web_search",
+    "web_fetch",
+    "run_command",
+    "browser",
+    "read_skill",
+    "memory_store",
+    "device_invoke",
+    "ask_user",
+    "generate_image",
+    "pdf",
+];
+
+/// `### Step — TOOL: write_file`, table junk, or other lines where `TOOL:` is not at column 0 after strips.
+fn inline_ascii_tool_colon_rest(line: &str) -> Option<&str> {
+    let t = line.trim();
+    let mut search = t;
+    let mut last_ok: Option<&str> = None;
+    while let Some(pos) = search.find("TOOL:") {
+        let abs = t.len() - search.len() + pos;
+        let prefix = &t[..abs];
+        let rest = t[abs + 5..].trim_start();
+        if let Some(tok) = rest.split_whitespace().next() {
+            let tl = tok.to_lowercase();
+            if ORCH_INLINE_TOOL_FIRST_WORDS
+                .iter()
+                .any(|&n| n == tl.as_str())
+            {
+                if tool_line_prefix_is_markdown_junk_only(prefix) {
+                    last_ok = Some(rest);
+                }
+            }
+        }
+        search = &t[abs + 5..];
+    }
+    last_ok
+}
+
+/// If the line begins with `tool` (case-insensitive) as a keyword followed by optional `*` / `` ` `` and `:`, return the rest.
+/// Handles models that emit `- Tool:`, `**TOOL:**`, table cells `| TOOL: ... |`, etc., when substring `TOOL:` is present but strict parse failed.
+fn line_rest_after_leading_tool(line: &str) -> Option<&str> {
+    line_rest_after_leading_tool_at_start(line).or_else(|| inline_ascii_tool_colon_rest(line))
+}
+
+fn line_rest_after_leading_tool_at_start(line: &str) -> Option<&str> {
+    let s = strip_leading_tool_line_noise(line);
+    if s.len() < 4 {
+        return None;
+    }
+    if !s.get(0..4)?.eq_ignore_ascii_case("tool") {
+        return None;
+    }
+    // Reject `tools:` / `toolkit:` — fifth char must not be ASCII letter.
+    if s
+        .as_bytes()
+        .get(4)
+        .is_some_and(|b| b.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    let mut rest = &s[4..];
+    rest = rest.trim_start();
+    while rest.starts_with('*') || rest.starts_with('`') {
+        rest = &rest[1..];
+    }
+    rest = rest.strip_prefix(':')?;
+    rest = rest.trim_start();
+    while rest.starts_with('*') || rest.starts_with('`') {
+        rest = &rest[1..];
+    }
+    // Drop trailing table pipe from first cell
+    let rest = rest.trim_end();
+    let rest = rest.strip_suffix('|').map(|x| x.trim_end()).unwrap_or(rest);
+    Some(rest.trim_start())
+}
+
+/// Returns true if `tool_name` (already lower-cased) takes a multiline body argument.
+fn tool_supports_multiline_body(tool_name: &str) -> bool {
+    matches!(tool_name, "apply_patch" | "edit_file" | "write_file" | "ask_user")
+}
+
+/// Rewrite lines so strict `TOOL:` prefix parsing succeeds (see `parse_tool_calls`).
+///
+/// Lines that are inside the body of a multiline tool (`write_file`, `edit_file`,
+/// `apply_patch`, `ask_user`) are **not** normalized — only a real tool header
+/// (canonical `TOOL: …` or a sloppy markdown-style prefix recognized by
+/// `line_rest_after_leading_tool`, e.g. `- Tool: …` or `**TOOL:** …`) can
+/// terminate a body.  Lines that merely *mention* a tool mid-sentence
+/// (e.g. `### Step — TOOL: read_file`) remain body content because
+/// `line_rest_after_leading_tool` requires the keyword to appear at the effective
+/// start of the line after stripping markdown noise.
+fn normalize_response_tool_prefixes(response: &str) -> String {
+    let mut in_fence = false;
+    let mut in_multiline_body = false;
+    let mut out_lines = Vec::new();
+
+    for raw in response.lines() {
+        let trimmed = raw.trim();
+
+        // Track fenced code blocks (``` or ```lang) — never normalize inside them.
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            out_lines.push(raw.to_string());
+            continue;
+        }
+
+        if in_fence {
+            out_lines.push(raw.to_string());
+            continue;
+        }
+
+        // Inside a multiline body, exit body mode only when the line is a real
+        // tool header — either the canonical "TOOL: …" form or a sloppy
+        // markdown-style prefix that `line_rest_after_leading_tool` recognises
+        // (e.g. "- Tool: …", "**TOOL:** …").  Lines where TOOL: is embedded
+        // after non-noise text (e.g. "### Step — TOOL: read_file") are kept as
+        // body content because `line_rest_after_leading_tool` requires the
+        // keyword at the effective start of the line.
+        if in_multiline_body {
+            if raw.trim_start().starts_with("TOOL:") || line_rest_after_leading_tool(raw).is_some() {
+                // Real tool header (canonical or sloppy) — exit body mode and fall through.
+                in_multiline_body = false;
+            } else {
+                out_lines.push(raw.to_string());
+                continue;
+            }
+        }
+
+        if let Some(rest) = line_rest_after_leading_tool(raw) {
+            let normalized = format!("TOOL: {}", rest);
+            // If this tool supports a multiline body, subsequent lines are body content.
+            if let Some(name) = rest.split_whitespace().next() {
+                if tool_supports_multiline_body(&name.to_lowercase()) {
+                    in_multiline_body = true;
+                }
+            }
+            out_lines.push(normalized);
+        } else {
+            // Already canonical TOOL: line — still need to track body-mode entry.
+            if let Some(rest) = trimmed.strip_prefix("TOOL:") {
+                if let Some(name) = rest.trim().split_whitespace().next() {
+                    if tool_supports_multiline_body(&name.to_lowercase()) {
+                        in_multiline_body = true;
+                    }
+                }
+            }
+            out_lines.push(raw.to_string());
+        }
+    }
+
+    out_lines.join("\n")
+}
+
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
 fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
+    let normalized = normalize_response_tool_prefixes(response);
+    parse_tool_calls_strict(&normalized)
+}
+
+/// Parse already-normalized tool lines (internal).
+fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
     let lines: Vec<&str> = response.lines().collect();
     let mut i = 0;
@@ -1520,10 +1762,7 @@ fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
                 let mut args = fixed_args.to_vec();
                 // Only certain tools support a multi-line body argument.
                 let tool_name_lc = name.to_lowercase();
-                let supports_body = matches!(
-                    tool_name_lc.as_str(),
-                    "apply_patch" | "edit_file" | "write_file" | "ask_user"
-                );
+                let supports_body = tool_supports_multiline_body(&tool_name_lc);
 
                 if supports_body {
                     // Collect subsequent non-TOOL: lines as a raw multi-line body (for
@@ -1628,7 +1867,94 @@ fn parse_device_invoke_params(args: &[String]) -> serde_json::Value {
     }
 }
 
-/// Execute one tool call via ToolExecutor. Returns `(success, display_string)` for structured events.
+/// Root task id for the `workspace:/` virtual store (same bucket as `write_file`).
+/// Orchestrated children must read the lineage root map; otherwise they miss files written under the parent id.
+fn workspace_lineage_root_task_id(task_id: Uuid, store_path: Option<&std::path::Path>) -> Uuid {
+    store_path
+        .and_then(|sp| TaskStore::open(sp).ok())
+        .map(|s| {
+            let mut current = task_id;
+            for _ in 0..8 {
+                let parent = s
+                    .get(current)
+                    .ok()
+                    .flatten()
+                    .and_then(|t| t.parent_task_id);
+                match parent {
+                    Some(p) => current = p,
+                    None => break,
+                }
+            }
+            current
+        })
+        .unwrap_or(task_id)
+}
+
+/// LLMs often paste a **stale** root id into `workspace:/.akasha/plan_<uuid>.md` (e.g. from an older run).
+/// Rewrite to this task's lineage root so reads/writes target the live orchestration plan.
+fn rewrite_workspace_plan_key_to_lineage_root(key: &str, lineage_root: Uuid) -> (String, Option<Uuid>) {
+    const PREFIX: &str = ".akasha/plan_";
+    const SUFFIX: &str = ".md";
+    let k = key.replace('\\', "/");
+    if !k.starts_with(PREFIX) || !k.ends_with(SUFFIX) {
+        return (key.to_string(), None);
+    }
+    let mid = &k[PREFIX.len()..k.len() - SUFFIX.len()];
+    let Ok(parsed) = Uuid::parse_str(mid) else {
+        return (key.to_string(), None);
+    };
+    if parsed == lineage_root {
+        return (k, None);
+    }
+    let new_key = format!("{PREFIX}{lineage_root}{SUFFIX}");
+    (new_key, Some(parsed))
+}
+
+/// Rewrite a full `workspace:/...` path string so that any stale plan UUID is replaced by the
+/// lineage-root UUID.  Non-workspace paths and non-plan-trace paths are returned unchanged.
+/// Used before calling `resolve_tool_disk_path` for partial-edit tools (`search_replace`,
+/// `edit_file`, `apply_patch`) so they operate on the live plan file rather than a stale copy.
+fn rewrite_workspace_plan_path_str(
+    path_str: &str,
+    task_id: Uuid,
+    store_path: Option<&std::path::Path>,
+) -> String {
+    if !(path_str.starts_with("workspace:/") || path_str.starts_with("workspace:")) {
+        return path_str.to_string();
+    }
+    let key = path_str
+        .trim_start_matches("workspace:/")
+        .trim_start_matches("workspace:")
+        .trim_start_matches('/');
+    let lineage_id = workspace_lineage_root_task_id(task_id, store_path);
+    let (new_key, _) = rewrite_workspace_plan_key_to_lineage_root(key, lineage_id);
+    format!("workspace:/{new_key}")
+}
+
+/// After a successful partial edit (`edit_file`, `search_replace`, `apply_patch`) on a `workspace:/` path,
+/// re-read the updated disk file and insert it into the in-memory workspace store so that subsequent
+/// `read_file workspace:/` calls return the latest content.
+async fn sync_workspace_store_from_disk(
+    workspace_store: Option<&TaskWorkspaceStore>,
+    task_id: Uuid,
+    store_path: Option<&std::path::Path>,
+    workspace_path_str: &str,
+    disk_path: &std::path::Path,
+) {
+    let Some(ws) = workspace_store else { return };
+    let key = workspace_path_str
+        .trim_start_matches("workspace:/")
+        .trim_start_matches("workspace:")
+        .trim_start_matches('/')
+        .to_string();
+    let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
+    let (key, _) = rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
+    if let Ok(updated) = tokio::fs::read_to_string(disk_path).await {
+        let mut guard = ws.write().await;
+        guard.entry(lineage_task_id).or_default().insert(key, updated);
+    }
+}
+
 async fn execute_tool_call(
     executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
     tool_name: &str,
@@ -1665,12 +1991,35 @@ async fn execute_tool_call(
                     .trim_start_matches('/')
                     .to_string();
                 let key = normalize_apostrophes(&key);
+                let lineage_id = workspace_lineage_root_task_id(task_id, store_path);
+                let (key, _) = rewrite_workspace_plan_key_to_lineage_root(&key, lineage_id);
                 if let Some(ws) = workspace_store {
                     let guard = ws.read().await;
-                    if let Some(map) = guard.get(&task_id) {
+                    // Prefer lineage root (where write_file stores); fall back to this task id.
+                    let mem_map = guard
+                        .get(&lineage_id)
+                        .or_else(|| guard.get(&task_id));
+                    if let Some(map) = mem_map {
                         if let Some(content) = map.get(&key) {
-                            let preview = if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] };
-                            return (true, format!("[read_file workspace:{}] {} chars: {}", key, content.len(), preview), None);
+                            // Empty in-memory entry must not mask the real file on disk (orchestrator
+                            // writes `.akasha/plan_*.md` with tokio::fs, not via this map).
+                            if !content.is_empty() {
+                                let preview = if content.len() <= 500 {
+                                    content.as_str()
+                                } else {
+                                    &content[..content.floor_char_boundary(500)]
+                                };
+                                return (
+                                    true,
+                                    format!(
+                                        "[read_file workspace:{}] {} chars: {}",
+                                        key,
+                                        content.len(),
+                                        preview
+                                    ),
+                                    None,
+                                );
+                            }
                         }
                     }
                 } else {
@@ -2105,6 +2454,7 @@ async fn execute_tool_call(
                                     session_id: sid,
                                     image_data_urls: None,
                                     execution_mode: None,
+                                    preferred_task_type: None,
                                 })
                                 .await
                                 .is_err()
@@ -2375,10 +2725,31 @@ async fn execute_tool_call(
                                 .trim_start_matches("workspace:")
                                 .trim_start_matches('/')
                                 .to_string();
+                            let mut key = key.trim().trim_matches('`').trim_matches('"').to_string();
+                            if key.ends_with('#') {
+                                key.pop();
+                            }
+                            let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
+                            let (key, _) =
+                                rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
                             let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
                             let mut guard = ws.write().await;
-                            let per_task = guard.entry(task_id).or_default();
-                            per_task.insert(key.clone(), content.clone());
+                            let per_task = guard.entry(lineage_task_id).or_default();
+                            let previous_mem = per_task.get(&key).cloned().unwrap_or_default();
+                            // Only prefer the longer previous content for plan-trace files
+                            // (.akasha/plan_*.md) where provider truncation is a known risk.
+                            // For all other files, always use the new content so legitimate
+                            // shortening edits (e.g. removing placeholder sections) are honoured.
+                            let is_plan_trace = key.starts_with(".akasha/plan_") && key.ends_with(".md");
+                            let effective_content = if is_plan_trace
+                                && !previous_mem.is_empty()
+                                && content.chars().count() < previous_mem.chars().count()
+                            {
+                                previous_mem.clone()
+                            } else {
+                                content.clone()
+                            };
+                            per_task.insert(key.clone(), effective_content.clone());
                             drop(guard);
                             // Also write to disk under data_dir (workspace root = store_path.parent())
                             let rel_path = Path::new(&key);
@@ -2390,7 +2761,7 @@ async fn execute_tool_call(
                                     if let Some(parent) = disk_path.parent() {
                                         let _ = tokio::fs::create_dir_all(parent).await;
                                     }
-                                    if tokio::fs::write(&disk_path, &content).await.is_ok() {
+                                    if tokio::fs::write(&disk_path, &effective_content).await.is_ok() {
                                         return (true, format!("[write_file workspace:{}] saved (disk).", key), None);
                                     }
                                 }
@@ -2419,7 +2790,14 @@ async fn execute_tool_call(
             }
         }
         "search_replace" => {
-            let path = path_arg(0);
+            let path_str = match args.get(0) {
+                Some(s) => s.as_str(),
+                None => return (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None),
+            };
+            let is_workspace = path_str.starts_with("workspace:/") || path_str.starts_with("workspace:");
+            let path_str_rewritten = rewrite_workspace_plan_path_str(path_str, task_id, store_path);
+            let path_str = path_str_rewritten.as_str();
+            let disk_path = resolve_tool_disk_path(path_str, workspace_root);
             let rest = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
             let Some((search, replace)) = rest
                 .split_once('|')
@@ -2427,76 +2805,92 @@ async fn execute_tool_call(
             else {
                 return (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None);
             };
-            match path {
-                Some(p) => match executor.search_replace(p, &search, &replace).await {
-                    Ok(res) => {
-                        let msg = if res.success {
-                            format!("[search_replace {}] {}", p.display(), res.summary)
-                        } else {
-                            format!("[search_replace] {}", res.summary)
-                        };
-                        (res.success, msg, None)
+            match executor.search_replace(&disk_path, &search, &replace).await {
+                Ok(res) => {
+                    if res.success && is_workspace {
+                        sync_workspace_store_from_disk(workspace_store, task_id, store_path, path_str, &disk_path).await;
                     }
-                    Err(e) => (false, format!("[search_replace] error: {}", e), None),
-                },
-                None => (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None),
+                    let msg = if res.success {
+                        format!("[search_replace {}] {}", disk_path.display(), res.summary)
+                    } else {
+                        format!("[search_replace] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[search_replace] error: {}", e), None),
             }
         }
         "edit_file" => {
-            let path = path_arg(0);
+            let path_str = match args.get(0) {
+                Some(s) => s.as_str(),
+                None => return (false, "[edit_file] usage: edit_file <path> <start_line> <end_line> <new_content>".to_string(), None),
+            };
+            let is_workspace = path_str.starts_with("workspace:/") || path_str.starts_with("workspace:");
+            let path_str_rewritten = rewrite_workspace_plan_path_str(path_str, task_id, store_path);
+            let path_str = path_str_rewritten.as_str();
+            let disk_path = resolve_tool_disk_path(path_str, workspace_root);
             let start_line = args.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
             let end_line = args.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
             let new_content = args.get(3..).map(|a| a.join("\n")).unwrap_or_default();
-            match path {
-                Some(p) => match executor.edit_file(p, start_line, end_line, &new_content).await {
-                    Ok(res) => {
-                        let msg = if res.success {
-                            format!("[edit_file {}] {}", p.display(), res.summary)
-                        } else {
-                            format!("[edit_file] {}", res.summary)
-                        };
-                        (res.success, msg, None)
+            match executor.edit_file(&disk_path, start_line, end_line, &new_content).await {
+                Ok(res) => {
+                    if res.success && is_workspace {
+                        sync_workspace_store_from_disk(workspace_store, task_id, store_path, path_str, &disk_path).await;
                     }
-                    Err(e) => (false, format!("[edit_file] error: {}", e), None),
-                },
-                None => (false, "[edit_file] usage: edit_file <path> <start_line> <end_line> <new_content>".to_string(), None),
+                    let msg = if res.success {
+                        format!("[edit_file {}] {}", disk_path.display(), res.summary)
+                    } else {
+                        format!("[edit_file] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[edit_file] error: {}", e), None),
             }
         }
         "apply_patch" => {
-            let path = path_arg(0);
+            let path_str = match args.get(0) {
+                Some(s) => s.as_str(),
+                None => return (false, "[apply_patch] usage: apply_patch <path> <patch_content>".to_string(), None),
+            };
+            let is_workspace = path_str.starts_with("workspace:/") || path_str.starts_with("workspace:");
+            let path_str_rewritten = rewrite_workspace_plan_path_str(path_str, task_id, store_path);
+            let path_str = path_str_rewritten.as_str();
+            let disk_path = resolve_tool_disk_path(path_str, workspace_root);
             let patch_content = args.get(1..).map(|a| a.join("\n")).unwrap_or_default();
-            match path {
-                Some(p) => match executor.apply_patch(p, &patch_content).await {
-                    Ok(res) => {
-                        let msg = if res.success {
-                            format!("[apply_patch {}] {}", p.display(), res.summary)
-                        } else {
-                            format!("[apply_patch] {}", res.summary)
-                        };
-                        (res.success, msg, None)
+            match executor.apply_patch(&disk_path, &patch_content).await {
+                Ok(res) => {
+                    if res.success && is_workspace {
+                        sync_workspace_store_from_disk(workspace_store, task_id, store_path, path_str, &disk_path).await;
                     }
-                    Err(e) => (false, format!("[apply_patch] error: {}", e), None),
-                },
-                None => (false, "[apply_patch] usage: apply_patch <path> <patch_content>".to_string(), None),
+                    let msg = if res.success {
+                        format!("[apply_patch {}] {}", disk_path.display(), res.summary)
+                    } else {
+                        format!("[apply_patch] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[apply_patch] error: {}", e), None),
             }
         }
         "file_diff" => {
-            let path_a = path_arg(0);
-            let path_b = path_arg(1);
-            match (path_a, path_b) {
-                (Some(a), Some(b)) => match executor.file_diff(a, b).await {
-                    Ok((diff, res)) => {
-                        let msg = if res.success {
-                            let preview = if diff.len() <= 400 { diff.as_str() } else { &diff[..diff.floor_char_boundary(400)] };
-                            format!("[file_diff] {} — {}", res.summary, preview)
-                        } else {
-                            format!("[file_diff] {}", res.summary)
-                        };
-                        (res.success, msg, None)
-                    }
-                    Err(e) => (false, format!("[file_diff] error: {}", e), None),
-                },
-                _ => (false, "[file_diff] usage: file_diff <path_a> <path_b>".to_string(), None),
+            let path_a_str = args.get(0).map(String::as_str).unwrap_or("");
+            let path_b_str = args.get(1).map(String::as_str).unwrap_or("");
+            if path_a_str.is_empty() || path_b_str.is_empty() {
+                return (false, "[file_diff] usage: file_diff <path_a> <path_b>".to_string(), None);
+            }
+            let disk_a = resolve_tool_disk_path(path_a_str, workspace_root);
+            let disk_b = resolve_tool_disk_path(path_b_str, workspace_root);
+            match executor.file_diff(&disk_a, &disk_b).await {
+                Ok((diff, res)) => {
+                    let msg = if res.success {
+                        let preview = if diff.len() <= 400 { diff.as_str() } else { &diff[..diff.floor_char_boundary(400)] };
+                        format!("[file_diff] {} — {}", res.summary, preview)
+                    } else {
+                        format!("[file_diff] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[file_diff] error: {}", e), None),
             }
         }
         "web_fetch" => {
@@ -3117,6 +3511,8 @@ pub(crate) async fn run_message_via_llm(
         .and_then(|t| t.parent_task_id)
         .unwrap_or(task_id);
 
+    let orch_disk_deliverables = message.contains(ORCH_DISK_DELIVERABLES_MARKER);
+
     let tools_executor_snapshot = match &tools_executor {
         Some(r) => Some((*r.read().await).clone()),
         None => None,
@@ -3159,6 +3555,18 @@ pub(crate) async fn run_message_via_llm(
                 let mut list = list.clone();
                 list.push("run_command".to_string());
                 allowed_tools = Some(list);
+            }
+        }
+        if orch_disk_deliverables {
+            if let Some(ref list) = allowed_tools {
+                if !list.iter().any(|t| t == "write_file") {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        "Orchestrated deliverables: tools_policy default_profile omits write_file; \
+                         workspace file tools will NOT be advertised to the model — add write_file \
+                         (and other file tools) to the profile to enable disk deliverables."
+                    );
+                }
             }
         }
         let base = available_tools_instruction(allowed_tools.as_deref());
@@ -3432,11 +3840,23 @@ pub(crate) async fn run_message_via_llm(
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(10);
+    // Orchestrated subtasks / remediation: extra tool rounds (models often read/search first).
+    if orch_disk_deliverables {
+        let floor = std::env::var("AKASHA_MAX_TOOL_ROUNDS_ORCH_DELIVERABLES")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(24);
+        if max_tool_rounds < floor {
+            max_tool_rounds = floor;
+        }
+    }
     let mut round = 0u32;
     let mut social_snapshot_seen = false;
     let mut tool_loop_history: Vec<(String, String)> = Vec::new();
     let mut last_tool_results_blob: Option<String> = None;
     let mut force_synthesis_attempted = false;
+    // Orchestrated deliverables: re-prompts when the model returns no parseable TOOL lines.
+    let mut orch_disk_write_nags = 0u32;
     let mut last_captured_image_base64: Option<String> = None;
     let mut last_llm_model_used: Option<String> = None;
 
@@ -3593,18 +4013,32 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
         };
-        if !accumulated.is_empty() && response.is_empty() {
-            // Stream sent chunks but final response empty; use accumulated
-            reply_text = accumulated.trim().to_string();
-            break;
-        }
+        // Some providers return the full text only in stream chunks while `resp.text` is empty, or drop `TOOL:` lines
+        // from the final body. Parsing tools only from `resp.text` then skips execution entirely (user sees text, no disk writes).
+        // Use `parse_tool_calls` (which normalizes sloppy prefixes like `- Tool:` / `**TOOL:**`) instead of a raw
+        // `contains("TOOL:")` check so that any provider-specific formatting is handled consistently.
+        let r = response.trim();
+        let a = accumulated.trim();
+        let a_has_tools = !a.is_empty() && !parse_tool_calls(a).is_empty();
+        let r_has_tools = !r.is_empty() && !parse_tool_calls(r).is_empty();
+        let merged_for_tools = if r.is_empty() && !a.is_empty() {
+            a.to_string()
+        } else if a_has_tools && !r_has_tools {
+            a.to_string()
+        } else if !r.is_empty() {
+            r.to_string()
+        } else {
+            a.to_string()
+        };
+        let response = merged_for_tools;
 
-        let tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
+        let parsed_tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
             let calls = parse_tool_calls(&response);
             if calls.is_empty() { None } else { Some(calls) }
         });
+        let no_parseable_tools_this_round = parsed_tool_calls.is_none();
 
-        if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), tool_calls) {
+        if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls) {
             round += 1;
             let mut tool_results = Vec::new();
             for (name, args) in &calls {
@@ -4264,6 +4698,37 @@ pub(crate) async fn run_message_via_llm(
                 continue;
             }
             continue;
+        }
+
+        // When the model returns prose / JSON only, this loop would exit with zero tool rounds — UI shows an
+        // answer but nothing is written. For orchestrated disk deliverables, nudge additional LLM rounds until
+        // a write-like tool appears in history. Only nag when the active policy actually permits write tools;
+        // if the profile blocks them the nudge would just churn through "tool not allowed" errors.
+        const MAX_ORCH_DISK_WRITE_NAGS: u32 = 8;
+        if orch_disk_deliverables
+            && tools_executor_snapshot.is_some()
+            && no_parseable_tools_this_round
+        {
+            let policy_allows_write = tools_executor_snapshot
+                .as_ref()
+                .map(|e| e.policy.can_use_tool("write_file"))
+                .unwrap_or(false);
+            if policy_allows_write {
+                let disk_write_attempted = tool_loop_history.iter().any(|(t, _)| {
+                    matches!(
+                        t.as_str(),
+                        "write_file" | "edit_file" | "search_replace" | "apply_patch"
+                    )
+                });
+                if !disk_write_attempted && orch_disk_write_nags < MAX_ORCH_DISK_WRITE_NAGS {
+                    orch_disk_write_nags += 1;
+                    current_prompt = format!(
+                        "{}\n\n[Orchestrator — disk deliverables] Your last assistant message did not include any executable TOOL: lines (or they were not parsed). This step MUST call tools: use TOOL: read_file on the shared plan trace if needed, then TOOL: write_file / edit_file / search_replace for every mandatory workspace path and update the plan sections **Fait (agent)** / **Reste (agent)**. Do not finish with prose-only or ```json``` — emit TOOL lines now.",
+                        current_prompt
+                    );
+                    continue;
+                }
+            }
         }
 
         let response_for_user = response
@@ -5476,23 +5941,8 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
-    // GET /api/plugins — list loaded skills/plugins (Phase 6 AI OS cockpit).
-    if method == "GET" && path == "/api/plugins" {
-        let list: Vec<serde_json::Value> = skill_registry
-            .list()
-            .await
-            .into_iter()
-            .map(|s| {
-                serde_json::json!({
-                    "name": s.name,
-                    "description": s.description,
-                    "parameters": s.parameters,
-                })
-            })
-            .collect();
-        let body_json = serde_json::json!({ "plugins": list });
-        return json_response("200 OK", &body_json.to_string());
-    }
+    // GET /api/plugins — voir plus bas (Phase 5 PluginRegistry) : tableau JSON pour CLI/Tauri/TUI.
+    // Les skills chargeables pour agents sont sur GET /api/skills (pas de doublon ici).
 
     // GET /api/doctor — health checks from daemon (for slash /doctor)
     if method == "GET" && path == "/api/doctor" {
@@ -5842,7 +6292,7 @@ pub async fn handle_api(
         // Build acknowledgment message before moving `message` into the envelope.
         let ack_message = build_ack_message(&message);
         let envelope = crate::gateway::MessageEnvelope::api(session_id.clone(), message, image_data_urls, priority);
-        match crate::gateway::handle_envelope(main_agent, store_path, envelope) {
+        match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
             Ok(task_id) => {
                 let body = serde_json::json!({
                     "ack": true,
@@ -7248,8 +7698,11 @@ mod tests {
         agent_role_system_prompt, build_image_markdown, ensure_no_open_code_block,
         is_pausable, is_resumable,
         message_suggests_tool_only_action, parse_content_length, parse_device_invoke_params,
+        parse_tool_calls, rewrite_workspace_plan_key_to_lineage_root,
+        rewrite_workspace_plan_path_str,
     };
     use akasha_store::TaskStatus;
+    use uuid::Uuid;
 
     #[test]
     fn parse_content_length_returns_header_end_and_content_length() {
@@ -7337,6 +7790,267 @@ mod tests {
     fn tool_only_action_false_when_code_intent_dominates() {
         // Explicit code request even if it mentions photo → do not override to conversation
         assert!(!message_suggests_tool_only_action("écris un script qui prend une photo"));
+    }
+
+    // --- parse_tool_calls (normalized markdown / list TOOL lines) ---
+
+    #[test]
+    fn parse_tool_calls_markdown_list_and_title_case_tool() {
+        let s = "- Tool: write_file workspace:/out.md hello world";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, "write_file");
+        assert!(c[0].1[0].contains("workspace:"), "{:?}", c[0].1);
+    }
+
+    #[test]
+    fn parse_tool_calls_bold_wrapped_tool_keyword() {
+        let s = "**TOOL:** write_file workspace:/x.md\nhello block";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, "write_file");
+        assert_eq!(c[0].1[0], "workspace:/x.md");
+        assert_eq!(c[0].1[1], "hello block");
+    }
+
+    #[test]
+    fn parse_tool_calls_table_cell_with_leading_pipe() {
+        let s = "| TOOL: read_file workspace:/plan.md |";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, "read_file");
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_tools_plain_word() {
+        let s = "tools: hammer and nail";
+        let c = parse_tool_calls(s);
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_calls_heading_then_tool_on_same_line() {
+        let s = "### Step 4 — TOOL: write_file workspace:/out.md hello";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, "write_file");
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_tool_in_long_prose_line() {
+        let s = "According to the documentation and the specification we note that TOOL: write_file workspace:/x y";
+        let c = parse_tool_calls(s);
+        assert!(
+            c.is_empty(),
+            "long alphabetic prefix before TOOL: must not become a false tool call"
+        );
+    }
+
+    // After the fix, sloppy "- Tool: …" headers DO terminate multiline bodies.
+    // A line like "- Tool: read_file …" inside a body is treated as the start of a new tool call.
+    #[test]
+    fn parse_tool_calls_sloppy_header_terminates_multiline_body() {
+        // write_file body is ended when "- Tool: read_file …" appears — new tool starts.
+        let s = "TOOL: write_file workspace:/docs/tools.md\n# Available tools\n\n- Tool: read_file — reads a file\n- Tool: write_file — writes a file\n\nEnd of list";
+        let c = parse_tool_calls(s);
+        // The "- Tool: read_file" line terminates the write_file body and starts a new call.
+        assert!(c.len() >= 2, "expected at least 2 tool calls, got {:?}", c);
+        assert_eq!(c[0].0, "write_file");
+        // The write_file body ends just before "- Tool: read_file …".
+        let body = &c[0].1[1];
+        assert!(
+            !body.contains("End of list"),
+            "write_file body should be truncated at the sloppy header, got: {:?}",
+            body
+        );
+        // The second call should be read_file (started by the sloppy header).
+        assert_eq!(c[1].0, "read_file");
+    }
+
+    #[test]
+    fn parse_tool_calls_body_with_heading_tool_mention_not_truncated() {
+        // edit_file body contains "### Step — TOOL: read_file …" — must NOT split here.
+        let s = "- Tool: edit_file workspace:/spec.md\n### Step — TOOL: read_file some args\nmore content\nTOOL: read_file workspace:/next.md";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 2, "expected edit_file + read_file, got {:?}", c);
+        assert_eq!(c[0].0, "edit_file");
+        let body = &c[0].1[1];
+        assert!(
+            body.contains("### Step — TOOL: read_file"),
+            "body should contain the heading tool mention verbatim, got: {:?}",
+            body
+        );
+        assert_eq!(c[1].0, "read_file");
+    }
+
+    #[test]
+    fn parse_tool_calls_body_terminated_by_canonical_tool_line() {
+        // After a body-supporting tool, a canonical TOOL: line correctly ends the body.
+        let s = "TOOL: write_file workspace:/a.txt\nsome content\nTOOL: read_file workspace:/b.txt";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].0, "write_file");
+        assert_eq!(c[1].0, "read_file");
+    }
+
+
+    #[test]
+    fn parse_tool_calls_sloppy_provider_all_headers_after_multiline_tool() {
+        // Providers that always emit sloppy "- Tool: …" headers must not lose tool calls
+        // that come after a multiline-body tool (write_file / edit_file / apply_patch).
+        let s = concat!(
+            "- Tool: write_file workspace:/out.txt\n",
+            "hello content\n",
+            "- Tool: read_file workspace:/in.txt\n",
+            "- Tool: list_dir workspace:/\n",
+        );
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 3, "expected write_file + read_file + list_dir, got {:?}", c);
+        assert_eq!(c[0].0, "write_file");
+        assert_eq!(c[1].0, "read_file");
+        assert_eq!(c[2].0, "list_dir");
+    }
+
+    #[test]
+    fn parse_tool_calls_bold_sloppy_provider_after_multiline_tool() {
+        // "**TOOL:** …" style also terminates a multiline body.
+        let s = concat!(
+            "**TOOL:** write_file workspace:/out.txt\n",
+            "some generated content\n",
+            "**TOOL:** read_file workspace:/plan.md\n",
+        );
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 2, "expected write_file + read_file, got {:?}", c);
+        assert_eq!(c[0].0, "write_file");
+        assert_eq!(c[1].0, "read_file");
+    }
+
+    // --- merged_for_tools selection logic ---
+    // These tests mirror the merge branch `a_has_tools && !r_has_tools`
+    // introduced to fix the sloppy-prefix streaming case.
+
+    /// Helper that reproduces the merge logic from `run_message_via_llm`.
+    fn merged_for_tools(response_text: &str, accumulated: &str) -> String {
+        let r = response_text.trim();
+        let a = accumulated.trim();
+        let a_has_tools = !a.is_empty() && !parse_tool_calls(a).is_empty();
+        let r_has_tools = !r.is_empty() && !parse_tool_calls(r).is_empty();
+        if r.is_empty() && !a.is_empty() {
+            a.to_string()
+        } else if a_has_tools && !r_has_tools {
+            a.to_string()
+        } else if !r.is_empty() {
+            r.to_string()
+        } else {
+            a.to_string()
+        }
+    }
+
+    #[test]
+    fn merge_prefers_accumulated_when_streamed_has_title_case_tool_and_resp_does_not() {
+        // Provider streams `- Tool: write_file …` but the final body omits tool lines.
+        let accumulated = "- Tool: write_file workspace:/out.md hello";
+        let resp_text = "I will write the file for you.";
+        let merged = merged_for_tools(resp_text, accumulated);
+        assert_eq!(merged, accumulated);
+        // The merged string must still parse as a tool call.
+        let calls = parse_tool_calls(&merged);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "write_file");
+    }
+
+    #[test]
+    fn merge_prefers_accumulated_when_streamed_has_bold_tool_and_resp_does_not() {
+        // Provider streams `**TOOL:** write_file …` but the final body is plain text.
+        let accumulated = "**TOOL:** write_file workspace:/x.md\nhello block";
+        let resp_text = "Here is your file.";
+        let merged = merged_for_tools(resp_text, accumulated);
+        assert_eq!(merged, accumulated);
+        let calls = parse_tool_calls(&merged);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "write_file");
+    }
+
+    #[test]
+    fn merge_uses_resp_text_when_both_have_tool_calls() {
+        // When both accumulated and resp_text have parseable tool calls, prefer resp_text (the
+        // final body is authoritative as long as it contains tools).
+        let accumulated = "TOOL: write_file workspace:/a.txt\nfoo";
+        let resp_text = "TOOL: write_file workspace:/b.txt\nbar";
+        let merged = merged_for_tools(resp_text, accumulated);
+        assert_eq!(merged, resp_text);
+    }
+
+    #[test]
+    fn merge_uses_resp_text_when_accumulated_has_no_tool_calls() {
+        // If the streamed chunk contains no parseable tools at all, use resp_text.
+        let accumulated = "Thinking about what to do…";
+        let resp_text = "TOOL: read_file workspace:/plan.md";
+        let merged = merged_for_tools(resp_text, accumulated);
+        assert_eq!(merged, resp_text);
+    }
+
+    // --- rewrite_workspace_plan_key_to_lineage_root ---
+
+    #[test]
+    fn rewrite_plan_key_stale_uuid_rewritten_to_lineage_root() {
+        let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
+        let stale = Uuid::parse_str("216364b2-9308-47a7-9c2b-1c3b84c55c8c").unwrap();
+        let (k, bad) = rewrite_workspace_plan_key_to_lineage_root(
+            &format!(".akasha/plan_{stale}.md"),
+            root,
+        );
+        assert_eq!(bad, Some(stale));
+        assert_eq!(k, format!(".akasha/plan_{root}.md"));
+    }
+
+    #[test]
+    fn rewrite_plan_key_matching_root_unchanged() {
+        let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
+        let (k, bad) = rewrite_workspace_plan_key_to_lineage_root(&format!(".akasha/plan_{root}.md"), root);
+        assert!(bad.is_none());
+        assert_eq!(k, format!(".akasha/plan_{root}.md"));
+    }
+
+    #[test]
+    fn rewrite_plan_key_non_plan_paths_passthrough() {
+        let root = Uuid::nil();
+        let (k, bad) = rewrite_workspace_plan_key_to_lineage_root("certification_ai/exo/x.md", root);
+        assert!(bad.is_none());
+        assert_eq!(k, "certification_ai/exo/x.md");
+    }
+
+    // --- rewrite_workspace_plan_path_str ---
+
+    #[test]
+    fn rewrite_workspace_plan_path_str_stale_uuid_rewritten() {
+        let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
+        let stale = Uuid::parse_str("216364b2-9308-47a7-9c2b-1c3b84c55c8c").unwrap();
+        // rewrite_workspace_plan_path_str calls workspace_lineage_root_task_id which needs a real
+        // store, so we test the path-string wrapper via a nil store_path (lineage = task_id = root).
+        let result = rewrite_workspace_plan_path_str(
+            &format!("workspace:/.akasha/plan_{stale}.md"),
+            root,
+            None,
+        );
+        assert_eq!(result, format!("workspace:/.akasha/plan_{root}.md"));
+    }
+
+    #[test]
+    fn rewrite_workspace_plan_path_str_non_workspace_unchanged() {
+        let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
+        let stale = Uuid::parse_str("216364b2-9308-47a7-9c2b-1c3b84c55c8c").unwrap();
+        let input = format!("/abs/path/.akasha/plan_{stale}.md");
+        let result = rewrite_workspace_plan_path_str(&input, root, None);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn rewrite_workspace_plan_path_str_non_plan_workspace_path_unchanged() {
+        let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
+        let result =
+            rewrite_workspace_plan_path_str("workspace:/certification_ai/exo/x.md", root, None);
+        assert_eq!(result, "workspace:/certification_ai/exo/x.md");
     }
 
     // --- agent_role_system_prompt ---

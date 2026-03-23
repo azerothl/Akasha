@@ -203,7 +203,7 @@ pub fn handle_teams_message(
     let app_password = app_password.to_string();
     let envelope = gateway::MessageEnvelope::teams("teams".to_string(), text.clone(), Some(conversation_id.clone()));
     tokio::spawn(async move {
-        let task_id = match gateway::handle_envelope(&main_agent, &store_path, envelope) {
+        let task_id = match gateway::handle_envelope(&main_agent, &store_path, envelope).await {
             Ok(id) => id,
             Err(_) => {
                 let _ = post_teams_reply(

@@ -5,13 +5,14 @@ use akasha_core::{EventEnvelope, EventType};
 use akasha_llm::CompletionRequest;
 use akasha_store::{PipelineState, PipelineStore, Schedule, ScheduleStore, Task, TaskStatus, TaskStore};
 use chrono::Utc;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::contract::{parse_contract_from_response, user_facing_message, ContractStatus};
-use super::execution_plan::{parse_plan_json, ExecutionPlan};
+use super::execution_plan::{parse_plan_json, ExecutionPlan, PlanStep};
 use super::orchestration_rules::OrchestrationRules;
 use super::prompts::compose_orchestrated_child_message;
 use super::{EventBus, ExecutionMode, OrchestratorTask};
@@ -37,11 +38,195 @@ enum SatisfactionOutcome {
 /// One subtask from decomposition: (agent_type, message for that agent).
 pub type Subtask = (String, String);
 
+#[derive(Debug, Clone)]
+struct DecomposeDiagnostics {
+    task_type_used: String,
+    reason: String,
+    attempt: String,
+}
+
+fn resolve_decompose_task_type(llm_router: &akasha_llm::LLMRouter) -> String {
+    let routes = llm_router.routes_by_category();
+    if routes.contains_key("orchestrator") {
+        "orchestrator".to_string()
+    } else {
+        "system".to_string()
+    }
+}
+
+fn is_project_like_request(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    let long = lower.chars().count() >= 600;
+    let keywords = [
+        "livrables",
+        "notebook",
+        "industrialisation",
+        "ci/cd",
+        "architecture",
+        "plusieurs",
+        "étapes",
+        "soutenance",
+        "dataset",
+        "workspace:/",
+        ".ipynb",
+        "api sécurisée",
+        "monitoring",
+    ];
+    let hits = keywords.iter().filter(|k| lower.contains(**k)).count();
+    // A message must show explicit project signals — length alone is not enough.
+    // This prevents long-but-ordinary requests (e.g. "summarise this pasted document")
+    // from being misrouted into the multi-step specialist pipeline.
+    hits >= 3 || (long && hits >= 1)
+}
+
+fn plan_is_single_conversation(plan: &ExecutionPlan) -> bool {
+    plan.steps.len() == 1 && plan.steps[0].agent_type == "conversation"
+}
+
+fn project_min_steps() -> usize {
+    std::env::var("AKASHA_ORCH_MIN_STEPS_PROJECT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(3)
+}
+
+/// Condense a message to at most `max_chars` characters using a head+tail strategy
+/// so that workspace paths and constraints near the end of a long brief are preserved.
+fn condense_message_head_tail(message: &str, max_chars: usize) -> String {
+    let msg = message.trim();
+    let char_count = msg.chars().count();
+    if char_count <= max_chars {
+        return msg.to_string();
+    }
+    // Reserve 20% of the budget for the tail, the rest for the head.
+    let tail_chars = max_chars / 5;
+    let head_chars = max_chars - tail_chars;
+    let head: String = msg.chars().take(head_chars).collect();
+    let tail: String = msg.chars().skip(char_count - tail_chars).collect();
+    format!("{}\n[…]\n{}", head, tail)
+}
+
+/// Extracts `workspace:/…` paths mentioned anywhere in a user message.
+/// Used to seed deliverables in the deterministic fallback plan so that the
+/// TOOL-first prompt, per-step retry, and final disk checks are activated even
+/// when the LLM decomposer failed to produce a structured plan.
+fn extract_workspace_paths_from_message(message: &str) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for token in message.split_whitespace() {
+        // Strip common trailing punctuation/delimiters that would corrupt the path.
+        let token = token.trim_end_matches([',', '.', ';', ')', '"', '\'', '`', ':', '!', '?', ']', '}', '>']);
+        if token.starts_with("workspace:/") {
+            let key = token.to_lowercase();
+            if seen.insert(key) {
+                paths.push(token.to_string());
+            }
+        }
+    }
+    paths
+}
+
+fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
+    // Use a head+tail strategy so that workspace paths and constraints
+    // listed anywhere in a long request are not silently dropped.
+    const HEAD: usize = 1500;
+    const TAIL: usize = 500;
+    let msg = message.trim();
+    let char_count = msg.chars().count();
+    let brief: String = if char_count <= HEAD + TAIL {
+        msg.to_string()
+    } else {
+        let head: String = msg.chars().take(HEAD).collect();
+        let tail: String = msg.chars().skip(char_count - TAIL).collect();
+        format!("{}\n[…]\n{}", head, tail)
+    };
+
+    // Extract workspace paths from the full original message so the backend step
+    // gets a non-empty deliverables list.  A non-empty list activates:
+    //   • compose_orchestrated_child_message(…, deliverables_required=true) → TOOL-first prompt
+    //   • per-step deliverable retry on missing files
+    //   • collect_missing_plan_deliverables() final disk check
+    let step_deliverables: Option<Vec<String>> = {
+        let paths = extract_workspace_paths_from_message(msg);
+        if paths.is_empty() { None } else { Some(paths) }
+    };
+    // QA verifies what backend produced, so it receives the same list.
+    let backend_deliverables = step_deliverables.clone();
+    let qa_deliverables = step_deliverables;
+
+    // Build a sequential chain so each step runs after the previous one finishes.
+    // Without dependencies, execution_waves() would schedule all steps in wave 0
+    // (parallel), meaning qa could verify before backend has produced any files.
+    ExecutionPlan {
+        plan_id: Uuid::new_v4(),
+        steps: vec![
+            PlanStep {
+                step_id: "s0".to_string(),
+                agent_type: "analyst".to_string(),
+                intent: format!("Formalise the request into a concrete execution backlog, acceptance criteria, and deliverables. Keep workspace paths exactly as provided.\n\nRequest:\n{}", brief),
+                depends_on: vec![],
+                parallel_group: None,
+                acceptance_criteria: None,
+                deliverables: None,
+            },
+            PlanStep {
+                step_id: "s1".to_string(),
+                agent_type: "documentalist".to_string(),
+                intent: "Extract and structure mandatory documentation sections, constraints, ethics/RGPD points, and required artifacts from the request. Produce a clear checklist tied to deliverables.".to_string(),
+                depends_on: vec!["s0".to_string()],
+                parallel_group: None,
+                acceptance_criteria: None,
+                deliverables: None,
+            },
+            PlanStep {
+                step_id: "s2".to_string(),
+                agent_type: "backend".to_string(),
+                intent: "Implement core technical deliverables (scripts/API/project structure) matching the requested artifacts and dataset workflow. Create concrete files in workspace paths when provided.".to_string(),
+                depends_on: vec!["s1".to_string()],
+                parallel_group: None,
+                acceptance_criteria: None,
+                deliverables: backend_deliverables,
+            },
+            PlanStep {
+                step_id: "s3".to_string(),
+                agent_type: "qa".to_string(),
+                intent: "Validate coverage against mandatory sections and deliverables. Report missing files/sections and propose exact fixes prioritized by severity.".to_string(),
+                depends_on: vec!["s2".to_string()],
+                parallel_group: None,
+                acceptance_criteria: None,
+                deliverables: qa_deliverables,
+            },
+            PlanStep {
+                step_id: "s4".to_string(),
+                agent_type: "conversation".to_string(),
+                intent: "Provide a concise final handoff summary: what was produced, where files are located, what's missing, and exact next steps for completion.".to_string(),
+                depends_on: vec!["s3".to_string()],
+                parallel_group: None,
+                acceptance_criteria: None,
+                deliverables: None,
+            },
+        ],
+    }
+}
+
+fn parse_plan_or_legacy(text: &str, fallback_message: &str) -> ExecutionPlan {
+    if let Some(plan) = parse_plan_json(text) {
+        plan
+    } else {
+        let steps = parse_legacy_subtasks(text, fallback_message);
+        ExecutionPlan::from_legacy(&steps)
+    }
+}
+
 /// Applies the tool-only override: if the decomposer returned a single "code" step but the
 /// step message suggests a tool-only action (camera, web search, save file, image gen),
 /// re-route to conversation so the agent uses TOOL: instead of generating a script.
 /// Exposed for unit tests.
-pub(crate) fn apply_decomposition_override(_message: &str, steps: Vec<Subtask>) -> Vec<Subtask> {
+pub(crate) fn apply_decomposition_override(message: &str, steps: Vec<Subtask>) -> Vec<Subtask> {
+    // Do not collapse project-like requests; keep specialist decomposition intact.
+    if is_project_like_request(message) {
+        return steps;
+    }
     if steps.len() == 1
         && steps[0].0 == "code"
         && message_suggests_tool_only_action(&steps[0].1)
@@ -118,14 +303,429 @@ fn parse_legacy_subtasks(text: &str, fallback_message: &str) -> Vec<Subtask> {
     }
 }
 
+fn plan_trace_rel_path(root_task_id: Uuid) -> String {
+    format!(".akasha/plan_{}.md", root_task_id)
+}
+
+/// Preserves **Fait (agent):** / **Reste (agent):** bodies per `### step_id` when the orchestrator rewrites the plan file.
+fn parse_agent_fait_reste_from_plan(content: &str) -> HashMap<String, (String, String)> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mode {
+        Neutral,
+        Fait,
+        Reste,
+    }
+    let mut out: HashMap<String, (String, String)> = HashMap::new();
+    let mut cur_step: Option<String> = None;
+    let mut mode = Mode::Neutral;
+    let mut fait = String::new();
+    let mut reste = String::new();
+
+    let flush = |out: &mut HashMap<String, (String, String)>,
+                     cur_step: &Option<String>,
+                     fait: &mut String,
+                     reste: &mut String| {
+        if let Some(sid) = cur_step {
+            if !fait.trim().is_empty() || !reste.trim().is_empty() {
+                out.insert(
+                    sid.clone(),
+                    (fait.trim().to_string(), reste.trim().to_string()),
+                );
+            }
+        }
+        fait.clear();
+        reste.clear();
+    };
+
+    for line in content.lines() {
+        if let Some(h) = line.strip_prefix("### ") {
+            flush(&mut out, &cur_step, &mut fait, &mut reste);
+            mode = Mode::Neutral;
+            cur_step = h.split_whitespace().next().map(std::string::ToString::to_string);
+            continue;
+        }
+        match line.trim() {
+            "**Fait (agent):**" => {
+                mode = Mode::Fait;
+                continue;
+            }
+            "**Reste (agent):**" => {
+                mode = Mode::Reste;
+                continue;
+            }
+            _ => {}
+        }
+        match mode {
+            Mode::Fait => {
+                if !fait.is_empty() {
+                    fait.push('\n');
+                }
+                fait.push_str(line);
+            }
+            Mode::Reste => {
+                if !reste.is_empty() {
+                    reste.push('\n');
+                }
+                reste.push_str(line);
+            }
+            Mode::Neutral => {}
+        }
+    }
+    flush(&mut out, &cur_step, &mut fait, &mut reste);
+    out
+}
+
+async fn load_agent_fait_reste_from_disk(workspace_root: &Path, rel_path: &str) -> HashMap<String, (String, String)> {
+    let path = workspace_root.join(rel_path);
+    let Ok(bytes) = tokio::fs::read(&path).await else {
+        return HashMap::new();
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        return HashMap::new();
+    };
+    parse_agent_fait_reste_from_plan(&text)
+}
+
+fn missing_deliverables_for_step(step: &PlanStep, workspace_root: &Path) -> Vec<String> {
+    let Some(list) = step.deliverables.as_ref() else {
+        return Vec::new();
+    };
+    let mut missing = Vec::new();
+    for d in list {
+        let raw = d.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        if !workspace_deliverable_satisfied(workspace_root, raw) {
+            missing.push(raw.to_string());
+        }
+    }
+    missing
+}
+
+fn render_plan_trace_markdown(
+    root_task_id: Uuid,
+    user_message: &str,
+    plan: &ExecutionPlan,
+    step_states: &std::collections::HashMap<String, String>,
+    step_notes: &std::collections::HashMap<String, String>,
+    agent_fait_reste: &HashMap<String, (String, String)>,
+) -> String {
+    const DEFAULT_FAIT: &str = "_(À remplir : ce qui est réellement accompli pour cette étape, après `read_file` sur ce plan.)_";
+    const DEFAULT_RESTE: &str = "_(À remplir : ce qu'il reste à faire. Indiquer « rien » ou laisser vide seulement si l'étape est à 100 % — l'orchestrateur vérifie les livrables sur disque.)_";
+
+    let mut out = String::new();
+    out.push_str("# Orchestrator Plan Trace\n\n");
+    out.push_str(&format!("- root_task_id: `{}`\n", root_task_id));
+    out.push_str(&format!("- updated_at: `{}`\n\n", Utc::now().to_rfc3339()));
+    out.push_str("## User request (excerpt)\n\n");
+    out.push_str(&user_message.chars().take(1200).collect::<String>());
+    out.push_str("\n\n## Steps\n\n");
+    for s in &plan.steps {
+        let status = step_states
+            .get(&s.step_id)
+            .cloned()
+            .unwrap_or_else(|| "pending".to_string());
+        out.push_str(&format!("### {} ({})\n\n", s.step_id, s.agent_type));
+        out.push_str(&format!("- status: `{}`\n", status));
+        if !s.depends_on.is_empty() {
+            out.push_str(&format!("- depends_on: {}\n", s.depends_on.join(", ")));
+        }
+        if let Some(ref d) = s.deliverables {
+            if !d.is_empty() {
+                out.push_str("- deliverables:\n");
+                for item in d {
+                    out.push_str(&format!("  - `{}`\n", item));
+                }
+            }
+        }
+        let note = step_notes.get(&s.step_id).cloned().unwrap_or_default();
+        if !note.is_empty() {
+            out.push_str(&format!("- note: {}\n", note));
+        }
+        let (fait_body, reste_body) = agent_fait_reste
+            .get(&s.step_id)
+            .cloned()
+            .unwrap_or_default();
+        let fait_display = if fait_body.trim().is_empty() {
+            DEFAULT_FAIT.to_string()
+        } else {
+            fait_body
+        };
+        let reste_display = if reste_body.trim().is_empty() {
+            DEFAULT_RESTE.to_string()
+        } else {
+            reste_body
+        };
+        out.push_str("\n#### Suivi agent (maintenir via `read_file` / `edit_file` / `search_replace` sur ce fichier)\n\n");
+        out.push_str("**Fait (agent):**\n");
+        out.push_str(&fait_display);
+        out.push_str("\n\n**Reste (agent):**\n");
+        out.push_str(&reste_display);
+        out.push_str("\n\n");
+    }
+    out
+}
+
+async fn persist_plan_trace(workspace_root: &Path, rel_path: &str, content: &str) {
+    let path = workspace_root.join(rel_path);
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let _ = tokio::fs::write(path, content).await;
+}
+
+/// Re-reads the plan file from disk so agent edits under **Fait (agent):** / **Reste (agent):** are preserved across orchestrator refreshes.
+async fn persist_plan_trace_merged(
+    workspace_root: &Path,
+    plan_trace_rel: &str,
+    root_task_id: Uuid,
+    user_message: &str,
+    plan: &ExecutionPlan,
+    step_states: &std::collections::HashMap<String, String>,
+    step_notes: &std::collections::HashMap<String, String>,
+) {
+    let merged = load_agent_fait_reste_from_disk(workspace_root, plan_trace_rel).await;
+    let md = render_plan_trace_markdown(
+        root_task_id,
+        user_message,
+        plan,
+        step_states,
+        step_notes,
+        &merged,
+    );
+    persist_plan_trace(workspace_root, plan_trace_rel, &md).await;
+}
+
+fn deliverable_workspace_rel(d: &str) -> String {
+    let t = d.trim();
+    // Strip `workspace:/` prefix → path is workspace-relative (no leading slash expected after it)
+    if let Some(rest) = t.strip_prefix("workspace:/") {
+        return rest.replace('\\', "/");
+    }
+    // Strip `workspace:` prefix, then any leading slash that follows it
+    if let Some(rest) = t.strip_prefix("workspace:") {
+        return rest.trim_start_matches('/').replace('\\', "/");
+    }
+    // For all other paths (relative *or* absolute) preserve the path as-is.
+    // Absolute paths like `/tmp/report.md` must not have their leading `/` stripped;
+    // `workspace_root.join("/tmp/report.md")` on Unix correctly returns `/tmp/report.md`.
+    t.replace('\\', "/")
+}
+
+/// Returns `true` when a deliverable path is safe to use (workspace-relative or absolute).
+/// Rejects paths containing `..` components, backslash-rooted paths, and Windows drive-letter
+/// prefixes.  Absolute Unix paths (starting with `/`) are allowed; `workspace_root.join` handles
+/// them correctly by returning the absolute path unchanged.
+fn deliverable_rel_is_safe(rel: &str) -> bool {
+    if rel.trim().is_empty() {
+        return false;
+    }
+    // Reject backslash-rooted paths (Windows-style absolute paths)
+    if rel.starts_with('\\') {
+        return false;
+    }
+    // Reject Windows drive-letter prefixes like C: or c: (both upper and lower case)
+    if rel.len() >= 2 {
+        let bytes = rel.as_bytes();
+        if bytes[1] == b':' && bytes[0].to_ascii_lowercase().is_ascii_alphabetic() {
+            return false;
+        }
+    }
+    // Reject any `..` path component; split on both `/` and `\` for defence in depth
+    for component in rel.split(['/', '\\']) {
+        if component == ".." {
+            return false;
+        }
+    }
+    true
+}
+
+/// Deliverable lists a directory when the path ends with `/` or `\` (e.g. `workspace:/proj/scripts/`).
+fn deliverable_targets_directory(raw: &str, rel: &str) -> bool {
+    let t = raw.trim();
+    t.ends_with('/') || t.ends_with('\\') || rel.ends_with('/') || rel.ends_with('\\')
+}
+
+fn deliverable_rel_normalized_dir(rel: &str) -> String {
+    rel.trim_end_matches('/')
+        .trim_end_matches('\\')
+        .replace('\\', "/")
+}
+
+fn workspace_deliverable_satisfied(workspace_root: &Path, raw: &str) -> bool {
+    let rel = deliverable_workspace_rel(raw);
+    if rel.trim().is_empty() {
+        return false;
+    }
+    if !deliverable_rel_is_safe(&rel) {
+        return false;
+    }
+    let norm = deliverable_rel_normalized_dir(&rel);
+    let path = workspace_root.join(&norm);
+    if deliverable_targets_directory(raw, &rel) {
+        path.is_dir()
+    } else {
+        path.exists()
+    }
+}
+
+/// Deduplicated missing deliverable paths from the plan (first spelling wins); keys normalized for case-insensitive dedup.
+fn collect_missing_plan_deliverables(plan: &ExecutionPlan, workspace_root: &Path) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut seen_keys = HashSet::new();
+    let mut missing = Vec::new();
+    for step in &plan.steps {
+        let Some(deliverables) = step.deliverables.as_ref() else {
+            continue;
+        };
+        for d in deliverables {
+            let raw = d.trim();
+            if raw.is_empty() {
+                continue;
+            }
+            let rel = deliverable_workspace_rel(raw);
+            if !deliverable_rel_is_safe(&rel) {
+                continue;
+            }
+            let key = deliverable_rel_normalized_dir(&rel).to_lowercase();
+            if key.is_empty() {
+                continue;
+            }
+            if !seen_keys.insert(key) {
+                continue;
+            }
+            if !workspace_deliverable_satisfied(workspace_root, raw) {
+                missing.push(raw.to_string());
+            }
+        }
+    }
+    missing
+}
+
+/// When LLM remediation does not emit write_file, create minimal on-disk stubs for
+/// text-based deliverables so the user can edit/replace content.
+///
+/// Binary-format deliverables (e.g. `.pdf`, `.pptx`) are intentionally skipped: writing a
+/// UTF-8 text stub to a binary-format path would create a file that standard readers cannot
+/// open, and `workspace_deliverable_satisfied` would incorrectly treat the deliverable as
+/// complete.  Those formats are left missing so the caller can surface the failure to the user.
+async fn write_missing_deliverables_fs_fallback(
+    workspace_root: &Path,
+    deliverables: &[String],
+    root_task_id: Uuid,
+) -> Vec<String> {
+    fn stub_body(rel_lower: &str, root: Uuid) -> String {
+        let rid = root.to_string();
+        if rel_lower.ends_with(".ipynb") {
+            return serde_json::json!({
+                "nbformat": 4,
+                "nbformat_minor": 5,
+                "metadata": {
+                    "akasha_auto_deliverable": true,
+                    "root_task_id": rid,
+                },
+                "cells": [{
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["_(Akasha placeholder — replace with notebook content.)_"],
+                }],
+            })
+            .to_string();
+        }
+        if rel_lower.ends_with(".json") {
+            return serde_json::json!({
+                "_akasha_auto_deliverable": true,
+                "root_task_id": rid,
+                "note": "Placeholder JSON — replace with real data.",
+                "items": [],
+            })
+            .to_string();
+        }
+        if rel_lower.ends_with(".py") {
+            return format!(
+                r#"# Akasha auto-deliverable (root_task_id={rid})
+"""Placeholder: agent did not write this file before aggregation."""
+raise NotImplementedError("Replace with implementation from the project plan.")
+"#
+            );
+        }
+        if rel_lower.ends_with(".yaml") || rel_lower.ends_with(".yml") {
+            return format!(
+                "# Akasha auto-deliverable root_task_id: {rid}\nplaceholder: true\n"
+            );
+        }
+        // .md and default
+        format!(
+            "# Deliverable (auto)\n\n\
+             **Root task:** `{rid}`\n\n\
+             This file was created by the Akasha orchestrator because the planned step did not write it before final aggregation. \
+             Replace this placeholder with the intended content.\n"
+        )
+    }
+
+    let mut written = Vec::new();
+    for d in deliverables {
+        let raw = d.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let rel = deliverable_workspace_rel(raw);
+        if rel.trim().is_empty() {
+            continue;
+        }
+        if !deliverable_rel_is_safe(&rel) {
+            continue;
+        }
+        // Do not auto-create stubs at absolute filesystem paths; only write inside the workspace.
+        if std::path::Path::new(&rel).is_absolute() {
+            continue;
+        }
+        let norm = deliverable_rel_normalized_dir(&rel);
+        if norm.is_empty() {
+            continue;
+        }
+        let path = workspace_root.join(&norm);
+        if deliverable_targets_directory(raw, &rel) {
+            if tokio::fs::create_dir_all(&path).await.is_ok() {
+                let marker = path.join(".akasha_deliverable_dir");
+                let note = format!(
+                    "Akasha auto-created deliverable directory (root_task_id={})\n",
+                    root_task_id
+                );
+                let _ = tokio::fs::write(&marker, note.as_bytes()).await;
+                written.push(norm);
+            }
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            if tokio::fs::create_dir_all(parent).await.is_err() {
+                continue;
+            }
+        }
+        let lower = norm.to_lowercase();
+        // Binary-format deliverables cannot be represented as UTF-8 text stubs.
+        // Skip them so the caller reports the missing artifact instead of masking failure.
+        if lower.ends_with(".pdf") || lower.ends_with(".pptx") {
+            continue;
+        }
+        let body = stub_body(&lower, root_task_id);
+        if tokio::fs::write(&path, body.as_bytes()).await.is_ok() {
+            written.push(norm);
+        }
+    }
+    written
+}
+
 /// Decompose a user request into one or more subtasks via LLM. Falls back to single "conversation" on error, timeout or empty.
 #[allow(dead_code)]
 async fn decompose_request(
     llm_router: &Arc<akasha_llm::LLMRouter>,
     message: &str,
 ) -> Vec<Subtask> {
-    decompose_to_plan(llm_router, message, Path::new("."))
+    decompose_to_plan(llm_router, message, Path::new("."), None)
         .await
+        .0
         .to_subtasks()
 }
 
@@ -133,11 +733,24 @@ async fn decompose_to_plan(
     llm_router: &Arc<akasha_llm::LLMRouter>,
     message: &str,
     data_dir: &Path,
-) -> ExecutionPlan {
+    preferred_task_type_override: Option<&str>,
+) -> (ExecutionPlan, DecomposeDiagnostics) {
     let rules = OrchestrationRules::load(data_dir);
     if let Some((agent, msg)) = rules.match_message(message) {
-        return ExecutionPlan::from_legacy(&[(agent, msg)]);
+        return (
+            ExecutionPlan::from_legacy(&[(agent, msg)]),
+            DecomposeDiagnostics {
+                task_type_used: "rules".to_string(),
+                reason: "rules_match".to_string(),
+                attempt: "primary".to_string(),
+            },
+        );
     }
+    let project_like = is_project_like_request(message);
+    let preferred_task_type = preferred_task_type_override
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| resolve_decompose_task_type(llm_router));
     let prompt = format!(
         "{}{}{}",
         DECOMPOSER_PROMPT_TEMPLATE,
@@ -152,27 +765,122 @@ async fn decompose_to_plan(
         prompt,
         max_tokens: Some(system_max_tokens),
         temperature: Some(0.2),
-        preferred_task_type: Some("system".to_string()),
+        preferred_task_type: Some(preferred_task_type.clone()),
         system_prompt: None,
         image_data_urls: None,
     };
     let decompose_timeout = std::time::Duration::from_secs(120);
-    match tokio::time::timeout(decompose_timeout, llm_router.complete(&request)).await {
-        Ok(Ok(resp)) => {
-            let text = resp.text.trim();
-            if let Some(plan) = parse_plan_json(text) {
-                return plan;
-            }
-            let steps = parse_legacy_subtasks(text, message);
-            ExecutionPlan::from_legacy(&steps)
+    let primary = tokio::time::timeout(decompose_timeout, llm_router.complete(&request)).await;
+    if let Ok(Ok(ref resp)) = primary {
+        let plan = parse_plan_or_legacy(resp.text.trim(), message);
+        let reject_single = project_like
+            && plan_is_single_conversation(&plan)
+            && plan.steps.len() < project_min_steps();
+        if !reject_single {
+            return (
+                plan,
+                DecomposeDiagnostics {
+                    task_type_used: preferred_task_type,
+                    reason: "ok".to_string(),
+                    attempt: "primary".to_string(),
+                },
+            );
         }
+    }
+
+    // Retry with condensed prompt to reduce failure rate on very long requests.
+    // Use head+tail so workspace paths and deliverables near the end of the brief
+    // are not silently dropped even when the retry succeeds.
+    let condensed_req = condense_message_head_tail(message, 5000);
+    let retry_prompt = format!(
+        "{}\n{}\n\n{}\n\nRetry rules: output strict JSON with >= {} steps for project-like requests; avoid single conversation fallback unless user explicitly asks only for a conversational summary.",
+        DECOMPOSER_PROMPT_TEMPLATE,
+        condensed_req,
+        JSON_PLAN_SUFFIX,
+        project_min_steps()
+    );
+    let retry_request = CompletionRequest {
+        prompt: retry_prompt,
+        max_tokens: Some(system_max_tokens),
+        temperature: Some(0.1),
+        preferred_task_type: Some(preferred_task_type.clone()),
+        system_prompt: None,
+        image_data_urls: None,
+    };
+    let retry_timeout = std::time::Duration::from_secs(60);
+    let retry = tokio::time::timeout(retry_timeout, llm_router.complete(&retry_request)).await;
+    if let Ok(Ok(resp)) = retry {
+        let plan = parse_plan_or_legacy(resp.text.trim(), message);
+        let reject_single = project_like
+            && plan_is_single_conversation(&plan)
+            && plan.steps.len() < project_min_steps();
+        if !reject_single {
+            return (
+                plan,
+                DecomposeDiagnostics {
+                    task_type_used: preferred_task_type,
+                    reason: "retry_ok".to_string(),
+                    attempt: "retry".to_string(),
+                },
+            );
+        } else {
+            let plan = build_deterministic_project_fallback_plan(message);
+            return (
+                plan,
+                DecomposeDiagnostics {
+                    task_type_used: preferred_task_type,
+                    reason: "guardrail_reject_single_conversation".to_string(),
+                    attempt: "deterministic_fallback".to_string(),
+                },
+            );
+        }
+    }
+
+    if project_like {
+        let plan = build_deterministic_project_fallback_plan(message);
+        return (
+            plan,
+            DecomposeDiagnostics {
+                task_type_used: preferred_task_type,
+                reason: "retry_failed".to_string(),
+                attempt: "deterministic_fallback".to_string(),
+            },
+        );
+    }
+
+    match primary {
         Ok(Err(e)) => {
             tracing::debug!(error = %e, "Decompose LLM failed, using single conversation step");
-            ExecutionPlan::from_legacy(&[("conversation".to_string(), message.to_string())])
+            (
+                ExecutionPlan::from_legacy(&[("conversation".to_string(), message.to_string())]),
+                DecomposeDiagnostics {
+                    task_type_used: preferred_task_type,
+                    reason: "llm_error".to_string(),
+                    attempt: "primary".to_string(),
+                },
+            )
         }
         Err(_) => {
             tracing::debug!("Decompose LLM timed out, using single conversation step");
-            ExecutionPlan::from_legacy(&[("conversation".to_string(), message.to_string())])
+            (
+                ExecutionPlan::from_legacy(&[("conversation".to_string(), message.to_string())]),
+                DecomposeDiagnostics {
+                    task_type_used: preferred_task_type,
+                    reason: "timeout".to_string(),
+                    attempt: "primary".to_string(),
+                },
+            )
+        }
+        Ok(Ok(_)) => {
+            // Primary returned but violated guardrails and retry failed.
+            (
+                ExecutionPlan::from_legacy(&[("conversation".to_string(), message.to_string())]),
+                DecomposeDiagnostics {
+                    task_type_used: preferred_task_type,
+                    reason: "guardrail_or_retry_failure".to_string(),
+                    attempt: "primary".to_string(),
+                },
+            )
         }
     }
 }
@@ -283,6 +991,7 @@ impl Orchestrator {
             let session_id = task.session_id;
             let image_data_urls = task.image_data_urls;
             let execution_mode = task.execution_mode;
+            let preferred_task_type = task.preferred_task_type;
             tokio::spawn(async move {
                 if let Err(e) = process_root_task(
                     bus,
@@ -299,6 +1008,7 @@ impl Orchestrator {
                     task_completion,
                     long_term_client,
                     execution_mode,
+                    preferred_task_type,
                 )
                 .await
                 {
@@ -324,6 +1034,7 @@ async fn process_root_task(
     task_completion: TaskCompletionRegistry,
     long_term_client: Option<LongTermMemoryClient>,
     execution_mode: Option<ExecutionMode>,
+    preferred_task_type: Option<String>,
 ) -> anyhow::Result<()> {
     if !akasha_core::Role::OrchestratorAgent.can_spawn_agents() {
         anyhow::bail!("RBAC: orchestrator not allowed to spawn agents");
@@ -349,11 +1060,29 @@ async fn process_root_task(
         .with_correlation(root_task_id),
     );
 
-    let mut plan = decompose_to_plan(&llm_router, &message, data_dir).await;
+    let (mut plan, decompose_diag) = decompose_to_plan(
+        &llm_router,
+        &message,
+        data_dir,
+        preferred_task_type.as_deref(),
+    )
+    .await;
     let steps_before = plan.to_subtasks();
     let steps_after = apply_decomposition_override(&message, steps_before.clone());
     if steps_after != steps_before {
-        plan = ExecutionPlan::from_legacy(&steps_after);
+        if steps_after.len() == plan.steps.len() {
+            // Preserve step metadata (depends_on, acceptance_criteria, deliverables); only
+            // patch the agent_type (and intent, if changed) for each step in-place.
+            for (plan_step, (new_agent, new_intent)) in
+                plan.steps.iter_mut().zip(steps_after.iter())
+            {
+                plan_step.agent_type = new_agent.clone();
+                plan_step.intent = new_intent.clone();
+            }
+        } else {
+            // Step count changed (defensive fallback; shouldn't happen with current overrides).
+            plan = ExecutionPlan::from_legacy(&steps_after);
+        }
     }
     let steps = plan.to_subtasks();
     let _ = bus.send(
@@ -363,7 +1092,10 @@ async fn process_root_task(
                 "task_id": root_task_id.to_string(),
                 "subtask_count": steps.len(),
                 "agents": steps.iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>(),
-                "plan_id": plan.plan_id.to_string()
+                "plan_id": plan.plan_id.to_string(),
+                "decompose_model_task_type": decompose_diag.task_type_used,
+                "decompose_reason": decompose_diag.reason,
+                "decompose_attempt": decompose_diag.attempt
             })),
         )
         .with_correlation(root_task_id),
@@ -546,7 +1278,17 @@ async fn process_root_task(
     if steps.len() == 1 && steps[0].0 == "conversation" {
         let conv_body = if let Some(s0) = plan.steps.first() {
             let shared = plan.shared_context_markdown(&message, s0);
-            compose_orchestrated_child_message("conversation", &s0.intent, &shared)
+            let deliverables_required = s0
+                .deliverables
+                .as_ref()
+                .map(|d| !d.is_empty())
+                .unwrap_or(false);
+            compose_orchestrated_child_message(
+                "conversation",
+                &s0.intent,
+                &shared,
+                deliverables_required,
+            )
         } else {
             steps[0].1.clone()
         };
@@ -557,6 +1299,7 @@ async fn process_root_task(
                 session_id,
                 image_data_urls,
                 execution_mode: None,
+                preferred_task_type: None,
             })
             .await
             .map_err(|_| anyhow::anyhow!("conversation channel closed"))?;
@@ -608,9 +1351,31 @@ async fn process_root_task(
     let conversation_tx_aggregator = conversation_tx.clone();
     let session_id_aggregator = session_id.clone();
     let execution_mode_aggregator = execution_mode;
+    let plan_trace_rel = plan_trace_rel_path(root_task_id);
     const GENERIC_MESSAGES: &[&str] = &["Done.", "Failed.", "Cancelled."];
     const PER_CHILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
     tokio::spawn(async move {
+        let workspace_root = store_path_buf
+            .parent()
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let mut step_states: std::collections::HashMap<String, String> = plan_spawn
+            .steps
+            .iter()
+            .map(|s| (s.step_id.clone(), "pending".to_string()))
+            .collect();
+        let mut step_notes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        persist_plan_trace_merged(
+            &workspace_root,
+            &plan_trace_rel,
+            root_task_id,
+            &user_message,
+            &plan_spawn,
+            &step_states,
+            &step_notes,
+        )
+        .await;
         let mut waves = plan_spawn.execution_waves().unwrap_or_else(|e| {
             tracing::warn!(error = %e, "execution_waves error");
             Vec::new()
@@ -626,7 +1391,7 @@ async fn process_root_task(
         let mut recovery_used = false;
         let mut cumulative_problem_sids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (wave_idx, wave) in waves.iter().enumerate() {
-            let mut batch: Vec<(Uuid, Arc<tokio::sync::Notify>, String)> = Vec::new();
+            let mut batch: Vec<(Uuid, Arc<tokio::sync::Notify>, String, Vec<String>)> = Vec::new();
             for &idx in wave {
                 let step = match plan_spawn.steps.get(idx) {
                     Some(s) => s,
@@ -650,10 +1415,51 @@ async fn process_root_task(
                         sub_message = format!("Output from step {}:\n{}\n\n{}", dep, prev, sub_message);
                     }
                 }
+                if let Some(deliverables) = step.deliverables.as_ref() {
+                    if !deliverables.is_empty() {
+                        let deliverables_list = deliverables
+                            .iter()
+                        .map(|d| format!("- {}", d))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                        sub_message = format!(
+                            "{}\n\nMandatory deliverables for this step (create/update each path explicitly with TOOL: write_file):\n{}\n\nDo not only describe files: actually write them.",
+                            sub_message, deliverables_list
+                        );
+                    }
+                }
+                sub_message = format!(
+                    r#"{base}
+
+## Ordre obligatoire (étape `{step_id}`)
+
+1. **Lire** le plan partagé : `read_file workspace:/{plan_rel}` — voir le contexte global et votre section **Fait (agent)** / **Reste (agent)** sous `### {step_id}`.
+2. **Mettre à jour le fichier de trace** :
+   - a. Modifier les sections **Fait (agent)** et **Reste (agent)** (ce qui est fait, ce qu'il reste).
+   - b. Réécrire avec `write_file workspace:/{plan_rel} <contenu complet>`.
+   - (`edit_file workspace:/{plan_rel}` et `search_replace workspace:/{plan_rel}` sont également acceptés — les chemins `workspace:/` sont résolus vers le disque.)
+3. **Créer ou mettre à jour chaque livrable** listé ci-dessous avec `write_file`, `edit_file`, ou `search_replace` aux chemins exacts indiqués.
+
+L'orchestrateur ne marque cette étape **terminée (done)** que si **tous** les livrables de l'étape existent sur disque à la fin. Sinon l'étape est marquée **échec** même si vous avez répondu en texte.
+
+Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file workspace:/{plan_rel}` pour mettre à jour le fichier de trace."#,
+                    base = sub_message,
+                    step_id = step.step_id,
+                    plan_rel = plan_trace_rel
+                );
                 let agent_type = step.agent_type.as_str();
                 let shared = plan_spawn.shared_context_markdown(&user_message, step);
-                let child_message =
-                    compose_orchestrated_child_message(agent_type, &sub_message, &shared);
+                let deliverables_required = step
+                    .deliverables
+                    .as_ref()
+                    .map(|d| !d.is_empty())
+                    .unwrap_or(false);
+                let child_message = compose_orchestrated_child_message(
+                    agent_type,
+                    &sub_message,
+                    &shared,
+                    deliverables_required,
+                );
                 let child_id = Uuid::new_v4();
                 let task = Task {
                     id: child_id,
@@ -708,6 +1514,18 @@ async fn process_root_task(
                     .with_correlation(root_task_id),
                 );
                 wave_step_counter += 1;
+                step_states.insert(step.step_id.clone(), "running".to_string());
+                step_notes.insert(step.step_id.clone(), format!("Spawned subtask {}", child_id));
+                persist_plan_trace_merged(
+                    &workspace_root,
+                    &plan_trace_rel,
+                    root_task_id,
+                    &user_message,
+                    &plan_spawn,
+                    &step_states,
+                    &step_notes,
+                )
+                .await;
                 let notify = Arc::new(tokio::sync::Notify::new());
                 task_completion.write().await.insert(child_id, notify.clone());
                 if conversation_tx_aggregator
@@ -717,28 +1535,39 @@ async fn process_root_task(
                         session_id: session_id_aggregator.clone(),
                         image_data_urls: None,
                         execution_mode: None,
+                        preferred_task_type: None,
                     })
                     .await
                     .is_err()
                 {
                     tracing::error!(child_id = %child_id, "orchestrator: conv channel closed");
                 }
-                batch.push((child_id, notify, step.step_id.clone()));
+                let deliverables_for_batch = step.deliverables.clone().unwrap_or_default();
+                batch.push((child_id, notify, step.step_id.clone(), deliverables_for_batch));
             }
             let futs: Vec<_> = batch
                 .iter()
-                .map(|(_, n, _)| {
+                .map(|(cid, n, sid, _)| {
                     let n = n.clone();
+                    let cid = *cid;
+                    let sid = sid.clone();
                     async move {
-                        let _ = tokio::time::timeout(PER_CHILD_TIMEOUT, n.notified()).await;
+                        let timed_out = tokio::time::timeout(PER_CHILD_TIMEOUT, n.notified())
+                            .await
+                            .is_err();
+                        (cid, sid, timed_out)
                     }
                 })
                 .collect();
-            join_all(futs).await;
+            let timeout_results = join_all(futs).await;
+            let timeout_by_child: std::collections::HashMap<Uuid, bool> = timeout_results
+                .into_iter()
+                .map(|(cid, _sid, timed_out)| (cid, timed_out))
+                .collect();
             // Pre-collect child failed statuses in a synchronous scope before any further .await.
             let child_failed: std::collections::HashMap<Uuid, bool> = {
                 match TaskStore::open(&store_path_buf) {
-                    Ok(s) => batch.iter().map(|(cid, _, _)| {
+                    Ok(s) => batch.iter().map(|(cid, _, _, _)| {
                         let failed = matches!(
                             s.get(*cid).ok().flatten().map(|t| t.status),
                             Some(TaskStatus::Failed)
@@ -750,7 +1579,11 @@ async fn process_root_task(
             };
             let mut problematic_this_wave: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
-            for (child_id, _, sid) in batch {
+            for (child_id, _, sid, _deliverables) in batch {
+                let step_ref = plan_spawn.steps.iter().find(|s| s.step_id == sid);
+                let missing_deliverables = step_ref
+                    .map(|st| missing_deliverables_for_step(st, &workspace_root))
+                    .unwrap_or_default();
                 task_completion.write().await.remove(&child_id);
                 let content = {
                     let g = progress.read().await;
@@ -759,10 +1592,122 @@ async fn process_root_task(
                         .unwrap_or_default()
                 };
                 step_outputs.insert(sid.clone(), content.clone());
-                let failed = child_failed.get(&child_id).copied().unwrap_or(false);
+                let mut failed = child_failed.get(&child_id).copied().unwrap_or(false);
+                let timed_out = timeout_by_child.get(&child_id).copied().unwrap_or(false);
+                if timed_out {
+                    failed = true;
+                }
+                // One-shot per-step retry: when deliverables are missing but the step
+                // didn't time out, give the agent a second targeted attempt to create
+                // the required files before declaring the step failed.
+                // This allows downstream dependent steps to work with real files
+                // rather than end-of-pipeline stubs.
+                const DELIVERABLE_RETRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150);
+                let missing_after_retry: Vec<String> = if !missing_deliverables.is_empty() && !timed_out {
+                    let retry_agent_type = step_ref
+                        .map(|s| s.agent_type.clone())
+                        .unwrap_or_else(|| "conversation".to_string());
+                    let retry_sub_message = format!(
+                        "[Deliverable retry — step {sid}] Your previous response did not create the required files.\n\n\
+You MUST now use TOOL: write_file (or TOOL: run_command for directories) to create each of the following paths before you finish. Do not stop until every file exists on disk.\n\n\
+Missing deliverables:\n{}\n\n\
+Use TOOL: write_file <exact_path> with real, substantive content for each entry above.",
+                        missing_deliverables.iter().map(|d| format!("- {d}")).collect::<Vec<_>>().join("\n")
+                    );
+                    // Build via compose_orchestrated_child_message with deliverables_required=true so
+                    // the message contains ORCH_DISK_DELIVERABLES_MARKER.  That marker enables the
+                    // hardening in run_message_via_llm(): workspace-file tools are forced into the
+                    // tool list, the tool-round floor is raised, and "emit TOOL lines now" re-prompts
+                    // fire — exactly the behaviour that must apply on a second attempt after a step
+                    // already missed its deliverables once.
+                    let retry_shared_plan = step_ref
+                        .map(|st| plan_spawn.shared_context_markdown(&user_message, st))
+                        .unwrap_or_default();
+                    let retry_prompt = compose_orchestrated_child_message(
+                        &retry_agent_type,
+                        &retry_sub_message,
+                        &retry_shared_plan,
+                        true,
+                    );
+                    let retry_id = Uuid::new_v4();
+                    let retry_task = Task {
+                        id: retry_id,
+                        parent_task_id: Some(root_task_id),
+                        status: TaskStatus::Pending,
+                        assigned_agent: retry_agent_type,
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                        initial_message: Some(format!("[deliverable-retry {sid}]")),
+                    };
+                    let retry_inserted = {
+                        TaskStore::open(&store_path_buf)
+                            .map(|s| s.insert(&retry_task).is_ok())
+                            .unwrap_or(false)
+                    };
+                    if retry_inserted {
+                        let notify_retry = Arc::new(tokio::sync::Notify::new());
+                        task_completion.write().await.insert(retry_id, notify_retry.clone());
+                        let _ = conversation_tx_aggregator
+                            .send(OrchestratorTask {
+                                task_id: retry_id,
+                                message: retry_prompt,
+                                session_id: session_id_aggregator.clone(),
+                                image_data_urls: None,
+                                execution_mode: None,
+                                preferred_task_type: None,
+                            })
+                            .await;
+                        let _ = tokio::time::timeout(DELIVERABLE_RETRY_TIMEOUT, notify_retry.notified()).await;
+                        task_completion.write().await.remove(&retry_id);
+                        if let Ok(s) = TaskStore::open(&store_path_buf) {
+                            let _ = s.update_status(retry_id, TaskStatus::Completed);
+                        }
+                    }
+                    // Re-check deliverables after the retry attempt.
+                    step_ref
+                        .map(|st| missing_deliverables_for_step(st, &workspace_root))
+                        .unwrap_or_default()
+                } else {
+                    missing_deliverables
+                };
+                let deliverables_incomplete = !missing_after_retry.is_empty();
+                if deliverables_incomplete {
+                    failed = true;
+                    if let Ok(store) = TaskStore::open(&store_path_buf) {
+                        let _ = store.update_status(child_id, TaskStatus::Failed);
+                    }
+                }
+                step_states.insert(
+                    sid.clone(),
+                    if failed { "failed".to_string() } else { "done".to_string() },
+                );
+                step_notes.insert(
+                    sid.clone(),
+                    format!(
+                        "Completed subtask {} (failed: {}, timed_out: {}, deliverables_missing: {:?}, content_chars: {})",
+                        child_id,
+                        failed,
+                        timed_out,
+                        missing_after_retry,
+                        content.chars().count()
+                    ),
+                );
+                persist_plan_trace_merged(
+                    &workspace_root,
+                    &plan_trace_rel,
+                    root_task_id,
+                    &user_message,
+                    &plan_spawn,
+                    &step_states,
+                    &step_notes,
+                )
+                .await;
                 if failed || response_indicates_blocked(&content) {
                     problematic_this_wave.insert(sid.clone());
                 }
+                let success = !failed
+                    && !content.trim().is_empty()
+                    && missing_after_retry.is_empty();
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::SubtaskCompleted,
@@ -771,7 +1716,7 @@ async fn process_root_task(
                             "root_task_id": root_task_id.to_string(),
                             "subtask_id": child_id.to_string(),
                             "step_id": sid,
-                            "success": !failed && !content.trim().is_empty(),
+                            "success": success,
                         })),
                     )
                     .with_correlation(root_task_id),
@@ -862,6 +1807,7 @@ Reply with SHORT actionable guidance only: what the user should provide, which p
                                 session_id: session_id_aggregator.clone(),
                                 image_data_urls: None,
                                 execution_mode: None,
+                                preferred_task_type: None,
                             })
                             .await;
                         let _ =
@@ -881,6 +1827,84 @@ Reply with SHORT actionable guidance only: what the user should provide, which p
                         }
                     }
                 }
+            }
+        }
+        let mut missing_deliverables = collect_missing_plan_deliverables(&plan_spawn, &workspace_root);
+        if !missing_deliverables.is_empty() {
+            const REMEDIATION_ROUNDS: usize = 2;
+            for _round in 0..REMEDIATION_ROUNDS {
+                if missing_deliverables.is_empty() {
+                    break;
+                }
+                let remediation_body = format!(
+                    r#"Fix missing orchestrated deliverables. These paths are still ABSENT on disk (create each now):
+
+{}
+
+You MUST use TOOL: write_file once per missing path with the EXACT prefix shown (e.g. workspace:/folder/file.md). Use multiple write_file calls in this turn. Create real, substantive content (not a single-line stub). For .ipynb output valid JSON notebook text. For paths ending in .pdf or .pptx, write_file to that exact path using UTF-8 text (placeholder is OK; file must exist). For paths ending with / (directory deliverables), create the directory tree (e.g. TOOL: run_command with mkdir) then optionally add a marker file inside.
+
+Do not only describe the files — execute the tools."#,
+                    missing_deliverables
+                        .iter()
+                        .map(|d| format!("- {}", d))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                let remediation_shared = format!(
+                    "## Orchestrator remediation\n\n- root_task_id: `{}`\n- Create every listed path under the task workspace; this run uses the same disk checks as normal subtasks.\n",
+                    root_task_id
+                );
+                let remediation_message = compose_orchestrated_child_message(
+                    "code",
+                    &remediation_body,
+                    &remediation_shared,
+                    true,
+                );
+                let remediation_id = Uuid::new_v4();
+                let remediation_task = Task {
+                    id: remediation_id,
+                    parent_task_id: Some(root_task_id),
+                    status: TaskStatus::Pending,
+                    assigned_agent: "code".to_string(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    initial_message: Some(remediation_message.chars().take(500).collect()),
+                };
+                let remediation_ok = TaskStore::open(&store_path_buf)
+                    .map(|s| s.insert(&remediation_task).is_ok())
+                    .unwrap_or(false);
+                if remediation_ok {
+                    let notify_r = Arc::new(tokio::sync::Notify::new());
+                    task_completion
+                        .write()
+                        .await
+                        .insert(remediation_id, notify_r.clone());
+                    let _ = conversation_tx_aggregator
+                        .send(OrchestratorTask {
+                            task_id: remediation_id,
+                            message: remediation_message,
+                            session_id: session_id_aggregator.clone(),
+                            image_data_urls: None,
+                            execution_mode: None,
+                            preferred_task_type: None,
+                        })
+                        .await;
+                    let _ = tokio::time::timeout(PER_CHILD_TIMEOUT, notify_r.notified()).await;
+                    task_completion.write().await.remove(&remediation_id);
+                    if let Ok(s) = TaskStore::open(&store_path_buf) {
+                        let _ = s.update_status(remediation_id, TaskStatus::Completed);
+                    }
+                }
+                missing_deliverables = collect_missing_plan_deliverables(&plan_spawn, &workspace_root);
+            }
+            if !missing_deliverables.is_empty() {
+                let snapshot_missing = missing_deliverables.clone();
+                let _written_rel = write_missing_deliverables_fs_fallback(
+                    &workspace_root,
+                    &snapshot_missing,
+                    root_task_id,
+                )
+                .await;
             }
         }
         // Collect final child statuses in a synchronous scope before the await-heavy aggregation.
@@ -1028,9 +2052,14 @@ Reply in the SAME LANGUAGE as the user's question above. Do not add any informat
                 Ok(Ok(resp)) if !resp.text.trim().is_empty() => {
                     synthesis_model_used = Some(resp.model_used.clone());
                     let text = resp.text.trim().to_string();
-                    // If synthesis is suspiciously short vs sub-agent content, model likely truncated; show full replies so user gets script/CSV/content
-                    const MIN_SYNTHESIS_CHARS: usize = 600;
-                    if text.len() < MIN_SYNTHESIS_CHARS && raw_responses.len() > text.len() * 2 {
+                    // If synthesis is significantly shorter than raw sub-agent outputs, it tends to drop
+                    // critical file/script details. Fall back to raw replies to preserve deliverables.
+                    // Only use the relative-size check: an absolute minimum would incorrectly discard
+                    // brief but complete syntheses for naturally short multi-step tasks.
+                    const MAX_COMPRESSION_RATIO: usize = 4;
+                    let suspiciously_short_relative =
+                        raw_responses.len() > text.len().saturating_mul(MAX_COMPRESSION_RATIO);
+                    if suspiciously_short_relative {
                         format!("Réponses des agents :\n\n{}", raw_responses)
                     } else {
                         text
@@ -1111,6 +2140,7 @@ Formatting rules (Markdown):
                         session_id: session_id_aggregator.clone(),
                         image_data_urls: None,
                         execution_mode: None,
+                        preferred_task_type: None,
                     })
                     .await;
                 if tokio::time::timeout(PER_CHILD_TIMEOUT, notify_refinement.notified())
@@ -1265,7 +2295,9 @@ Formatting rules (Markdown):
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_decomposition_override, Subtask};
+    use super::{apply_decomposition_override, build_deterministic_project_fallback_plan, extract_workspace_paths_from_message, is_project_like_request, Subtask};
+    use super::super::execution_plan::{ExecutionPlan, PlanStep};
+    use uuid::Uuid;
 
     fn step(agent: &str, msg: &str) -> Subtask {
         (agent.to_string(), msg.to_string())
@@ -1304,5 +2336,259 @@ mod tests {
         let out = apply_decomposition_override("Quelle météo ?", steps);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0, "search");
+    }
+
+    #[test]
+    fn override_does_not_collapse_project_like_single_code() {
+        let steps = vec![step("code", "Prends une photo et crée tout le projet complet")];
+        let out = apply_decomposition_override(
+            "Dans ce projet, crée plusieurs livrables, un notebook et une API sécurisée dans workspace:/certification_ai/exo/",
+            steps,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "code");
+    }
+
+    #[test]
+    fn project_like_detection_for_long_delivery_request() {
+        assert!(is_project_like_request(
+            "Construis un notebook .ipynb, des scripts, une API, du monitoring et place les livrables dans workspace:/certification_ai/exo/"
+        ));
+    }
+
+    #[test]
+    fn long_but_keyword_free_message_is_not_project_like() {
+        // A 600+ char message that contains no project keywords must NOT be treated as
+        // project-like; doing so would send a simple "summarise this document" request
+        // through the multi-step analyst/backend/qa pipeline instead of answering directly.
+        let long_summary_request = format!(
+            "Please summarise the following article for me: {}",
+            "This is filler text without any project keywords. ".repeat(15)
+        );
+        assert!(
+            long_summary_request.chars().count() >= 600,
+            "test message must be at least 600 chars"
+        );
+        assert!(!is_project_like_request(&long_summary_request));
+    }
+
+    #[test]
+    fn long_message_with_one_keyword_is_project_like() {
+        // A 600+ char message that mentions at least one project keyword (e.g. "monitoring")
+        // should still be treated as project-like.
+        let long_with_keyword = format!(
+            "We need monitoring for our system. {}",
+            "Additional context and detailed requirements follow here. ".repeat(12)
+        );
+        assert!(
+            long_with_keyword.chars().count() >= 600,
+            "test message must be at least 600 chars"
+        );
+        assert!(is_project_like_request(&long_with_keyword));
+    }
+
+    #[test]
+    fn short_message_with_three_keywords_is_project_like() {
+        // 3+ keyword hits are sufficient regardless of length.
+        assert!(is_project_like_request(
+            "Crée un notebook avec monitoring et livrables dans workspace:/"
+        ));
+    }
+
+    #[test]
+    fn deterministic_project_fallback_has_multiple_specialist_steps() {
+        let p = build_deterministic_project_fallback_plan("request");
+        assert!(p.steps.len() >= 5);
+        assert_eq!(p.steps.first().map(|s| s.agent_type.as_str()), Some("analyst"));
+        assert_eq!(p.steps.last().map(|s| s.agent_type.as_str()), Some("conversation"));
+    }
+
+    /// When apply_decomposition_override reroutes a `code` step to `conversation`, the
+    /// original PlanStep metadata (depends_on, acceptance_criteria, deliverables) must be
+    /// preserved by patching agent_type in-place rather than rebuilding via from_legacy.
+    #[test]
+    fn override_preserves_plan_step_metadata_on_code_to_conversation() {
+        let mut plan = ExecutionPlan {
+            plan_id: Uuid::nil(),
+            steps: vec![PlanStep {
+                step_id: "s0".into(),
+                agent_type: "code".into(),
+                intent: "Prends une photo".into(),
+                depends_on: vec!["prev_step".into()],
+                parallel_group: None,
+                acceptance_criteria: Some("Photo saved at workspace:/out.jpg".into()),
+                deliverables: Some(vec!["workspace:/out.jpg".into()]),
+            }],
+        };
+
+        let steps_before = plan.to_subtasks();
+        let steps_after =
+            apply_decomposition_override("Prends une photo", steps_before.clone());
+
+        // Override must have fired (code → conversation).
+        assert_ne!(steps_after, steps_before);
+        assert_eq!(steps_after[0].0, "conversation");
+
+        // Apply the in-place patch (mirrors orchestrator.rs fix).
+        assert_eq!(steps_after.len(), plan.steps.len());
+        for (plan_step, (new_agent, new_intent)) in
+            plan.steps.iter_mut().zip(steps_after.iter())
+        {
+            plan_step.agent_type = new_agent.clone();
+            plan_step.intent = new_intent.clone();
+        }
+
+        // Agent type updated.
+        assert_eq!(plan.steps[0].agent_type, "conversation");
+        // Deliverables preserved (not discarded as from_legacy would have done).
+        assert_eq!(
+            plan.steps[0].deliverables.as_deref().map(|d| d.iter().map(String::as_str).collect::<Vec<_>>()),
+            Some(vec!["workspace:/out.jpg"])
+        );
+        // Acceptance criteria preserved.
+        assert_eq!(
+            plan.steps[0].acceptance_criteria.as_deref(),
+            Some("Photo saved at workspace:/out.jpg")
+        );
+        // depends_on preserved.
+        assert_eq!(plan.steps[0].depends_on, vec!["prev_step"]);
+    }
+
+    #[test]
+    fn extract_workspace_paths_finds_paths_in_message() {
+        let paths = extract_workspace_paths_from_message(
+            "Crée un notebook dans workspace:/proj/notebook.ipynb et une API dans workspace:/proj/api/",
+        );
+        assert_eq!(paths, vec!["workspace:/proj/notebook.ipynb", "workspace:/proj/api/"]);
+    }
+
+    #[test]
+    fn extract_workspace_paths_strips_trailing_punctuation() {
+        let paths = extract_workspace_paths_from_message("Place files in workspace:/out/, workspace:/data.csv.");
+        assert_eq!(paths, vec!["workspace:/out/", "workspace:/data.csv"]);
+    }
+
+    #[test]
+    fn extract_workspace_paths_deduplicates() {
+        let paths = extract_workspace_paths_from_message(
+            "workspace:/proj/file.py and workspace:/proj/file.py again",
+        );
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "workspace:/proj/file.py");
+    }
+
+    #[test]
+    fn extract_workspace_paths_empty_when_no_paths() {
+        let paths = extract_workspace_paths_from_message("Just a plain request with no workspace paths");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn deterministic_fallback_backend_step_has_deliverables_when_workspace_paths_present() {
+        let p = build_deterministic_project_fallback_plan(
+            "Construis un notebook dans workspace:/proj/notebook.ipynb et une API dans workspace:/proj/api/",
+        );
+        let backend = p.steps.iter().find(|s| s.agent_type == "backend").expect("backend step missing");
+        let deliverables = backend.deliverables.as_ref().expect("backend deliverables must be Some");
+        assert!(deliverables.contains(&"workspace:/proj/notebook.ipynb".to_string()));
+        assert!(deliverables.contains(&"workspace:/proj/api/".to_string()));
+    }
+
+    #[test]
+    fn deterministic_fallback_qa_step_has_deliverables_when_workspace_paths_present() {
+        let p = build_deterministic_project_fallback_plan(
+            "Crée un script dans workspace:/scripts/run.py",
+        );
+        let qa = p.steps.iter().find(|s| s.agent_type == "qa").expect("qa step missing");
+        let deliverables = qa.deliverables.as_ref().expect("qa deliverables must be Some");
+        assert!(deliverables.contains(&"workspace:/scripts/run.py".to_string()));
+    }
+
+    #[test]
+    fn deterministic_fallback_no_deliverables_when_no_workspace_paths() {
+        let p = build_deterministic_project_fallback_plan("Build a monitoring API with several deliverables");
+        let backend = p.steps.iter().find(|s| s.agent_type == "backend").expect("backend step missing");
+        // Without explicit workspace:/ paths, deliverables stay None — no false disk checks.
+        assert!(backend.deliverables.is_none());
+    }
+
+    // ── deliverable_workspace_rel ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn deliverable_workspace_rel_strips_workspace_slash_prefix() {
+        use super::deliverable_workspace_rel;
+        assert_eq!(deliverable_workspace_rel("workspace:/proj/report.md"), "proj/report.md");
+        assert_eq!(deliverable_workspace_rel("workspace:proj/report.md"), "proj/report.md");
+        assert_eq!(deliverable_workspace_rel("workspace:/report.md"), "report.md");
+    }
+
+    #[test]
+    fn deliverable_workspace_rel_preserves_absolute_paths() {
+        use super::deliverable_workspace_rel;
+        // Absolute paths must NOT have their leading `/` stripped.
+        assert_eq!(deliverable_workspace_rel("/tmp/report.md"), "/tmp/report.md");
+        assert_eq!(deliverable_workspace_rel("/home/user/out.txt"), "/home/user/out.txt");
+    }
+
+    #[test]
+    fn deliverable_workspace_rel_preserves_relative_paths() {
+        use super::deliverable_workspace_rel;
+        assert_eq!(deliverable_workspace_rel("output/report.md"), "output/report.md");
+        assert_eq!(deliverable_workspace_rel("report.md"), "report.md");
+    }
+
+    // ── deliverable_rel_is_safe ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn deliverable_rel_is_safe_allows_absolute_unix_paths() {
+        use super::deliverable_rel_is_safe;
+        // Absolute Unix paths are now allowed so workspace_root.join() can return them unchanged.
+        assert!(deliverable_rel_is_safe("/tmp/report.md"));
+        assert!(deliverable_rel_is_safe("/home/user/output.txt"));
+    }
+
+    #[test]
+    fn deliverable_rel_is_safe_rejects_dotdot() {
+        use super::deliverable_rel_is_safe;
+        assert!(!deliverable_rel_is_safe("../escape.txt"));
+        assert!(!deliverable_rel_is_safe("/tmp/../etc/passwd"));
+        assert!(!deliverable_rel_is_safe("a/../../b"));
+    }
+
+    #[test]
+    fn deliverable_rel_is_safe_rejects_windows_paths() {
+        use super::deliverable_rel_is_safe;
+        assert!(!deliverable_rel_is_safe("C:\\Users\\report.txt"));
+        assert!(!deliverable_rel_is_safe("c:/users/report.txt"));
+        assert!(!deliverable_rel_is_safe("\\\\server\\share\\file"));
+    }
+
+    // ── workspace_deliverable_satisfied ───────────────────────────────────────────────────────
+
+    #[test]
+    fn workspace_deliverable_satisfied_checks_absolute_path_directly() {
+        use super::workspace_deliverable_satisfied;
+        use std::path::Path;
+        // A path that cannot exist (clearly absent) but is absolute should be checked as-is.
+        // We just verify it does NOT incorrectly return true when the path is absent.
+        assert!(!workspace_deliverable_satisfied(
+            Path::new("/nonexistent_workspace_root_xyz"),
+            "/nonexistent_absolute_deliverable_xyz/report.md"
+        ));
+    }
+
+    #[test]
+    fn workspace_deliverable_satisfied_returns_true_for_existing_absolute_path() {
+        use super::workspace_deliverable_satisfied;
+        use std::path::Path;
+        // Create a real temp file and verify it is found via its absolute path,
+        // regardless of what workspace_root is set to.
+        let dir = std::env::temp_dir();
+        let tmp = dir.join("akasha_test_deliverable_abs.txt");
+        std::fs::write(&tmp, b"test").expect("write temp file");
+        let abs = tmp.to_str().expect("valid utf8 path");
+        let result = workspace_deliverable_satisfied(Path::new("/some/unrelated/workspace"), abs);
+        let _ = std::fs::remove_file(&tmp);
+        assert!(result, "absolute deliverable that exists on disk must be satisfied");
     }
 }

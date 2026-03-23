@@ -63,21 +63,10 @@ pub fn parse_contract_from_response(response: &str) -> Option<AgentOutputContrac
         }
     }
     // Try last {...} in the last ~2K chars.
-    // IMPORTANT: slicing by byte offsets on UTF-8 strings must start at a valid char boundary,
-    // otherwise Rust will panic ("byte index is not a char boundary").
-    let tail = {
-        let start = trimmed.len().saturating_sub(2000);
-        let start = if trimmed.is_char_boundary(start) {
-            start
-        } else {
-            trimmed[..start]
-                .char_indices()
-                .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0)
-        };
-        &trimmed[start..]
-    };
+    // IMPORTANT: never use `trimmed[..start]` to "fix" a bad boundary — if `start` is not a char
+    // boundary, that slice panics. Use `floor_char_boundary` (stable) instead.
+    let tail_start = trimmed.floor_char_boundary(trimmed.len().saturating_sub(2000));
+    let tail = &trimmed[tail_start..];
     let open = tail.rfind('{')?;
     // Find the matching closing brace for the last '{' by tracking nesting depth.
     let mut depth = 0i32;
@@ -121,19 +110,8 @@ fn strip_trailing_contract(response: &str) -> String {
         }
     }
     // Remove last {...} that parses as contract (search from end, try parsing)
-    let tail = {
-        let start = trimmed.len().saturating_sub(2500);
-        let start = if trimmed.is_char_boundary(start) {
-            start
-        } else {
-            trimmed[..start]
-                .char_indices()
-                .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0)
-        };
-        &trimmed[start..]
-    };
+    let tail_start = trimmed.floor_char_boundary(trimmed.len().saturating_sub(2500));
+    let tail = &trimmed[tail_start..];
     if let Some(open_rel) = tail.rfind('{') {
         let json_candidate = &tail[open_rel..];
         if serde_json::from_str::<AgentOutputContract>(json_candidate).is_ok() {
@@ -210,5 +188,15 @@ mod tests {
         let r = "Voici l'analyse.\n\n```json\n{\"status\": \"done\", \"summary\": \"Done.\"}\n```";
         let out = user_facing_message(r);
         assert_eq!(out, "Voici l'analyse.");
+    }
+
+    /// `len - 2000` can land inside a multi-byte UTF-8 char (e.g. `└`); slicing must not panic.
+    #[test]
+    fn parse_contract_tail_slice_does_not_panic_mid_utf8_char() {
+        // 1999 ASCII bytes + 3-byte '└' + filler so that (len - 2000) points inside '└' (byte index 2000).
+        let filler = "a".repeat(1998);
+        let r = format!("{}└{} {{\"status\":\"done\",\"summary\":\"x\"}}", "a".repeat(1999), filler);
+        assert!(!r.is_char_boundary(r.len().saturating_sub(2000)));
+        let _ = parse_contract_from_response(&r);
     }
 }

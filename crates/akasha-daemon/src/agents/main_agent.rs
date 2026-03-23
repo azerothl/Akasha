@@ -1,9 +1,11 @@
 //! Main Agent — entry point, ack < 500ms, task creation, routing to Orchestrator or Direct to conversation (Plan: Architecture agents et pipeline).
 
 use akasha_core::{EventEnvelope, EventType};
+use akasha_llm::CompletionRequest;
 use akasha_store::{Task, TaskStatus, TaskStore, TodoStatus};
 use chrono::Utc;
 use std::path::Path;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -27,6 +29,63 @@ pub struct OrchestratorTask {
     pub image_data_urls: Option<Vec<String>>,
     /// When present, orchestrator may use for lighter (Guided) or full (Orchestrated) pipeline. Absent when sent Direct to conversation.
     pub execution_mode: Option<ExecutionMode>,
+    /// Optional system-selected task type for routing (falls back to current classifier/router when absent).
+    pub preferred_task_type: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SelectorAnswerMode {
+    Direct,
+    Delegate,
+}
+
+#[derive(Clone, Debug)]
+struct SelectorDecision {
+    answer_mode: SelectorAnswerMode,
+    task_type: Option<String>,
+    target_agent: Option<String>,
+    reason: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SelectorRawDecision {
+    answer_mode: Option<String>,
+    task_type: Option<String>,
+    target_agent: Option<String>,
+    reason: Option<String>,
+}
+
+fn normalize_task_type(task_type: Option<&str>) -> Option<String> {
+    let t = task_type?.trim().to_lowercase();
+    if t.is_empty() {
+        return None;
+    }
+    let normalized = match t.as_str() {
+        "conversation" | "code_generation" | "creative_writing" | "scientific_analysis"
+        | "data_analysis" | "system_diagnostic" | "system" | "orchestrator" | "image_generation"
+        | "financial" | "documentalist" | "project_manager" | "technical_writer" | "research"
+        | "security_audit" | "creative" => t,
+        _ => return None,
+    };
+    Some(normalized)
+}
+
+fn parse_selector_decision(raw_json: &str) -> Option<SelectorDecision> {
+    let parsed: SelectorRawDecision = serde_json::from_str(raw_json).ok()?;
+    let answer_mode = match parsed.answer_mode.as_deref().map(|s| s.trim().to_lowercase()) {
+        Some(v) if v == "direct" => SelectorAnswerMode::Direct,
+        Some(v) if v == "delegate" => SelectorAnswerMode::Delegate,
+        _ => return None,
+    };
+    Some(SelectorDecision {
+        answer_mode,
+        task_type: normalize_task_type(parsed.task_type.as_deref()),
+        target_agent: parsed
+            .target_agent
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty()),
+        reason: parsed.reason.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+    })
 }
 
 /// Sender that routes tasks to high or normal priority channel (multiplexer feeds orchestrator).
@@ -67,15 +126,21 @@ impl OrchestratorSender {
 pub struct MainAgent {
     bus: EventBus,
     orchestrator: OrchestratorSender,
+    llm_router: Arc<akasha_llm::LLMRouter>,
     /// When Some, Direct mode tasks are sent here (conversation worker) instead of to the orchestrator.
     direct_conversation_tx: Option<mpsc::Sender<OrchestratorTask>>,
 }
 
 impl MainAgent {
-    pub fn new(bus: EventBus, orchestrator: OrchestratorSender) -> Self {
+    pub fn new(
+        bus: EventBus,
+        orchestrator: OrchestratorSender,
+        llm_router: Arc<akasha_llm::LLMRouter>,
+    ) -> Self {
         Self {
             bus,
             orchestrator,
+            llm_router,
             direct_conversation_tx: None,
         }
     }
@@ -92,7 +157,43 @@ impl MainAgent {
     /// session_id: used for short-term memory; if empty, a default "default" is used so all messages share one session.
     /// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
     /// priority: used when forward_to_orchestrator is true; UserHigh tasks are processed before UserNormal/Scheduled.
-    pub fn handle_message(
+    async fn system_selector_decision(&self, message: &str) -> Option<SelectorDecision> {
+        let enabled = std::env::var("AKASHA_SYSTEM_TASK_SELECTOR")
+            .ok()
+            .map(|s| s != "0" && !s.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+        if !enabled {
+            return None;
+        }
+        let prompt = format!(
+            "You are a strict routing selector for Akasha.\n\
+Return ONLY compact JSON with schema:\n\
+{{\"answer_mode\":\"direct|delegate\",\"task_type\":\"snake_case or empty\",\"target_agent\":\"optional\",\"reason\":\"short\"}}\n\
+Rules:\n\
+- answer_mode=direct when the request can be answered in one pass without decomposition/delegation.\n\
+- answer_mode=delegate for multi-step/project/planning/complex implementation requests.\n\
+- task_type must be one of: conversation, code_generation, creative_writing, scientific_analysis, data_analysis, system_diagnostic, system, orchestrator, image_generation.\n\
+- If unsure, use answer_mode=delegate and task_type=conversation.\n\
+User message:\n{}",
+            message
+        );
+        let req = CompletionRequest {
+            prompt,
+            max_tokens: Some(128),
+            temperature: Some(0.0),
+            preferred_task_type: Some("system".to_string()),
+            system_prompt: None,
+            image_data_urls: None,
+        };
+        let timeout = std::time::Duration::from_secs(8);
+        let resp = tokio::time::timeout(timeout, self.llm_router.complete(&req))
+            .await
+            .ok()?
+            .ok()?;
+        parse_selector_decision(resp.text.trim())
+    }
+
+    pub async fn handle_message(
         &self,
         store_path: &Path,
         message: &str,
@@ -126,15 +227,35 @@ impl MainAgent {
             })
         };
 
+        let selector_decision = if forward_to_orchestrator {
+            self.system_selector_decision(message).await
+        } else {
+            None
+        };
         let execution_mode = if forward_to_orchestrator {
             Some(classify_execution_mode(message))
         } else {
             None
         };
 
+        let selector_direct = selector_decision
+            .as_ref()
+            .map(|d| d.answer_mode == SelectorAnswerMode::Direct)
+            .unwrap_or(false);
         let use_direct = forward_to_orchestrator
-            && execution_mode == Some(ExecutionMode::Direct)
+            && (selector_direct || execution_mode == Some(ExecutionMode::Direct))
             && self.direct_conversation_tx.is_some();
+        let preferred_task_type = selector_decision
+            .as_ref()
+            .and_then(|d| d.task_type.clone());
+        let preferred_task_type_event = preferred_task_type.clone();
+        let selector_used = selector_decision.is_some();
+        let selector_mode = selector_decision.as_ref().map(|d| match d.answer_mode {
+            SelectorAnswerMode::Direct => "direct",
+            SelectorAnswerMode::Delegate => "delegate",
+        });
+        let selector_target_agent = selector_decision.as_ref().and_then(|d| d.target_agent.clone());
+        let selector_reason = selector_decision.as_ref().and_then(|d| d.reason.clone());
 
         let assigned_agent = if !forward_to_orchestrator {
             "llm".to_string()
@@ -162,7 +283,13 @@ impl MainAgent {
                     "task_id": task_id.to_string(),
                     "parent_task_id": null,
                     "assigned_agent": task.assigned_agent,
-                    "execution_mode": execution_mode.map(|e| e.as_str())
+                    "execution_mode": execution_mode.map(|e| e.as_str()),
+                    "selector_used": selector_used,
+                    "selector_mode": selector_mode,
+                    "selector_task_type": preferred_task_type_event,
+                    "selector_target_agent": selector_target_agent,
+                    "selector_reason": selector_reason,
+                    "fallback_used": !selector_used
                 })),
             )
             .with_correlation(task_id),
@@ -177,6 +304,7 @@ impl MainAgent {
                     session_id: session_id.to_string(),
                     image_data_urls,
                     execution_mode: None,
+                    preferred_task_type: None,
                 };
                 if let Err(e) = tx.try_send(task_msg) {
                     match e {
@@ -198,6 +326,7 @@ impl MainAgent {
                         session_id: session_id.to_string(),
                         image_data_urls,
                         execution_mode,
+                        preferred_task_type,
                     },
                     priority,
                 );
@@ -250,6 +379,7 @@ impl MainAgent {
             session_id,
             image_data_urls: None,
             execution_mode,
+            preferred_task_type: None,
         };
         // Update status to Queued BEFORE enqueuing so the conversation worker won't
         // see a Paused/Interrupted status and silently drop the task.
@@ -279,5 +409,29 @@ impl MainAgent {
             .with_correlation(task_id),
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_task_type, parse_selector_decision, SelectorAnswerMode};
+
+    #[test]
+    fn selector_parse_valid_direct() {
+        let raw = r#"{"answer_mode":"direct","task_type":"conversation","reason":"simple qa"}"#;
+        let d = parse_selector_decision(raw).expect("decision should parse");
+        assert_eq!(d.answer_mode, SelectorAnswerMode::Direct);
+        assert_eq!(d.task_type.as_deref(), Some("conversation"));
+    }
+
+    #[test]
+    fn selector_parse_invalid_mode_is_none() {
+        let raw = r#"{"answer_mode":"maybe","task_type":"conversation"}"#;
+        assert!(parse_selector_decision(raw).is_none());
+    }
+
+    #[test]
+    fn selector_normalize_rejects_unknown_task_type() {
+        assert_eq!(normalize_task_type(Some("unknown_type")), None);
     }
 }
