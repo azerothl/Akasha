@@ -90,7 +90,7 @@ pub fn classify_execution_mode(message: &str) -> ExecutionMode {
         "quel temps", "il fait quel", "il va faire", "temps dehors", "temps aujourd",
         // Simple agenda / calendar queries
         "prévu demain", "prévu aujourd", "trucs de prévu", "choses de prévu",
-        "j'ai des trucs", "j'ai des choses", "rendez-vous", "agenda", "planned for",
+        "j'ai des trucs", "j'ai des choses", "rendez-vous", "planned for",
         "do i have", "est-ce que j'ai",
         // Quick factual / identity questions
         "c'est quoi", "qu'est-ce que", "qu'est-ce qui", "c'est qui", "who is ", "what is ",
@@ -135,6 +135,14 @@ mod tests {
     fn test_orchestrated_keywords() {
         assert_eq!(classify_execution_mode("Crée-moi un site web complet avec blog et auth"), ExecutionMode::Orchestrated);
         assert_eq!(classify_execution_mode("Migration de l'application vers le cloud"), ExecutionMode::Orchestrated);
+        // "agenda" as a bare noun in a project request must NOT be treated as Direct.
+        // Use a message long enough (>80 chars) to bypass the short-message fallback.
+        assert_ne!(
+            classify_execution_mode(
+                "Build an agenda application with reminder notifications, recurring events, and calendar sync"
+            ),
+            ExecutionMode::Direct
+        );
     }
 
     #[test]
