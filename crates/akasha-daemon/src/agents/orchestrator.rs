@@ -1508,12 +1508,27 @@ Shared trace file: `workspace:/{plan_rel}` — préférer des éditions partiell
                     let retry_agent_type = step_ref
                         .map(|s| s.agent_type.clone())
                         .unwrap_or_else(|| "conversation".to_string());
-                    let retry_prompt = format!(
+                    let retry_sub_message = format!(
                         "[Deliverable retry — step {sid}] Your previous response did not create the required files.\n\n\
 You MUST now use TOOL: write_file (or TOOL: run_command for directories) to create each of the following paths before you finish. Do not stop until every file exists on disk.\n\n\
 Missing deliverables:\n{}\n\n\
 Use TOOL: write_file <exact_path> with real, substantive content for each entry above.",
                         missing_deliverables.iter().map(|d| format!("- {d}")).collect::<Vec<_>>().join("\n")
+                    );
+                    // Build via compose_orchestrated_child_message with deliverables_required=true so
+                    // the message contains ORCH_DISK_DELIVERABLES_MARKER.  That marker enables the
+                    // hardening in run_message_via_llm(): workspace-file tools are forced into the
+                    // tool list, the tool-round floor is raised, and "emit TOOL lines now" re-prompts
+                    // fire — exactly the behaviour that must apply on a second attempt after a step
+                    // already missed its deliverables once.
+                    let retry_shared_plan = step_ref
+                        .map(|st| plan_spawn.shared_context_markdown(&user_message, st))
+                        .unwrap_or_default();
+                    let retry_prompt = compose_orchestrated_child_message(
+                        &retry_agent_type,
+                        &retry_sub_message,
+                        &retry_shared_plan,
+                        true,
                     );
                     let retry_id = Uuid::new_v4();
                     let retry_task = Task {

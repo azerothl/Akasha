@@ -725,20 +725,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_skill", "read_skill <name> — charge le contenu (instructions, usage) du skill. À utiliser quand tu as besoin du détail d'un skill avant de l'invoquer par son nom."),
 ];
 
-fn available_tools_instruction(allowed_tools: Option<&[String]>, orch_disk_deliverables: bool) -> String {
-    // Workspace file tools: keep in the "Available:" list for orchestrated deliverables even if tool_profile omitted them.
-    fn is_orch_workspace_file_tool(name: &str) -> bool {
-        matches!(
-            name,
-            "write_file"
-                | "read_file"
-                | "edit_file"
-                | "search_replace"
-                | "grep_content"
-                | "search_files"
-                | "apply_patch"
-        )
-    }
+fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
     let iter: Box<dyn Iterator<Item = &(&str, &str)>> = if let Some(allowed) = allowed_tools {
         Box::new(
             AVAILABLE_TOOLS
@@ -754,8 +741,7 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>, orch_disk_deliv
                         || *name == "list_skills"
                         || *name == "read_skill";
                     let in_profile = allowed.iter().any(|a| a == *name);
-                    let force_files = orch_disk_deliverables && is_orch_workspace_file_tool(name);
-                    always_misc || in_profile || force_files
+                    always_misc || in_profile
                 }),
         )
     } else {
@@ -3463,12 +3449,14 @@ pub(crate) async fn run_message_via_llm(
                 if !list.iter().any(|t| t == "write_file") {
                     tracing::warn!(
                         task_id = %task_id,
-                        "Orchestrated deliverables: tools_policy default_profile omits write_file; prompt still lists workspace file tools — check allowed_write_paths / tool_profiles."
+                        "Orchestrated deliverables: tools_policy default_profile omits write_file; \
+                         workspace file tools will NOT be advertised to the model — add write_file \
+                         (and other file tools) to the profile to enable disk deliverables."
                     );
                 }
             }
         }
-        let base = available_tools_instruction(allowed_tools.as_deref(), orch_disk_deliverables);
+        let base = available_tools_instruction(allowed_tools.as_deref());
         let (skills_part, skills_rule) = match &skill_registry {
             Some(reg) => {
                 let list = reg.list().await;
@@ -4597,25 +4585,32 @@ pub(crate) async fn run_message_via_llm(
 
         // When the model returns prose / JSON only, this loop would exit with zero tool rounds — UI shows an
         // answer but nothing is written. For orchestrated disk deliverables, nudge additional LLM rounds until
-        // a write-like tool appears in history.
+        // a write-like tool appears in history. Only nag when the active policy actually permits write tools;
+        // if the profile blocks them the nudge would just churn through "tool not allowed" errors.
         const MAX_ORCH_DISK_WRITE_NAGS: u32 = 8;
         if orch_disk_deliverables
             && tools_executor_snapshot.is_some()
             && no_parseable_tools_this_round
         {
-            let disk_write_attempted = tool_loop_history.iter().any(|(t, _)| {
-                matches!(
-                    t.as_str(),
-                    "write_file" | "edit_file" | "search_replace" | "apply_patch"
-                )
-            });
-            if !disk_write_attempted && orch_disk_write_nags < MAX_ORCH_DISK_WRITE_NAGS {
-                orch_disk_write_nags += 1;
-                current_prompt = format!(
-                    "{}\n\n[Orchestrator — disk deliverables] Your last assistant message did not include any executable TOOL: lines (or they were not parsed). This step MUST call tools: use TOOL: read_file on the shared plan trace if needed, then TOOL: write_file / edit_file / search_replace for every mandatory workspace path and update the plan sections **Fait (agent)** / **Reste (agent)**. Do not finish with prose-only or ```json``` — emit TOOL lines now.",
-                    current_prompt
-                );
-                continue;
+            let policy_allows_write = tools_executor_snapshot
+                .as_ref()
+                .map(|e| e.policy.can_use_tool("write_file"))
+                .unwrap_or(false);
+            if policy_allows_write {
+                let disk_write_attempted = tool_loop_history.iter().any(|(t, _)| {
+                    matches!(
+                        t.as_str(),
+                        "write_file" | "edit_file" | "search_replace" | "apply_patch"
+                    )
+                });
+                if !disk_write_attempted && orch_disk_write_nags < MAX_ORCH_DISK_WRITE_NAGS {
+                    orch_disk_write_nags += 1;
+                    current_prompt = format!(
+                        "{}\n\n[Orchestrator — disk deliverables] Your last assistant message did not include any executable TOOL: lines (or they were not parsed). This step MUST call tools: use TOOL: read_file on the shared plan trace if needed, then TOOL: write_file / edit_file / search_replace for every mandatory workspace path and update the plan sections **Fait (agent)** / **Reste (agent)**. Do not finish with prose-only or ```json``` — emit TOOL lines now.",
+                        current_prompt
+                    );
+                    continue;
+                }
             }
         }
 
