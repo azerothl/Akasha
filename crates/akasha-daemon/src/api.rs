@@ -1671,10 +1671,13 @@ fn tool_supports_multiline_body(tool_name: &str) -> bool {
 /// Rewrite lines so strict `TOOL:` prefix parsing succeeds (see `parse_tool_calls`).
 ///
 /// Lines that are inside the body of a multiline tool (`write_file`, `edit_file`,
-/// `apply_patch`, `ask_user`) are **not** normalized — only a canonical `TOOL: …`
-/// line (already in strict form) can terminate a body.  This prevents file/doc
-/// content that happens to contain phrases like `- Tool: read_file` from being
-/// rewritten into a false tool invocation that truncates the body.
+/// `apply_patch`, `ask_user`) are **not** normalized — only a real tool header
+/// (canonical `TOOL: …` or a sloppy markdown-style prefix recognized by
+/// `line_rest_after_leading_tool`, e.g. `- Tool: …` or `**TOOL:** …`) can
+/// terminate a body.  Lines that merely *mention* a tool mid-sentence
+/// (e.g. `### Step — TOOL: read_file`) remain body content because
+/// `line_rest_after_leading_tool` requires the keyword to appear at the effective
+/// start of the line after stripping markdown noise.
 fn normalize_response_tool_prefixes(response: &str) -> String {
     let mut in_fence = false;
     let mut in_multiline_body = false;
@@ -1695,14 +1698,16 @@ fn normalize_response_tool_prefixes(response: &str) -> String {
             continue;
         }
 
-        // Inside a multiline body, do NOT apply sloppy-prefix normalization.
-        // Body content (docs, generated files, specs …) may contain phrases like
-        // "- Tool: read_file" or "### TOOL: …" that must not become tool headers.
-        // Only a line that is already in strict canonical "TOOL: …" form can end
-        // the body and start a new tool invocation.
+        // Inside a multiline body, exit body mode only when the line is a real
+        // tool header — either the canonical "TOOL: …" form or a sloppy
+        // markdown-style prefix that `line_rest_after_leading_tool` recognises
+        // (e.g. "- Tool: …", "**TOOL:** …").  Lines where TOOL: is embedded
+        // after non-noise text (e.g. "### Step — TOOL: read_file") are kept as
+        // body content because `line_rest_after_leading_tool` requires the
+        // keyword at the effective start of the line.
         if in_multiline_body {
-            if raw.trim_start().starts_with("TOOL:") {
-                // Canonical tool header — exit body mode and fall through to process.
+            if raw.trim_start().starts_with("TOOL:") || line_rest_after_leading_tool(raw).is_some() {
+                // Real tool header (canonical or sloppy) — exit body mode and fall through.
                 in_multiline_body = false;
             } else {
                 out_lines.push(raw.to_string());
@@ -7811,21 +7816,25 @@ mod tests {
         );
     }
 
-    // Body lines containing sloppy "- Tool: …" / "### TOOL: …" must not be treated as new tool calls.
+    // After the fix, sloppy "- Tool: …" headers DO terminate multiline bodies.
+    // A line like "- Tool: read_file …" inside a body is treated as the start of a new tool call.
     #[test]
-    fn parse_tool_calls_body_with_tool_mention_list_item_not_truncated() {
-        // write_file body contains "- Tool: read_file …" — must NOT start a new tool.
+    fn parse_tool_calls_sloppy_header_terminates_multiline_body() {
+        // write_file body is ended when "- Tool: read_file …" appears — new tool starts.
         let s = "TOOL: write_file workspace:/docs/tools.md\n# Available tools\n\n- Tool: read_file — reads a file\n- Tool: write_file — writes a file\n\nEnd of list";
         let c = parse_tool_calls(s);
-        assert_eq!(c.len(), 1, "only one tool call expected, got {:?}", c);
+        // The "- Tool: read_file" line terminates the write_file body and starts a new call.
+        assert!(c.len() >= 2, "expected at least 2 tool calls, got {:?}", c);
         assert_eq!(c[0].0, "write_file");
+        // The write_file body ends just before "- Tool: read_file …".
         let body = &c[0].1[1];
         assert!(
-            body.contains("- Tool: read_file"),
-            "body should contain the tool mention verbatim, got: {:?}",
+            !body.contains("End of list"),
+            "write_file body should be truncated at the sloppy header, got: {:?}",
             body
         );
-        assert!(body.contains("End of list"), "body should not be truncated, got: {:?}", body);
+        // The second call should be read_file (started by the sloppy header).
+        assert_eq!(c[1].0, "read_file");
     }
 
     #[test]
@@ -7850,6 +7859,38 @@ mod tests {
         let s = "TOOL: write_file workspace:/a.txt\nsome content\nTOOL: read_file workspace:/b.txt";
         let c = parse_tool_calls(s);
         assert_eq!(c.len(), 2);
+        assert_eq!(c[0].0, "write_file");
+        assert_eq!(c[1].0, "read_file");
+    }
+
+
+    #[test]
+    fn parse_tool_calls_sloppy_provider_all_headers_after_multiline_tool() {
+        // Providers that always emit sloppy "- Tool: …" headers must not lose tool calls
+        // that come after a multiline-body tool (write_file / edit_file / apply_patch).
+        let s = concat!(
+            "- Tool: write_file workspace:/out.txt\n",
+            "hello content\n",
+            "- Tool: read_file workspace:/in.txt\n",
+            "- Tool: list_dir workspace:/\n",
+        );
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 3, "expected write_file + read_file + list_dir, got {:?}", c);
+        assert_eq!(c[0].0, "write_file");
+        assert_eq!(c[1].0, "read_file");
+        assert_eq!(c[2].0, "list_dir");
+    }
+
+    #[test]
+    fn parse_tool_calls_bold_sloppy_provider_after_multiline_tool() {
+        // "**TOOL:** …" style also terminates a multiline body.
+        let s = concat!(
+            "**TOOL:** write_file workspace:/out.txt\n",
+            "some generated content\n",
+            "**TOOL:** read_file workspace:/plan.md\n",
+        );
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 2, "expected write_file + read_file, got {:?}", c);
         assert_eq!(c[0].0, "write_file");
         assert_eq!(c[1].0, "read_file");
     }
