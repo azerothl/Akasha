@@ -199,6 +199,15 @@ impl TaskStore {
         Ok(())
     }
 
+    pub fn update_assigned_agent(&self, id: Uuid, agent: &str) -> anyhow::Result<()> {
+        let now = Utc::now();
+        self.conn.execute(
+            "UPDATE tasks SET assigned_agent = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![agent, now.to_rfc3339(), id.to_string()],
+        )?;
+        Ok(())
+    }
+
     pub fn update_status(&self, id: Uuid, status: TaskStatus) -> anyhow::Result<()> {
         let now = Utc::now();
         self.conn.execute(

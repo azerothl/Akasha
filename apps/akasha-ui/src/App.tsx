@@ -5243,8 +5243,8 @@ function App() {
                   const { content_base64, mime_type } = await readFileAsBase64(file);
                   await invoke("add_user_rag_document", {
                     name: file.name,
-                    contentBase64: content_base64,
-                    mimeType: mime_type,
+                    content_base64: content_base64,
+                    mime_type: mime_type,
                     port: DAEMON_PORT,
                   });
                   fetchUserRagDocuments();

@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { cn } from "@/lib/utils";
 
 export default function AddTransaction({ onAdd }: { onAdd: (data: any) => void }) {
   const [description, setDescription] = useState("");

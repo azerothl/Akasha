@@ -34,7 +34,8 @@ pub struct ToolsPolicy {
     /// Brave Search API key (set by daemon from vault "brave_api_key"; not in YAML). Takes precedence over BRAVE_API_KEY env.
     #[serde(skip)]
     pub brave_api_key: Option<String>,
-    /// Project root for resolving workspace:/ paths (set by daemon from spec_dir.parent()). Paths under this are allowed when "." is in allowed_read_paths/allowed_write_paths.
+    /// Project root for resolving workspace:/ paths and "." in allowed_read_paths/allowed_write_paths.
+    /// Set by the daemon from its data_dir (see daemon.rs).
     #[serde(skip)]
     pub workspace_root: Option<PathBuf>,
     /// Optional: tool profiles (profile_name -> list of tool names). If default_profile is set, only tools in that profile are allowed.
@@ -160,18 +161,16 @@ impl ToolsPolicy {
                         return true;
                     }
                 }
-                // Absolute path: allow if under process current_dir or under policy.workspace_root (daemon sets spec_dir.parent())
+                // Absolute path: allow if under process current_dir or under policy.workspace_root
                 if let Ok(cwd) = std::env::current_dir() {
                     let cwd_n = path_normalize(&cwd);
-                    let cwd_s = cwd_n.to_string_lossy();
-                    if path_str.starts_with(cwd_s.as_ref()) {
+                    if path_n.starts_with(&cwd_n) {
                         return true;
                     }
                 }
                 if let Some(ref root) = self.workspace_root {
                     let root_n = path_normalize(root);
-                    let root_s = root_n.to_string_lossy();
-                    if path_str.starts_with(root_s.as_ref()) {
+                    if path_n.starts_with(&root_n) {
                         return true;
                     }
                 }
@@ -200,15 +199,13 @@ impl ToolsPolicy {
                 }
                 if let Ok(cwd) = std::env::current_dir() {
                     let cwd_n = path_normalize(&cwd);
-                    let cwd_s = cwd_n.to_string_lossy();
-                    if path_str.starts_with(cwd_s.as_ref()) {
+                    if path_n.starts_with(&cwd_n) {
                         return true;
                     }
                 }
                 if let Some(ref root) = self.workspace_root {
                     let root_n = path_normalize(root);
-                    let root_s = root_n.to_string_lossy();
-                    if path_str.starts_with(root_s.as_ref()) {
+                    if path_n.starts_with(&root_n) {
                         return true;
                     }
                 }
