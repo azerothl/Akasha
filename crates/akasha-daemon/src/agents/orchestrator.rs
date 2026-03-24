@@ -59,6 +59,26 @@ fn resolve_decompose_task_type(llm_router: &akasha_llm::LLMRouter) -> String {
 fn is_project_like_request(message: &str) -> bool {
     let lower = message.to_lowercase();
     let long = lower.chars().count() >= 600;
+    let has_workspace_deliverable = lower.contains("workspace:/");
+    let deliverable_or_analysis = [
+        "rapport",
+        "report",
+        "markdown",
+        ".md",
+        "comparaison",
+        "compare",
+        "différences",
+        "differences",
+        "analyse",
+        "analysis",
+        "étude",
+        "study",
+        "écris",
+        "ecris",
+        "write",
+    ]
+    .iter()
+    .any(|k| lower.contains(*k));
     let keywords = [
         "livrables",
         "notebook",
@@ -75,6 +95,9 @@ fn is_project_like_request(message: &str) -> bool {
         "monitoring",
     ];
     let hits = keywords.iter().filter(|k| lower.contains(**k)).count();
+    if has_workspace_deliverable && (deliverable_or_analysis || lower.chars().count() >= 120) {
+        return true;
+    }
     // A message must show explicit project signals — length alone is not enough.
     // This prevents long-but-ordinary requests (e.g. "summarise this pasted document")
     // from being misrouted into the multi-step specialist pipeline.
@@ -1397,6 +1420,7 @@ async fn process_root_task(
 
     // Single subtask (conversation): delegate to conversation worker for root (user sees reply on root_id).
     if steps.len() == 1 && steps[0].0 == "conversation" {
+        let _ = store.update_assigned_agent(root_task_id, "conversation");
         let conv_body = if let Some(s0) = plan.steps.first() {
             let shared = plan.shared_context_markdown(&message, s0);
             let deliverables_required = s0
@@ -2614,6 +2638,13 @@ mod tests {
         // 3+ keyword hits are sufficient regardless of length.
         assert!(is_project_like_request(
             "Crée un notebook avec monitoring et livrables dans workspace:/"
+        ));
+    }
+
+    #[test]
+    fn workspace_report_request_is_project_like() {
+        assert!(is_project_like_request(
+            "fais moi une étude détaillée des différences entre Akasha et openClaw puis écris le rapport markdown dans workspace:/analyze/comparaison/rapport.md"
         ));
     }
 

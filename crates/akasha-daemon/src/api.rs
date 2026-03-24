@@ -4253,34 +4253,6 @@ pub(crate) async fn run_message_via_llm(
     let mut user_prefix = String::with_capacity(8192);
     user_prefix.push_str(&personality_reminder);
     user_prefix.push_str("Reply in the same language as the user message below (French, English, etc.).\n\n");
-    if let Some(ref st) = short_term {
-        if memory_profile.recent_turns_limit > 0 && memory_profile.recent_context_max_chars > 0 {
-            let turns = st.get_turns(&session_id).await;
-            let recent_turns: Vec<_> = turns
-                .iter()
-                .rev()
-                .take(memory_profile.recent_turns_limit)
-                .cloned()
-                .rev()
-                .collect();
-            if !recent_turns.is_empty() {
-                let short_ctx = ShortTermStore::turns_to_context(&recent_turns);
-                let capped = if short_ctx.chars().count() > memory_profile.recent_context_max_chars {
-                    short_ctx
-                        .chars()
-                        .take(memory_profile.recent_context_max_chars)
-                        .collect::<String>() + "…"
-                } else {
-                    short_ctx
-                };
-                if !capped.is_empty() {
-                    user_prefix.push_str("[Recent context (this session)]\n");
-                    user_prefix.push_str(&capped);
-                    user_prefix.push_str("\n\n");
-                }
-            }
-        }
-    }
     let turns_empty = match &short_term {
         Some(st) => st.get_turns(&session_id).await.is_empty(),
         None => true,
@@ -4356,8 +4328,21 @@ pub(crate) async fn run_message_via_llm(
             .collect();
         let short_ctx = ShortTermStore::turns_to_context(&final_turns);
         if !short_ctx.is_empty() {
-            user_prefix.push_str(short_ctx.trim_end());
-            user_prefix.push_str("\n\n");
+            let capped = if memory_profile.recent_context_max_chars > 0
+                && short_ctx.chars().count() > memory_profile.recent_context_max_chars
+            {
+                short_ctx
+                    .chars()
+                    .take(memory_profile.recent_context_max_chars)
+                    .collect::<String>() + "…"
+            } else {
+                short_ctx
+            };
+            if !capped.is_empty() {
+                user_prefix.push_str("[Recent context (this session)]\n");
+                user_prefix.push_str(capped.trim_end());
+                user_prefix.push_str("\n\n");
+            }
         }
     }
     if !is_small_talk_fast_lane {
