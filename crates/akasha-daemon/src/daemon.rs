@@ -460,6 +460,12 @@ impl Daemon {
             let task_usage_store = std::sync::Arc::new(crate::api::TaskUsageStore::new());
             let user_rag_store = crate::user_rag::UserRagStore::new_shared(&data_dir);
             let (progress_persistence_tx, progress_persistence_rx) = std::sync::mpsc::channel::<(uuid::Uuid, u8, String)>();
+            let (event_persistence_tx, event_persistence_rx) = std::sync::mpsc::channel::<(
+                uuid::Uuid,
+                String,
+                Option<serde_json::Value>,
+                String,
+            )>();
             {
                 let store_path = db_path.clone();
                 std::thread::spawn(move || {
@@ -473,6 +479,23 @@ impl Daemon {
                     while let Ok((task_id, progress_pct, message)) = progress_persistence_rx.recv() {
                         if store.insert_progress(task_id, progress_pct, &message).is_err() {
                             tracing::warn!(task_id = %task_id, "Progress persistence: insert failed");
+                        }
+                    }
+                });
+            }
+            {
+                let store_path = db_path.clone();
+                std::thread::spawn(move || {
+                    let store = match akasha_store::TaskStore::open(&store_path) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!(error = %e, "Event persistence thread: failed to open TaskStore");
+                            return;
+                        }
+                    };
+                    while let Ok((task_id, event_type, payload, at)) = event_persistence_rx.recv() {
+                        if store.insert_event(task_id, &event_type, payload.as_ref(), &at).is_err() {
+                            tracing::warn!(task_id = %task_id, event_type = %event_type, "Event persistence: insert failed");
                         }
                     }
                 });
@@ -758,8 +781,9 @@ impl Daemon {
             tokio::spawn({
                 let bus = bus.clone();
                 let events = events.clone();
+                let persistence_tx = Some(event_persistence_tx);
                 async move {
-                    crate::agents::run_events_subscriber(bus, events).await;
+                    crate::agents::run_events_subscriber(bus, events, persistence_tx).await;
                 }
             });
 

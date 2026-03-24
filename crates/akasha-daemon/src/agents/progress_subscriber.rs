@@ -13,6 +13,8 @@ use crate::api::{
 
 /// Optional sender to persist progress to DB (daemon passes this for fast GET /api/tasks/:id).
 pub type ProgressPersistenceTx = Option<mpsc::Sender<(Uuid, u8, String)>>;
+/// Optional sender to persist task events to DB so details survive daemon restarts.
+pub type EventPersistenceTx = Option<mpsc::Sender<(Uuid, String, Option<serde_json::Value>, String)>>;
 
 pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, persistence_tx: ProgressPersistenceTx) {
     let mut rx = bus.subscribe();
@@ -85,18 +87,27 @@ pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, per
 
 /// Subscribes to event bus and fills events cache (all events with correlation_id) for GET /api/tasks/:id/events.
 /// Resilient to Lagged: continues processing instead of exiting so root task events are never lost.
-pub async fn run_events_subscriber(bus: EventBus, events: EventsCache) {
+pub async fn run_events_subscriber(bus: EventBus, events: EventsCache, persistence_tx: EventPersistenceTx) {
     let mut rx = bus.subscribe();
     loop {
         match rx.recv().await {
             Ok(ev) => {
                 let Some(task_id) = ev.correlation_id else { continue };
+                let at = Utc::now().to_rfc3339();
                 let entry = TaskEventEntry {
                     event_type: ev.event_type.as_str().to_string(),
                     payload: ev.payload.clone(),
-                    at: Utc::now().to_rfc3339(),
+                    at: at.clone(),
                     task_id: Some(task_id.to_string()),
                 };
+                if let Some(ref tx) = persistence_tx {
+                    let _ = tx.send((
+                        task_id,
+                        entry.event_type.clone(),
+                        entry.payload.clone(),
+                        at,
+                    ));
+                }
                 let mut g = events.write().await;
                 let q = g.entry(task_id).or_insert_with(VecDeque::new);
                 q.push_back(entry);

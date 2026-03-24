@@ -269,15 +269,29 @@ async fn get_task_list(store_path: &Path, status_filter: Option<String>) -> Stri
     json_response("200 OK", &body.to_string())
 }
 
-async fn get_task_events(events: &EventsCache, id: Uuid) -> String {
+async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> String {
     let mut list: Vec<TaskEventEntry> = {
+        let mut root_events = Vec::new();
+        match TaskStore::open(store_path) {
+            Ok(store) => {
+                if let Ok(persisted) = store.get_events(id) {
+                    root_events.extend(persisted.into_iter().map(|e| TaskEventEntry {
+                        event_type: e.event_type,
+                        payload: e.payload,
+                        at: e.at,
+                        task_id: Some(id.to_string()),
+                    }));
+                }
+            }
+            Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+        }
         let g = events.read().await;
-        g.get(&id)
-            .map(|q| q.iter().cloned().collect())
-            .unwrap_or_default()
+        if let Some(q) = g.get(&id) {
+            root_events.extend(q.iter().cloned());
+        }
+        root_events
     };
-    // Derive child task IDs from SubAgentSpawned events already in the in-memory cache —
-    // avoids reopening SQLite (TaskStore) on every poll cycle (the endpoint is polled ~1.5s).
+
     let child_ids: Vec<Uuid> = list
         .iter()
         .filter(|e| e.event_type == "sub_agent_spawned")
@@ -288,17 +302,58 @@ async fn get_task_events(events: &EventsCache, id: Uuid) -> String {
                 .and_then(|v| v.as_str())
                 .and_then(|s| Uuid::parse_str(s).ok())
         })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .collect();
     if !child_ids.is_empty() {
         let g = events.read().await;
         for child_id in child_ids {
             if let Some(q) = g.get(&child_id) {
-                for e in q.iter().cloned() {
-                    list.push(e);
+                list.extend(q.iter().cloned());
+            }
+        }
+        drop(g);
+        if let Ok(store) = TaskStore::open(store_path) {
+            for child_id in list
+                .iter()
+                .filter(|e| e.event_type == "sub_agent_spawned")
+                .filter_map(|e| {
+                    e.payload
+                        .as_ref()
+                        .and_then(|p| p.get("task_id"))
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| Uuid::parse_str(s).ok())
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+            {
+                if let Ok(persisted) = store.get_events(child_id) {
+                    list.extend(persisted.into_iter().map(|e| TaskEventEntry {
+                        event_type: e.event_type,
+                        payload: e.payload,
+                        at: e.at,
+                        task_id: Some(child_id.to_string()),
+                    }));
                 }
             }
         }
     }
+
+    let mut seen = std::collections::HashSet::new();
+    list.retain(|entry| {
+        let payload_key = entry
+            .payload
+            .as_ref()
+            .map(|p| serde_json::to_string(p).unwrap_or_default())
+            .unwrap_or_default();
+        let key = format!(
+            "{}|{}|{}|{}",
+            entry.task_id.as_deref().unwrap_or_default(),
+            entry.event_type,
+            entry.at,
+            payload_key
+        );
+        seen.insert(key)
+    });
     list.sort_by(|a, b| a.at.cmp(&b.at));
     let body = serde_json::json!({ "task_id": id.to_string(), "events": list });
     json_response("200 OK", &body.to_string())
@@ -3795,8 +3850,8 @@ fn memory_profile_for_task(
 ) -> MemoryProfile {
     if is_subagent {
         return MemoryProfile {
-            recent_turns_limit: 4,
-            recent_context_max_chars: 1_200,
+            recent_turns_limit: 0,
+            recent_context_max_chars: 0,
             semantic_top_k: 0,
             episodic_limit: 0,
             facts_limit: 0,
@@ -7041,7 +7096,7 @@ pub async fn handle_api(
                     return resume_task(store_path, id, main_agent).await;
                 }
                 if method == "GET" && parts.get(1) == Some(&"events") {
-                    return get_task_events(events, id).await;
+                    return get_task_events(store_path, events, id).await;
                 }
                 // Human in the loop: GET pending question/context/choices for the task
                 if method == "GET" && parts.get(1) == Some(&"human-input") {
