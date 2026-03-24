@@ -17,6 +17,7 @@ use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_prog
 use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
+use crate::latency::env_usize;
 
 const HEALTHCHECK_INTERVAL_SECS: u64 = 5;
 const DEFAULT_PORT: u16 = 3876;
@@ -568,12 +569,10 @@ impl Daemon {
             let spec_dir = self.spec_dir.clone();
             let tools_policy_path = tools_policy_path.clone();
             let device_bridge_for_worker = device_bridge.clone();
-            let max_parallel_subtasks = std::env::var("AKASHA_MAX_PARALLEL_SUBTASKS")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(4)
-                .max(1);
+            let max_parallel_subtasks = env_usize("AKASHA_MAX_PARALLEL_SUBTASKS", 4).max(1);
+            let max_parallel_root_tasks = env_usize("AKASHA_MAX_PARALLEL_ROOT_TASKS", 2).max(1);
             let subtask_llm_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_parallel_subtasks));
+            let root_llm_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_parallel_root_tasks));
             tokio::spawn({
                 let bus = bus.clone();
                 let llm_router = llm_router.clone();
@@ -593,6 +592,7 @@ impl Daemon {
                 let agent_profile_cache = agent_profile_cache.clone();
                 let task_usage_store = task_usage_store.clone();
                 let device_bridge = device_bridge_for_worker.clone();
+                let root_llm_sem = root_llm_sem.clone();
                 let subtask_llm_sem = subtask_llm_sem.clone();
                 let delegation_tx = delegation_tx.clone();
                 async move {
@@ -686,33 +686,63 @@ impl Daemon {
                                 drop(permit);
                             });
                         } else {
-                            run_message_via_llm(
-                                bus.clone(),
-                                llm_router.clone(),
-                                store_path.clone(),
-                                spec_dir.clone(),
-                                task.task_id,
-                                task.message,
-                                task.session_id,
-                                task.image_data_urls,
-                                Some(short_term.clone()),
-                                long_term_client.clone(),
-                                tools_executor.clone(),
-                                Some(tools_policy_path.clone()),
-                                Some(skill_registry.clone()),
-                                Some(process_registry.clone()),
-                                Some(conv_tx.clone()),
-                                Some(human_input_store.clone()),
-                                Some(delegation_tx.clone()),
-                                Some(task_completion.clone()),
-                                Some(agent_profile_cache.clone()),
-                                Some(task_usage_store.clone()),
-                                Some(device_bridge.clone()),
-                                Some(workspace_store.clone()),
-                                Some(browser_registry.clone()),
-                            )
-                            .instrument(span)
-                            .await;
+                            let permit = match root_llm_sem.clone().acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => continue,
+                            };
+                            let bus = bus.clone();
+                            let llm_router = llm_router.clone();
+                            let store_path = store_path.clone();
+                            let spec_dir = spec_dir.clone();
+                            let short_term = short_term.clone();
+                            let long_term_client = long_term_client.clone();
+                            let tools_executor = tools_executor.clone();
+                            let tools_policy_path = tools_policy_path.clone();
+                            let skill_registry = skill_registry.clone();
+                            let process_registry = process_registry.clone();
+                            let conv_tx = conv_tx.clone();
+                            let human_input_store = human_input_store.clone();
+                            let task_completion = task_completion.clone();
+                            let agent_profile_cache = agent_profile_cache.clone();
+                            let task_usage_store = task_usage_store.clone();
+                            let device_bridge = device_bridge.clone();
+                            let workspace_store = workspace_store.clone();
+                            let browser_registry = browser_registry.clone();
+                            let delegation_tx = delegation_tx.clone();
+                            let task_id = task.task_id;
+                            let message = task.message;
+                            let session_id = task.session_id;
+                            let image_data_urls = task.image_data_urls;
+                            tokio::spawn(async move {
+                                run_message_via_llm(
+                                    bus,
+                                    llm_router,
+                                    store_path,
+                                    spec_dir,
+                                    task_id,
+                                    message,
+                                    session_id,
+                                    image_data_urls,
+                                    Some(short_term),
+                                    long_term_client,
+                                    tools_executor,
+                                    Some(tools_policy_path),
+                                    Some(skill_registry),
+                                    Some(process_registry),
+                                    Some(conv_tx),
+                                    Some(human_input_store),
+                                    Some(delegation_tx),
+                                    Some(task_completion),
+                                    Some(agent_profile_cache),
+                                    Some(task_usage_store),
+                                    Some(device_bridge),
+                                    Some(workspace_store),
+                                    Some(browser_registry),
+                                )
+                                .instrument(span)
+                                .await;
+                                drop(permit);
+                            });
                         }
                     }
                 }

@@ -6,10 +6,39 @@ use akasha_store::{Task, TaskStatus, TaskStore, TodoStatus};
 use chrono::Utc;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+fn is_session_recall_message(message: &str) -> bool {
+    let lower = message
+        .trim()
+        .to_lowercase()
+        .replace('’', "'")
+        .replace(['!', '?', '.', ',', ';', ':'], " ");
+    if lower.is_empty() {
+        return false;
+    }
+    [
+        "rappeler",
+        "rappelle",
+        "rappel",
+        "ce qu'on a fait",
+        "ce qu on a fait",
+        "on a fait",
+        "what we did",
+        "what we've done",
+        "what we have done",
+        "what did we do",
+        "remind me",
+        "recap",
+        "recap what we did",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+}
 use super::{classify_execution_mode, EventBus, ExecutionMode};
+use crate::latency::{emit_timeline_for_task, env_duration_ms};
 
 /// Priority for the task queue: high-priority tasks are processed before normal/scheduled (Phase 4.1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -45,6 +74,14 @@ struct SelectorDecision {
     task_type: Option<String>,
     target_agent: Option<String>,
     reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SelectorRunResult {
+    decision: Option<SelectorDecision>,
+    enabled: bool,
+    timed_out: bool,
+    elapsed_ms: u64,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -157,14 +194,20 @@ impl MainAgent {
     /// session_id: used for short-term memory; if empty, a default "default" is used so all messages share one session.
     /// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
     /// priority: used when forward_to_orchestrator is true; UserHigh tasks are processed before UserNormal/Scheduled.
-    async fn system_selector_decision(&self, message: &str) -> Option<SelectorDecision> {
+    async fn system_selector_decision(&self, message: &str) -> SelectorRunResult {
         let enabled = std::env::var("AKASHA_SYSTEM_TASK_SELECTOR")
             .ok()
             .map(|s| s != "0" && !s.eq_ignore_ascii_case("false"))
             .unwrap_or(true);
         if !enabled {
-            return None;
+            return SelectorRunResult {
+                decision: None,
+                enabled: false,
+                timed_out: false,
+                elapsed_ms: 0,
+            };
         }
+        let started = Instant::now();
         let prompt = format!(
             "You are a strict routing selector for Akasha.\n\
 Return ONLY compact JSON with schema:\n\
@@ -185,12 +228,33 @@ User message:\n{}",
             system_prompt: None,
             image_data_urls: None,
         };
-        let timeout = std::time::Duration::from_secs(8);
-        let resp = tokio::time::timeout(timeout, self.llm_router.complete(&req))
-            .await
-            .ok()?
-            .ok()?;
-        parse_selector_decision(resp.text.trim())
+        let timeout = env_duration_ms("AKASHA_SELECTOR_TIMEOUT_MS", 2_000);
+        match tokio::time::timeout(timeout, self.llm_router.complete(&req)).await {
+            Ok(Ok(resp)) => SelectorRunResult {
+                decision: parse_selector_decision(resp.text.trim()),
+                enabled: true,
+                timed_out: false,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            },
+            Ok(Err(err)) => {
+                tracing::warn!(error = %err, "selector completion failed; using immediate fallback");
+                SelectorRunResult {
+                    decision: None,
+                    enabled: true,
+                    timed_out: false,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                }
+            }
+            Err(_) => {
+                tracing::info!(timeout_ms = timeout.as_millis() as u64, "selector timed out; using immediate fallback");
+                SelectorRunResult {
+                    decision: None,
+                    enabled: true,
+                    timed_out: true,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                }
+            }
+        }
     }
 
     pub async fn handle_message(
@@ -247,6 +311,7 @@ User message:\n{}",
 
         // Use task_id as correlation so GET /api/tasks/{task_id}/events returns these events.
         let _ = self.bus.send(EventEnvelope::new(EventType::UserRequestReceived, Some(serde_json::json!({ "message": message }))).with_correlation(task_id));
+        emit_timeline_for_task(&self.bus, Some(store_path), task_id, "request_received", None);
         let _ = self.bus.send(
             EventEnvelope::new(
                 EventType::AcknowledgmentSent,
@@ -256,11 +321,41 @@ User message:\n{}",
         );
 
         // Run the LLM selector (up to 8 s) after the task is safely persisted.
-        let selector_decision = if forward_to_orchestrator {
+        let skip_selector_for_recall = forward_to_orchestrator && is_session_recall_message(message);
+        let selector_result = if forward_to_orchestrator && !skip_selector_for_recall {
+            emit_timeline_for_task(&self.bus, Some(store_path), task_id, "selector_start", None);
             self.system_selector_decision(message).await
         } else {
-            None
+            SelectorRunResult {
+                decision: None,
+                enabled: false,
+                timed_out: false,
+                elapsed_ms: 0,
+            }
         };
+        if forward_to_orchestrator && !skip_selector_for_recall {
+            emit_timeline_for_task(
+                &self.bus,
+                Some(store_path),
+                task_id,
+                "selector_end",
+                Some(serde_json::json!({
+                    "duration_ms": selector_result.elapsed_ms,
+                    "selector_enabled": selector_result.enabled,
+                    "timed_out": selector_result.timed_out,
+                    "decision_found": selector_result.decision.is_some(),
+                })),
+            );
+            tracing::info!(
+                task_id = %task_id,
+                selector_ms = selector_result.elapsed_ms,
+                selector_timed_out = selector_result.timed_out,
+                selector_used = selector_result.decision.is_some(),
+                "selector finished"
+            );
+        }
+
+        let selector_decision = selector_result.decision;
 
         let selector_direct = selector_decision
             .as_ref()

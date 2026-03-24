@@ -11,9 +11,12 @@ const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => (
 
 const DAEMON_PORT = 3876;
 const THEME_STORAGE_KEY = "akasha_theme";
+const UI_MODE_STORAGE_KEY = "akasha_ui_mode";
 const AKASHA_SESSION_ID_KEY = "akasha_session_id";
+const TASK_TREE_COLLAPSE_STORAGE_KEY = "akasha_task_tree_collapsed";
 
 export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_latte";
+type UiMode = "simple" | "expert";
 
 const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "light_latte"];
 
@@ -161,6 +164,65 @@ function loadSavedTheme(): ThemeId {
   return "dark_akasha";
 }
 
+function loadSavedUiMode(): UiMode {
+  try {
+    const s = localStorage.getItem(UI_MODE_STORAGE_KEY);
+    if (s === "simple" || s === "expert") return s;
+  } catch {
+    /* ignore */
+  }
+  return "simple";
+}
+
+function trimPreview(text: string, max = 140): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (compact.length <= max) return compact;
+  return `${compact.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function formatRelativeTimeLabel(value?: string, locale: "fr" | "en" = "fr"): string | null {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  const deltaMs = Date.now() - d.getTime();
+  const future = deltaMs < 0;
+  const deltaSec = Math.round(Math.abs(deltaMs) / 1000);
+  if (deltaSec < 60) return locale === "fr" ? (future ? "dans quelques sec." : "à l'instant") : (future ? "in a few sec" : "just now");
+  const deltaMin = Math.round(deltaSec / 60);
+  if (deltaMin < 60) return locale === "fr" ? (future ? `dans ${deltaMin} min` : `il y a ${deltaMin} min`) : (future ? `in ${deltaMin} min` : `${deltaMin} min ago`);
+  const deltaHours = Math.round(deltaMin / 60);
+  if (deltaHours < 24) return locale === "fr" ? (future ? `dans ${deltaHours} h` : `il y a ${deltaHours} h`) : (future ? `in ${deltaHours} h` : `${deltaHours} h ago`);
+  const deltaDays = Math.round(deltaHours / 24);
+  return locale === "fr" ? (future ? `dans ${deltaDays} j` : `il y a ${deltaDays} j`) : (future ? `in ${deltaDays} d` : `${deltaDays} d ago`);
+}
+
+function classifyAgentKind(agent?: string | null): string {
+  const value = (agent ?? "").trim().toLowerCase();
+  if (!value) return "generic";
+  if (/(orchestr|planner|plan|router|main_agent|coordinator|supervisor)/.test(value)) return "orchestrator";
+  if (/(code|coding|dev|developer|refactor|review|test|debug|fix)/.test(value)) return "code";
+  if (/(conversation|chat|dialog|assistant|support)/.test(value)) return "conversation";
+  if (/(memory|rag|search|retriev|knowledge|research|docs?)/.test(value)) return "knowledge";
+  if (/(tool|exec|shell|terminal|operator|command)/.test(value)) return "tooling";
+  if (/(vision|image|ocr|screen)/.test(value)) return "vision";
+  if (/(voice|audio|speech|stt|tts)/.test(value)) return "voice";
+  if (/(schedule|calendar|time|cron)/.test(value)) return "scheduler";
+  return "generic";
+}
+
+function classifyEventKind(eventType?: string | null): string {
+  const value = (eventType ?? "").trim().toLowerCase();
+  if (!value) return "neutral";
+  if (/(received|created|queued|accepted|started)$/.test(value) || value === "task_received") return "received";
+  if (value === "progress_update" || value === "todo_list_updated") return "progress";
+  if (value === "tool_call_started" || value === "tool_call_finished") return "tool";
+  if (value === "sub_agent_spawned" || value === "task_decomposed" || value === "plan_proposed" || value === "plan_committed") return "orchestration";
+  if (value === "task_completed") return "success";
+  if (value === "task_failed") return "failure";
+  if (/(ask_user|human_input|approval|confirmation)/.test(value)) return "question";
+  return "neutral";
+}
+
 type Tab = "chat" | "scheduled" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
 
 type SettingsSection = "display" | "system" | "agent" | "user" | "data";
@@ -284,6 +346,7 @@ function App() {
   const [tab, setTab] = useState<Tab>("chat");
   const [rightSidebarOpen, setRightSidebarOpen] = useState(false);
   const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
+  const [uiMode, setUiMode] = useState<UiMode>(loadSavedUiMode);
   const [showOnboarding, setShowOnboarding] = useState(() => {
     try {
       return localStorage.getItem("akasha_onboarding_dismissed") !== "1";
@@ -296,6 +359,28 @@ function App() {
       const key = "events." + typ;
       const s = t(key);
       return s === key ? typ : s;
+    },
+    [t]
+  );
+  const summarizeTaskEvent = useCallback(
+    (event: { event_type: string; payload?: unknown }) => {
+      const payload = event.payload;
+      if (event.event_type === "progress_update" && payload && typeof payload === "object" && "message" in payload && typeof (payload as { message?: unknown }).message === "string") {
+        return trimPreview(String((payload as { message: string }).message), 160);
+      }
+      if ((event.event_type === "tool_call_started" || event.event_type === "tool_call_finished") && payload && typeof payload === "object" && "tool" in payload && (payload as { tool?: string }).tool) {
+        return `${t("tasks.tool_summary_prefix")}: ${String((payload as { tool: string }).tool)}`;
+      }
+      if (event.event_type === "sub_agent_spawned" && payload && typeof payload === "object" && "agent" in payload && (payload as { agent?: string }).agent) {
+        return `${t("tasks.agent_summary_prefix")}: ${String((payload as { agent: string }).agent)}`;
+      }
+      if ((event.event_type === "plan_proposed" || event.event_type === "plan_committed") && payload && typeof payload === "object" && Array.isArray((payload as { steps?: unknown[] }).steps)) {
+        return t("tasks.plan_summary").replace("{{count}}", String((payload as { steps: unknown[] }).steps.length));
+      }
+      if ((event.event_type === "task_completed" || event.event_type === "task_failed") && payload && typeof payload === "object" && "model_used" in payload && (payload as { model_used?: string | null }).model_used) {
+        return `${t("tasks.model_used")}: ${String((payload as { model_used: string }).model_used)}`;
+      }
+      return "";
     },
     [t]
   );
@@ -316,6 +401,17 @@ function App() {
   const [tasksSelected, setTasksSelected] = useState(0);
   const [tasksEvents, setTasksEvents] = useState<Array<{ event_type: string; payload?: unknown; at: string }>>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
+  const isSimpleMode = uiMode === "simple";
+  const [collapsedTaskBranches, setCollapsedTaskBranches] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = localStorage.getItem(TASK_TREE_COLLAPSE_STORAGE_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw) as Record<string, boolean>;
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  });
   /** Tâches : sections pliables (liste / étapes / événements), mémorisées localement. */
   const [taskPanelSections, setTaskPanelSections] = useState(() => {
     try {
@@ -344,6 +440,20 @@ function App() {
       return next;
     });
   }, []);
+  const persistCollapsedTaskBranches = useCallback((next: Record<string, boolean>) => {
+    try {
+      localStorage.setItem(TASK_TREE_COLLAPSE_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  const toggleTaskBranch = useCallback((taskId: string) => {
+    setCollapsedTaskBranches((prev) => {
+      const next = { ...prev, [taskId]: !prev[taskId] };
+      persistCollapsedTaskBranches(next);
+      return next;
+    });
+  }, [persistCollapsedTaskBranches]);
   const [taskStepsTodos, setTaskStepsTodos] = useState<Array<{ id?: string | null; title: string; status: string }>>([]);
   const selectedTaskIdForTodosRef = useRef<string | null>(null);
   const fetchTaskStepsRef = useRef<(taskId: string) => Promise<void>>(async () => {});
@@ -635,8 +745,6 @@ function App() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatInlineReplyRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
-  /** True when we loaded with existing messages (reconnect during the day); send once then clear. */
-  const firstMessageSinceLoadRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Tasks for which we already auto-opened the human-input modal (avoid re-opening every poll). */
   const humanInputAutoOpenedRef = useRef<Set<string>>(new Set());
@@ -801,7 +909,6 @@ function App() {
             }))
           );
           setSessionId(data.session_id);
-          firstMessageSinceLoadRef.current = true;
           try {
             localStorage.setItem(AKASHA_SESSION_ID_KEY, data.session_id);
           } catch {
@@ -871,12 +978,22 @@ function App() {
   // Apply theme to document (for CSS variables)
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
-  }, [theme]);
+    document.documentElement.setAttribute("data-ui-mode", uiMode);
+  }, [theme, uiMode]);
 
   const setThemeAndSave = useCallback((next: ThemeId) => {
     setTheme(next);
     try {
       localStorage.setItem(THEME_STORAGE_KEY, next);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const setUiModeAndSave = useCallback((next: UiMode) => {
+    setUiMode(next);
+    try {
+      localStorage.setItem(UI_MODE_STORAGE_KEY, next);
     } catch {
       /* ignore */
     }
@@ -1049,6 +1166,181 @@ function App() {
     return list;
   }, [tasksList, taskListFilter, taskSearchQuery]);
 
+  const taskTreeData = useMemo(() => {
+    const byId = new Map(tasksList.map((task) => [task.id, task]));
+    const visibleIds = new Set<string>();
+    const childrenByParent = new Map<string | null, TaskListItem[]>();
+
+    for (const task of tasksList) {
+      const parentId = task.parent_task_id && byId.has(task.parent_task_id) ? task.parent_task_id : null;
+      const bucket = childrenByParent.get(parentId) ?? [];
+      bucket.push(task);
+      childrenByParent.set(parentId, bucket);
+    }
+
+    for (const task of filteredTasksList) {
+      let current: TaskListItem | undefined = task;
+      while (current) {
+        if (visibleIds.has(current.id)) break;
+        visibleIds.add(current.id);
+        current = current.parent_task_id ? byId.get(current.parent_task_id) : undefined;
+      }
+    }
+
+    const branchIds = new Set<string>();
+    for (const [parentId, children] of childrenByParent.entries()) {
+      if (!parentId || !visibleIds.has(parentId)) continue;
+      if (children.some((child) => visibleIds.has(child.id))) {
+        branchIds.add(parentId);
+      }
+    }
+
+    const roots = tasksList.filter((task) => {
+      if (!visibleIds.has(task.id)) return false;
+      if (!task.parent_task_id) return true;
+      return !byId.has(task.parent_task_id);
+    });
+
+    return { byId, visibleIds, childrenByParent, branchIds, roots };
+  }, [tasksList, filteredTasksList]);
+
+  const selectedTask = tasksList[tasksSelected] ?? null;
+
+  useEffect(() => {
+    setCollapsedTaskBranches((prev) => {
+      let changed = false;
+      const next: Record<string, boolean> = {};
+
+      for (const [taskId, isCollapsed] of Object.entries(prev)) {
+        if (taskTreeData.branchIds.has(taskId)) {
+          next[taskId] = isCollapsed;
+        } else {
+          changed = true;
+        }
+      }
+
+      let current: TaskListItem | undefined | null = selectedTask;
+      while (current?.parent_task_id) {
+        const parentId = current.parent_task_id;
+        if (taskTreeData.branchIds.has(parentId) && next[parentId]) {
+          next[parentId] = false;
+          changed = true;
+        }
+        current = taskTreeData.byId.get(parentId);
+      }
+
+      if (!changed) return prev;
+      persistCollapsedTaskBranches(next);
+      return next;
+    });
+  }, [selectedTask, taskTreeData, persistCollapsedTaskBranches]);
+
+  const taskTreeRows = useMemo(() => {
+    const rows: Array<{
+      task: TaskListItem;
+      depth: number;
+      hasChildren: boolean;
+      visibleChildCount: number;
+      rootId: string;
+      isCollapsed: boolean;
+    }> = [];
+
+    const visit = (task: TaskListItem, depth: number, rootId: string) => {
+      if (!taskTreeData.visibleIds.has(task.id)) return;
+      const allChildren = taskTreeData.childrenByParent.get(task.id) ?? [];
+      const visibleChildren = allChildren.filter((child) => taskTreeData.visibleIds.has(child.id));
+      const isCollapsed = visibleChildren.length > 0 ? !!collapsedTaskBranches[task.id] : false;
+      rows.push({
+        task,
+        depth,
+        hasChildren: visibleChildren.length > 0,
+        visibleChildCount: visibleChildren.length,
+        rootId,
+        isCollapsed,
+      });
+      if (isCollapsed) return;
+      for (const child of visibleChildren) {
+        visit(child, depth + 1, rootId);
+      }
+    };
+
+    for (const root of taskTreeData.roots) {
+      visit(root, 0, root.id);
+    }
+
+    return rows;
+  }, [taskTreeData, collapsedTaskBranches]);
+
+  const visibleTaskEvents = useMemo(() => {
+    if (!isSimpleMode) return tasksEvents;
+    return [...tasksEvents].slice(-8).reverse();
+  }, [isSimpleMode, tasksEvents]);
+
+  const selectedTaskHierarchy = useMemo(() => {
+    if (!selectedTask) return [] as TaskListItem[];
+    const lineage: TaskListItem[] = [];
+    let current: TaskListItem | undefined = selectedTask;
+    while (current) {
+      lineage.unshift(current);
+      current = current.parent_task_id ? taskTreeData.byId.get(current.parent_task_id) : undefined;
+    }
+    return lineage;
+  }, [selectedTask, taskTreeData]);
+
+  const selectedTaskRootId = selectedTaskHierarchy[0]?.id ?? null;
+
+  const selectedTaskAncestorIds = useMemo(() => {
+    return new Set(selectedTaskHierarchy.slice(0, -1).map((task) => task.id));
+  }, [selectedTaskHierarchy]);
+
+  const setAllTaskBranchesCollapsed = useCallback((collapsed: boolean) => {
+    const next: Record<string, boolean> = {};
+    for (const branchId of taskTreeData.branchIds) {
+      next[branchId] = collapsed;
+    }
+    if (collapsed && selectedTaskHierarchy.length > 1) {
+      for (const task of selectedTaskHierarchy.slice(0, -1)) {
+        if (taskTreeData.branchIds.has(task.id)) next[task.id] = false;
+      }
+    }
+    persistCollapsedTaskBranches(next);
+    setCollapsedTaskBranches(next);
+  }, [taskTreeData, selectedTaskHierarchy, persistCollapsedTaskBranches]);
+
+  const taskStatusCounts = useMemo(() => {
+    return tasksList.reduce(
+      (acc, task) => {
+        const status = (task.status ?? "").toLowerCase();
+        if (status === "running") acc.running += 1;
+        else if (status === "pending") acc.pending += 1;
+        else if (status === "completed") acc.completed += 1;
+        else if (status === "failed") acc.failed += 1;
+        return acc;
+      },
+      { running: 0, pending: 0, completed: 0, failed: 0 }
+    );
+  }, [tasksList]);
+
+  const taskStepsSummary = useMemo(() => {
+    const total = taskStepsTodos.length;
+    const done = taskStepsTodos.filter((step) => step.status === "done").length;
+    const cancelled = taskStepsTodos.filter((step) => step.status === "cancelled").length;
+    const pending = Math.max(0, total - done - cancelled);
+    const progressPct = total > 0 ? Math.round((done / total) * 100) : 0;
+    return { total, done, cancelled, pending, progressPct };
+  }, [taskStepsTodos]);
+
+  const selectedTaskSummary = useMemo(() => {
+    if (!selectedTask) return null;
+    const runningChip = selectedTask.status === "running" ? runningTaskChips[selectedTask.id] : undefined;
+    const latestEvent = tasksEvents.length > 0 ? tasksEvents[tasksEvents.length - 1] : null;
+    return {
+      runningChip,
+      latestEvent,
+      latestSummary: latestEvent ? summarizeTaskEvent(latestEvent) : "",
+    };
+  }, [selectedTask, runningTaskChips, tasksEvents, summarizeTaskEvent]);
+
   const taskDisplayLabel = (task: TaskListItem) => (task.label && task.label.trim() ? task.label.trim() : t("tasks.task_unnamed") + task.id.slice(-8));
 
   const fetchTasksEvents = useCallback(async (taskId: string) => {
@@ -1058,11 +1350,6 @@ function App() {
         { taskId, port: DAEMON_PORT }
       );
       const list = data?.events ?? [];
-      const planEvent = list.find((e) => (e.event_type === "plan_proposed" || e.event_type === "plan_committed") && e.payload && typeof e.payload === "object" && "steps" in e.payload);
-      const planStepsCount =
-        planEvent && planEvent.payload && typeof planEvent.payload === "object" && Array.isArray((planEvent.payload as { steps?: unknown }).steps)
-          ? (planEvent.payload as { steps: unknown[] }).steps.length
-          : 0;
       setTasksEvents(
         list.map((e) => ({
           event_type: e.event_type ?? "?",
@@ -2087,14 +2374,11 @@ function App() {
     setAttachments([]);
     setLoading(true);
     try {
-      const reconnect = firstMessageSinceLoadRef.current;
-      firstMessageSinceLoadRef.current = false;
       const ack = await invoke<{ task_id: string; session_id: string; message: string }>("send_message_ack", {
         message: userMessage,
         session_id: sessionId,
         attachments: attachmentsPayload,
         port: DAEMON_PORT,
-        reconnect: reconnect || undefined,
       });
       setLoading(false);
       if (ack?.session_id) {
@@ -2297,7 +2581,7 @@ function App() {
   handleSendRef.current = handleSend;
 
   return (
-    <div className="app">
+    <div className={`app ui-mode-${uiMode}`}>
       <a href="#main-content" className="skip-link">Aller au contenu principal</a>
       {updateBannerInfo && (
         <div className="update-banner" role="region" aria-label={t("update.banner_label")}>
@@ -2484,25 +2768,31 @@ function App() {
         <div className="container-main">
           <div className="container-main-inner">
             <header className="view-header">
-              <h2 className="view-title">{t("tabs." + tab)}</h2>
-              <span
-                className={`daemon-status ${health?.ok ? "daemon-status-ok" : "daemon-status-off"}`}
-                role="status"
-                aria-live="polite"
-                title={health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
-              >
-                {health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
-              </span>
-              <button
-                type="button"
-                className="sidebar-right-toggle"
-                onClick={() => setRightSidebarOpen((o) => !o)}
-                aria-expanded={rightSidebarOpen}
-                aria-label={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
-                title={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
-              >
-                {rightSidebarOpen ? "▐" : "▌"}
-              </button>
+              <div className="view-header-main">
+                <h2 className="view-title">{t("tabs." + tab)}</h2>
+                <p className="view-subtitle">{isSimpleMode ? t("settings.ui_mode_hint") : t("chat.follow_tasks")}</p>
+              </div>
+              <div className="view-header-actions">
+                <span className="view-mode-badge">{uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}</span>
+                <span
+                  className={`daemon-status ${health?.ok ? "daemon-status-ok" : "daemon-status-off"}`}
+                  role="status"
+                  aria-live="polite"
+                  title={health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
+                >
+                  {health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
+                </span>
+                <button
+                  type="button"
+                  className="sidebar-right-toggle"
+                  onClick={() => setRightSidebarOpen((o) => !o)}
+                  aria-expanded={rightSidebarOpen}
+                  aria-label={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
+                  title={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
+                >
+                  {rightSidebarOpen ? "▐" : "▌"}
+                </button>
+              </div>
             </header>
       <main className="main" id="main-content" tabIndex={-1}>
         {/* Onboarding: first steps modal (dismissible, "Ne plus afficher" stored in localStorage) */}
@@ -2785,6 +3075,17 @@ function App() {
             aria-labelledby="tab-chat"
             className="panel chat-panel"
           >
+            <div className="panel-hero chat-panel-hero">
+              <div>
+                <h3 className="panel-hero-title">{t("chat.hero_title")}</h3>
+                <p className="panel-hero-text">{isSimpleMode ? t("chat.hero_simple") : t("chat.hero_expert")}</p>
+              </div>
+              {Object.keys(runningTaskChips).length > 0 && (
+                <button type="button" className="panel-hero-action" onClick={() => setTab("tasks")}>
+                  {t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}
+                </button>
+              )}
+            </div>
             <div className="chat-area">
               {messages.length === 0 ? (
                 <div className="chat-placeholder">
@@ -2881,7 +3182,7 @@ function App() {
                         const chipAskUser = parseAskUserMessage(message ?? "");
                         const chipLabel = chipAskUser
                           ? "Question en attente — répondez ci‑dessous"
-                          : (message ?? "en cours");
+                          : trimPreview(message ?? "en cours", isSimpleMode ? 72 : 140);
                         return (
                         <span key={tid} className="task-chip">
                           <span className="task-chip-spinner" aria-hidden />
@@ -2903,7 +3204,13 @@ function App() {
                   )}
                 </div>
               )}
-              {Object.keys(runningTaskChips).length > 0 && (
+              {isSimpleMode && Object.keys(runningTaskChips).length > 0 && (
+                <div className="chat-task-summary-bar">
+                  <span>{t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}</span>
+                  <button type="button" className="chat-task-summary-btn" onClick={() => setTab("tasks")}>{t("chat.open_tasks")}</button>
+                </div>
+              )}
+              {!isSimpleMode && Object.keys(runningTaskChips).length > 0 && (
                 <div className="chat-subagents-panel">
                   <button
                     type="button"
@@ -2979,7 +3286,7 @@ function App() {
                                             <ol className="chat-subagents-plan-steps">
                                               {steps.map((s, i) => (
                                                 <li key={s.step_id ?? i} className="chat-subagents-plan-step">
-                                                  {s.agent_type && <span className="chat-subagents-plan-agent">{s.agent_type}</span>}
+                                                  {s.agent_type && <span className="chat-subagents-plan-agent agent-kind-pill" data-agent-kind={classifyAgentKind(s.agent_type)}>{s.agent_type}</span>}
                                                   {s.step_id != null && s.step_id !== "" && (
                                                     <span className="chat-subagents-plan-step-id">{s.step_id}</span>
                                                   )}
@@ -3006,38 +3313,42 @@ function App() {
                                         </div>
                                         <ul className="chat-subagents-events">
                                           {evs.map((ev, idx) => (
-                                            <li key={`${tid}-${idx}`} className="chat-subagents-event" data-type={ev.event_type}>
-                                              <span className="chat-subagents-event-type">{eventLabel(ev.event_type)}</span>
-                                              {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload ? (
-                                                <span className="chat-subagents-event-agent"> → {String((ev.payload as { agent?: string }).agent ?? "")}</span>
-                                              ) : null}
-                                              {ev.payload && typeof ev.payload === "object" && (ev.event_type === "tool_call_started" || ev.event_type === "tool_call_finished") && "tool" in ev.payload ? (
-                                                <span className="chat-subagents-event-agent"> — {String((ev.payload as { tool?: string }).tool ?? "")}</span>
-                                              ) : null}
-                                              {ev.payload && typeof ev.payload === "object" && (ev.event_type === "task_completed" || ev.event_type === "task_failed") && "model_used" in ev.payload && (ev.payload as { model_used?: string | null }).model_used ? (
-                                                <span className="chat-subagents-event-model"> — {t("tasks.model_used")}: {(ev.payload as { model_used: string }).model_used}</span>
-                                              ) : null}
-                                              {ev.payload && typeof ev.payload === "object" && ev.event_type === "task_decomposed" ? (
-                                                (() => {
-                                                  const p = ev.payload as {
-                                                    decompose_model_task_type?: string;
-                                                    decompose_reason?: string;
-                                                    decompose_attempt?: string;
-                                                  };
-                                                  const parts = [
-                                                    p.decompose_model_task_type ? `task_type=${p.decompose_model_task_type}` : null,
-                                                    p.decompose_attempt ? `attempt=${p.decompose_attempt}` : null,
-                                                    p.decompose_reason ? `reason=${p.decompose_reason}` : null,
-                                                  ].filter(Boolean);
-                                                  return parts.length > 0 ? (
-                                                    <span className="chat-subagents-event-agent">
-                                                      {" — "}
-                                                      {parts.join(" · ")}
-                                                    </span>
-                                                  ) : null;
-                                                })()
-                                              ) : null}
-                                              {ev.at && <span className="chat-subagents-event-at"> {ev.at.slice(0, 19)}</span>}
+                                            <li key={`${tid}-${idx}`} className="chat-subagents-event" data-type={ev.event_type} data-event-kind={classifyEventKind(ev.event_type)}>
+                                              <span className="chat-subagents-event-dot" aria-hidden />
+                                              <div className="chat-subagents-event-body">
+                                                <div className="chat-subagents-event-topline">
+                                                  <span className="chat-subagents-event-type event-kind-pill" data-event-kind={classifyEventKind(ev.event_type)}>{eventLabel(ev.event_type)}</span>
+                                                  {ev.at && <span className="chat-subagents-event-at">{ev.at.slice(0, 19)}</span>}
+                                                </div>
+                                                <div className="chat-subagents-event-meta">
+                                                  {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload ? (
+                                                    <span className="chat-subagents-event-agent">→ <span className="agent-kind-pill" data-agent-kind={classifyAgentKind(String((ev.payload as { agent?: string }).agent ?? ""))}>{String((ev.payload as { agent?: string }).agent ?? "")}</span></span>
+                                                  ) : null}
+                                                  {ev.payload && typeof ev.payload === "object" && (ev.event_type === "tool_call_started" || ev.event_type === "tool_call_finished") && "tool" in ev.payload ? (
+                                                    <span className="chat-subagents-event-agent">— {String((ev.payload as { tool?: string }).tool ?? "")}</span>
+                                                  ) : null}
+                                                  {ev.payload && typeof ev.payload === "object" && (ev.event_type === "task_completed" || ev.event_type === "task_failed") && "model_used" in ev.payload && (ev.payload as { model_used?: string | null }).model_used ? (
+                                                    <span className="chat-subagents-event-model">— {t("tasks.model_used")}: {(ev.payload as { model_used: string }).model_used}</span>
+                                                  ) : null}
+                                                  {ev.payload && typeof ev.payload === "object" && ev.event_type === "task_decomposed" ? (
+                                                    (() => {
+                                                      const p = ev.payload as {
+                                                        decompose_model_task_type?: string;
+                                                        decompose_reason?: string;
+                                                        decompose_attempt?: string;
+                                                      };
+                                                      const parts = [
+                                                        p.decompose_model_task_type ? `task_type=${p.decompose_model_task_type}` : null,
+                                                        p.decompose_attempt ? `attempt=${p.decompose_attempt}` : null,
+                                                        p.decompose_reason ? `reason=${p.decompose_reason}` : null,
+                                                      ].filter(Boolean);
+                                                      return parts.length > 0 ? (
+                                                        <span className="chat-subagents-event-agent">— {parts.join(" · ")}</span>
+                                                      ) : null;
+                                                    })()
+                                                  ) : null}
+                                                </div>
+                                              </div>
                                             </li>
                                           ))}
                                         </ul>
@@ -3387,6 +3698,48 @@ function App() {
             >
               Rafraîchir
             </button>
+            {!tasksLoading && tasksList.length > 0 && (
+              <div className="task-center-summary">
+                <div className="task-center-summary-chips">
+                  <span className="task-center-chip task-center-chip-running">{t("tasks.filter_active")}: {taskStatusCounts.running + taskStatusCounts.pending}</span>
+                  <span className="task-center-chip task-center-chip-completed">{t("tasks.filter_completed")}: {taskStatusCounts.completed}</span>
+                  {taskStatusCounts.failed > 0 && <span className="task-center-chip task-center-chip-failed">{t("common.error")}: {taskStatusCounts.failed}</span>}
+                </div>
+                {selectedTask && (
+                  <div className="task-center-selected-summary">
+                    <div className="task-center-selected-main">
+                      <p className="task-center-selected-label">{t("tasks.selected_task_label")}</p>
+                      <h3 className="task-center-selected-title">{taskDisplayLabel(selectedTask)}</h3>
+                      <div className="task-center-selected-badges">
+                        <span className={"task-tree-kind-badge " + (selectedTask.parent_task_id ? "task-tree-kind-badge-child" : "task-tree-kind-badge-root")}>
+                          {selectedTask.parent_task_id ? t("tasks.subtask_badge") : t("tasks.root_badge")}
+                        </span>
+                        {selectedTaskHierarchy.length > 1 && (
+                          <span className="task-tree-path-summary">
+                            {selectedTaskHierarchy.map((task, index) => (
+                              <span key={task.id} className="task-tree-path-segment">
+                                {index > 0 && <span className="task-tree-path-separator" aria-hidden>›</span>}
+                                <span>{taskDisplayLabel(task)}</span>
+                              </span>
+                            ))}
+                          </span>
+                        )}
+                      </div>
+                      <div className="task-center-selected-meta">
+                        <span className={"activity-task-status-pill status-" + selectedTask.status}>{selectedTask.status}</span>
+                        {selectedTask.assigned_agent && <span className="agent-kind-pill" data-agent-kind={classifyAgentKind(selectedTask.assigned_agent)}>{selectedTask.assigned_agent}</span>}
+                        {selectedTask.created_at && <span>{formatRelativeTimeLabel(selectedTask.created_at, locale)}</span>}
+                      </div>
+                    </div>
+                    {selectedTaskSummary?.latestSummary ? (
+                      <p className="task-center-selected-text">{selectedTaskSummary.latestSummary}</p>
+                    ) : selectedTaskSummary?.runningChip?.message ? (
+                      <p className="task-center-selected-text">{trimPreview(selectedTaskSummary.runningChip.message, 180)}</p>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            )}
             {tasksLoading && (
               <p className="panel-loading" aria-busy="true">
                 <span className="panel-loading-spinner" aria-hidden />
@@ -3461,17 +3814,41 @@ function App() {
                               aria-label={t("tasks.search_placeholder")}
                             />
                           </div>
+                          {taskTreeData.branchIds.size > 0 && (
+                            <div className="task-tree-toolbar" role="group" aria-label={t("tasks.tree_actions")}>
+                              <button
+                                type="button"
+                                className="task-tree-toolbar-btn"
+                                onClick={() => setAllTaskBranchesCollapsed(false)}
+                              >
+                                {t("tasks.expand_all")}
+                              </button>
+                              <button
+                                type="button"
+                                className="task-tree-toolbar-btn"
+                                onClick={() => setAllTaskBranchesCollapsed(true)}
+                              >
+                                {t("tasks.collapse_all")}
+                              </button>
+                            </div>
+                          )}
                         </>
                       )}
                       {tasksList.length === 0 ? (
                         <p className="empty-state">{t("tasks.empty")}</p>
-                      ) : filteredTasksList.length === 0 ? (
+                      ) : taskTreeRows.length === 0 ? (
                         <p className="empty-state">{t("tasks.no_match_filter")}</p>
                       ) : (
                         <ul className="activity-task-cards" role="list">
-                          {filteredTasksList.map((task) => {
+                          {taskTreeRows.map((row) => {
+                            const task = row.task;
                             const isSelected = tasksList[tasksSelected]?.id === task.id;
+                            const isAncestor = !isSelected && selectedTaskAncestorIds.has(task.id);
+                            const isActiveRoot = selectedTaskRootId === task.id;
                             const runningChip = task.status === "running" ? runningTaskChips[task.id] : undefined;
+                            const snippet = runningChip?.message ? trimPreview(runningChip.message, isSimpleMode ? 90 : 140) : trimPreview(taskDisplayLabel(task), 100);
+                            const hierarchyLabel = row.depth > 0 ? t("tasks.subtask_badge") : t("tasks.root_badge");
+                            const childCountLabel = t("tasks.children_count").replace("{{count}}", String(row.visibleChildCount));
                             const createdLabel = task.created_at ? (() => {
                               try {
                                 const d = new Date(task.created_at);
@@ -3481,9 +3858,9 @@ function App() {
                               }
                             })() : null;
                             return (
-                              <li key={task.id} className={"activity-task-card" + (isSelected ? " selected" : "")}>
+                              <li key={task.id} className={"activity-task-card" + (isSelected ? " selected" : "") + (isAncestor ? " activity-task-card-ancestor" : "") + (isActiveRoot ? " activity-task-card-active-root" : "") + (row.depth > 0 ? " activity-task-card-child" : " activity-task-card-root") }>
                                 <div
-                                  className="activity-task-card-inner"
+                                  className={"activity-task-card-inner task-tree-row" + (row.depth > 0 ? " task-tree-row-child" : " task-tree-row-root")}
                                   role="button"
                                   tabIndex={0}
                                   onClick={() => setTasksSelected(tasksList.findIndex((x) => x.id === task.id))}
@@ -3492,25 +3869,63 @@ function App() {
                                       e.preventDefault();
                                       setTasksSelected(tasksList.findIndex((x) => x.id === task.id));
                                     }
-                                    const idx = filteredTasksList.findIndex((x) => x.id === task.id);
-                                    if (e.key === "ArrowDown" && idx < filteredTasksList.length - 1) {
-                                      const next = filteredTasksList[idx + 1];
+                                    if (e.key === "ArrowRight" && row.hasChildren && row.isCollapsed) {
+                                      e.preventDefault();
+                                      toggleTaskBranch(task.id);
+                                    }
+                                    if (e.key === "ArrowLeft" && row.hasChildren && !row.isCollapsed) {
+                                      e.preventDefault();
+                                      toggleTaskBranch(task.id);
+                                    }
+                                    const idx = taskTreeRows.findIndex((x) => x.task.id === task.id);
+                                    if (e.key === "ArrowDown" && idx < taskTreeRows.length - 1) {
+                                      const next = taskTreeRows[idx + 1].task;
                                       setTasksSelected(tasksList.findIndex((x) => x.id === next.id));
                                     }
                                     if (e.key === "ArrowUp" && idx > 0) {
-                                      const prev = filteredTasksList[idx - 1];
+                                      const prev = taskTreeRows[idx - 1].task;
                                       setTasksSelected(tasksList.findIndex((x) => x.id === prev.id));
                                     }
                                   }}
+                                  style={{ marginLeft: `${row.depth * 1.25}rem` }}
                                 >
                                   <div className="activity-task-card-head">
-                                    <span className="activity-task-card-title" title={taskDisplayLabel(task)}>
-                                      {taskDisplayLabel(task)}
-                                    </span>
+                                    <div className="activity-task-card-heading">
+                                      <div className="task-tree-title-row">
+                                        {row.hasChildren ? (
+                                          <button
+                                            type="button"
+                                            className="task-tree-toggle"
+                                            aria-label={(row.isCollapsed ? t("tasks.expand_branch") : t("tasks.collapse_branch")) + ": " + taskDisplayLabel(task)}
+                                            aria-expanded={!row.isCollapsed}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              toggleTaskBranch(task.id);
+                                            }}
+                                          >
+                                            <span aria-hidden>{row.isCollapsed ? "▶" : "▼"}</span>
+                                          </button>
+                                        ) : (
+                                          <span className="task-tree-toggle-spacer" aria-hidden>
+                                            {row.depth > 0 ? "•" : ""}
+                                          </span>
+                                        )}
+                                        <span className="activity-task-card-title" title={taskDisplayLabel(task)}>
+                                          {taskDisplayLabel(task)}
+                                        </span>
+                                      </div>
+                                      <div className="task-tree-meta-row">
+                                        <span className={"task-tree-kind-badge " + (row.depth > 0 ? "task-tree-kind-badge-child" : "task-tree-kind-badge-root")}>
+                                          {hierarchyLabel}
+                                        </span>
+                                        {row.hasChildren && <span className="task-tree-child-count">{childCountLabel}</span>}
+                                      </div>
+                                    </div>
                                     <span className={"activity-task-status-pill status-" + task.status}>
                                       {task.status}
                                     </span>
                                   </div>
+                                  <p className="activity-task-card-snippet">{snippet}</p>
                                   {task.status === "running" && runningChip != null && (
                                     <div className="activity-task-progress">
                                       <div className="activity-task-progress-bar" style={{ width: `${runningChip.pct ?? 0}%` }} />
@@ -3520,7 +3935,8 @@ function App() {
                                   <div className="activity-task-meta">
                                     <span className="activity-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>
                                     {createdLabel && <span className="activity-task-created">{createdLabel}</span>}
-                                    {task.assigned_agent && <span className="activity-task-agent">{task.assigned_agent}</span>}
+                                    {task.created_at && <span className="activity-task-relative">{formatRelativeTimeLabel(task.created_at, locale)}</span>}
+                                    {task.assigned_agent && <span className="activity-task-agent agent-kind-pill" data-agent-kind={classifyAgentKind(task.assigned_agent)}>{task.assigned_agent}</span>}
                                   </div>
                                   <button
                                     type="button"
@@ -3572,6 +3988,17 @@ function App() {
                       aria-labelledby="task-panel-heading-steps"
                       className="task-panel-section-body"
                     >
+                      {taskStepsSummary.total > 0 && (
+                        <div className="task-steps-summary">
+                          <div className="task-steps-summary-topline">
+                            <span>{t("tasks.step_done")}: {taskStepsSummary.done}/{taskStepsSummary.total}</span>
+                            <span>{taskStepsSummary.progressPct}%</span>
+                          </div>
+                          <div className="task-steps-summary-bar">
+                            <div className="task-steps-summary-bar-fill" style={{ width: `${taskStepsSummary.progressPct}%` }} />
+                          </div>
+                        </div>
+                      )}
                       {(() => {
                         const planEv = tasksEvents.find((e) => (e.event_type === "plan_proposed" || e.event_type === "plan_committed") && e.payload && typeof e.payload === "object" && "steps" in e.payload);
                         let steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> = planEv?.payload && typeof planEv.payload === "object" && Array.isArray((planEv.payload as { steps?: unknown }).steps)
@@ -3590,7 +4017,7 @@ function App() {
                             <ol className="chat-subagents-plan-steps">
                               {steps.map((s, i) => (
                                 <li key={s.step_id ?? i} className="chat-subagents-plan-step">
-                                  {s.agent_type && <span className="chat-subagents-plan-agent">{s.agent_type}</span>}
+                                  {s.agent_type && <span className="chat-subagents-plan-agent agent-kind-pill" data-agent-kind={classifyAgentKind(s.agent_type)}>{s.agent_type}</span>}
                                   {s.step_id != null && s.step_id !== "" && (
                                     <span className="chat-subagents-plan-step-id">{s.step_id}</span>
                                   )}
@@ -3707,22 +4134,32 @@ function App() {
                       </div>
                     ) : null;
                   })()}
-                  {tasksEvents.length === 0 ? (
+                  {visibleTaskEvents.length === 0 ? (
                     <p className="empty-state">
                       {tasksList.length > 0 ? t("tasks.no_events") : t("tasks.select_task")}
                     </p>
                   ) : (
                     <>
+                    {isSimpleMode && <p className="task-events-hint">{t("tasks.event_summary_hint")}</p>}
                     <ul className="activity-events-list" role="list">
-                      {tasksEvents.map((e, i) => (
-                        <li key={i}>
-                          <strong>{eventLabel(e.event_type)}</strong> @ {e.at}
-                          {e.payload != null && typeof e.payload === "object" && (e.event_type === "task_completed" || e.event_type === "task_failed") && "model_used" in e.payload && (e.payload as { model_used?: string | null }).model_used && (
-                            <p className="event-model-used">{t("tasks.model_used")}: {(e.payload as { model_used: string }).model_used}</p>
-                          )}
-                          {e.payload != null && (
-                            <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
-                          )}
+                      {visibleTaskEvents.map((e, i) => (
+                        <li key={`${e.event_type}-${e.at}-${i}`} className="activity-event-card" data-event-kind={classifyEventKind(e.event_type)}>
+                          <span className="activity-event-dot" aria-hidden />
+                          <div className="activity-event-body">
+                            <div className="activity-event-topline">
+                              <strong className="event-kind-pill" data-event-kind={classifyEventKind(e.event_type)}>{eventLabel(e.event_type)}</strong>
+                              <span className="activity-event-at">{e.at}</span>
+                            </div>
+                            {summarizeTaskEvent(e) && <p className="activity-event-summary">{summarizeTaskEvent(e)}</p>}
+                            {e.payload != null && (isSimpleMode ? (
+                              <details className="event-payload-details">
+                                <summary>{t("tasks.event_details")}</summary>
+                                <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
+                              </details>
+                            ) : (
+                              <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
+                            ))}
+                          </div>
                         </li>
                       ))}
                     </ul>
@@ -4777,6 +5214,19 @@ function App() {
                 </select>
                 <span className="settings-theme-hint">{t("settings.theme_saved")}</span>
               </dd>
+              <dt>{t("settings.ui_mode")}</dt>
+              <dd>
+                <select
+                  aria-label={t("settings.ui_mode")}
+                  className="settings-theme-select"
+                  value={uiMode}
+                  onChange={(e) => setUiModeAndSave(e.target.value as UiMode)}
+                >
+                  <option value="simple">{t("settings.ui_mode_simple")}</option>
+                  <option value="expert">{t("settings.ui_mode_expert")}</option>
+                </select>
+                <span className="settings-theme-hint">{t("settings.ui_mode_hint")}</span>
+              </dd>
               <dt>{t("settings.language")}</dt>
               <dd>
                 <select
@@ -5354,6 +5804,24 @@ function App() {
                       aria-label={t("tasks.search_placeholder")}
                     />
                   </div>
+                  {taskTreeData.branchIds.size > 0 && (
+                    <div className="task-tree-toolbar task-tree-toolbar-sidebar" role="group" aria-label={t("tasks.tree_actions")}>
+                      <button
+                        type="button"
+                        className="task-tree-toolbar-btn"
+                        onClick={() => setAllTaskBranchesCollapsed(false)}
+                      >
+                        {t("tasks.expand_all")}
+                      </button>
+                      <button
+                        type="button"
+                        className="task-tree-toolbar-btn"
+                        onClick={() => setAllTaskBranchesCollapsed(true)}
+                      >
+                        {t("tasks.collapse_all")}
+                      </button>
+                    </div>
+                  )}
                 </>
               )}
               {tasksLoading && (
@@ -5362,14 +5830,19 @@ function App() {
               {!tasksLoading && tasksList.length === 0 && (
                 <p className="empty-state">{t("tasks.empty")}</p>
               )}
-              {!tasksLoading && tasksList.length > 0 && filteredTasksList.length === 0 && (
+              {!tasksLoading && tasksList.length > 0 && taskTreeRows.length === 0 && (
                 <p className="empty-state">{t("tasks.no_match_filter")}</p>
               )}
-              {!tasksLoading && filteredTasksList.length > 0 && (
+              {!tasksLoading && taskTreeRows.length > 0 && (
                 <ul className="sidebar-right-task-list" role="list">
-                  {filteredTasksList.map((task) => {
+                  {taskTreeRows.map((row) => {
+                    const task = row.task;
                     const isSelected = tasksList[tasksSelected]?.id === task.id;
+                    const isAncestor = !isSelected && selectedTaskAncestorIds.has(task.id);
+                    const isActiveRoot = selectedTaskRootId === task.id;
                     const runningChip = task.status === "running" ? runningTaskChips[task.id] : undefined;
+                    const hierarchyLabel = row.depth > 0 ? t("tasks.subtask_badge") : t("tasks.root_badge");
+                    const childCountLabel = t("tasks.children_count").replace("{{count}}", String(row.visibleChildCount));
                     const createdLabel = task.created_at ? (() => {
                       try {
                         const d = new Date(task.created_at);
@@ -5379,9 +5852,9 @@ function App() {
                       }
                     })() : null;
                     return (
-                      <li key={task.id} className={"sidebar-right-task-card" + (isSelected ? " selected" : "")}>
+                      <li key={task.id} className={"sidebar-right-task-card" + (isSelected ? " selected" : "") + (isAncestor ? " sidebar-right-task-card-ancestor" : "") + (isActiveRoot ? " sidebar-right-task-card-active-root" : "") + (row.depth > 0 ? " sidebar-right-task-card-child" : " sidebar-right-task-card-root") }>
                         <div
-                          className="sidebar-right-task-card-inner"
+                          className={"sidebar-right-task-card-inner task-tree-row" + (row.depth > 0 ? " task-tree-row-child" : " task-tree-row-root")}
                           role="button"
                           tabIndex={0}
                           onClick={() => { setTasksSelected(tasksList.findIndex((x) => x.id === task.id)); setTab("tasks"); }}
@@ -5391,12 +5864,49 @@ function App() {
                               setTasksSelected(tasksList.findIndex((x) => x.id === task.id));
                               setTab("tasks");
                             }
+                            if (e.key === "ArrowRight" && row.hasChildren && row.isCollapsed) {
+                              e.preventDefault();
+                              toggleTaskBranch(task.id);
+                            }
+                            if (e.key === "ArrowLeft" && row.hasChildren && !row.isCollapsed) {
+                              e.preventDefault();
+                              toggleTaskBranch(task.id);
+                            }
                           }}
+                          style={{ marginLeft: `${row.depth * 1.1}rem` }}
                         >
                           <div className="sidebar-right-task-card-head">
-                            <span className="sidebar-right-task-card-title" title={taskDisplayLabel(task)}>
-                              {taskDisplayLabel(task)}
-                            </span>
+                            <div className="sidebar-right-task-card-heading">
+                              <div className="task-tree-title-row">
+                                {row.hasChildren ? (
+                                  <button
+                                    type="button"
+                                    className="task-tree-toggle"
+                                    aria-label={(row.isCollapsed ? t("tasks.expand_branch") : t("tasks.collapse_branch")) + ": " + taskDisplayLabel(task)}
+                                    aria-expanded={!row.isCollapsed}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      toggleTaskBranch(task.id);
+                                    }}
+                                  >
+                                    <span aria-hidden>{row.isCollapsed ? "▶" : "▼"}</span>
+                                  </button>
+                                ) : (
+                                  <span className="task-tree-toggle-spacer" aria-hidden>
+                                    {row.depth > 0 ? "•" : ""}
+                                  </span>
+                                )}
+                                <span className="sidebar-right-task-card-title" title={taskDisplayLabel(task)}>
+                                  {taskDisplayLabel(task)}
+                                </span>
+                              </div>
+                              <div className="task-tree-meta-row">
+                                <span className={"task-tree-kind-badge " + (row.depth > 0 ? "task-tree-kind-badge-child" : "task-tree-kind-badge-root")}>
+                                  {hierarchyLabel}
+                                </span>
+                                {row.hasChildren && <span className="task-tree-child-count">{childCountLabel}</span>}
+                              </div>
+                            </div>
                             <span className={"sidebar-right-task-status-pill status-" + task.status}>
                               {task.status}
                             </span>
@@ -5407,17 +5917,21 @@ function App() {
                               <span className="sidebar-right-task-progress-pct">{runningChip.pct ?? 0}%</span>
                             </div>
                           )}
+                          {isSimpleMode && runningChip?.message && (
+                            <p className="sidebar-right-task-snippet">{trimPreview(runningChip.message, 96)}</p>
+                          )}
                           <div className="sidebar-right-task-meta">
-                            <span className="sidebar-right-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>
+                            {!isSimpleMode && <span className="sidebar-right-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>}
                             {createdLabel && <span className="sidebar-right-task-created">{createdLabel}</span>}
-                            {task.assigned_agent && <span className="sidebar-right-task-agent">{task.assigned_agent}</span>}
+                            {task.created_at && <span className="sidebar-right-task-relative">{formatRelativeTimeLabel(task.created_at, locale)}</span>}
+                            {task.assigned_agent && <span className="sidebar-right-task-agent agent-kind-pill" data-agent-kind={classifyAgentKind(task.assigned_agent)}>{task.assigned_agent}</span>}
                           </div>
                           <button
                             type="button"
                             className="sidebar-right-task-view-btn"
                             onClick={(e) => { e.stopPropagation(); setTasksSelected(tasksList.findIndex((x) => x.id === task.id)); setTab("tasks"); }}
                           >
-                            {t("tasks.view_task")}
+                            {isSimpleMode ? t("tasks.open") : t("tasks.view_task")}
                           </button>
                         </div>
                       </li>
