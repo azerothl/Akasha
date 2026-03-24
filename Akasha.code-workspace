@@ -10,5 +10,13 @@
 			"path": "../Akasha_skills"
 		}
 	],
-	"settings": {}
+	"settings": {
+		"chat.tools.terminal.autoApprove": {
+            "cargo check": true,
+            "Push-Location": true,
+            "cargo metadata": true,
+            "ConvertFrom-Json": true,
+            "Pop-Location": true
+        }
+	}
 }
