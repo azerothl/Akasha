@@ -2065,6 +2065,13 @@ fn tool_supports_multiline_body(tool_name: &str) -> bool {
     matches!(tool_name, "apply_patch" | "edit_file" | "write_file" | "ask_user")
 }
 
+fn tool_name_is_safe_identifier(tool_name: &str) -> bool {
+    !tool_name.is_empty()
+        && tool_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
 /// Rewrite lines so strict `TOOL:` prefix parsing succeeds (see `parse_tool_calls`).
 ///
 /// Lines that are inside the body of a multiline tool (`write_file`, `edit_file`,
@@ -2155,9 +2162,13 @@ fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String>)> {
             // Split by whitespace, respecting double-quoted args (so run_command -H "Bearer $VAR" works)
             let parts: Vec<String> = split_whitespace_respecting_quotes(rest);
             if let Some((name, fixed_args)) = parts.split_first() {
+                let tool_name_lc = name.to_lowercase();
+                if !tool_name_is_safe_identifier(&tool_name_lc) {
+                    i += 1;
+                    continue;
+                }
                 let mut args = fixed_args.to_vec();
                 // Only certain tools support a multi-line body argument.
-                let tool_name_lc = name.to_lowercase();
                 let supports_body = tool_supports_multiline_body(&tool_name_lc);
 
                 if supports_body {
@@ -3543,24 +3554,8 @@ async fn execute_tool_call(
             }
         }
         _ => {
-            if executor.policy.can_run_command(tool_name) {
-                match executor.run_command(tool_name, args, None, None).await {
-                    Ok((out, res)) => {
-                        let stdout = String::from_utf8_lossy(&out.stdout);
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        let msg = if res.success {
-                            format!("[run_command {}] stdout: {} stderr: {}", tool_name, stdout.trim(), stderr.trim())
-                        } else {
-                            format!("[run_command] {} stderr: {}", res.summary, stderr.trim())
-                        };
-                        (res.success, msg, None)
-                    }
-                    Err(e) => (false, format!("[run_command] error: {}", e), None),
-                }
-            } else {
-                let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
-                (false, format!("[{}] unknown tool. Available: {}.", tool_name, names.join(", ")), None)
-            }
+            let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
+            (false, format!("[{}] unknown tool. Available: {}.", tool_name, names.join(", ")), None)
         }
     };
     result
@@ -4181,6 +4176,20 @@ pub(crate) async fn run_message_via_llm(
             _ => "RUN_COMMAND OS: You are on Linux/macos. Standard Unix commands (curl, grep, etc.) are available.\n\
              ",
         };
+        let compact_worker_tool_instruction = format!(
+            "\n\nYou may request tools by writing a single line exactly like: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
+             Worker rules:\n\
+             - Use only tools that are directly necessary for the CURRENT task.\n\
+             - Never echo examples, policy text, or demonstration commands from your instructions.\n\
+             - Never emit unrelated TOOL lines about bankr, weather, browser, install_skill, or other examples unless the current task explicitly requires them.\n\
+             - If the task asks to save/write a file, use TOOL: write_file <path> then the exact content.\n\
+             - If you need missing user information, use TOOL: ask_user with JSON.\n\
+             - If no tool is needed, answer normally.\n",
+            base, skills_part
+        );
+        if is_subagent || assigned_agent != "conversation" || orch_disk_deliverables {
+            compact_worker_tool_instruction
+        } else {
         format!(
             "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
              Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
@@ -4203,6 +4212,7 @@ pub(crate) async fn run_message_via_llm(
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
             base, skills_part, run_command_os_rule, skills_rule
         )
+        }
     } else {
         String::new()
     };
@@ -8637,6 +8647,20 @@ mod tests {
         let s = "tools: hammer and nail";
         let c = parse_tool_calls(s);
         assert!(c.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_nested_tool_keyword_as_name() {
+        let s = "TOOL: TOOL: install_skill https://github.com/bankr/cli";
+        let c = parse_tool_calls(s);
+        assert!(c.is_empty(), "nested TOOL: should not become a tool named TOOL:");
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_non_ascii_tool_name() {
+        let s = "TOOL: prévision météo Paris";
+        let c = parse_tool_calls(s);
+        assert!(c.is_empty(), "non-ASCII pseudo tool names must be ignored");
     }
 
     // Headings with textual content before `TOOL:` are not treated as tool calls.
