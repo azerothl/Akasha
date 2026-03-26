@@ -110,60 +110,59 @@ impl ExecutionPlan {
             .collect()
     }
 
-    /// Markdown block: full user request summary + all steps (truncated if needed) + highlighted current step.
+    /// Markdown block: root request + minimal plan map + highlighted current step.
+    ///
+    /// Keep this intentionally narrow so orchestrated sub-agents stay focused on
+    /// their assignment instead of inheriting the whole execution plan narrative.
     pub fn shared_context_markdown(&self, user_request: &str, current: &PlanStep) -> String {
         let max_total = plan_context_max_chars();
-        let user_trim: String = user_request.chars().take(2000).collect();
+        let user_trim = truncate_chars(user_request.trim(), 1_200);
+        let dependency_steps: Vec<&PlanStep> = current
+            .depends_on
+            .iter()
+            .filter_map(|dep| self.steps.iter().find(|s| s.step_id == *dep))
+            .collect();
+        let sibling_steps: Vec<&PlanStep> = self
+            .steps
+            .iter()
+            .filter(|s| s.step_id != current.step_id && !current.depends_on.iter().any(|dep| dep == &s.step_id))
+            .collect();
         let mut out = String::new();
         out.push_str("## User request (root)\n\n");
         out.push_str(user_trim.trim());
-        out.push_str("\n\n## Execution plan (all steps)\n\n");
-        out.push_str("| step_id | agent | depends_on | intent (preview) |\n");
-        out.push_str("|---------|-------|------------|------------------|\n");
-        let other_limit = 400usize;
-        for s in &self.steps {
-            let intent_preview: String = if s.step_id == current.step_id {
-                s.intent.clone()
-            } else {
-                truncate_chars(&s.intent, other_limit)
-            };
-            let deps = if s.depends_on.is_empty() {
-                "(none)".to_string()
-            } else {
-                s.depends_on.join(", ")
-            };
-            let row = format!(
-                "| {} | {} | {} | {} |\n",
-                s.step_id,
-                s.agent_type,
-                deps,
-                intent_preview.replace('\n', " ").replace('|', "\\|")
-            );
-            out.push_str(&row);
+        out.push_str("\n\n## Plan map (minimal)\n\n");
+        out.push_str(&format!(
+            "- Total steps: `{}`\n- Your step: `{}` (`{}`)\n",
+            self.steps.len(),
+            current.step_id,
+            current.agent_type
+        ));
+        if current.depends_on.is_empty() {
+            out.push_str("- Direct dependencies: `(none)`\n");
+        } else {
+            out.push_str(&format!(
+                "- Direct dependencies: {}\n",
+                current
+                    .depends_on
+                    .iter()
+                    .map(|dep| format!("`{}`", dep))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
-        out.push_str("\n### Step details\n\n");
-        for s in &self.steps {
-            out.push_str(&format!("- **{}** (`{}`):\n", s.step_id, s.agent_type));
-            let intent_line = if s.step_id == current.step_id {
-                s.intent.as_str()
-            } else {
-                &truncate_chars(&s.intent, other_limit)
-            };
-            out.push_str("  - intent: ");
-            out.push_str(&intent_line.replace('\n', "\n    "));
-            out.push('\n');
-            if let Some(ref a) = s.acceptance_criteria {
-                let t = truncate_chars(a, 800);
-                out.push_str("  - acceptance_criteria: ");
-                out.push_str(&t);
-                out.push('\n');
+        if !dependency_steps.is_empty() {
+            out.push_str("\n### Dependencies you may rely on\n\n");
+            for s in dependency_steps {
+                out.push_str(&format!(
+                    "- `{}` (`{}`) — dependency output is injected separately by the orchestrator.\n",
+                    s.step_id, s.agent_type
+                ));
             }
-            if let Some(ref d) = s.deliverables {
-                if !d.is_empty() {
-                    out.push_str("  - deliverables: ");
-                    out.push_str(&d.join(", "));
-                    out.push('\n');
-                }
+        }
+        if !sibling_steps.is_empty() {
+            out.push_str("\n### Other steps (awareness only)\n\n");
+            for s in sibling_steps {
+                out.push_str(&format!("- `{}` (`{}`)\n", s.step_id, s.agent_type));
             }
         }
         out.push_str("\n## Your assignment (this step only)\n\n");
@@ -191,7 +190,9 @@ impl ExecutionPlan {
                 }
             }
         }
-        out.push_str("\n\n---\nFollow your step only; other steps run in parallel or in other waves as scheduled.\n");
+        out.push_str(
+            "\n\n---\nFocus only on this step. Dependency outputs, if any, are provided separately above your task. Ignore unrelated steps unless they directly affect your deliverables.\n",
+        );
 
         if out.len() <= max_total {
             return out;
@@ -388,5 +389,8 @@ mod tests {
         assert!(ctx.contains("Tests pass"));
         assert!(ctx.contains("workspace:/x.py"));
         assert!(ctx.contains("Your assignment"));
+        assert!(ctx.contains("Dependencies you may rely on"));
+        assert!(!ctx.contains("intent: Read PDF"));
+        assert!(!ctx.contains("Read PDF\n"));
     }
 }

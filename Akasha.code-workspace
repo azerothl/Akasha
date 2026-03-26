@@ -1,14 +1,13 @@
 {
-	"folders": [
-		{
-			"path": "."
-		},
-		{
-			"path": "../Akasha_app"
-		},
-		{
-			"path": "../Akasha_skills"
-		}
-	],
-	"settings": {}
+"folders": [
+{
+"path": "."
+},
+{
+"path": "../Akasha_app"
+},
+{
+"path": "../Akasha_skills"
+}
+]
 }

@@ -13,6 +13,7 @@ use crate::user_profile::UserProfile;
 use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
+use crate::latency::{clear_task_milestones, emit_timeline_once_for_task, env_duration_ms, log_latency_metric, resolve_root_task_id};
 use std::path::{Path, PathBuf};
 use std::cmp::Ordering;
 
@@ -35,6 +36,86 @@ fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
 /// LLM tool calls may use typographic quotes, while files on disk typically use ASCII quotes.
 fn normalize_apostrophes(s: &str) -> String {
     s.replace('’', "'").replace('‘', "'")
+}
+
+fn normalize_tool_path_hint(raw: &str) -> String {
+    let mut s = raw
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string();
+    s = normalize_apostrophes(&s);
+    if s.starts_with("workspace:/") {
+        return format!(
+            "workspace:/{}",
+            s.trim_start_matches("workspace:/")
+                .trim_start_matches(['/', '\\'])
+        );
+    }
+    if let Some(rest) = s.strip_prefix("workspace:") {
+        return format!("workspace:/{}", rest.trim_start_matches(['/', '\\']));
+    }
+    if let Some(rest) = s.strip_prefix("workspace/") {
+        return format!("workspace:/{}", rest.trim_start_matches(['/', '\\']));
+    }
+    if let Some(rest) = s.strip_prefix("workspace\\") {
+        return format!("workspace:/{}", rest.trim_start_matches(['/', '\\']));
+    }
+    s
+}
+
+fn is_workspace_virtual_path(raw: &str) -> bool {
+    normalize_tool_path_hint(raw).starts_with("workspace:/")
+}
+
+fn parse_write_file_request(args: &[String]) -> Option<(String, String)> {
+    if args.is_empty() {
+        return None;
+    }
+
+    let joined = args.join("\n");
+    let trimmed = joined.trim();
+    if trimmed.starts_with('{') {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let path = value
+                .get("path")
+                .or_else(|| value.get("filePath"))
+                .or_else(|| value.get("file"))
+                .and_then(|v| v.as_str())
+                .map(normalize_tool_path_hint);
+            let content = value
+                .get("content")
+                .or_else(|| value.get("text"))
+                .or_else(|| value.get("body"))
+                .or_else(|| value.get("data"))
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Array(items) => items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+                });
+            if let Some(path) = path {
+                return Some((path, content.unwrap_or_default()));
+            }
+        }
+    }
+
+    let path = normalize_tool_path_hint(args.first()?.as_str());
+    let content = args.get(1..).map(|a| a.join("\n")).unwrap_or_default();
+    Some((path, content))
+}
+
+fn canonicalize_tool_name(tool_name: &str) -> String {
+    match tool_name.to_lowercase().as_str() {
+        "create_todos" => "write_todos".to_string(),
+        "append_todos" => "merge_todos".to_string(),
+        _ => tool_name.to_string(),
+    }
 }
 
 /// Banner injected by `compose_orchestrated_child_message(..., deliverables_required: true)` for subtasks and remediation.
@@ -82,6 +163,7 @@ async fn pdf_extract_message_from_disk(disk_path: &Path, via_tool: &str) -> (boo
 }
 
 fn resolve_tool_disk_path(raw: &str, workspace_root: Option<&Path>) -> PathBuf {
+    let raw = normalize_tool_path_hint(raw);
     let raw = raw.trim();
     if raw.starts_with("workspace:/") || raw.starts_with("workspace:") {
         let key = raw
@@ -268,15 +350,29 @@ async fn get_task_list(store_path: &Path, status_filter: Option<String>) -> Stri
     json_response("200 OK", &body.to_string())
 }
 
-async fn get_task_events(events: &EventsCache, id: Uuid) -> String {
+async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> String {
     let mut list: Vec<TaskEventEntry> = {
+        let mut root_events = Vec::new();
+        match TaskStore::open(store_path) {
+            Ok(store) => {
+                if let Ok(persisted) = store.get_events(id) {
+                    root_events.extend(persisted.into_iter().map(|e| TaskEventEntry {
+                        event_type: e.event_type,
+                        payload: e.payload,
+                        at: e.at,
+                        task_id: Some(id.to_string()),
+                    }));
+                }
+            }
+            Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+        }
         let g = events.read().await;
-        g.get(&id)
-            .map(|q| q.iter().cloned().collect())
-            .unwrap_or_default()
+        if let Some(q) = g.get(&id) {
+            root_events.extend(q.iter().cloned());
+        }
+        root_events
     };
-    // Derive child task IDs from SubAgentSpawned events already in the in-memory cache —
-    // avoids reopening SQLite (TaskStore) on every poll cycle (the endpoint is polled ~1.5s).
+
     let child_ids: Vec<Uuid> = list
         .iter()
         .filter(|e| e.event_type == "sub_agent_spawned")
@@ -287,17 +383,58 @@ async fn get_task_events(events: &EventsCache, id: Uuid) -> String {
                 .and_then(|v| v.as_str())
                 .and_then(|s| Uuid::parse_str(s).ok())
         })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .collect();
     if !child_ids.is_empty() {
         let g = events.read().await;
         for child_id in child_ids {
             if let Some(q) = g.get(&child_id) {
-                for e in q.iter().cloned() {
-                    list.push(e);
+                list.extend(q.iter().cloned());
+            }
+        }
+        drop(g);
+        if let Ok(store) = TaskStore::open(store_path) {
+            for child_id in list
+                .iter()
+                .filter(|e| e.event_type == "sub_agent_spawned")
+                .filter_map(|e| {
+                    e.payload
+                        .as_ref()
+                        .and_then(|p| p.get("task_id"))
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| Uuid::parse_str(s).ok())
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+            {
+                if let Ok(persisted) = store.get_events(child_id) {
+                    list.extend(persisted.into_iter().map(|e| TaskEventEntry {
+                        event_type: e.event_type,
+                        payload: e.payload,
+                        at: e.at,
+                        task_id: Some(child_id.to_string()),
+                    }));
                 }
             }
         }
     }
+
+    let mut seen = std::collections::HashSet::new();
+    list.retain(|entry| {
+        let payload_key = entry
+            .payload
+            .as_ref()
+            .map(|p| serde_json::to_string(p).unwrap_or_default())
+            .unwrap_or_default();
+        let key = format!(
+            "{}|{}|{}|{}",
+            entry.task_id.as_deref().unwrap_or_default(),
+            entry.event_type,
+            entry.at,
+            payload_key
+        );
+        seen.insert(key)
+    });
     list.sort_by(|a, b| a.at.cmp(&b.at));
     let body = serde_json::json!({ "task_id": id.to_string(), "events": list });
     json_response("200 OK", &body.to_string())
@@ -543,9 +680,19 @@ pub async fn run_delegation_handler(
                 child_task_id = %child_id_span,
                 assigned_agent = %agent_type_span
             );
-            const DELEGATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+            let first_activity_timeout = env_duration_ms("AKASHA_DELEGATION_FIRST_ACTIVITY_TIMEOUT_MS", 15_000);
+            let completion_timeout = env_duration_ms("AKASHA_DELEGATION_COMPLETION_TIMEOUT_MS", 300_000);
+            let had_first_activity = wait_for_task_activity(&progress, child_id_span, first_activity_timeout).await;
+            if !had_first_activity {
+                task_completion.write().await.remove(&child_id_span);
+                let _ = reply_tx.send(Err(format!(
+                    "delegation startup timeout ({} ms without visible activity)",
+                    first_activity_timeout.as_millis()
+                )));
+                return;
+            }
             let timed_out = tokio::time::timeout(
-                DELEGATION_TIMEOUT,
+                completion_timeout,
                 notify.notified().instrument(span),
             )
             .await
@@ -553,7 +700,10 @@ pub async fn run_delegation_handler(
             // Ensure the registry entry is removed regardless of outcome.
             task_completion.write().await.remove(&child_id_span);
             if timed_out {
-                let _ = reply_tx.send(Err("delegation timeout (5 min)".to_string()));
+                let _ = reply_tx.send(Err(format!(
+                    "delegation completion timeout ({} ms)",
+                    completion_timeout.as_millis()
+                )));
                 return;
             }
             // Single store read to retrieve the final task status and result message.
@@ -764,6 +914,333 @@ struct MessageIntentFlags {
     code_generation: bool,
     /// User asks for GitHub repo/API info and mentions vault or GITHUB_TOKEN.
     github_with_vault: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SmallTalkLanguage {
+    French,
+    English,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SmallTalkIntent {
+    language: SmallTalkLanguage,
+    asks_status: bool,
+}
+
+fn classify_small_talk_message(message: &str) -> Option<SmallTalkIntent> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed
+        .to_lowercase()
+        .replace('’', "'")
+        .replace(['!', '?', '.', ',', ';', ':'], " ");
+    let collapsed = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Reject messages that mingle small-talk with "real request" keywords
+    let real_request_keywords = [
+        "peux tu", "peux-tu", "peut tu", "peut-tu",
+        "pouvez vous", "pouvez-vous", "tu peux", "peux me", "peux nous",
+        "could you", "can you", "would you", "can you help", "can you tell",
+        "me rappeler", "me rappelle", "help me", "show me", "tell me",
+        "lire", "read", "fichier", "file", "faire", "do", "créer", "create",
+        "écrire", "write", "générer", "generate",
+        "projet", "project",
+        "avait", "avaient", "avez", "have", "has", "fait", "done",
+        "hier", "yesterday", "dernier", "last",
+    ];
+    for keyword in real_request_keywords {
+        if collapsed.contains(keyword) {
+            return None;
+        }
+    }
+
+    let has_french = [
+        "salut",
+        "bonjour",
+        "bonsoir",
+        "coucou",
+        "ca va",
+        "ça va",
+        "comment ca va",
+        "comment ça va",
+    ]
+    .iter()
+    .any(|k| collapsed.contains(k));
+    let has_english = [
+        "hello",
+        "hi",
+        "hey",
+        "good morning",
+        "good evening",
+        "how are you",
+        "hows it going",
+        "how's it going",
+    ]
+    .iter()
+    .any(|k| collapsed.contains(k));
+    let asks_status = [
+        "ca va",
+        "ça va",
+        "comment ca va",
+        "comment ça va",
+        "how are you",
+        "hows it going",
+        "how's it going",
+    ]
+    .iter()
+    .any(|k| collapsed.contains(k));
+    if has_french {
+        Some(SmallTalkIntent {
+            language: SmallTalkLanguage::French,
+            asks_status,
+        })
+    } else if has_english {
+        Some(SmallTalkIntent {
+            language: SmallTalkLanguage::English,
+            asks_status,
+        })
+    } else {
+        None
+    }
+}
+
+fn small_talk_fast_lane(message: &str) -> Option<SmallTalkIntent> {
+    let intent = classify_small_talk_message(message)?;
+    let trimmed = message.trim();
+    if trimmed.contains('\n') || trimmed.chars().count() > 80 {
+        return None;
+    }
+    let word_count = trimmed
+        .split_whitespace()
+        .filter(|w| !w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-').is_empty())
+        .count();
+    if word_count > 8 {
+        return None;
+    }
+    let lower = trimmed.to_lowercase();
+    let flags = compute_message_intent_flags(trimmed);
+    if flags.save_file
+        || flags.external_info
+        || flags.social_feed_fetch
+        || flags.camera_or_mic
+        || flags.image_generation
+        || flags.code_generation
+        || flags.github_with_vault
+        || message_suggests_project(trimmed)
+    {
+        return None;
+    }
+    if [
+        "fichier",
+        "file",
+        "code",
+        "projet",
+        "project",
+        "browser",
+        "navigateur",
+        "outil",
+        "tool",
+        "github",
+        "api",
+        "cargo",
+        "rust",
+        "erreur",
+        "error",
+        "bug",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+    {
+        return None;
+    }
+    Some(intent)
+}
+
+fn small_talk_fast_reply(message: &str, intent: SmallTalkIntent) -> String {
+    let lower = message.to_lowercase();
+    match intent.language {
+        SmallTalkLanguage::French => {
+            if intent.asks_status {
+                "Salut ! Oui, ça va bien 😊 Et toi ?".to_string()
+            } else if lower.contains("bonsoir") {
+                "Bonsoir ! 👋".to_string()
+            } else if lower.contains("bonjour") {
+                "Bonjour ! 👋".to_string()
+            } else if lower.contains("coucou") {
+                "Coucou ! 👋".to_string()
+            } else {
+                "Salut ! 👋".to_string()
+            }
+        }
+        SmallTalkLanguage::English => {
+            if intent.asks_status {
+                "Hi! I'm doing well 😊 How about you?".to_string()
+            } else if lower.contains("good morning") {
+                "Good morning! 👋".to_string()
+            } else if lower.contains("good evening") {
+                "Good evening! 👋".to_string()
+            } else {
+                "Hi! 👋".to_string()
+            }
+        }
+    }
+}
+
+fn response_looks_off_topic_for_small_talk(response: &str) -> bool {
+    let lower = response.to_lowercase();
+    lower.contains("tool:")
+        || lower.contains("tools_policy")
+        || lower.contains("allowed_write_paths")
+        || lower.contains("allowed_read_paths")
+        || lower.contains("write_file")
+        || lower.contains("read_file")
+        || lower.contains("browser navigate")
+        || lower.contains("web_search")
+        || lower.contains("memory_store")
+        || lower.contains("delegate_to_agent")
+        || lower.contains("vault:")
+        || lower.len() > 240
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionRecallRange {
+    Yesterday,
+    CurrentDay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionRecallIntent {
+    range: SessionRecallRange,
+    language: SmallTalkLanguage,
+}
+
+fn detect_session_recall_intent(message: &str) -> Option<SessionRecallIntent> {
+    let lower = message
+        .trim()
+        .to_lowercase()
+        .replace('’', "'")
+        .replace(['!', '?', '.', ',', ';', ':'], " ");
+    if lower.is_empty() {
+        return None;
+    }
+    let asks_recall = [
+        "rappeler", "rappelle", "rappel", "ce qu'on a fait", "ce qu on a fait", "on a fait",
+        "what we did", "remind me", "recap", "recap what we did", "what did we do",
+    ]
+    .iter()
+    .any(|k| lower.contains(k));
+    if !asks_recall {
+        return None;
+    }
+    let range = if ["hier", "yesterday", "last night", "hier soir"].iter().any(|k| lower.contains(k)) {
+        SessionRecallRange::Yesterday
+    } else {
+        SessionRecallRange::CurrentDay
+    };
+    let language = if ["bonjour", "salut", "merci", "hier", "rappeler", "qu'on", "quoi"].iter().any(|k| lower.contains(k)) {
+        SmallTalkLanguage::French
+    } else {
+        SmallTalkLanguage::English
+    };
+    Some(SessionRecallIntent { range, language })
+}
+
+fn build_session_recap_reply(
+    turns: &[crate::memory::ConversationTurn],
+    intent: SessionRecallIntent,
+) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for t in turns {
+        let c = t.content.trim();
+        if c.is_empty() {
+            continue;
+        }
+        let lower = c.to_lowercase();
+        // Filter out system/error messages
+        if lower.contains("tools_policy")
+            || lower.contains("allowed_write_paths")
+            || lower.contains("allowed_read_paths")
+            || lower.contains("allowed_paths")
+            || lower.contains("llm response timed out")
+            || lower.contains("timed out")
+            || lower.starts_with("[recent context")
+            || lower.starts_with("[mémoire")
+            || lower.starts_with("[system")
+            || lower.starts_with("[error")
+            || lower.contains("not authorized")
+            || lower.contains("pas autorisé")
+            || lower.contains("cannot create")
+            || lower.contains("ne peux pas créer")
+            || lower.contains("cannot write")
+            || lower.contains("cannot read")
+            // Filter out previous recap generations
+            || lower.starts_with("bien sûr — voici")
+            || lower.starts_with("sure — here's")
+            || lower.starts_with("voici ce qu'on a fait")
+            || lower.starts_with("here's what we")
+            // Filter out generic greetings/closings
+            || (lower.contains("bonjour") && lower.len() < 100)
+            || (lower.contains("salut") && lower.len() < 80)
+            || lower == "oui" || lower == "yes"
+            || lower == "ok" || lower == "d'accord"
+            || lower == "merci" || lower == "thanks"
+            || lower == "merci beaucoup" || lower == "thank you"
+        {
+            continue;
+        }
+        let compact = c.replace('\n', " ").trim().to_string();
+        // Skip very short fragments
+        if compact.len() < 20 {
+            continue;
+        }
+        lines.push(compact);
+    }
+    lines.dedup();
+    if lines.is_empty() {
+        return None;
+    }
+    let selected: Vec<String> = lines.into_iter().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect();
+    match intent.language {
+        SmallTalkLanguage::French => {
+            let period = match intent.range {
+                SessionRecallRange::Yesterday => "hier",
+                SessionRecallRange::CurrentDay => "dans cette session",
+            };
+            let mut out = format!("Bien sûr — voici ce qu'on a fait {} :\n", period);
+            for item in selected {
+                out.push_str("- ");
+                let truncated = if item.len() > 400 {
+                    format!("{}…", item.chars().take(397).collect::<String>())
+                } else {
+                    item
+                };
+                out.push_str(&truncated);
+                out.push('\n');
+            }
+            Some(out.trim_end().to_string())
+        }
+        SmallTalkLanguage::English => {
+            let period = match intent.range {
+                SessionRecallRange::Yesterday => "yesterday",
+                SessionRecallRange::CurrentDay => "in this session",
+            };
+            let mut out = format!("Sure — here's what we did {}:\n", period);
+            for item in selected {
+                out.push_str("- ");
+                let truncated = if item.len() > 400 {
+                    format!("{}…", item.chars().take(397).collect::<String>())
+                } else {
+                    item
+                };
+                out.push_str(&truncated);
+                out.push('\n');
+            }
+            Some(out.trim_end().to_string())
+        }
+    }
 }
 
 /// Best-effort X handle from user text (e.g. `@akasha_anthiam` → `akasha_anthiam`).
@@ -1669,6 +2146,13 @@ fn tool_supports_multiline_body(tool_name: &str) -> bool {
     matches!(tool_name, "apply_patch" | "edit_file" | "write_file" | "ask_user")
 }
 
+fn tool_name_is_safe_identifier(tool_name: &str) -> bool {
+    !tool_name.is_empty()
+        && tool_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
 /// Rewrite lines so strict `TOOL:` prefix parsing succeeds (see `parse_tool_calls`).
 ///
 /// Lines that are inside the body of a multiline tool (`write_file`, `edit_file`,
@@ -1759,9 +2243,13 @@ fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String>)> {
             // Split by whitespace, respecting double-quoted args (so run_command -H "Bearer $VAR" works)
             let parts: Vec<String> = split_whitespace_respecting_quotes(rest);
             if let Some((name, fixed_args)) = parts.split_first() {
+                let tool_name_lc = name.to_lowercase();
+                if !tool_name_is_safe_identifier(&tool_name_lc) {
+                    i += 1;
+                    continue;
+                }
                 let mut args = fixed_args.to_vec();
                 // Only certain tools support a multi-line body argument.
-                let tool_name_lc = name.to_lowercase();
                 let supports_body = tool_supports_multiline_body(&tool_name_lc);
 
                 if supports_body {
@@ -1981,10 +2469,10 @@ async fn execute_tool_call(
     };
     let result = match tool_name {
         "read_file" => {
-            let path_str = path_arg_joined(args);
+            let path_str = normalize_tool_path_hint(&path_arg_joined(args));
             if path_str.is_empty() {
                 (false, "[read_file] usage: read_file <path>".to_string(), None)
-            } else if path_str.starts_with("workspace:/") || path_str.starts_with("workspace:") {
+            } else if is_workspace_virtual_path(&path_str) {
                 let key = path_str
                     .trim_start_matches("workspace:/")
                     .trim_start_matches("workspace:")
@@ -2715,68 +3203,63 @@ async fn execute_tool_call(
             }
         }
         "write_file" => {
-            let path_str_opt = args.get(0).map(String::as_str);
-            if let Some(path_str) = path_str_opt {
-                if path_str.starts_with("workspace:/") || path_str.starts_with("workspace:") {
-                    match workspace_store {
-                        Some(ws) => {
-                            let key = path_str
-                                .trim_start_matches("workspace:/")
-                                .trim_start_matches("workspace:")
-                                .trim_start_matches('/')
-                                .to_string();
-                            let mut key = key.trim().trim_matches('`').trim_matches('"').to_string();
-                            if key.ends_with('#') {
-                                key.pop();
-                            }
-                            let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
-                            let (key, _) =
-                                rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
-                            let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
-                            let mut guard = ws.write().await;
-                            let per_task = guard.entry(lineage_task_id).or_default();
-                            let previous_mem = per_task.get(&key).cloned().unwrap_or_default();
-                            // Only prefer the longer previous content for plan-trace files
-                            // (.akasha/plan_*.md) where provider truncation is a known risk.
-                            // For all other files, always use the new content so legitimate
-                            // shortening edits (e.g. removing placeholder sections) are honoured.
-                            let is_plan_trace = key.starts_with(".akasha/plan_") && key.ends_with(".md");
-                            let effective_content = if is_plan_trace
-                                && !previous_mem.is_empty()
-                                && content.chars().count() < previous_mem.chars().count()
-                            {
-                                previous_mem.clone()
-                            } else {
-                                content.clone()
-                            };
-                            per_task.insert(key.clone(), effective_content.clone());
-                            drop(guard);
-                            // Also write to disk under data_dir (workspace root = store_path.parent())
-                            let rel_path = Path::new(&key);
-                            if executor.policy.can_write(rel_path) {
-                                let disk_path_opt = workspace_root.map(|root| root.join(&key))
-                                    .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
-                                    .map(strip_verbatim_prefix);
-                                if let Some(disk_path) = disk_path_opt {
-                                    if let Some(parent) = disk_path.parent() {
-                                        let _ = tokio::fs::create_dir_all(parent).await;
-                                    }
-                                    if tokio::fs::write(&disk_path, &effective_content).await.is_ok() {
-                                        return (true, format!("[write_file workspace:{}] saved (disk).", key), None);
-                                    }
+            let Some((path_str, content)) = parse_write_file_request(args) else {
+                return (false, "[write_file] usage: write_file <path> <content>".to_string(), None);
+            };
+            if is_workspace_virtual_path(&path_str) {
+                match workspace_store {
+                    Some(ws) => {
+                        let key = path_str
+                            .trim_start_matches("workspace:/")
+                            .trim_start_matches("workspace:")
+                            .trim_start_matches('/')
+                            .to_string();
+                        let mut key = key.trim().trim_matches('`').trim_matches('"').to_string();
+                        if key.ends_with('#') {
+                            key.pop();
+                        }
+                        let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
+                        let (key, _) =
+                            rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
+                        let mut guard = ws.write().await;
+                        let per_task = guard.entry(lineage_task_id).or_default();
+                        let previous_mem = per_task.get(&key).cloned().unwrap_or_default();
+                        // Only prefer the longer previous content for plan-trace files
+                        // (.akasha/plan_*.md) where provider truncation is a known risk.
+                        // For all other files, always use the new content so legitimate
+                        // shortening edits (e.g. removing placeholder sections) are honoured.
+                        let is_plan_trace = key.starts_with(".akasha/plan_") && key.ends_with(".md");
+                        let effective_content = if is_plan_trace
+                            && !previous_mem.is_empty()
+                            && content.chars().count() < previous_mem.chars().count()
+                        {
+                            previous_mem.clone()
+                        } else {
+                            content.clone()
+                        };
+                        per_task.insert(key.clone(), effective_content.clone());
+                        drop(guard);
+                        // Also write to disk under data_dir (workspace root = store_path.parent())
+                        let rel_path = Path::new(&key);
+                        if executor.policy.can_write(rel_path) {
+                            let disk_path_opt = workspace_root.map(|root| root.join(&key))
+                                .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                                .map(strip_verbatim_prefix);
+                            if let Some(disk_path) = disk_path_opt {
+                                if let Some(parent) = disk_path.parent() {
+                                    let _ = tokio::fs::create_dir_all(parent).await;
+                                }
+                                if tokio::fs::write(&disk_path, &effective_content).await.is_ok() {
+                                    return (true, format!("[write_file workspace:{}] saved (disk).", key), None);
                                 }
                             }
-                            return (true, format!("[write_file workspace:{}] saved.", key), None);
                         }
-                        None => return (false, "[write_file] workspace paths require a workspace store.".to_string(), None),
+                        return (true, format!("[write_file workspace:{}] saved.", key), None);
                     }
+                    None => return (false, "[write_file] workspace paths require a workspace store.".to_string(), None),
                 }
             }
-            let path = match path_arg(0) {
-                Some(p) => p,
-                None => return (false, "[write_file] usage: write_file <path> <content>".to_string(), None),
-            };
-            let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
+            let path = Path::new(&path_str);
             match executor.write_file(path, &content).await {
                 Ok(res) => {
                     let msg = if res.success {
@@ -3147,24 +3630,8 @@ async fn execute_tool_call(
             }
         }
         _ => {
-            if executor.policy.can_run_command(tool_name) {
-                match executor.run_command(tool_name, args, None, None).await {
-                    Ok((out, res)) => {
-                        let stdout = String::from_utf8_lossy(&out.stdout);
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        let msg = if res.success {
-                            format!("[run_command {}] stdout: {} stderr: {}", tool_name, stdout.trim(), stderr.trim())
-                        } else {
-                            format!("[run_command] {} stderr: {}", res.summary, stderr.trim())
-                        };
-                        (res.success, msg, None)
-                    }
-                    Err(e) => (false, format!("[run_command] error: {}", e), None),
-                }
-            } else {
-                let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
-                (false, format!("[{}] unknown tool. Available: {}.", tool_name, names.join(", ")), None)
-            }
+            let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
+            (false, format!("[{}] unknown tool. For shell commands, use: TOOL: run_command <cmd> .... Available: {}.", tool_name, names.join(", ")), None)
         }
     };
     result
@@ -3216,8 +3683,17 @@ async fn compact_short_term_if_needed(
         system_prompt: None,
         image_data_urls: None,
     };
-    match llm_router.complete(&req).await {
-        Ok(resp) => {
+    let compaction_timeout = env_duration_ms("AKASHA_COMPACTION_TIMEOUT_MS", 1_500);
+    match tokio::time::timeout(compaction_timeout, llm_router.complete(&req)).await {
+        Err(_) => {
+            tracing::debug!(
+                session_id,
+                timeout_ms = compaction_timeout.as_millis() as u64,
+                "Short-term compaction skipped: budget exceeded"
+            );
+        }
+        Ok(Err(e)) => tracing::warn!(error = %e, "Compaction LLM failed, keeping full history"),
+        Ok(Ok(resp)) => {
             let summary = resp.text.trim();
             if !summary.is_empty() {
                 short_term.replace_oldest_with_summary(session_id, summary.to_string(), to_summarize).await;
@@ -3240,7 +3716,6 @@ async fn compact_short_term_if_needed(
                 }
             }
         }
-        Err(e) => tracing::warn!(error = %e, "Compaction LLM failed, keeping full history"),
     }
 }
 
@@ -3368,6 +3843,9 @@ fn extract_how_to_call_from_message(msg: &str) -> Option<String> {
     if msg.is_empty() || msg.len() > 80 {
         return None;
     }
+    if classify_small_talk_message(msg).is_some() {
+        return None;
+    }
     let lower = msg.to_lowercase();
     let skip_prefixes = ["je m'appelle", "je suis", "c'est", "my name is", "i'm", "i am", "call me", "moi c'est"];
     let mut text = msg;
@@ -3414,6 +3892,150 @@ fn build_ack_message(user_message: &str) -> String {
     format!("On it — looking into {}. You can follow progress in the Tasks tab.", preview)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MemoryProfile {
+    recent_turns_limit: usize,
+    recent_context_max_chars: usize,
+    semantic_top_k: usize,
+    episodic_limit: usize,
+    facts_limit: usize,
+    user_rag_top_k: usize,
+    expand_by_graph: bool,
+    compact_before_prompt: bool,
+    allow_project_recall: bool,
+    allow_identity_lookup: bool,
+}
+
+fn memory_fast_path_enabled() -> bool {
+    std::env::var("AKASHA_MEMORY_FAST_PATH")
+        .ok()
+        .map(|s| s != "0" && !s.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
+fn memory_profile_for_task(
+    message: &str,
+    assigned_agent: &str,
+    is_subagent: bool,
+    orch_disk_deliverables: bool,
+) -> MemoryProfile {
+    if is_subagent {
+        return MemoryProfile {
+            recent_turns_limit: 0,
+            recent_context_max_chars: 0,
+            semantic_top_k: 0,
+            episodic_limit: 0,
+            facts_limit: 0,
+            user_rag_top_k: 0,
+            expand_by_graph: false,
+            compact_before_prompt: false,
+            allow_project_recall: false,
+            allow_identity_lookup: false,
+        };
+    }
+
+    let enriched = !memory_fast_path_enabled()
+        || orch_disk_deliverables
+        || message_suggests_project(message)
+        || assigned_agent != "conversation"
+        || message.chars().count() > 280;
+
+    if enriched {
+        MemoryProfile {
+            recent_turns_limit: 15,
+            recent_context_max_chars: 2_000,
+            semantic_top_k: 5,
+            episodic_limit: 5,
+            facts_limit: 10,
+            user_rag_top_k: 5,
+            expand_by_graph: std::env::var("AKASHA_GRAPH_EXPAND")
+                .ok()
+                .as_deref()
+                == Some("1"),
+            compact_before_prompt: true,
+            allow_project_recall: true,
+            allow_identity_lookup: true,
+        }
+    } else {
+        MemoryProfile {
+            recent_turns_limit: 6,
+            recent_context_max_chars: 800,
+            semantic_top_k: 2,
+            episodic_limit: 1,
+            facts_limit: 0,
+            user_rag_top_k: 0,
+            expand_by_graph: false,
+            compact_before_prompt: false,
+            allow_project_recall: false,
+            allow_identity_lookup: true,
+        }
+    }
+}
+
+fn spawn_progress_watchdog(
+    bus: EventBus,
+    correlation_id: Uuid,
+    task_id: Uuid,
+    mut cancel_rx: oneshot::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        let checkpoints = [
+            (2_u64, 12_u8, "Still spinning up the worker…"),
+            (5_u64, 18_u8, "Still working — routing tools and context…"),
+            (10_u64, 24_u8, "Still working — using a fallback path if needed…"),
+        ];
+        for (secs, pct, message) in checkpoints {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(secs)) => {
+                    let _ = bus.send(
+                        EventEnvelope::new(
+                            EventType::ProgressUpdate,
+                            Some(serde_json::json!({
+                                "task_id": task_id.to_string(),
+                                "progress_pct": pct,
+                                "message": message,
+                            })),
+                        )
+                        .with_correlation(correlation_id),
+                    );
+                }
+                _ = &mut cancel_rx => return,
+            }
+        }
+    });
+}
+
+fn cancel_progress_watchdog(cancel_tx: &mut Option<oneshot::Sender<()>>) {
+    if let Some(tx) = cancel_tx.take() {
+        let _ = tx.send(());
+    }
+}
+
+async fn wait_for_task_activity(
+    progress: &ProgressCache,
+    task_id: Uuid,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        {
+            let guard = progress.read().await;
+            let has_activity = guard
+                .get(&task_id)
+                .and_then(|q| q.back())
+                .map(|entry| !entry.message.trim().is_empty())
+                .unwrap_or(false);
+            if has_activity {
+                return true;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
 /// Returns true if the text looks like a placeholder / promise ("I'll do it", "one second") rather than an actual answer.
 /// Used after tool calls to avoid completing the task with "I will fetch…" instead of the real result.
 fn looks_like_placeholder_after_tools(text: &str) -> bool {
@@ -3458,6 +4080,29 @@ fn looks_like_placeholder_after_tools(text: &str) -> bool {
     placeholder_phrases.iter().any(|p| lower.contains(p))
 }
 
+fn looks_like_meta_agent_response(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    [
+        "i am ready to assist",
+        "i'm ready to assist",
+        "based on the instructions provided",
+        "according to the instructions provided",
+        "following the instructions provided",
+        "i am configured as",
+        "i'm configured as",
+        "as an ai assistant",
+        "as an ai language model",
+        "today, i will execute the phase 2 task",
+        "phase 2 task",
+        "click, fill, screenshot, and wait",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+}
+
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
 /// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
 pub(crate) async fn run_message_via_llm(
@@ -3498,20 +4143,47 @@ pub(crate) async fn run_message_via_llm(
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
     let structured = interpret_message(&message);
-    let assigned_agent = store
-        .get(task_id)
-        .ok()
-        .flatten()
+    let task_snapshot = store.get(task_id).ok().flatten();
+    let assigned_agent = task_snapshot
+        .as_ref()
         .map(|t| t.assigned_agent.clone())
         .unwrap_or_else(|| "conversation".to_string());
-    let timeline_correlation = store
-        .get(task_id)
-        .ok()
-        .flatten()
+    let is_subagent = task_snapshot
+        .as_ref()
         .and_then(|t| t.parent_task_id)
+        .is_some();
+    let timeline_correlation = resolve_root_task_id(&store_path, task_id)
+        .or_else(|| task_snapshot.as_ref().and_then(|t| t.parent_task_id))
         .unwrap_or(task_id);
 
     let orch_disk_deliverables = message.contains(ORCH_DISK_DELIVERABLES_MARKER);
+    let small_talk_intent = classify_small_talk_message(&message);
+    let small_talk_fast_lane_intent = small_talk_fast_lane(&message);
+    let session_recall_intent = detect_session_recall_intent(&message);
+    tracing::debug!(?session_recall_intent, "[RECALL_DEBUG] session_recall_intent");
+    let is_small_talk_fast_lane = small_talk_fast_lane_intent.is_some();
+    let is_session_recall = session_recall_intent.is_some();
+    let memory_profile = if is_small_talk_fast_lane || is_session_recall {
+        MemoryProfile {
+            recent_turns_limit: 0,
+            recent_context_max_chars: 0,
+            semantic_top_k: 0,
+            episodic_limit: 0,
+            facts_limit: 0,
+            user_rag_top_k: 0,
+            expand_by_graph: false,
+            compact_before_prompt: false,
+            allow_project_recall: false,
+            allow_identity_lookup: false,
+        }
+    } else {
+        memory_profile_for_task(
+            &message,
+            &assigned_agent,
+            is_subagent,
+            orch_disk_deliverables,
+        )
+    };
 
     let tools_executor_snapshot = match &tools_executor {
         Some(r) => Some((*r.read().await).clone()),
@@ -3541,13 +4213,18 @@ pub(crate) async fn run_message_via_llm(
         )
         .with_correlation(task_id),
     );
+    let (watchdog_tx, watchdog_rx) = oneshot::channel();
+    let mut watchdog_cancel = Some(watchdog_tx);
+    spawn_progress_watchdog(bus.clone(), timeline_correlation, task_id, watchdog_rx);
 
     let max_tokens = std::env::var("AKASHA_MAX_RESPONSE_TOKENS")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(4096);
 
-    let tool_instruction = if tools_executor_snapshot.is_some() {
+    let tool_instruction = if is_small_talk_fast_lane {
+        String::new()
+    } else if tools_executor_snapshot.is_some() {
         let mut allowed_tools = tools_executor_snapshot.as_ref().and_then(|e| e.policy.allowed_tool_list());
         if let Some(ref list) = allowed_tools {
             let has_wildcard = tools_executor_snapshot.as_ref().map(|e| e.policy.allowed_commands.iter().any(|c| c.trim().eq_ignore_ascii_case("*"))).unwrap_or(false);
@@ -3598,6 +4275,21 @@ pub(crate) async fn run_message_via_llm(
             _ => "RUN_COMMAND OS: You are on Linux/macos. Standard Unix commands (curl, grep, etc.) are available.\n\
              ",
         };
+        let compact_worker_tool_instruction = format!(
+            "\n\nYou may request tools by writing a single line exactly like: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
+             Worker rules:\n\
+             - Use only tools that are directly necessary for the CURRENT task.\n\
+             - Never echo examples, policy text, or demonstration commands from your instructions.\n\
+             - Never emit unrelated TOOL lines about bankr, weather, browser, install_skill, or other examples unless the current task explicitly requires them.\n\
+             - If the task asks to save/write a file, use TOOL: write_file <path> then the exact content, or TOOL: write_file {{\"path\":\"...\",\"content\":\"...\"}}.\n\
+             - Use write_todos / merge_todos (not create_todos) for todo lists.\n\
+             - If you need missing user information, use TOOL: ask_user with JSON.\n\
+             - If no tool is needed, answer normally.\n",
+            base, skills_part
+        );
+        if is_subagent || assigned_agent != "conversation" || orch_disk_deliverables {
+            compact_worker_tool_instruction
+        } else {
         format!(
             "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
              Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
@@ -3620,6 +4312,7 @@ pub(crate) async fn run_message_via_llm(
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
             base, skills_part, run_command_os_rule, skills_rule
         )
+        }
     } else {
         String::new()
     };
@@ -3670,86 +4363,104 @@ pub(crate) async fn run_message_via_llm(
     let mut user_prefix = String::with_capacity(8192);
     user_prefix.push_str(&personality_reminder);
     user_prefix.push_str("Reply in the same language as the user message below (French, English, etc.).\n\n");
-    if let Some(ref st) = short_term {
-        let turns = st.get_turns(&session_id).await;
-        let last_15: Vec<_> = turns.iter().rev().take(15).cloned().rev().collect();
-        if !last_15.is_empty() {
-            let short_ctx = ShortTermStore::turns_to_context(&last_15);
-            let capped = if short_ctx.chars().count() > 2000 {
-                short_ctx.chars().take(2000).collect::<String>() + "…"
-            } else {
-                short_ctx
-            };
-            if !capped.is_empty() {
-                user_prefix.push_str("[Recent context (this session)]\n");
-                user_prefix.push_str(&capped);
-                user_prefix.push_str("\n\n");
-            }
-        }
-    }
     let turns_empty = match &short_term {
         Some(st) => st.get_turns(&session_id).await.is_empty(),
         None => true,
     };
-    let expand_by_graph = std::env::var("AKASHA_GRAPH_EXPAND").ok().as_deref() == Some("1");
     let user_profile = UserProfile::load(data_dir);
     let user_identity_prefix = user_profile.format_for_prompt();
     let recall_params = crate::memory_orchestrator::RecallParams {
         message: message.clone(),
         session_id: session_id.clone(),
+        semantic_top_k: memory_profile.semantic_top_k,
+        episodic_limit: memory_profile.episodic_limit,
+        facts_limit: memory_profile.facts_limit,
         filter_by_session: !turns_empty,
-        suggest_project: message_suggests_project(&message),
-        is_first_message: turns_empty,
-        expand_by_graph,
-        user_identity_prefix: if user_identity_prefix.is_empty() {
+        suggest_project: memory_profile.allow_project_recall && message_suggests_project(&message),
+        is_first_message: turns_empty && memory_profile.allow_identity_lookup,
+        expand_by_graph: memory_profile.expand_by_graph,
+        user_identity_prefix: if user_identity_prefix.is_empty() || !memory_profile.allow_identity_lookup {
             None
         } else {
             Some(user_identity_prefix)
         },
         ..Default::default()
     };
-    let fused = crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params).await;
-    let fused_str = fused.to_context_string();
-    if !fused_str.is_empty() {
-        user_prefix.push_str(&fused_str);
+    if memory_profile.semantic_top_k > 0
+        || memory_profile.episodic_limit > 0
+        || memory_profile.facts_limit > 0
+        || recall_params.user_identity_prefix.is_some()
+    {
+        let fused = crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params).await;
+        let fused_str = fused.to_context_string();
+        if !fused_str.is_empty() {
+            user_prefix.push_str(&fused_str);
+        }
     }
-    let user_rag_store = crate::user_rag::UserRagStore::new(data_dir);
-    let rag_query = message.clone();
-    let chunks = tokio::task::spawn_blocking(move || user_rag_store.retrieve(&rag_query, 5))
-        .await
-        .ok()
-        .and_then(|res| res.ok())
-        .unwrap_or_default();
-    if !chunks.is_empty() {
-        user_prefix.push_str("[User documents — use these excerpts if relevant to answer]\n");
-        for c in &chunks {
-            user_prefix.push_str("- ");
-            user_prefix.push_str(&c.replace('\n', " "));
+    if memory_profile.user_rag_top_k > 0 {
+        let user_rag_store = crate::user_rag::UserRagStore::new(data_dir);
+        let rag_query = message.clone();
+        let rag_top_k = memory_profile.user_rag_top_k;
+        let chunks = tokio::task::spawn_blocking(move || user_rag_store.retrieve(&rag_query, rag_top_k))
+            .await
+            .ok()
+            .and_then(|res| res.ok())
+            .unwrap_or_default();
+        if !chunks.is_empty() {
+            user_prefix.push_str("[User documents — use these excerpts if relevant to answer]\n");
+            for c in &chunks {
+                user_prefix.push_str("- ");
+                user_prefix.push_str(&c.replace('\n', " "));
+                user_prefix.push_str("\n");
+            }
             user_prefix.push_str("\n");
         }
-        user_prefix.push_str("\n");
     }
     if let Some(ref st) = short_term {
-        let new_msg_tokens = ShortTermStore::estimate_tokens(&message);
-        compact_short_term_if_needed(
-            st,
-            &session_id,
-            &llm_router,
-            new_msg_tokens,
-            long_term_client.as_ref(),
-        )
-        .await;
+        if memory_profile.compact_before_prompt {
+            let new_msg_tokens = ShortTermStore::estimate_tokens(&message);
+            compact_short_term_if_needed(
+                st,
+                &session_id,
+                &llm_router,
+                new_msg_tokens,
+                long_term_client.as_ref(),
+            )
+            .await;
+        }
         let turns = st.get_turns(&session_id).await;
-        let short_ctx = ShortTermStore::turns_to_context(&turns);
+        let final_turns: Vec<_> = turns
+            .iter()
+            .rev()
+            .take(memory_profile.recent_turns_limit)
+            .cloned()
+            .rev()
+            .collect();
+        let short_ctx = ShortTermStore::turns_to_context(&final_turns);
         if !short_ctx.is_empty() {
-            user_prefix.push_str(short_ctx.trim_end());
-            user_prefix.push_str("\n\n");
+            let capped = if memory_profile.recent_context_max_chars > 0
+                && short_ctx.chars().count() > memory_profile.recent_context_max_chars
+            {
+                short_ctx
+                    .chars()
+                    .take(memory_profile.recent_context_max_chars)
+                    .collect::<String>() + "…"
+            } else {
+                short_ctx
+            };
+            if !capped.is_empty() {
+                user_prefix.push_str("[Recent context (this session)]\n");
+                user_prefix.push_str(capped.trim_end());
+                user_prefix.push_str("\n\n");
+            }
         }
     }
-    if let Ok(todos) = store.get_todos(task_id) {
-        if let Some(block) = format_todos_plan_block(&todos) {
-            user_prefix.push_str(&block);
-            user_prefix.push_str("\n");
+    if !is_small_talk_fast_lane {
+        if let Ok(todos) = store.get_todos(task_id) {
+            if let Some(block) = format_todos_plan_block(&todos) {
+                user_prefix.push_str(&block);
+                user_prefix.push_str("\n");
+            }
         }
     }
     let intent_flags = compute_message_intent_flags(&message);
@@ -3836,43 +4547,108 @@ pub(crate) async fn run_message_via_llm(
         )
     };
     let reply_text;
-    let mut max_tool_rounds = std::env::var("AKASHA_MAX_TOOL_ROUNDS")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(10);
-    // Orchestrated subtasks / remediation: extra tool rounds (models often read/search first).
-    if orch_disk_deliverables {
-        let floor = std::env::var("AKASHA_MAX_TOOL_ROUNDS_ORCH_DELIVERABLES")
+    let mut last_llm_model_used: Option<String> = None;
+    let mut first_meaningful_progress_sent = false;
+
+    if let Some(intent) = small_talk_fast_lane_intent {
+        reply_text = small_talk_fast_reply(&message, intent);
+        first_meaningful_progress_sent = true;
+        cancel_progress_watchdog(&mut watchdog_cancel);
+        if emit_timeline_once_for_task(
+            &bus,
+            Some(store_path.as_path()),
+            task_id,
+            "first_meaningful_progress",
+            Some(serde_json::json!({ "source": "small_talk_fast_lane" })),
+        ) {
+            log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
+        }
+    } else if let Some(intent) = session_recall_intent {
+        tracing::debug!(?intent, "[RECALL_LOAD] loading recall turns");
+        let recall_turns = match intent.range {
+            SessionRecallRange::Yesterday => {
+                tracing::debug!("[RECALL_LOAD] reading YESTERDAY data");
+                if short_term.is_some() {
+                    let short_term_dir = data_dir.join("short_term");
+                    let yesterday = chrono::Utc::now() - chrono::Duration::days(1);
+                    let sid = format!("day-{}", yesterday.format("%Y-%m-%d"));
+                    tracing::debug!(session_id = %sid, "[RECALL_LOAD] yesterday session_id");
+                    let turns = crate::memory::ShortTermStore::read_day_from_disk(&sid, &short_term_dir).unwrap_or_default();
+                    tracing::debug!(count = turns.len(), "[RECALL_LOAD] read turns from yesterday");
+                    turns
+                } else {
+                    tracing::debug!("[RECALL_LOAD] short_term is None, returning empty");
+                    Vec::new()
+                }
+            }
+            SessionRecallRange::CurrentDay => {
+                tracing::debug!("[RECALL_LOAD] reading CURRENT_DAY data");
+                if let Some(st) = short_term.as_ref() {
+                    let turns = st.get_turns(&session_id).await;
+                    tracing::debug!(count = turns.len(), "[RECALL_LOAD] read turns from current day");
+                    turns
+                } else {
+                    tracing::debug!("[RECALL_LOAD] short_term is None, returning empty");
+                    Vec::new()
+                }
+            }
+        };
+        tracing::debug!(count = recall_turns.len(), "[RECALL_BUILD] building recap");
+        reply_text = build_session_recap_reply(&recall_turns, intent).unwrap_or_else(|| {
+            match intent.language {
+                SmallTalkLanguage::French => "Je n'ai pas encore de résumé fiable à te partager pour cette période. Si tu veux, je peux te faire un récap dès qu'on a un peu plus d'historique utile.".to_string(),
+                SmallTalkLanguage::English => "I don't have a reliable recap for that period yet. If you want, I can provide one as soon as we have a bit more useful history.".to_string(),
+            }
+        });
+        first_meaningful_progress_sent = true;
+        cancel_progress_watchdog(&mut watchdog_cancel);
+        if emit_timeline_once_for_task(
+            &bus,
+            Some(store_path.as_path()),
+            task_id,
+            "first_meaningful_progress",
+            Some(serde_json::json!({ "source": "session_recap_fast_path" })),
+        ) {
+            log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
+        }
+    } else {
+        let mut max_tool_rounds = std::env::var("AKASHA_MAX_TOOL_ROUNDS")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(24);
-        if max_tool_rounds < floor {
-            max_tool_rounds = floor;
+            .unwrap_or(10);
+        // Orchestrated subtasks / remediation: extra tool rounds (models often read/search first).
+        if orch_disk_deliverables {
+            let floor = std::env::var("AKASHA_MAX_TOOL_ROUNDS_ORCH_DELIVERABLES")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(24);
+            if max_tool_rounds < floor {
+                max_tool_rounds = floor;
+            }
         }
-    }
-    let mut round = 0u32;
-    let mut social_snapshot_seen = false;
-    let mut tool_loop_history: Vec<(String, String)> = Vec::new();
-    let mut last_tool_results_blob: Option<String> = None;
-    let mut force_synthesis_attempted = false;
-    // Orchestrated deliverables: re-prompts when the model returns no parseable TOOL lines.
-    let mut orch_disk_write_nags = 0u32;
-    let mut last_captured_image_base64: Option<String> = None;
-    let mut last_llm_model_used: Option<String> = None;
+        let mut round = 0u32;
+        let mut social_snapshot_seen = false;
+        let mut tool_loop_history: Vec<(String, String)> = Vec::new();
+        let mut last_tool_results_blob: Option<String> = None;
+        let mut force_synthesis_attempted = false;
+        let mut meta_response_retry_count = 0u32;
+        // Orchestrated deliverables: re-prompts when the model returns no parseable TOOL lines.
+        let mut orch_disk_write_nags = 0u32;
+        let mut last_captured_image_base64: Option<String> = None;
 
-    let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(300);
-    let idle_timeout_secs = std::env::var("AKASHA_LLM_STREAM_IDLE_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(60);
-    // First chunk can take long (model load, first token on CPU). Use longer wait so we don't hit idle before any data.
-    let first_chunk_timeout_secs = std::env::var("AKASHA_LLM_FIRST_CHUNK_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or_else(|| llm_timeout_secs.min(300));
+        let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(300);
+        let idle_timeout_secs = std::env::var("AKASHA_LLM_STREAM_IDLE_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+        // First chunk can take long (model load, first token on CPU). Use longer wait so we don't hit idle before any data.
+        let first_chunk_timeout_secs = std::env::var("AKASHA_LLM_FIRST_CHUNK_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or_else(|| llm_timeout_secs.min(300));
 
     'tool_rounds: loop {
         // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
@@ -3943,6 +4719,19 @@ pub(crate) async fn run_message_via_llm(
             };
             match tokio::time::timeout(idle, tok_rx.recv()).await {
                 Ok(Some(chunk)) => {
+                    if !first_meaningful_progress_sent && !chunk.trim().is_empty() {
+                        first_meaningful_progress_sent = true;
+                        cancel_progress_watchdog(&mut watchdog_cancel);
+                        if emit_timeline_once_for_task(
+                            &bus,
+                            Some(store_path.as_path()),
+                            task_id,
+                            "first_meaningful_progress",
+                            Some(serde_json::json!({ "source": "stream_chunk" })),
+                        ) {
+                            log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
+                        }
+                    }
                     const MAX_ACCUMULATED: usize = 2 * 1024 * 1024; // 2 MiB cap to prevent unbounded allocation on long streams
                     if accumulated.len() + chunk.len() > MAX_ACCUMULATED {
                         accumulated.truncate(MAX_ACCUMULATED.saturating_sub(chunk.len()));
@@ -4032,11 +4821,40 @@ pub(crate) async fn run_message_via_llm(
         };
         let response = merged_for_tools;
 
+        if let Some(intent) = small_talk_intent {
+            if response_looks_off_topic_for_small_talk(&response) {
+                tracing::warn!(task_id = %task_id, "Small-talk guardrail triggered; suppressing off-topic/tool-heavy reply");
+                reply_text = small_talk_fast_reply(&message, intent);
+                break 'tool_rounds;
+            }
+        }
+
         let parsed_tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
             let calls = parse_tool_calls(&response);
             if calls.is_empty() { None } else { Some(calls) }
         });
         let no_parseable_tools_this_round = parsed_tool_calls.is_none();
+        let response_plain = response
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("TOOL:"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+
+        if no_parseable_tools_this_round
+            && meta_response_retry_count < 2
+            && (is_subagent || assigned_agent != "conversation" || orch_disk_deliverables)
+            && looks_like_meta_agent_response(&response_plain)
+        {
+            meta_response_retry_count += 1;
+            current_prompt = format!(
+                "User request: {}\n\nYour previous reply:\n{}\n\nThat reply was meta/instruction recitation, not actual progress on the assigned task. Do the work now. Do NOT describe your role, say you are ready, mention instructions, or narrate a generic Phase 2 plan. If files are required, start with TOOL: read_file / write_file on the exact workspace paths. If you are blocked, state only the concrete missing input or exact tool failure.",
+                user_message,
+                response_plain
+            );
+            continue;
+        }
 
         if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls) {
             round += 1;
@@ -4047,6 +4865,7 @@ pub(crate) async fn run_message_via_llm(
                     Some(reg) => reg.get(name).await.map(|s| s.tool_ref).unwrap_or_else(|| name.clone()),
                     None => name.clone(),
                 };
+                let actual_tool = canonicalize_tool_name(&actual_tool);
                 let args_str = args.join(" ");
                 tool_loop_history.push((actual_tool.clone(), args_str.clone()));
                 // Phase 4: loop detection — same tool+args repeated 3 times
@@ -4060,6 +4879,22 @@ pub(crate) async fn run_message_via_llm(
                 // User-friendly progress at key step: what we are doing right now (use skill name when actual_tool is empty, e.g. bankr skill).
                 let display_tool = if actual_tool.is_empty() { name.as_str() } else { &actual_tool };
                 let progress_msg = progress_message_for_tool(display_tool, args);
+                if !first_meaningful_progress_sent {
+                    first_meaningful_progress_sent = true;
+                    cancel_progress_watchdog(&mut watchdog_cancel);
+                    if emit_timeline_once_for_task(
+                        &bus,
+                        Some(store_path.as_path()),
+                        task_id,
+                        "first_meaningful_progress",
+                        Some(serde_json::json!({
+                            "source": "tool_progress",
+                            "tool": display_tool,
+                        })),
+                    ) {
+                        log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
+                    }
+                }
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::ProgressUpdate,
@@ -4769,6 +5604,8 @@ pub(crate) async fn run_message_via_llm(
         break;
     }
 
+    }
+
     let reply_text = if reply_text.is_empty() {
         tracing::warn!("LLM returned empty text");
         "No response from the model. Check Ollama or your LLM provider.".to_string()
@@ -4780,14 +5617,31 @@ pub(crate) async fn run_message_via_llm(
         }
         reply_text
     };
+    if !first_meaningful_progress_sent && !reply_text.trim().is_empty() {
+        cancel_progress_watchdog(&mut watchdog_cancel);
+        if emit_timeline_once_for_task(
+            &bus,
+            Some(store_path.as_path()),
+            task_id,
+            "first_meaningful_progress",
+            Some(serde_json::json!({ "source": "final_reply" })),
+        ) {
+            log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
+        }
+    } else {
+        cancel_progress_watchdog(&mut watchdog_cancel);
+    }
 
     // Persist this exchange in short-term memory (spec 06)
-    if let Some(ref st) = short_term {
-        st.append(&session_id, "user", message.clone()).await;
-        st.append(&session_id, "assistant", reply_text.clone()).await;
+    if !is_small_talk_fast_lane {
+        if let Some(ref st) = short_term {
+            st.append(&session_id, "user", message.clone()).await;
+            st.append(&session_id, "assistant", reply_text.clone()).await;
+        }
     }
 
     // Extract and promote personal facts to long-term memory (spec 06: nom, préférences, décisions).
+    if !is_small_talk_fast_lane {
     if let Some(ref long_term) = long_term_client {
         // Heuristic: capture obvious name/intro from user message. Promote these *immediately* so they appear in Memory tab right away.
         // Case-insensitive matching on lowercased text, but extract from original message to preserve casing.
@@ -4966,6 +5820,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             }
         });
     }
+    }
 
     let _ = bus.send(
         EventEnvelope::new(
@@ -5032,6 +5887,14 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         )
         .with_correlation(task_id),
     );
+    emit_timeline_once_for_task(
+        &bus,
+        Some(store_path.as_path()),
+        task_id,
+        "task_completed",
+        Some(serde_json::json!({ "status": final_status_str })),
+    );
+    clear_task_milestones(task_id, Some(store_path.as_path()));
 
     // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
     if !is_paused {
@@ -5044,7 +5907,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             .flatten()
             .map(|t| t.parent_task_id.is_none())
             .unwrap_or(true);
-        if is_root_task {
+        if is_root_task && !is_small_talk_fast_lane {
             if let Ok(st) = crate::session_state::merge(data_dir_sess, &session_id, |s| {
                 let fact = reply_text.chars().take(240).collect::<String>();
                 if !fact.trim().is_empty() {
@@ -5064,17 +5927,19 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                 );
             }
         }
-        let summary_preview: String = reply_text.chars().take(300).collect();
-        learn_from_task_outcome_async(
-            long_term_client.clone(),
-            task_id,
-            message.clone(),
-            "completed".to_string(),
-            summary_preview,
-            Some(session_id.clone()),
-            structured.intent_slug.clone(),
-        )
-        .await;
+        if !is_small_talk_fast_lane {
+            let summary_preview: String = reply_text.chars().take(300).collect();
+            learn_from_task_outcome_async(
+                long_term_client.clone(),
+                task_id,
+                message.clone(),
+                "completed".to_string(),
+                summary_preview,
+                Some(session_id.clone()),
+                structured.intent_slug.clone(),
+            )
+            .await;
+        }
     }
 }
 
@@ -6269,19 +7134,8 @@ pub async fn handle_api(
                 }
             }
         }
-        // Reconnect: if UI says user just reconnected and there is already history today, ask agent to briefly recap then answer
-        let reconnect = body_json.as_ref().and_then(|v| v.get("reconnect")).and_then(|v| v.as_bool()).unwrap_or(false);
-        if reconnect {
-            if let Some(ref st) = short_term {
-                let turns = st.get_turns(&session_id).await;
-                if !turns.is_empty() {
-                    message = format!(
-                        "[L'utilisateur vient de se reconnecter. Rappelez-lui brièvement ce que vous avez fait ensemble jusqu'ici aujourd'hui, puis répondez à son message.]\n\n{}",
-                        message
-                    );
-                }
-            }
-        }
+        // Reconnect recap temporarily disabled: it polluted the real user request when the daemon
+        // is restarted several times during the same day and could generate repeated summaries.
         // Update last user activity for proactive check-in
         let _ = UserProfile::save_last_activity(data_dir, chrono::Utc::now());
         let priority = body_json
@@ -6361,7 +7215,7 @@ pub async fn handle_api(
                     return resume_task(store_path, id, main_agent).await;
                 }
                 if method == "GET" && parts.get(1) == Some(&"events") {
-                    return get_task_events(events, id).await;
+                    return get_task_events(store_path, events, id).await;
                 }
                 // Human in the loop: GET pending question/context/choices for the task
                 if method == "GET" && parts.get(1) == Some(&"human-input") {
@@ -7696,7 +8550,7 @@ async fn get_schedule_run_reports(store_path: &Path, progress: &ProgressCache) -
 mod tests {
     use super::{
         agent_role_system_prompt, build_image_markdown, ensure_no_open_code_block,
-        is_pausable, is_resumable,
+        is_pausable, is_resumable, memory_profile_for_task,
         message_suggests_tool_only_action, parse_content_length, parse_device_invoke_params,
         parse_tool_calls, rewrite_workspace_plan_key_to_lineage_root,
         rewrite_workspace_plan_path_str,
@@ -7792,6 +8646,97 @@ mod tests {
         assert!(!message_suggests_tool_only_action("écris un script qui prend une photo"));
     }
 
+    #[test]
+    fn memory_profile_uses_fast_path_for_simple_root_requests() {
+        let profile = memory_profile_for_task("Bonjour, ça va ?", "conversation", false, false);
+        assert_eq!(profile.semantic_top_k, 2);
+        assert_eq!(profile.user_rag_top_k, 0);
+        assert!(!profile.expand_by_graph);
+        assert!(!profile.compact_before_prompt);
+    }
+
+    #[test]
+    fn memory_profile_is_lean_for_subagents() {
+        let profile = memory_profile_for_task(
+            "Implémente la route demandée dans le plan partagé",
+            "backend",
+            true,
+            true,
+        );
+        assert_eq!(profile.semantic_top_k, 0);
+        assert_eq!(profile.episodic_limit, 0);
+        assert_eq!(profile.user_rag_top_k, 0);
+        assert!(!profile.compact_before_prompt);
+    }
+
+    #[test]
+    fn small_talk_fast_lane_detects_simple_greeting() {
+        let intent = small_talk_fast_lane("Salut, ça va ?").expect("small-talk should be detected");
+        assert_eq!(intent.language, SmallTalkLanguage::French);
+        assert!(intent.asks_status);
+    }
+
+    #[test]
+    fn small_talk_fast_lane_rejects_real_request_after_greeting() {
+        assert!(small_talk_fast_lane("Bonjour, peux-tu lire ce fichier ?").is_none());
+    }
+
+    #[test]
+    fn extract_how_to_call_ignores_greetings() {
+        assert!(extract_how_to_call_from_message("salut").is_none());
+        assert!(extract_how_to_call_from_message("bonjour").is_none());
+    }
+
+    #[test]
+    fn classify_small_talk_rejects_small_talk_with_real_request() {
+        // "ça va merci, tu peux me rappeler ce qu'on a fait hier ?"
+        // Should be rejected because it contains "peux me" + "rappeler" + "hier"
+        assert!(classify_small_talk_message("ça va merci, tu peux me rappeler ce qu'on a fait hier ?").is_none());
+
+        // "ça va, peux-tu lire ce fichier ?" should be rejected
+        assert!(classify_small_talk_message("ça va, peux-tu lire ce fichier ?").is_none());
+
+        // But "salut, ça va ?" should still pass
+        assert!(classify_small_talk_message("salut, ça va ?").is_some());
+    }
+
+    #[test]
+    fn small_talk_guardrail_flags_tool_leaks() {
+        assert!(response_looks_off_topic_for_small_talk(
+            "TOOL: write_file c:/tmp/x.txt\nJe vais d'abord modifier tools_policy.yaml"
+        ));
+        assert!(!response_looks_off_topic_for_small_talk("Salut ! 👋"));
+    }
+
+    #[test]
+    fn detect_session_recall_intent_for_yesterday() {
+        let intent = detect_session_recall_intent("tu peux me rappeler ce qu'on a fait hier ?")
+            .expect("intent should be detected");
+        assert_eq!(intent.range, SessionRecallRange::Yesterday);
+        assert_eq!(intent.language, SmallTalkLanguage::French);
+    }
+
+    #[test]
+    fn build_session_recap_reply_filters_noise() {
+        let turns = vec![
+            crate::memory::ConversationTurn {
+                role: "assistant".to_string(),
+                content: "tools_policy.yaml blocked write_file".to_string(),
+            },
+            crate::memory::ConversationTurn {
+                role: "assistant".to_string(),
+                content: "On a mis en place le fast-path small-talk et ajouté des garde-fous de pertinence.".to_string(),
+            },
+        ];
+        let intent = SessionRecallIntent {
+            range: SessionRecallRange::Yesterday,
+            language: SmallTalkLanguage::French,
+        };
+        let recap = build_session_recap_reply(&turns, intent).expect("recap should exist");
+        assert!(recap.contains("fast-path small-talk"));
+        assert!(!recap.to_lowercase().contains("tools_policy.yaml"));
+    }
+
     // --- parse_tool_calls (normalized markdown / list TOOL lines) ---
 
     #[test]
@@ -7829,11 +8774,70 @@ mod tests {
     }
 
     #[test]
+    fn parse_tool_calls_rejects_nested_tool_keyword_as_name() {
+        let s = "TOOL: TOOL: install_skill https://github.com/bankr/cli";
+        let c = parse_tool_calls(s);
+        assert!(c.is_empty(), "nested TOOL: should not become a tool named TOOL:");
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_non_ascii_tool_name() {
+        let s = "TOOL: prévision météo Paris";
+        let c = parse_tool_calls(s);
+        assert!(c.is_empty(), "non-ASCII pseudo tool names must be ignored");
+    }
+
+    #[test]
+    fn normalize_tool_path_hint_accepts_workspace_slash_form() {
+        assert_eq!(
+            normalize_tool_path_hint("workspace/analyze/comparatif.md"),
+            "workspace:/analyze/comparatif.md"
+        );
+        assert_eq!(
+            normalize_tool_path_hint("workspace\\analyze\\comparatif.md"),
+            "workspace:/analyze\\comparatif.md"
+        );
+    }
+
+    #[test]
+    fn parse_write_file_request_accepts_json_payload() {
+        let args = vec![
+            "{".to_string(),
+            "\"path\": \"workspace/project_plan.md\",".to_string(),
+            "\"content\": \"# Plan\n- item\"".to_string(),
+            "}".to_string(),
+        ];
+        let (path, content) = parse_write_file_request(&args).expect("json payload should parse");
+        assert_eq!(path, "workspace:/project_plan.md");
+        assert!(content.contains("# Plan"));
+    }
+
+    #[test]
+    fn canonicalize_tool_name_supports_create_todos_alias() {
+        assert_eq!(canonicalize_tool_name("create_todos"), "write_todos");
+        assert_eq!(canonicalize_tool_name("append_todos"), "merge_todos");
+    }
+
+    #[test]
+    fn looks_like_meta_agent_response_flags_instruction_recitation() {
+        assert!(looks_like_meta_agent_response(
+            "Based on the instructions provided, I am ready to assist with this Phase 2 task."
+        ));
+        assert!(!looks_like_meta_agent_response(
+            "Voici le rapport demandé et le fichier a été écrit dans workspace:/analyze/comparatif.md."
+        ));
+    }
+
+    // Headings with textual content before `TOOL:` are not treated as tool calls.
+    // Only markdown "junk" (e.g. `#` heading markers, list bullets) may precede `TOOL:`.
+    #[test]
     fn parse_tool_calls_heading_then_tool_on_same_line() {
         let s = "### Step 4 — TOOL: write_file workspace:/out.md hello";
         let c = parse_tool_calls(s);
-        assert_eq!(c.len(), 1);
-        assert_eq!(c[0].0, "write_file");
+        assert!(
+            c.is_empty(),
+            "alphabetic heading text before `TOOL:` must not be parsed as a tool call"
+        );
     }
 
     #[test]

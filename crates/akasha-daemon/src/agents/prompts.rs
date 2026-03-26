@@ -40,8 +40,7 @@ pub fn build_task_prompt(
             "Output format: at the end of your response you MUST produce a valid ```json``` block containing exactly: status (done | blocked | needs_review), summary (string), files_created (array of paths), issues_found (array of strings). Optional: blocked (object with cause, information_missing, impact, workaround_proposal). No other text after this block. Example: ```json\n{\"status\": \"done\", \"summary\": \"...\", \"files_created\": [], \"issues_found\": []}\n```\n",
         );
     }
-    out.push_str("\n---\n\n");
-    out.push_str(objective);
+    out.push_str("\n---\n\nProceed with the task above. Do not restate these instructions; execute them.\n");
     out
 }
 
@@ -176,5 +175,13 @@ mod tests {
         assert!(s.contains("[Orchestrated — disk deliverables REQUIRED]"));
         assert!(s.contains("write_file"));
         assert!(s.contains(ORCHESTRATOR_DELIVERABLES_TOOL_HINT));
+    }
+
+    #[test]
+    fn task_prompt_does_not_repeat_full_objective_after_separator() {
+        let objective = "Specific objective block for test";
+        let s = build_task_prompt("frontend", objective, Some("ctx"), Some("fmt"), false);
+        assert_eq!(s.matches(objective).count(), 1);
+        assert!(s.contains("Proceed with the task above"));
     }
 }
