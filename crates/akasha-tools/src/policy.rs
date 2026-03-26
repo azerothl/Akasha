@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 fn path_normalize(p: &Path) -> PathBuf {
     let s = p.to_string_lossy().replace('\\', "/").to_lowercase();
@@ -155,9 +155,10 @@ impl ToolsPolicy {
                 if path_str.is_empty() {
                     return false;
                 }
-                // Relative path: no ".." escape, not absolute
+                // Relative path: no ".." (ParentDir) components, not absolute
                 if !path_str.starts_with('/') && (path_str.len() < 2 || path_str.chars().nth(1) != Some(':')) {
-                    if !path_str.contains("/../") && !path_str.starts_with("..") {
+                    let has_parent_dir = path_n.components().any(|c| c == Component::ParentDir);
+                    if !has_parent_dir {
                         return true;
                     }
                 }
@@ -193,7 +194,8 @@ impl ToolsPolicy {
                     return false;
                 }
                 if !path_str.starts_with('/') && (path_str.len() < 2 || path_str.chars().nth(1) != Some(':')) {
-                    if !path_str.contains("/../") && !path_str.starts_with("..") {
+                    let has_parent_dir = path_n.components().any(|c| c == Component::ParentDir);
+                    if !has_parent_dir {
                         return true;
                     }
                 }
@@ -516,5 +518,47 @@ mod tests {
         };
         assert!(!p.can_use_tool("device_discover"));
         assert!(!p.can_use_tool("device_invoke"));
+    }
+
+    // --- path traversal guard ---
+
+    fn dot_policy() -> ToolsPolicy {
+        ToolsPolicy {
+            allowed_read_paths: vec![".".to_string()],
+            allowed_write_paths: vec![".".to_string()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn path_traversal_relative_dotdot_prefix_blocked() {
+        // ".." at start must be blocked
+        let p = dot_policy();
+        assert!(!p.can_read(Path::new("../secret")));
+        assert!(!p.can_write(Path::new("../secret")));
+    }
+
+    #[test]
+    fn path_traversal_embedded_dotdot_blocked() {
+        // "a/.." escapes the directory without starting with ".." or containing "/../"
+        let p = dot_policy();
+        assert!(!p.can_read(Path::new("a/..")));
+        assert!(!p.can_write(Path::new("a/..")));
+    }
+
+    #[test]
+    fn path_traversal_embedded_dotdot_mid_blocked() {
+        // "a/../b" must also be blocked
+        let p = dot_policy();
+        assert!(!p.can_read(Path::new("a/../b")));
+        assert!(!p.can_write(Path::new("a/../b")));
+    }
+
+    #[test]
+    fn path_traversal_normal_relative_allowed() {
+        // Normal relative paths without ".." must be allowed
+        let p = dot_policy();
+        assert!(p.can_read(Path::new("src/main.rs")));
+        assert!(p.can_write(Path::new("output/result.txt")));
     }
 }

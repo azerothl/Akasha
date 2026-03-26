@@ -84,7 +84,6 @@ async fn send_message_ack(
     session_id: Option<String>,
     attachments: Option<Vec<AttachmentPayload>>,
     port: Option<u16>,
-    reconnect: Option<bool>,
 ) -> Result<SendMessageAckResult, String> {
     let port = port.unwrap_or(DAEMON_PORT);
     let base = daemon_base_url(port);
@@ -99,9 +98,6 @@ async fn send_message_ack(
         Some(s) if !s.is_empty() => serde_json::json!({ "message": message_for_body, "session_id": s }),
         _ => serde_json::json!({ "message": message_for_body }),
     };
-    if reconnect == Some(true) {
-        body["reconnect"] = serde_json::json!(true);
-    }
     if let Some(ref atts) = attachments {
         if !atts.is_empty() {
             let arr: Vec<serde_json::Value> = atts

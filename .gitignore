@@ -37,3 +37,5 @@ docker/
 
 # DB
 *.db
+# Local environment overrides (use .env.example as template)
+.env

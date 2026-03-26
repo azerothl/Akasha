@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 /// Maximum number of progress entries retained per task (in both store and in-memory cache).
 pub const MAX_PROGRESS_PER_TASK: usize = 32;
+/// Maximum number of task event entries retained per task in SQLite.
+pub const MAX_TASK_EVENTS_PER_TASK: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -73,6 +75,13 @@ pub struct Task {
     pub initial_message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskEventRecord {
+    pub event_type: String,
+    pub payload: Option<serde_json::Value>,
+    pub at: String,
+}
+
 pub struct TaskStore {
     conn: Connection,
 }
@@ -102,6 +111,15 @@ impl TaskStore {
                 PRIMARY KEY (task_id, seq)
             );
             CREATE INDEX IF NOT EXISTS idx_task_progress_task_id ON task_progress(task_id);
+            CREATE TABLE IF NOT EXISTS task_events (
+                task_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                payload_json TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (task_id, seq)
+            );
+            CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id);
             "#,
         )?;
         // Migration: add initial_message if missing (existing DBs).
@@ -176,6 +194,58 @@ impl TaskStore {
         )?;
         let rows = stmt.query_map([task_id.to_string()], |row| {
             Ok((row.get::<_, i32>(0)? as u8, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Append a task event for a task and retain only the most recent entries.
+    pub fn insert_event(
+        &self,
+        task_id: Uuid,
+        event_type: &str,
+        payload: Option<&serde_json::Value>,
+        at: &str,
+    ) -> anyhow::Result<()> {
+        let seq: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM task_events WHERE task_id = ?1",
+            [task_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let payload_json = payload.map(serde_json::to_string).transpose()?;
+        self.conn.execute(
+            "INSERT INTO task_events (task_id, seq, event_type, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![task_id.to_string(), seq, event_type, payload_json, at],
+        )?;
+        let max_events: i64 = MAX_TASK_EVENTS_PER_TASK as i64;
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ?1",
+            [task_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if count > max_events {
+            self.conn.execute(
+                "DELETE FROM task_events WHERE task_id = ?1 AND seq IN (SELECT seq FROM task_events WHERE task_id = ?1 ORDER BY seq ASC LIMIT ?2)",
+                rusqlite::params![task_id.to_string(), count - max_events],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Get persisted task events for a task in chronological order.
+    pub fn get_events(&self, task_id: Uuid) -> anyhow::Result<Vec<TaskEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_type, payload_json, created_at FROM task_events WHERE task_id = ?1 ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map([task_id.to_string()], |row| {
+            let payload_json: Option<String> = row.get(1)?;
+            let payload = payload_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            Ok(TaskEventRecord {
+                event_type: row.get(0)?,
+                payload,
+                at: row.get(2)?,
+            })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
