@@ -13,7 +13,7 @@ use crate::user_profile::UserProfile;
 use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
-use crate::latency::{emit_timeline_once_for_task, env_duration_ms, log_latency_metric, resolve_root_task_id};
+use crate::latency::{clear_task_milestones, emit_timeline_once_for_task, env_duration_ms, log_latency_metric, resolve_root_task_id};
 use std::path::{Path, PathBuf};
 use std::cmp::Ordering;
 
@@ -3631,7 +3631,7 @@ async fn execute_tool_call(
         }
         _ => {
             let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
-            (false, format!("[{}] unknown tool. Available: {}.", tool_name, names.join(", ")), None)
+            (false, format!("[{}] unknown tool. For shell commands, use: TOOL: run_command <cmd> .... Available: {}.", tool_name, names.join(", ")), None)
         }
     };
     result
@@ -4160,7 +4160,7 @@ pub(crate) async fn run_message_via_llm(
     let small_talk_intent = classify_small_talk_message(&message);
     let small_talk_fast_lane_intent = small_talk_fast_lane(&message);
     let session_recall_intent = detect_session_recall_intent(&message);
-    eprintln!("[RECALL_DEBUG] session_recall_intent: {:?}", session_recall_intent);
+    tracing::debug!(?session_recall_intent, "[RECALL_DEBUG] session_recall_intent");
     let is_small_talk_fast_lane = small_talk_fast_lane_intent.is_some();
     let is_session_recall = session_recall_intent.is_some();
     let memory_profile = if is_small_talk_fast_lane || is_session_recall {
@@ -4564,36 +4564,36 @@ pub(crate) async fn run_message_via_llm(
             log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
         }
     } else if let Some(intent) = session_recall_intent {
-        eprintln!("[RECALL_LOAD] Loading recall turns for: {:?}", intent);
+        tracing::debug!(?intent, "[RECALL_LOAD] loading recall turns");
         let recall_turns = match intent.range {
             SessionRecallRange::Yesterday => {
-                eprintln!("[RECALL_LOAD] Reading YESTERDAY data");
+                tracing::debug!("[RECALL_LOAD] reading YESTERDAY data");
                 if short_term.is_some() {
                     let short_term_dir = data_dir.join("short_term");
                     let yesterday = chrono::Utc::now() - chrono::Duration::days(1);
                     let sid = format!("day-{}", yesterday.format("%Y-%m-%d"));
-                    eprintln!("[RECALL_LOAD] Yesterday session_id: {}", sid);
+                    tracing::debug!(session_id = %sid, "[RECALL_LOAD] yesterday session_id");
                     let turns = crate::memory::ShortTermStore::read_day_from_disk(&sid, &short_term_dir).unwrap_or_default();
-                    eprintln!("[RECALL_LOAD] Read {} turns from yesterday", turns.len());
+                    tracing::debug!(count = turns.len(), "[RECALL_LOAD] read turns from yesterday");
                     turns
                 } else {
-                    eprintln!("[RECALL_LOAD] short_term is None, returning empty");
+                    tracing::debug!("[RECALL_LOAD] short_term is None, returning empty");
                     Vec::new()
                 }
             }
             SessionRecallRange::CurrentDay => {
-                eprintln!("[RECALL_LOAD] Reading CURRENT_DAY data");
+                tracing::debug!("[RECALL_LOAD] reading CURRENT_DAY data");
                 if let Some(st) = short_term.as_ref() {
                     let turns = st.get_turns(&session_id).await;
-                    eprintln!("[RECALL_LOAD] Read {} turns from current day", turns.len());
+                    tracing::debug!(count = turns.len(), "[RECALL_LOAD] read turns from current day");
                     turns
                 } else {
-                    eprintln!("[RECALL_LOAD] short_term is None, returning empty");
+                    tracing::debug!("[RECALL_LOAD] short_term is None, returning empty");
                     Vec::new()
                 }
             }
         };
-        eprintln!("[RECALL_BUILD] Building recap from {} turns", recall_turns.len());
+        tracing::debug!(count = recall_turns.len(), "[RECALL_BUILD] building recap");
         reply_text = build_session_recap_reply(&recall_turns, intent).unwrap_or_else(|| {
             match intent.language {
                 SmallTalkLanguage::French => "Je n'ai pas encore de résumé fiable à te partager pour cette période. Si tu veux, je peux te faire un récap dès qu'on a un peu plus d'historique utile.".to_string(),
@@ -5894,6 +5894,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         "task_completed",
         Some(serde_json::json!({ "status": final_status_str })),
     );
+    clear_task_milestones(task_id, Some(store_path.as_path()));
 
     // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
     if !is_paused {

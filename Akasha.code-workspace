@@ -1,22 +1,13 @@
 {
-	"folders": [
-		{
-			"path": "."
-		},
-		{
-			"path": "../Akasha_app"
-		},
-		{
-			"path": "../Akasha_skills"
-		}
-	],
-	"settings": {
-		"chat.tools.terminal.autoApprove": {
-            "cargo check": true,
-            "Push-Location": true,
-            "cargo metadata": true,
-            "ConvertFrom-Json": true,
-            "Pop-Location": true
-        }
-	}
+"folders": [
+{
+"path": "."
+},
+{
+"path": "../Akasha_app"
+},
+{
+"path": "../Akasha_skills"
+}
+]
 }

@@ -60,6 +60,29 @@ fn mark_once(task_id: Uuid, name: &str) -> bool {
     guard.insert(key)
 }
 
+/// Remove all milestone deduplication entries for the given root task id.
+/// Call this after a task has fully completed or failed to prevent unbounded
+/// growth of the global milestone registry.
+pub fn clear_task_milestones(task_id: Uuid, store_path: Option<&Path>) {
+    let root_id = if let Some(p) = store_path {
+        match resolve_root_task_id(p, task_id) {
+            Some(id) => id,
+            None => {
+                tracing::warn!(%task_id, "clear_task_milestones: could not resolve root task id, using task_id directly");
+                task_id
+            }
+        }
+    } else {
+        task_id
+    };
+    let prefix = format!("{}:", root_id);
+    let mut guard = match milestone_registry().lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.retain(|key| !key.starts_with(&prefix));
+}
+
 pub fn emit_timeline(
     bus: &crate::agents::EventBus,
     correlation_id: Uuid,

@@ -296,18 +296,21 @@ User message:\n{}",
         };
 
         // Insert the task into the store before any network/LLM call so events can be
-        // correlated against a task that actually exists.
-        let store = TaskStore::open(store_path)?;
-        let task = Task {
-            id: task_id,
-            parent_task_id: None,
-            status: TaskStatus::Pending,
-            assigned_agent: preliminary_agent.to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            initial_message,
-        };
-        store.insert(&task)?;
+        // correlated against a task that actually exists. The TaskStore (non-Send SQLite
+        // connection) must be dropped before the .await below (system_selector_decision).
+        {
+            let store = TaskStore::open(store_path)?;
+            let task = Task {
+                id: task_id,
+                parent_task_id: None,
+                status: TaskStatus::Pending,
+                assigned_agent: preliminary_agent.to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                initial_message,
+            };
+            store.insert(&task)?;
+        }
 
         // Use task_id as correlation so GET /api/tasks/{task_id}/events returns these events.
         let _ = self.bus.send(EventEnvelope::new(EventType::UserRequestReceived, Some(serde_json::json!({ "message": message }))).with_correlation(task_id));
@@ -386,8 +389,15 @@ User message:\n{}",
 
         // Update the assigned_agent if the selector changed it from our preliminary value.
         if assigned_agent != preliminary_agent {
-            if let Err(e) = store.update_assigned_agent(task_id, &assigned_agent) {
-                tracing::warn!(task_id = %task_id, assigned_agent = %assigned_agent, err = %e, "failed to update assigned_agent after selector");
+            match TaskStore::open(store_path) {
+                Ok(store) => {
+                    if let Err(e) = store.update_assigned_agent(task_id, &assigned_agent) {
+                        tracing::warn!(task_id = %task_id, assigned_agent = %assigned_agent, err = %e, "failed to update assigned_agent after selector");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id, err = %e, "failed to open store to update assigned_agent after selector");
+                }
             }
         }
 

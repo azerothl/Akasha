@@ -22,7 +22,7 @@ use crate::agent_profile::AgentProfile;
 use crate::personality;
 use crate::agent_contracts::ContractRegistry;
 use crate::api::{learn_from_task_outcome_async, message_suggests_tool_only_action, ProgressCache, TaskCompletionRegistry};
-use crate::latency::{emit_timeline_for_task, emit_timeline_once_for_task, env_duration_ms, log_latency_metric};
+use crate::latency::{clear_task_milestones, emit_timeline_for_task, emit_timeline_once_for_task, env_duration_ms, log_latency_metric};
 use crate::session_state;
 use crate::memory_actor::LongTermMemoryClient;
 
@@ -2326,6 +2326,7 @@ Do not only describe the files — execute the tools."#,
                     "task_completed",
                     Some(serde_json::json!({ "status": "failed" })),
                 );
+                clear_task_milestones(root_task_id, None);
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::TaskFailed,
@@ -2645,6 +2646,7 @@ Formatting rules (Markdown):
             "task_completed",
             Some(serde_json::json!({ "status": status_str })),
         );
+        clear_task_milestones(root_task_id, None);
         if root_status == TaskStatus::Completed && execution_mode_aggregator == Some(ExecutionMode::Orchestrated) {
             if let Ok(pipeline) = PipelineStore::open(&store_path_buf) {
                 let _ = pipeline.set_state(root_task_id, PipelineState::Livraison, Some(display_message.as_str()));
