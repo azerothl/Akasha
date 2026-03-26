@@ -216,10 +216,11 @@ function classifyEventKind(eventType?: string | null): string {
   if (/(received|created|queued|accepted|started)$/.test(value) || value === "task_received") return "received";
   if (value === "progress_update" || value === "todo_list_updated") return "progress";
   if (value === "tool_call_started" || value === "tool_call_finished") return "tool";
-  if (value === "sub_agent_spawned" || value === "task_decomposed" || value === "plan_proposed" || value === "plan_committed") return "orchestration";
+  if (value === "sub_agent_spawned" || value === "task_decomposed" || value === "plan_proposed" || value === "plan_committed" || value === "timeline_milestone" || value === "subagent_startup_started") return "orchestration";
   if (value === "task_completed") return "success";
   if (value === "task_failed") return "failure";
   if (/(ask_user|human_input|approval|confirmation)/.test(value)) return "question";
+  if (value === "subagent_startup_pending") return "progress";
   return "neutral";
 }
 
