@@ -128,11 +128,39 @@ fn child_first_activity_timeout() -> std::time::Duration {
 }
 
 fn child_completion_timeout() -> std::time::Duration {
-    env_duration_ms("AKASHA_CHILD_COMPLETION_TIMEOUT_MS", 300_000)
+    env_duration_ms("AKASHA_CHILD_COMPLETION_TIMEOUT_MS", 180_000)
+}
+
+fn child_retry_timeout() -> std::time::Duration {
+    env_duration_ms("AKASHA_CHILD_RETRY_TIMEOUT_MS", 90_000)
 }
 
 fn deliverable_retry_timeout() -> std::time::Duration {
-    env_duration_ms("AKASHA_DELIVERABLE_RETRY_TIMEOUT_MS", 150_000)
+    env_duration_ms("AKASHA_DELIVERABLE_RETRY_TIMEOUT_MS", 90_000)
+}
+
+fn child_output_needs_retry(content: &str) -> bool {
+    let lower = content.trim().to_lowercase();
+    if lower.is_empty() {
+        return true;
+    }
+    [
+        "i am ready to assist",
+        "i'm ready to assist",
+        "based on the instructions provided",
+        "according to the instructions provided",
+        "following the instructions provided",
+        "i am configured as",
+        "i'm configured as",
+        "today, i will execute the phase 2 task",
+        "phase 2 task",
+        "click, fill, screenshot, and wait",
+        "still working",
+        "working on it",
+        "action in progress",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
 }
 
 async fn wait_for_task_activity(
@@ -196,6 +224,38 @@ fn extract_workspace_paths_from_message(message: &str) -> Vec<String> {
     paths
 }
 
+fn deliverables_are_document_like(paths: &[String]) -> bool {
+    !paths.is_empty()
+        && paths.iter().all(|path| {
+            let lower = path.to_lowercase();
+            [".md", ".markdown", ".txt", ".rst", ".adoc", ".html"]
+                .iter()
+                .any(|ext| lower.ends_with(ext))
+        })
+}
+
+fn request_looks_like_report_or_comparison(message: &str, paths: &[String]) -> bool {
+    let lower = message.to_lowercase();
+    let has_report_terms = [
+        "rapport",
+        "report",
+        "comparaison",
+        "comparison",
+        "compare",
+        "différences",
+        "differences",
+        "analyse",
+        "analysis",
+        "étude",
+        "study",
+        "markdown",
+    ]
+    .iter()
+    .any(|k| lower.contains(*k));
+
+    has_report_terms || deliverables_are_document_like(paths)
+}
+
 fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
     // Use a head+tail strategy so that workspace paths and constraints
     // listed anywhere in a long request are not silently dropped.
@@ -216,13 +276,33 @@ fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
     //   • compose_orchestrated_child_message(…, deliverables_required=true) → TOOL-first prompt
     //   • per-step deliverable retry on missing files
     //   • collect_missing_plan_deliverables() final disk check
-    let step_deliverables: Option<Vec<String>> = {
-        let paths = extract_workspace_paths_from_message(msg);
-        if paths.is_empty() { None } else { Some(paths) }
+    let extracted_paths = extract_workspace_paths_from_message(msg);
+    let report_like = request_looks_like_report_or_comparison(msg, &extracted_paths);
+    let step_deliverables: Option<Vec<String>> = if extracted_paths.is_empty() {
+        None
+    } else {
+        Some(extracted_paths.clone())
     };
     // QA verifies what backend produced, so it receives the same list.
     let backend_deliverables = step_deliverables.clone();
     let qa_deliverables = step_deliverables;
+    let discovery_agent = if report_like { "research" } else { "documentalist" };
+    let production_agent = if report_like { "technical_writer" } else { "backend" };
+    let discovery_intent = if report_like {
+        "Research and structure the factual comparison points, mandatory sections, and evidence needed for the requested report. Produce a comparison outline tied to the exact deliverable path(s).".to_string()
+    } else {
+        "Extract and structure mandatory documentation sections, constraints, ethics/RGPD points, and required artifacts from the request. Produce a clear checklist tied to deliverables.".to_string()
+    };
+    let production_intent = if report_like {
+        "Write the requested comparative report in the exact workspace path(s) provided. Use substantial Markdown with clear sections, concrete differences, evidence from available context, and a conclusion. Create/update the file(s) on disk.".to_string()
+    } else {
+        "Implement core technical deliverables (scripts/API/project structure) matching the requested artifacts and dataset workflow. Create concrete files in workspace paths when provided.".to_string()
+    };
+    let qa_intent = if report_like {
+        "Validate that the report covers the requested comparison scope, contains concrete differences, and that every expected Markdown/document deliverable exists on disk. Report missing sections or factual gaps by severity.".to_string()
+    } else {
+        "Validate coverage against mandatory sections and deliverables. Report missing files/sections and propose exact fixes prioritized by severity.".to_string()
+    };
 
     // Build a sequential chain so each step runs after the previous one finishes.
     // Without dependencies, execution_waves() would schedule all steps in wave 0
@@ -241,8 +321,8 @@ fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
             },
             PlanStep {
                 step_id: "s1".to_string(),
-                agent_type: "documentalist".to_string(),
-                intent: "Extract and structure mandatory documentation sections, constraints, ethics/RGPD points, and required artifacts from the request. Produce a clear checklist tied to deliverables.".to_string(),
+                agent_type: discovery_agent.to_string(),
+                intent: discovery_intent,
                 depends_on: vec!["s0".to_string()],
                 parallel_group: None,
                 acceptance_criteria: None,
@@ -250,8 +330,8 @@ fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
             },
             PlanStep {
                 step_id: "s2".to_string(),
-                agent_type: "backend".to_string(),
-                intent: "Implement core technical deliverables (scripts/API/project structure) matching the requested artifacts and dataset workflow. Create concrete files in workspace paths when provided.".to_string(),
+                agent_type: production_agent.to_string(),
+                intent: production_intent,
                 depends_on: vec!["s1".to_string()],
                 parallel_group: None,
                 acceptance_criteria: None,
@@ -260,7 +340,7 @@ fn build_deterministic_project_fallback_plan(message: &str) -> ExecutionPlan {
             PlanStep {
                 step_id: "s3".to_string(),
                 agent_type: "qa".to_string(),
-                intent: "Validate coverage against mandatory sections and deliverables. Report missing files/sections and propose exact fixes prioritized by severity.".to_string(),
+                intent: qa_intent,
                 depends_on: vec!["s2".to_string()],
                 parallel_group: None,
                 acceptance_criteria: None,
@@ -1521,6 +1601,7 @@ async fn process_root_task(
     let plan_trace_rel = plan_trace_rel_path(root_task_id);
     const GENERIC_MESSAGES: &[&str] = &["Done.", "Failed.", "Cancelled."];
     let per_child_timeout = child_completion_timeout();
+    let per_child_retry_timeout = child_retry_timeout();
     let child_activity_timeout = child_first_activity_timeout();
     let retry_timeout = deliverable_retry_timeout();
     let mut startup_watchdog_tx = startup_watchdog_tx;
@@ -1800,9 +1881,6 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                 std::collections::HashSet::new();
             for (child_id, _, sid, _deliverables) in batch {
                 let step_ref = plan_spawn.steps.iter().find(|s| s.step_id == sid);
-                let missing_deliverables = step_ref
-                    .map(|st| missing_deliverables_for_step(st, &workspace_root))
-                    .unwrap_or_default();
                 task_completion.write().await.remove(&child_id);
                 let content = {
                     let g = progress.read().await;
@@ -1810,6 +1888,7 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                         .and_then(|q| q.back().map(|e| e.message.trim().to_string()))
                         .unwrap_or_default()
                 };
+                let mut content = content;
                 if !content.trim().is_empty() {
                     if emit_timeline_once_for_task(
                         &bus,
@@ -1824,12 +1903,95 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                         log_latency_metric(store_path_buf.as_path(), root_task_id, "ttfr_ms");
                     }
                 }
-                step_outputs.insert(sid.clone(), content.clone());
                 let mut failed = child_failed.get(&child_id).copied().unwrap_or(false);
-                let timed_out = timeout_by_child.get(&child_id).copied().unwrap_or(false);
+                let mut timed_out = timeout_by_child.get(&child_id).copied().unwrap_or(false);
                 if timed_out {
                     failed = true;
                 }
+                let needs_quality_retry = timed_out || child_output_needs_retry(&content);
+                if needs_quality_retry {
+                    if let Some(step) = step_ref {
+                        let retry_agent_type = step.agent_type.clone();
+                        let prior_excerpt = if content.trim().is_empty() {
+                            "(no usable output captured)".to_string()
+                        } else {
+                            content.chars().take(1200).collect::<String>()
+                        };
+                        let retry_body = format!(
+                            "[Recovery retry — step {sid}] The previous attempt timed out or returned non-actionable progress text. Continue the SAME step and do the actual work now.\n\nPrevious output excerpt:\n{prior_excerpt}\n\nRequirements:\n- Do not restate your role or instructions.\n- Do not answer with 'still working', 'I am ready', or generic plan text.\n- If deliverables are required, create/update them now with tools.\n- If blocked, state the exact missing input or tool failure and its impact.",
+                        );
+                        let retry_shared_plan = plan_spawn.shared_context_markdown(&user_message, step);
+                        let retry_prompt = compose_orchestrated_child_message(
+                            &retry_agent_type,
+                            &retry_body,
+                            &retry_shared_plan,
+                            step.deliverables.as_ref().map(|d| !d.is_empty()).unwrap_or(false),
+                        );
+                        let retry_id = Uuid::new_v4();
+                        let retry_task = Task {
+                            id: retry_id,
+                            parent_task_id: Some(root_task_id),
+                            status: TaskStatus::Pending,
+                            assigned_agent: retry_agent_type,
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                            initial_message: Some(format!("[recovery-retry {sid}]")),
+                        };
+                        let retry_inserted = {
+                            TaskStore::open(&store_path_buf)
+                                .map(|s| s.insert(&retry_task).is_ok())
+                                .unwrap_or(false)
+                        };
+                        if retry_inserted {
+                            let notify_retry = Arc::new(tokio::sync::Notify::new());
+                            task_completion.write().await.insert(retry_id, notify_retry.clone());
+                            let _ = conversation_tx_aggregator
+                                .send(OrchestratorTask {
+                                    task_id: retry_id,
+                                    message: retry_prompt,
+                                    session_id: session_id_aggregator.clone(),
+                                    image_data_urls: None,
+                                    execution_mode: None,
+                                    preferred_task_type: None,
+                                })
+                                .await;
+                            let retry_timed_out = tokio::time::timeout(
+                                per_child_retry_timeout,
+                                notify_retry.notified(),
+                            )
+                            .await
+                            .is_err();
+                            task_completion.write().await.remove(&retry_id);
+                            let retry_content = {
+                                let g = progress.read().await;
+                                g.get(&retry_id)
+                                    .and_then(|q| q.back().map(|e| e.message.trim().to_string()))
+                                    .unwrap_or_default()
+                            };
+                            if let Ok(s) = TaskStore::open(&store_path_buf) {
+                                let _ = s.update_status(
+                                    retry_id,
+                                    if retry_timed_out {
+                                        TaskStatus::Failed
+                                    } else {
+                                        TaskStatus::Completed
+                                    },
+                                );
+                            }
+                            if !retry_content.trim().is_empty() {
+                                content = retry_content;
+                            }
+                            if !retry_timed_out && !child_output_needs_retry(&content) {
+                                timed_out = false;
+                                failed = false;
+                            }
+                        }
+                    }
+                }
+                step_outputs.insert(sid.clone(), content.clone());
+                let missing_deliverables = step_ref
+                    .map(|st| missing_deliverables_for_step(st, &workspace_root))
+                    .unwrap_or_default();
                 // One-shot per-step retry: when deliverables are missing but the step
                 // didn't time out, give the agent a second targeted attempt to create
                 // the required files before declaring the step failed.
@@ -2541,7 +2703,7 @@ Formatting rules (Markdown):
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_decomposition_override, build_deterministic_project_fallback_plan, extract_workspace_paths_from_message, is_project_like_request, Subtask};
+    use super::{apply_decomposition_override, build_deterministic_project_fallback_plan, child_output_needs_retry, child_retry_timeout, extract_workspace_paths_from_message, is_project_like_request, Subtask};
     use super::super::execution_plan::{ExecutionPlan, PlanStep};
     use uuid::Uuid;
 
@@ -2646,6 +2808,22 @@ mod tests {
         assert!(is_project_like_request(
             "fais moi une étude détaillée des différences entre Akasha et openClaw puis écris le rapport markdown dans workspace:/analyze/comparaison/rapport.md"
         ));
+    }
+
+    #[test]
+    fn child_output_retry_detection_flags_meta_progress() {
+        assert!(child_output_needs_retry(
+            "Based on the instructions provided, I am ready to assist with this Phase 2 task."
+        ));
+        assert!(child_output_needs_retry("Still working — using a fallback path if needed…"));
+        assert!(!child_output_needs_retry(
+            "Voici les différences principales entre Akasha et openClaw, avec les livrables créés."
+        ));
+    }
+
+    #[test]
+    fn child_retry_timeout_has_reasonable_default() {
+        assert_eq!(child_retry_timeout(), std::time::Duration::from_millis(90_000));
     }
 
     #[test]
@@ -2763,6 +2941,28 @@ mod tests {
         let backend = p.steps.iter().find(|s| s.agent_type == "backend").expect("backend step missing");
         // Without explicit workspace:/ paths, deliverables stay None — no false disk checks.
         assert!(backend.deliverables.is_none());
+    }
+
+    #[test]
+    fn deterministic_fallback_report_request_uses_research_and_writer_agents() {
+        let p = build_deterministic_project_fallback_plan(
+            "fais moi une étude détaillée des différences entre Akasha et openClaw puis écris le rapport markdown dans workspace:/analyze/comparatif.md",
+        );
+        assert_eq!(p.steps[1].agent_type, "research");
+        assert_eq!(p.steps[2].agent_type, "technical_writer");
+        assert!(p.steps[2]
+            .deliverables
+            .as_ref()
+            .is_some_and(|d| d.contains(&"workspace:/analyze/comparatif.md".to_string())));
+    }
+
+    #[test]
+    fn deterministic_fallback_code_project_request_keeps_backend_agent() {
+        let p = build_deterministic_project_fallback_plan(
+            "Construis une API sécurisée et un notebook dans workspace:/proj/api/ et workspace:/proj/notebook.ipynb",
+        );
+        assert_eq!(p.steps[1].agent_type, "documentalist");
+        assert_eq!(p.steps[2].agent_type, "backend");
     }
 
     // ── deliverable_workspace_rel ──────────────────────────────────────────────────────────────

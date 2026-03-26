@@ -38,6 +38,86 @@ fn normalize_apostrophes(s: &str) -> String {
     s.replace('’', "'").replace('‘', "'")
 }
 
+fn normalize_tool_path_hint(raw: &str) -> String {
+    let mut s = raw
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string();
+    s = normalize_apostrophes(&s);
+    if s.starts_with("workspace:/") {
+        return format!(
+            "workspace:/{}",
+            s.trim_start_matches("workspace:/")
+                .trim_start_matches(['/', '\\'])
+        );
+    }
+    if let Some(rest) = s.strip_prefix("workspace:") {
+        return format!("workspace:/{}", rest.trim_start_matches(['/', '\\']));
+    }
+    if let Some(rest) = s.strip_prefix("workspace/") {
+        return format!("workspace:/{}", rest.trim_start_matches(['/', '\\']));
+    }
+    if let Some(rest) = s.strip_prefix("workspace\\") {
+        return format!("workspace:/{}", rest.trim_start_matches(['/', '\\']));
+    }
+    s
+}
+
+fn is_workspace_virtual_path(raw: &str) -> bool {
+    normalize_tool_path_hint(raw).starts_with("workspace:/")
+}
+
+fn parse_write_file_request(args: &[String]) -> Option<(String, String)> {
+    if args.is_empty() {
+        return None;
+    }
+
+    let joined = args.join("\n");
+    let trimmed = joined.trim();
+    if trimmed.starts_with('{') {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let path = value
+                .get("path")
+                .or_else(|| value.get("filePath"))
+                .or_else(|| value.get("file"))
+                .and_then(|v| v.as_str())
+                .map(normalize_tool_path_hint);
+            let content = value
+                .get("content")
+                .or_else(|| value.get("text"))
+                .or_else(|| value.get("body"))
+                .or_else(|| value.get("data"))
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Array(items) => items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+                });
+            if let Some(path) = path {
+                return Some((path, content.unwrap_or_default()));
+            }
+        }
+    }
+
+    let path = normalize_tool_path_hint(args.first()?.as_str());
+    let content = args.get(1..).map(|a| a.join("\n")).unwrap_or_default();
+    Some((path, content))
+}
+
+fn canonicalize_tool_name(tool_name: &str) -> String {
+    match tool_name.to_lowercase().as_str() {
+        "create_todos" => "write_todos".to_string(),
+        "append_todos" => "merge_todos".to_string(),
+        _ => tool_name.to_string(),
+    }
+}
+
 /// Banner injected by `compose_orchestrated_child_message(..., deliverables_required: true)` for subtasks and remediation.
 const ORCH_DISK_DELIVERABLES_MARKER: &str = "[Orchestrated — disk deliverables REQUIRED]";
 
@@ -83,6 +163,7 @@ async fn pdf_extract_message_from_disk(disk_path: &Path, via_tool: &str) -> (boo
 }
 
 fn resolve_tool_disk_path(raw: &str, workspace_root: Option<&Path>) -> PathBuf {
+    let raw = normalize_tool_path_hint(raw);
     let raw = raw.trim();
     if raw.starts_with("workspace:/") || raw.starts_with("workspace:") {
         let key = raw
@@ -2388,10 +2469,10 @@ async fn execute_tool_call(
     };
     let result = match tool_name {
         "read_file" => {
-            let path_str = path_arg_joined(args);
+            let path_str = normalize_tool_path_hint(&path_arg_joined(args));
             if path_str.is_empty() {
                 (false, "[read_file] usage: read_file <path>".to_string(), None)
-            } else if path_str.starts_with("workspace:/") || path_str.starts_with("workspace:") {
+            } else if is_workspace_virtual_path(&path_str) {
                 let key = path_str
                     .trim_start_matches("workspace:/")
                     .trim_start_matches("workspace:")
@@ -3122,68 +3203,63 @@ async fn execute_tool_call(
             }
         }
         "write_file" => {
-            let path_str_opt = args.get(0).map(String::as_str);
-            if let Some(path_str) = path_str_opt {
-                if path_str.starts_with("workspace:/") || path_str.starts_with("workspace:") {
-                    match workspace_store {
-                        Some(ws) => {
-                            let key = path_str
-                                .trim_start_matches("workspace:/")
-                                .trim_start_matches("workspace:")
-                                .trim_start_matches('/')
-                                .to_string();
-                            let mut key = key.trim().trim_matches('`').trim_matches('"').to_string();
-                            if key.ends_with('#') {
-                                key.pop();
-                            }
-                            let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
-                            let (key, _) =
-                                rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
-                            let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
-                            let mut guard = ws.write().await;
-                            let per_task = guard.entry(lineage_task_id).or_default();
-                            let previous_mem = per_task.get(&key).cloned().unwrap_or_default();
-                            // Only prefer the longer previous content for plan-trace files
-                            // (.akasha/plan_*.md) where provider truncation is a known risk.
-                            // For all other files, always use the new content so legitimate
-                            // shortening edits (e.g. removing placeholder sections) are honoured.
-                            let is_plan_trace = key.starts_with(".akasha/plan_") && key.ends_with(".md");
-                            let effective_content = if is_plan_trace
-                                && !previous_mem.is_empty()
-                                && content.chars().count() < previous_mem.chars().count()
-                            {
-                                previous_mem.clone()
-                            } else {
-                                content.clone()
-                            };
-                            per_task.insert(key.clone(), effective_content.clone());
-                            drop(guard);
-                            // Also write to disk under data_dir (workspace root = store_path.parent())
-                            let rel_path = Path::new(&key);
-                            if executor.policy.can_write(rel_path) {
-                                let disk_path_opt = workspace_root.map(|root| root.join(&key))
-                                    .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
-                                    .map(strip_verbatim_prefix);
-                                if let Some(disk_path) = disk_path_opt {
-                                    if let Some(parent) = disk_path.parent() {
-                                        let _ = tokio::fs::create_dir_all(parent).await;
-                                    }
-                                    if tokio::fs::write(&disk_path, &effective_content).await.is_ok() {
-                                        return (true, format!("[write_file workspace:{}] saved (disk).", key), None);
-                                    }
+            let Some((path_str, content)) = parse_write_file_request(args) else {
+                return (false, "[write_file] usage: write_file <path> <content>".to_string(), None);
+            };
+            if is_workspace_virtual_path(&path_str) {
+                match workspace_store {
+                    Some(ws) => {
+                        let key = path_str
+                            .trim_start_matches("workspace:/")
+                            .trim_start_matches("workspace:")
+                            .trim_start_matches('/')
+                            .to_string();
+                        let mut key = key.trim().trim_matches('`').trim_matches('"').to_string();
+                        if key.ends_with('#') {
+                            key.pop();
+                        }
+                        let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
+                        let (key, _) =
+                            rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
+                        let mut guard = ws.write().await;
+                        let per_task = guard.entry(lineage_task_id).or_default();
+                        let previous_mem = per_task.get(&key).cloned().unwrap_or_default();
+                        // Only prefer the longer previous content for plan-trace files
+                        // (.akasha/plan_*.md) where provider truncation is a known risk.
+                        // For all other files, always use the new content so legitimate
+                        // shortening edits (e.g. removing placeholder sections) are honoured.
+                        let is_plan_trace = key.starts_with(".akasha/plan_") && key.ends_with(".md");
+                        let effective_content = if is_plan_trace
+                            && !previous_mem.is_empty()
+                            && content.chars().count() < previous_mem.chars().count()
+                        {
+                            previous_mem.clone()
+                        } else {
+                            content.clone()
+                        };
+                        per_task.insert(key.clone(), effective_content.clone());
+                        drop(guard);
+                        // Also write to disk under data_dir (workspace root = store_path.parent())
+                        let rel_path = Path::new(&key);
+                        if executor.policy.can_write(rel_path) {
+                            let disk_path_opt = workspace_root.map(|root| root.join(&key))
+                                .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                                .map(strip_verbatim_prefix);
+                            if let Some(disk_path) = disk_path_opt {
+                                if let Some(parent) = disk_path.parent() {
+                                    let _ = tokio::fs::create_dir_all(parent).await;
+                                }
+                                if tokio::fs::write(&disk_path, &effective_content).await.is_ok() {
+                                    return (true, format!("[write_file workspace:{}] saved (disk).", key), None);
                                 }
                             }
-                            return (true, format!("[write_file workspace:{}] saved.", key), None);
                         }
-                        None => return (false, "[write_file] workspace paths require a workspace store.".to_string(), None),
+                        return (true, format!("[write_file workspace:{}] saved.", key), None);
                     }
+                    None => return (false, "[write_file] workspace paths require a workspace store.".to_string(), None),
                 }
             }
-            let path = match path_arg(0) {
-                Some(p) => p,
-                None => return (false, "[write_file] usage: write_file <path> <content>".to_string(), None),
-            };
-            let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
+            let path = Path::new(&path_str);
             match executor.write_file(path, &content).await {
                 Ok(res) => {
                     let msg = if res.success {
@@ -4004,6 +4080,29 @@ fn looks_like_placeholder_after_tools(text: &str) -> bool {
     placeholder_phrases.iter().any(|p| lower.contains(p))
 }
 
+fn looks_like_meta_agent_response(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    [
+        "i am ready to assist",
+        "i'm ready to assist",
+        "based on the instructions provided",
+        "according to the instructions provided",
+        "following the instructions provided",
+        "i am configured as",
+        "i'm configured as",
+        "as an ai assistant",
+        "as an ai language model",
+        "today, i will execute the phase 2 task",
+        "phase 2 task",
+        "click, fill, screenshot, and wait",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+}
+
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
 /// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
 pub(crate) async fn run_message_via_llm(
@@ -4182,7 +4281,8 @@ pub(crate) async fn run_message_via_llm(
              - Use only tools that are directly necessary for the CURRENT task.\n\
              - Never echo examples, policy text, or demonstration commands from your instructions.\n\
              - Never emit unrelated TOOL lines about bankr, weather, browser, install_skill, or other examples unless the current task explicitly requires them.\n\
-             - If the task asks to save/write a file, use TOOL: write_file <path> then the exact content.\n\
+             - If the task asks to save/write a file, use TOOL: write_file <path> then the exact content, or TOOL: write_file {{\"path\":\"...\",\"content\":\"...\"}}.\n\
+             - Use write_todos / merge_todos (not create_todos) for todo lists.\n\
              - If you need missing user information, use TOOL: ask_user with JSON.\n\
              - If no tool is needed, answer normally.\n",
             base, skills_part
@@ -4531,6 +4631,7 @@ pub(crate) async fn run_message_via_llm(
         let mut tool_loop_history: Vec<(String, String)> = Vec::new();
         let mut last_tool_results_blob: Option<String> = None;
         let mut force_synthesis_attempted = false;
+        let mut meta_response_retry_count = 0u32;
         // Orchestrated deliverables: re-prompts when the model returns no parseable TOOL lines.
         let mut orch_disk_write_nags = 0u32;
         let mut last_captured_image_base64: Option<String> = None;
@@ -4733,6 +4834,27 @@ pub(crate) async fn run_message_via_llm(
             if calls.is_empty() { None } else { Some(calls) }
         });
         let no_parseable_tools_this_round = parsed_tool_calls.is_none();
+        let response_plain = response
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("TOOL:"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+
+        if no_parseable_tools_this_round
+            && meta_response_retry_count < 2
+            && (is_subagent || assigned_agent != "conversation" || orch_disk_deliverables)
+            && looks_like_meta_agent_response(&response_plain)
+        {
+            meta_response_retry_count += 1;
+            current_prompt = format!(
+                "User request: {}\n\nYour previous reply:\n{}\n\nThat reply was meta/instruction recitation, not actual progress on the assigned task. Do the work now. Do NOT describe your role, say you are ready, mention instructions, or narrate a generic Phase 2 plan. If files are required, start with TOOL: read_file / write_file on the exact workspace paths. If you are blocked, state only the concrete missing input or exact tool failure.",
+                user_message,
+                response_plain
+            );
+            continue;
+        }
 
         if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls) {
             round += 1;
@@ -4743,6 +4865,7 @@ pub(crate) async fn run_message_via_llm(
                     Some(reg) => reg.get(name).await.map(|s| s.tool_ref).unwrap_or_else(|| name.clone()),
                     None => name.clone(),
                 };
+                let actual_tool = canonicalize_tool_name(&actual_tool);
                 let args_str = args.join(" ");
                 tool_loop_history.push((actual_tool.clone(), args_str.clone()));
                 // Phase 4: loop detection — same tool+args repeated 3 times
@@ -8661,6 +8784,47 @@ mod tests {
         let s = "TOOL: prévision météo Paris";
         let c = parse_tool_calls(s);
         assert!(c.is_empty(), "non-ASCII pseudo tool names must be ignored");
+    }
+
+    #[test]
+    fn normalize_tool_path_hint_accepts_workspace_slash_form() {
+        assert_eq!(
+            normalize_tool_path_hint("workspace/analyze/comparatif.md"),
+            "workspace:/analyze/comparatif.md"
+        );
+        assert_eq!(
+            normalize_tool_path_hint("workspace\\analyze\\comparatif.md"),
+            "workspace:/analyze\\comparatif.md"
+        );
+    }
+
+    #[test]
+    fn parse_write_file_request_accepts_json_payload() {
+        let args = vec![
+            "{".to_string(),
+            "\"path\": \"workspace/project_plan.md\",".to_string(),
+            "\"content\": \"# Plan\n- item\"".to_string(),
+            "}".to_string(),
+        ];
+        let (path, content) = parse_write_file_request(&args).expect("json payload should parse");
+        assert_eq!(path, "workspace:/project_plan.md");
+        assert!(content.contains("# Plan"));
+    }
+
+    #[test]
+    fn canonicalize_tool_name_supports_create_todos_alias() {
+        assert_eq!(canonicalize_tool_name("create_todos"), "write_todos");
+        assert_eq!(canonicalize_tool_name("append_todos"), "merge_todos");
+    }
+
+    #[test]
+    fn looks_like_meta_agent_response_flags_instruction_recitation() {
+        assert!(looks_like_meta_agent_response(
+            "Based on the instructions provided, I am ready to assist with this Phase 2 task."
+        ));
+        assert!(!looks_like_meta_agent_response(
+            "Voici le rapport demandé et le fichier a été écrit dans workspace:/analyze/comparatif.md."
+        ));
     }
 
     // Headings with textual content before `TOOL:` are not treated as tool calls.
