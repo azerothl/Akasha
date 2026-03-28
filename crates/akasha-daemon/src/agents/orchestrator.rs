@@ -922,8 +922,30 @@ async fn decompose_to_plan(
         preferred_task_type: Some(preferred_task_type.clone()),
         system_prompt: None,
         image_data_urls: None,
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        repeat_penalty: None,
+        num_ctx: None,
+        num_gpu: None,
     };
-    let decompose_timeout = decompose_timeout();
+    let decompose_timeout = {
+        let base = decompose_timeout();
+        // Ollama needs extra time on first call (model cold-start). Push the decompose budget
+        // up when Ollama is registered as a provider, so the decomposer has a realistic chance
+        // to respond instead of always timing out.
+        if llm_router.is_ollama_registered() {
+            let ollama_timeout = env_duration_ms("AKASHA_DECOMPOSE_TIMEOUT_MS_OLLAMA", 120_000);
+            tracing::debug!(
+                timeout_ms = ollama_timeout.as_millis() as u64,
+                "decompose: Ollama registered, using extended timeout"
+            );
+            ollama_timeout
+        } else {
+            base
+        }
+    };
     let primary = tokio::time::timeout(decompose_timeout, llm_router.complete(&request)).await;
     if let Ok(Ok(ref resp)) = primary {
         let plan = parse_plan_or_legacy(resp.text.trim(), message);
@@ -960,8 +982,23 @@ async fn decompose_to_plan(
         preferred_task_type: Some(preferred_task_type.clone()),
         system_prompt: None,
         image_data_urls: None,
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        repeat_penalty: None,
+        num_ctx: None,
+        num_gpu: None,
     };
-    let retry_timeout = decompose_retry_timeout();
+    let retry_timeout = {
+        let base = decompose_retry_timeout();
+        if llm_router.is_ollama_registered() {
+            let ollama_retry = env_duration_ms("AKASHA_DECOMPOSE_RETRY_TIMEOUT_MS_OLLAMA", 60_000);
+            ollama_retry
+        } else {
+            base
+        }
+    };
     let retry = tokio::time::timeout(retry_timeout, llm_router.complete(&retry_request)).await;
     if let Ok(Ok(resp)) = retry {
         let plan = parse_plan_or_legacy(resp.text.trim(), message);
@@ -1068,6 +1105,13 @@ Output only: SATISFACTORY, CANNOT_DO, or NEEDS_REFINEMENT"#,
         preferred_task_type: Some("system".to_string()),
         system_prompt: None,
         image_data_urls: None,
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        repeat_penalty: None,
+        num_ctx: None,
+        num_gpu: None,
     };
     match tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -1501,22 +1545,11 @@ async fn process_root_task(
     // Single subtask (conversation): delegate to conversation worker for root (user sees reply on root_id).
     if steps.len() == 1 && steps[0].0 == "conversation" {
         let _ = store.update_assigned_agent(root_task_id, "conversation");
-        let conv_body = if let Some(s0) = plan.steps.first() {
-            let shared = plan.shared_context_markdown(&message, s0);
-            let deliverables_required = s0
-                .deliverables
-                .as_ref()
-                .map(|d| !d.is_empty())
-                .unwrap_or(false);
-            compose_orchestrated_child_message(
-                "conversation",
-                &s0.intent,
-                &shared,
-                deliverables_required,
-            )
-        } else {
-            steps[0].1.clone()
-        };
+        // Do NOT wrap in [Task]\n/Objective scaffolding for a plain conversation step.
+        // That format adds "Akasha project" framing that confuses small local models into
+        // asking project clarification questions instead of answering the user's actual request.
+        // The intent is exactly the user's raw message — send it directly.
+        let conv_body = message.clone();
         let _ = bus.send(
             EventEnvelope::new(
                 EventType::SubagentStartupStarted,
@@ -2444,6 +2477,13 @@ Reply in the SAME LANGUAGE as the user's question above. Do not add any informat
                 preferred_task_type: Some("conversation".to_string()),
                 system_prompt: Some(synthesis_system_prompt),
                 image_data_urls: None,
+                top_p: None,
+                top_k: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                repeat_penalty: None,
+                num_ctx: None,
+                num_gpu: None,
             };
             match tokio::time::timeout(
                 std::time::Duration::from_secs(120),

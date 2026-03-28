@@ -14,9 +14,11 @@ const THEME_STORAGE_KEY = "akasha_theme";
 const UI_MODE_STORAGE_KEY = "akasha_ui_mode";
 const AKASHA_SESSION_ID_KEY = "akasha_session_id";
 const TASK_TREE_COLLAPSE_STORAGE_KEY = "akasha_task_tree_collapsed";
+const TASK_ORCHESTRATION_DEBUG_STORAGE_KEY = "akasha_task_orchestration_debug";
 
 export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_latte";
 type UiMode = "simple" | "expert";
+type TaskOrchestrationDebugLevel = "minimal" | "normal" | "full";
 
 const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "light_latte"];
 
@@ -385,6 +387,78 @@ function App() {
     },
     [t]
   );
+  const extractTaskDiscussionHighlights = useCallback(
+    (event: { event_type: string; payload?: unknown }) => {
+      const payload = event.payload;
+      if (!payload || typeof payload !== "object") return [] as string[];
+      const p = payload as Record<string, unknown>;
+      const out: string[] = [];
+      const pushLabeled = (label: string, value: unknown) => {
+        if (typeof value === "string" && value.trim()) {
+          out.push(`${label}: ${trimPreview(value.trim(), 180)}`);
+        }
+      };
+
+      if (event.event_type === "task_decomposed") {
+        pushLabeled(t("tasks.task_type_label"), p.decompose_model_task_type);
+        pushLabeled(t("tasks.reason_label"), p.decompose_reason);
+        pushLabeled(t("tasks.attempt_label"), p.decompose_attempt);
+      }
+      if (event.event_type === "sub_agent_spawned") {
+        pushLabeled(t("tasks.reason_label"), p.delegation_reason);
+      }
+
+      pushLabeled(t("tasks.reason_label"), p.reason);
+      pushLabeled(t("tasks.reason_label"), p.selector_reason);
+
+      if (event.event_type === "progress_update" && typeof p.message === "string" && p.message.trim()) {
+        const msg = p.message.trim();
+        if (/(analy|analyse|orchestr|routing|routage|decompos|décompos|plan|thinking|réflex|reflex|recovery|best-effort|startup|démarrage)/i.test(msg)) {
+          out.push(`${t("tasks.phase_label")}: ${trimPreview(msg, 180)}`);
+        }
+      }
+      if (event.event_type === "timeline_milestone") {
+        pushLabeled(t("tasks.phase_label"), p.milestone);
+      }
+
+      return Array.from(new Set(out));
+    },
+    [t]
+  );
+  const extractModelMetadata = useCallback(
+    (event: { event_type: string; payload?: unknown }) => {
+      const payload = event.payload;
+      if (!payload || typeof payload !== "object") return null;
+      const p = payload as Record<string, unknown>;
+      
+      const thinking = typeof p.thinking === "string" ? p.thinking.trim() : null;
+      const response = typeof p.response === "string" ? p.response.trim() : null;
+      const model = typeof p.model === "string" ? p.model.trim() : null;
+      const evalCount = typeof p.eval_count === "number" ? p.eval_count : null;
+      const promptEvalCount = typeof p.prompt_eval_count === "number" ? p.prompt_eval_count : null;
+      const evalDuration = typeof p.eval_duration === "number" ? p.eval_duration : null;
+      const promptEvalDuration = typeof p.prompt_eval_duration === "number" ? p.prompt_eval_duration : null;
+      const loadDuration = typeof p.load_duration === "number" ? p.load_duration : null;
+      const totalDuration = typeof p.total_duration === "number" ? p.total_duration : null;
+      const doneReason = typeof p.done_reason === "string" ? p.done_reason.trim() : null;
+      
+      if (!thinking && !response && !model && !evalCount) return null;
+      
+      return {
+        thinking,
+        response,
+        model,
+        evalCount,
+        promptEvalCount,
+        evalDuration,
+        promptEvalDuration,
+        loadDuration,
+        totalDuration,
+        doneReason,
+      };
+    },
+    []
+  );
   const [health, setHealth] = useState<HealthState | null>(null);
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState<ChatMessageRow[]>([]);
@@ -400,7 +474,7 @@ function App() {
   const [taskListFilter, setTaskListFilter] = useState<"active" | "completed">("active");
   const [taskSearchQuery, setTaskSearchQuery] = useState("");
   const [tasksSelected, setTasksSelected] = useState(0);
-  const [tasksEvents, setTasksEvents] = useState<Array<{ event_type: string; payload?: unknown; at: string }>>([]);
+  const [tasksEvents, setTasksEvents] = useState<Array<{ event_type: string; payload?: unknown; at: string; task_id?: string }>>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
   const isSimpleMode = uiMode === "simple";
   const [collapsedTaskBranches, setCollapsedTaskBranches] = useState<Record<string, boolean>>(() => {
@@ -430,6 +504,18 @@ function App() {
     }
     return { list: true, steps: true, events: true };
   });
+  const [taskOrchestrationDebugLevel, setTaskOrchestrationDebugLevel] = useState<TaskOrchestrationDebugLevel>(() => {
+    try {
+      const raw = localStorage.getItem(TASK_ORCHESTRATION_DEBUG_STORAGE_KEY);
+      if (raw === "minimal" || raw === "normal" || raw === "full") return raw;
+      // Backward compatibility with previous boolean persistence.
+      if (raw === "1") return "normal";
+      if (raw === "0") return "minimal";
+    } catch {
+      /* ignore */
+    }
+    return loadSavedUiMode() === "expert" ? "normal" : "minimal";
+  });
   const toggleTaskPanelSection = useCallback((key: "list" | "steps" | "events") => {
     setTaskPanelSections((prev) => {
       const next = { ...prev, [key]: !prev[key] };
@@ -440,6 +526,14 @@ function App() {
       }
       return next;
     });
+  }, []);
+  const setTaskOrchestrationDebugLevelAndSave = useCallback((next: TaskOrchestrationDebugLevel) => {
+    setTaskOrchestrationDebugLevel(next);
+    try {
+      localStorage.setItem(TASK_ORCHESTRATION_DEBUG_STORAGE_KEY, next);
+    } catch {
+      /* ignore */
+    }
   }, []);
   const persistCollapsedTaskBranches = useCallback((next: Record<string, boolean>) => {
     try {
@@ -1342,11 +1436,54 @@ function App() {
     };
   }, [selectedTask, runningTaskChips, tasksEvents, summarizeTaskEvent]);
 
+  const taskDiscussionHighlights = useMemo(() => {
+    const minimalSignalTypes = new Set([
+      "task_decomposed",
+      "sub_agent_spawned",
+      "plan_proposed",
+      "plan_committed",
+      "timeline_milestone",
+      "contract_violation",
+    ]);
+
+    const normalSignalTypes = new Set([
+      "task_decomposed",
+      "sub_agent_spawned",
+      "plan_proposed",
+      "plan_committed",
+      "timeline_milestone",
+      "subagent_startup_started",
+      "subagent_startup_pending",
+      "progress_update",
+      "contract_violation",
+      "subtask_started",
+      "subtask_completed",
+    ]);
+
+    const signalTypes = taskOrchestrationDebugLevel === "minimal" ? minimalSignalTypes : normalSignalTypes;
+
+    const rows = tasksEvents.map((event) => ({
+        event,
+        highlights: extractTaskDiscussionHighlights(event),
+      }));
+
+    const filteredRows = taskOrchestrationDebugLevel === "full"
+      ? rows
+      : rows.filter(({ event, highlights }) => signalTypes.has(event.event_type) || highlights.length > 0);
+
+    const maxRows = isSimpleMode
+      ? (taskOrchestrationDebugLevel === "full" ? 16 : 8)
+      : (taskOrchestrationDebugLevel === "full" ? 48 : 24);
+
+    if (isSimpleMode) return [...filteredRows].slice(-maxRows).reverse();
+    return filteredRows.slice(-maxRows);
+  }, [tasksEvents, extractTaskDiscussionHighlights, isSimpleMode, taskOrchestrationDebugLevel]);
+
   const taskDisplayLabel = (task: TaskListItem) => (task.label && task.label.trim() ? task.label.trim() : t("tasks.task_unnamed") + task.id.slice(-8));
 
   const fetchTasksEvents = useCallback(async (taskId: string) => {
     try {
-      const data = await invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string }> }>(
+      const data = await invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> }>(
         "get_task_events",
         { taskId, port: DAEMON_PORT }
       );
@@ -1356,6 +1493,7 @@ function App() {
           event_type: e.event_type ?? "?",
           payload: e.payload,
           at: e.at ?? "",
+          task_id: e.task_id,
         }))
       );
     } catch {
@@ -4097,75 +4235,212 @@ function App() {
                       aria-labelledby="task-panel-heading-events"
                       className="task-panel-section-body task-panel-events-body"
                     >
-                  {tasksList.length > 0 && tasksList[tasksSelected] && (() => {
-                    const sel = tasksList[tasksSelected];
-                    const canCancel = sel.status === "pending" || sel.status === "running";
-                    const canRetry = sel.status === "failed";
-                    return (canCancel || canRetry) ? (
-                      <div className="task-actions-row" role="group" aria-label="Actions sur la tâche">
-                        {canCancel && (
-                          <button
-                            type="button"
-                            className="task-action-btn task-action-cancel"
-                            onClick={async () => {
-                              if (!sel?.id) return;
-                              try {
-                                await invoke<{ cancelled?: boolean }>("cancel_task", { task_id: sel.id, port: DAEMON_PORT });
-                                fetchTasksList();
-                              } catch (e) {
-                                console.error(e);
-                              }
-                            }}
-                          >
-                            Annuler
-                          </button>
-                        )}
-                        {canRetry && (
-                          <button
-                            type="button"
-                            className="task-action-btn task-action-retry"
-                            onClick={() => {
-                              setTab("chat");
-                              setMessage(sel?.label ?? "Relance la tâche.");
-                            }}
-                          >
-                            Relancer
-                          </button>
-                        )}
+                  <div className="task-events-controls">
+                    <label className="task-events-debug-level-control" htmlFor="task-debug-level-select">
+                      <span className="task-events-debug-level-label">{t("tasks.debug_orchestration_level_label")}</span>
+                      <select
+                        id="task-debug-level-select"
+                        className="task-events-debug-level-select"
+                        value={taskOrchestrationDebugLevel}
+                        onChange={(e) => setTaskOrchestrationDebugLevelAndSave(e.target.value as TaskOrchestrationDebugLevel)}
+                        aria-label={t("tasks.debug_orchestration_level_label")}
+                      >
+                        <option value="minimal">{t("tasks.debug_level_minimal")}</option>
+                        <option value="normal">{t("tasks.debug_level_normal")}</option>
+                        <option value="full">{t("tasks.debug_level_full")}</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="task-panel-events-scroll">
+                    {taskDiscussionHighlights.length > 0 && (
+                      <div className="task-discussion-highlight" role="region" aria-label={t("tasks.agent_discussions_title")}>
+                        <h4 className="chat-subagents-plan-title">{t("tasks.agent_discussions_title")}</h4>
+                        <p className="task-events-hint">
+                          {taskOrchestrationDebugLevel === "minimal"
+                            ? t("tasks.agent_discussions_hint_minimal")
+                            : taskOrchestrationDebugLevel === "normal"
+                              ? t("tasks.agent_discussions_hint_normal")
+                              : t("tasks.agent_discussions_hint_full")}
+                        </p>
+                        <ul className="activity-events-list" role="list">
+                          {taskDiscussionHighlights.map(({ event, highlights }, i) => (
+                            <li key={`discussion-${event.event_type}-${event.at}-${i}`} className="activity-event-card" data-event-kind={classifyEventKind(event.event_type)}>
+                              <span className="activity-event-dot" aria-hidden />
+                              <div className="activity-event-body">
+                                <div className="activity-event-topline">
+                                  <strong className="event-kind-pill" data-event-kind={classifyEventKind(event.event_type)}>{eventLabel(event.event_type)}</strong>
+                                  <span className="activity-event-at">{event.at}</span>
+                                  {event.task_id && selectedTask && event.task_id !== selectedTask.id && (
+                                    <span className="activity-event-subtask">{t("chat.sub_task")}{event.task_id.slice(-8)}</span>
+                                  )}
+                                </div>
+                                {summarizeTaskEvent(event) && <p className="activity-event-summary">{summarizeTaskEvent(event)}</p>}
+                                {highlights.length > 0 && (
+                                  <ul className="task-steps-list" role="list" aria-label={t("tasks.agent_discussions_title")}>
+                                    {highlights.map((line, j) => (
+                                      <li key={`discussion-line-${i}-${j}`} className="task-step task-step--pending">
+                                        <span className="task-step-check" aria-hidden>•</span>
+                                        <span className="task-step-title">{line}</span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
                       </div>
-                    ) : null;
-                  })()}
-                  {visibleTaskEvents.length === 0 ? (
-                    <p className="empty-state">
-                      {tasksList.length > 0 ? t("tasks.no_events") : t("tasks.select_task")}
-                    </p>
-                  ) : (
-                    <>
-                    {isSimpleMode && <p className="task-events-hint">{t("tasks.event_summary_hint")}</p>}
-                    <ul className="activity-events-list" role="list">
-                      {visibleTaskEvents.map((e, i) => (
-                        <li key={`${e.event_type}-${e.at}-${i}`} className="activity-event-card" data-event-kind={classifyEventKind(e.event_type)}>
-                          <span className="activity-event-dot" aria-hidden />
-                          <div className="activity-event-body">
-                            <div className="activity-event-topline">
-                              <strong className="event-kind-pill" data-event-kind={classifyEventKind(e.event_type)}>{eventLabel(e.event_type)}</strong>
-                              <span className="activity-event-at">{e.at}</span>
-                            </div>
-                            {summarizeTaskEvent(e) && <p className="activity-event-summary">{summarizeTaskEvent(e)}</p>}
-                            {e.payload != null && (isSimpleMode ? (
-                              <details className="event-payload-details">
-                                <summary>{t("tasks.event_details")}</summary>
+                    )}
+                    {tasksList.length > 0 && tasksList[tasksSelected] && (() => {
+                      const sel = tasksList[tasksSelected];
+                      const canCancel = sel.status === "pending" || sel.status === "running";
+                      const canRetry = sel.status === "failed";
+                      return (canCancel || canRetry) ? (
+                        <div className="task-actions-row" role="group" aria-label="Actions sur la tâche">
+                          {canCancel && (
+                            <button
+                              type="button"
+                              className="task-action-btn task-action-cancel"
+                              onClick={async () => {
+                                if (!sel?.id) return;
+                                try {
+                                  await invoke<{ cancelled?: boolean }>("cancel_task", { task_id: sel.id, port: DAEMON_PORT });
+                                  fetchTasksList();
+                                } catch (e) {
+                                  console.error(e);
+                                }
+                              }}
+                            >
+                              Annuler
+                            </button>
+                          )}
+                          {canRetry && (
+                            <button
+                              type="button"
+                              className="task-action-btn task-action-retry"
+                              onClick={() => {
+                                setTab("chat");
+                                setMessage(sel?.label ?? "Relance la tâche.");
+                              }}
+                            >
+                              Relancer
+                            </button>
+                          )}
+                        </div>
+                      ) : null;
+                    })()}
+                    {visibleTaskEvents.length === 0 ? (
+                      <p className="empty-state">
+                        {tasksList.length > 0 ? t("tasks.no_events") : t("tasks.select_task")}
+                      </p>
+                    ) : (
+                      <>
+                      {isSimpleMode && <p className="task-events-hint">{t("tasks.event_summary_hint")}</p>}
+                      <ul className="activity-events-list" role="list">
+                        {visibleTaskEvents.map((e, i) => (
+                          <li key={`${e.event_type}-${e.at}-${i}`} className="activity-event-card" data-event-kind={classifyEventKind(e.event_type)}>
+                            <span className="activity-event-dot" aria-hidden />
+                            <div className="activity-event-body">
+                              <div className="activity-event-topline">
+                                <strong className="event-kind-pill" data-event-kind={classifyEventKind(e.event_type)}>{eventLabel(e.event_type)}</strong>
+                                <span className="activity-event-at">{e.at}</span>
+                                {e.task_id && selectedTask && e.task_id !== selectedTask.id && (
+                                  <span className="activity-event-subtask">{t("chat.sub_task")}{e.task_id.slice(-8)}</span>
+                                )}
+                              </div>
+                              {summarizeTaskEvent(e) && <p className="activity-event-summary">{summarizeTaskEvent(e)}</p>}
+                              {(() => {
+                                const metadata = extractModelMetadata(e);
+                                if (metadata) {
+                                  return (
+                                    <div className="event-model-metadata">
+                                      {metadata.thinking && (
+                                        <div className="event-model-thinking">
+                                          <strong className="metadata-label">{t("tasks.model_thinking_label")}</strong>
+                                          <div className="thinking-content">{trimPreview(metadata.thinking, 500)}</div>
+                                        </div>
+                                      )}
+                                      {metadata.response && (
+                                        <div className="event-model-response">
+                                          <strong className="metadata-label">{t("tasks.model_response_label")}</strong>
+                                          <div className="response-content">{trimPreview(metadata.response, 500)}</div>
+                                        </div>
+                                      )}
+                                      {(metadata.model || metadata.evalCount || metadata.totalDuration) && (
+                                        <div className="event-model-metrics">
+                                          <strong className="metadata-label">{t("tasks.model_metrics_label")}</strong>
+                                          <dl className="metrics-list">
+                                            {metadata.model && (
+                                              <>
+                                                <dt>{t("tasks.model_label")}</dt>
+                                                <dd>{metadata.model}</dd>
+                                              </>
+                                            )}
+                                            {metadata.doneReason && (
+                                              <>
+                                                <dt>{t("tasks.done_reason_label")}</dt>
+                                                <dd>{metadata.doneReason}</dd>
+                                              </>
+                                            )}
+                                            {metadata.evalCount && (
+                                              <>
+                                                <dt>{t("tasks.eval_count_label")}</dt>
+                                                <dd>{metadata.evalCount}</dd>
+                                              </>
+                                            )}
+                                            {metadata.promptEvalCount && (
+                                              <>
+                                                <dt>{t("tasks.prompt_eval_count_label")}</dt>
+                                                <dd>{metadata.promptEvalCount}</dd>
+                                              </>
+                                            )}
+                                            {metadata.totalDuration && (
+                                              <>
+                                                <dt>{t("tasks.total_duration_label")}</dt>
+                                                <dd>{(metadata.totalDuration / 1000000000).toFixed(2)}s</dd>
+                                              </>
+                                            )}
+                                            {metadata.loadDuration && (
+                                              <>
+                                                <dt>{t("tasks.load_duration_label")}</dt>
+                                                <dd>{(metadata.loadDuration / 1000000).toFixed(2)}ms</dd>
+                                              </>
+                                            )}
+                                            {metadata.promptEvalDuration && (
+                                              <>
+                                                <dt>{t("tasks.prompt_eval_duration_label")}</dt>
+                                                <dd>{(metadata.promptEvalDuration / 1000000).toFixed(2)}ms</dd>
+                                              </>
+                                            )}
+                                            {metadata.evalDuration && (
+                                              <>
+                                                <dt>{t("tasks.eval_duration_label")}</dt>
+                                                <dd>{(metadata.evalDuration / 1000000).toFixed(2)}ms</dd>
+                                              </>
+                                            )}
+                                          </dl>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                }
+                                return null;
+                              })()}
+                              {e.payload != null && (isSimpleMode ? (
+                                <details className="event-payload-details">
+                                  <summary>{t("tasks.event_details")}</summary>
+                                  <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
+                                </details>
+                              ) : (
                                 <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
-                              </details>
-                            ) : (
-                              <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
-                            ))}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                    </>
-                  )}
+                              ))}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                      </>
+                    )}
+                  </div>
                     </div>
                   )}
                 </div>

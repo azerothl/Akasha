@@ -914,6 +914,8 @@ struct MessageIntentFlags {
     code_generation: bool,
     /// User asks for GitHub repo/API info and mentions vault or GITHUB_TOKEN.
     github_with_vault: bool,
+    /// User asks about transport schedules, routes, or travel info (train, bus, flight, etc.)
+    transport: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1329,6 +1331,16 @@ fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
             let vault = ["vault", "github_token", "clé du vault", "cle du vault", "key in the vault", "token dans le vault", "clef dans le vault"].iter().any(|k| m.contains(k));
             github && vault
         },
+        transport: [
+            "train", "tgv", "ter ", "sncf", "gare ", "horaires de train", "horaires de bus",
+            "horaires du train", "billet de train", "trajet en train", "rer ", "transilien",
+            "bus ", "métro ", "metro ", "tramway", "tram ",
+            "vol ", "aéroport", "aeroport", "airport", "terminal ",
+            "itinéraire", "itineraire", "horaires de métro", "horaires du métro",
+            "départ de ", "depart de ", "arrivée à ", "arrivee a ",
+        ]
+        .iter()
+        .any(|k| m.contains(k)),
     }
 }
 
@@ -1860,6 +1872,11 @@ const WRITE_FILE_REMINDER: &str = "\n[Reminder: the user is asking to save a fil
 
 const WEB_SEARCH_REMINDER: &str = "\n[Reminder: the user is asking for external information (weather/météo, news, etc.). You MUST use TOOL: web_search <query> to search — do NOT use bankr or portfolio for weather. Then reply with the results. Do not suggest visiting a site without having used web_search first.]\n\n";
 
+const TRANSPORT_REMINDER: &str = "\n[Reminder: the user is asking about transport schedules, routes, or travel information. You MUST use TOOL: web_search <query> first (e.g. web_search \"horaires train Angoulême Paris CDG dimanche\"). Do NOT write any files, generate HTML, or ask about project file paths — the user wants travel information only. If web_search is unavailable, say so clearly and suggest the relevant site (e.g. sncf.com, ratp.fr, transilien.com).]\n\n";
+
+/// Transport reminder when web_search is not enabled: model cannot use the tool so we only anchor it to the domain.
+const TRANSPORT_REMINDER_NO_SEARCH: &str = "\n[Reminder: the user is asking about transport routes or travel (train, car, bus, etc.). Do NOT write any files, create HTML pages, or ask about project file paths — the user wants travel information only. Answer from your knowledge (e.g. compare train vs car for this route). If you cannot give accurate live schedules, say so clearly and suggest the relevant site (e.g. sncf.com, ratp.fr, transilien.com).  Do NOT ask about file paths or project details — this is a travel question.]\n\n";
+
 /// X/Twitter/social feed fetches: do not use ask_user for unrelated onboarding; use tools first.
 const SOCIAL_FEED_REMINDER: &str = "\n[Reminder: SOCIAL / X / TWITTER — PRIORITY: The user wants posts, tweets, or timeline content from X (Twitter) or similar. Do NOT use TOOL: ask_user for generic greetings or unrelated menu choices — fulfill this request with tools. First TOOL: web_search <query> (e.g. site:x.com handle latest posts). If results are empty or insufficient, use TOOL: browser navigate <profile URL> then TOOL: browser snapshot (if browser is enabled in policy). Do not answer \"no context\" or \"blocked\" without having called web_search or browser.]\n\n";
 
@@ -1884,6 +1901,11 @@ const APP_CONTEXT: &str = concat!(
     "Otherwise the user can place files in the skills folder and run /skills reload. ",
     "Full documentation is available in the Doc tab of the interface. ",
     "Language: ALWAYS reply in the same language as the user's last message (French → French, English → English, etc.). Do not switch language even if tool results or context are in another language. ",
+    "Autonomy: work autonomously until the user's request is completely resolved. Do not stop in the middle of a task to ask for confirmation unless you hit a hard blocker (missing credentials, genuinely ambiguous requirements that cannot be inferred from context). For anything you can discover via a tool (read_file, web_search, run_command, etc.), prefer the tool over asking the user. ",
+    "Research before acting: when you are unsure about file contents or codebase structure, use read_file and search tools before editing or answering. Never guess or invent code — your answer must be grounded in actual research. ",
+    "Code conventions: when editing code, first read the file to understand its existing conventions, imports, and style. Mimic existing patterns. Never assume a library or dependency is available — verify it is already declared in the project's dependency file (Cargo.toml, package.json, requirements.txt, etc.) before using it. ",
+    "Tests discipline: when tests fail, never modify the tests themselves unless the user explicitly asks you to. Assume the bug is in the code under test. If the same test or CI still fails after three consecutive attempts, stop and ask the user for guidance rather than iterating blindly. ",
+    "Debugging: when debugging, address the root cause rather than the symptoms. Add descriptive logging statements to track variable state. If multiple approaches have failed, step back and think big-picture before making more changes. ",
     "Never invent data. If you do not have the information to answer, say so clearly (e.g. \"I did not find that information\"). ",
     "For questions about information you do not have (weather, forecasts, news, schedules, etc.), you must use the web_search tool to search yourself then reply with the results. When you have just received tool results (e.g. web_search, web_fetch), you must answer immediately with the synthesized result — do not reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"); the task ends after your message, so give the actual answer. ",
     "Do not suggest the user visit a site without having used web_search first if you have access to that tool. ",
@@ -1904,7 +1926,7 @@ const APP_CONTEXT: &str = concat!(
 pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
     match agent_type {
         "conversation" => None,
-        "code" => Some("You are the code generation agent. Produce correct, readable code. Prefer run_command or write_file when the user asks to create or run code. Do not invent APIs; use read_file when needed to match existing code. When the user asks to *perform* an action (take a photo, run a command, search the web, save a file), use the appropriate TOOL; do not generate a script. Use code only when the user explicitly asks to *write* or *generate* code or a script."),
+        "code" => Some("You are the code generation agent. Produce correct, readable code. Prefer run_command or write_file when the user asks to create or run code. Do not invent APIs; use read_file when needed to match existing code. When the user asks to *perform* an action (take a photo, run a command, search the web, save a file), use the appropriate TOOL; do not generate a script. Use code only when the user explicitly asks to *write* or *generate* code or a script. Before editing any file, read it to understand its conventions, imports, and style; mimic existing patterns. Never assume a library is available — verify it is already declared in the project dependency file (Cargo.toml, package.json, etc.). When tests fail, never modify the tests themselves; fix the code under test. If the same test still fails after three attempts, stop and ask the user for guidance."),
         "search" => Some("You are the search agent. Use web_search to find external information (weather, news, facts). Synthesize results and cite sources. Do not claim information you have not retrieved via web_search when it is available."),
         "financial" => Some("You are the financial specialist. Help with budgets, cost analysis, financial reports, numeric reasoning. Be precise with figures and units. Do not invent data; state what is missing if needed."),
         "documentalist" => Some("You are the documentalist. Transform a pile of files into exploitable data. Answer from the user's document base (RAG). Prioritize [User documents] and [Long-term memory]. Use memory_search when relevant. Quote or summarize from excerpts; if insufficient, say so and suggest adding documents. Produce structured summaries when asked."),
@@ -1915,8 +1937,8 @@ pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
         "creative" => Some("You are the creative agent. You have a strong creative sense for text and images. Produce marketing copy, creative content, stories, and audience-adapted text. Match tone and format to the requested channel and goal. When the task is to get a photo from the user's webcam/camera, use TOOL: device_invoke local_media camera capture first; for AI-generated images use generate_image."),
         "analyst" => Some("You are the product / functional analyst. Formalize the need before any production. Output: reformulated need, scope, assumptions, acceptance criteria, initial backlog. Do not jump to implementation; clarify and structure the request first."),
         "architect" => Some("You are the technical architect. Design the skeleton of the project. Output: proposed architecture, task list, dependencies between tasks, execution order, definition of done. Stay at design level; do not write full implementation."),
-        "frontend" => Some("You are the frontend agent. Produce UI components, views, and client-side logic. Focus on UX, accessibility, responsive layout, and integration with the design system. List impacted components. Do not modify database schema unless explicitly asked."),
-        "backend" => Some("You are the backend agent. Produce server-side logic, APIs, and business rules. Focus on correctness, performance, and clear contracts. Do not change frontend or DB schema unless the task explicitly requires it."),
+        "frontend" => Some("You are the frontend agent. Produce UI components, views, and client-side logic. Focus on UX, accessibility, responsive layout, and integration with the design system. List impacted components. Do not modify database schema unless explicitly asked. Before editing any file, read it to understand existing conventions and patterns; mimic the existing code style. Verify that any library you use is already declared in package.json before importing it."),
+        "backend" => Some("You are the backend agent. Produce server-side logic, APIs, and business rules. Focus on correctness, performance, and clear contracts. Do not change frontend or DB schema unless the task explicitly requires it. Before editing any file, read it to understand existing conventions, imports, and patterns; mimic the existing code style. Never assume a dependency is available — verify it in the project's dependency file. When debugging failures, address the root cause rather than the symptoms; add targeted logging to isolate the issue. If the same problem persists after three attempts, stop and ask the user."),
         "database" => Some("You are the database / data agent. Produce schemas, migrations, queries, and data pipelines. Focus on consistency, indexing, and data integrity. Output clear DDL or migration steps when applicable."),
         "integration" => Some("You are the integration agent. Wire components together: APIs, events, external services. Focus on contracts, error handling, and end-to-end flows. Produce a precise deliverable (config, glue code, or runbook)."),
         "qa" => Some("You are the quality control agent. You prevent false 'work done'. Verify coherence, requirement coverage, missing files, hidden TODOs, incomplete sections. Do not rewrite; report defects and gaps by severity. Do not validate if acceptance criteria are incomplete; output a clear report for rework."),
@@ -3682,6 +3704,13 @@ async fn compact_short_term_if_needed(
         preferred_task_type: None,
         system_prompt: None,
         image_data_urls: None,
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        repeat_penalty: None,
+        num_ctx: None,
+        num_gpu: None,
     };
     let compaction_timeout = env_duration_ms("AKASHA_COMPACTION_TIMEOUT_MS", 1_500);
     match tokio::time::timeout(compaction_timeout, llm_router.complete(&req)).await {
@@ -3763,6 +3792,13 @@ Factual response in English.\n\n{}",
         preferred_task_type: Some("system".to_string()),
         system_prompt: None,
         image_data_urls: None,
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        repeat_penalty: None,
+        num_ctx: None,
+        num_gpu: None,
     };
     match llm_router.complete(&req).await {
         Ok(resp) => {
@@ -4142,7 +4178,7 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
-    let structured = interpret_message(&message);
+    // NOTE: interpret_message is called below, after guardrail extraction, so it uses clean_message.
     let task_snapshot = store.get(task_id).ok().flatten();
     let assigned_agent = task_snapshot
         .as_ref()
@@ -4152,18 +4188,53 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .and_then(|t| t.parent_task_id)
         .is_some();
+    // When main_agent prepends a guardrail block on selector timeout, extract the real user message.
+    // Format: "[Guardrail: …]\n\n<actual message>"
+    const GUARDRAIL_MARKER: &str = "[Guardrail:";
+    const GUARDRAIL_END: &str = "]\n\n";
+    let (guardrail_reminder_block, clean_message): (String, &str) =
+        if message.starts_with(GUARDRAIL_MARKER) {
+            if let Some(end) = message.find(GUARDRAIL_END) {
+                let block = format!("{}\n\n", &message[..end + 1]);
+                let actual = message[end + GUARDRAIL_END.len()..].trim_start();
+                (block, actual)
+            } else {
+                (String::new(), message.as_str())
+            }
+        } else {
+            (String::new(), message.as_str())
+        };
+    // Whether this is an orchestrated subtask message (starts with "[Task]\n").
+    // These messages must not pollute session goals, short-term history, or trigger full
+    // memory context — they are internal planner artefacts, not real user messages.
+    let is_orchestrated_task_msg = clean_message.starts_with("[Task]\n");
+
+    // Anchor the CLEAN user goal (without guardrail prefix) in session state at task start.
+    // Skip for orchestrated task messages — their [Task]\nObjective text is not a user goal.
+    if !is_subagent && !is_orchestrated_task_msg && !clean_message.trim().is_empty() {
+        let data_dir_goal = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+        let goal_text = clean_message.chars().take(240).collect::<String>();
+        let _ = crate::session_state::merge(data_dir_goal, &session_id, |s| {
+            if s.goals.iter().all(|g| g != &goal_text) {
+                s.goals.push(goal_text);
+            }
+        });
+    }
     let timeline_correlation = resolve_root_task_id(&store_path, task_id)
         .or_else(|| task_snapshot.as_ref().and_then(|t| t.parent_task_id))
         .unwrap_or(task_id);
 
-    let orch_disk_deliverables = message.contains(ORCH_DISK_DELIVERABLES_MARKER);
-    let small_talk_intent = classify_small_talk_message(&message);
-    let small_talk_fast_lane_intent = small_talk_fast_lane(&message);
-    let session_recall_intent = detect_session_recall_intent(&message);
+    // All intent detection / classification uses clean_message so a guardrail prefix never
+    // breaks fast-lane matching or memory profile selection.
+    let structured = interpret_message(clean_message);
+    let orch_disk_deliverables = clean_message.contains(ORCH_DISK_DELIVERABLES_MARKER);
+    let small_talk_intent = classify_small_talk_message(clean_message);
+    let small_talk_fast_lane_intent = small_talk_fast_lane(clean_message);
+    let session_recall_intent = detect_session_recall_intent(clean_message);
     tracing::debug!(?session_recall_intent, "[RECALL_DEBUG] session_recall_intent");
     let is_small_talk_fast_lane = small_talk_fast_lane_intent.is_some();
     let is_session_recall = session_recall_intent.is_some();
-    let memory_profile = if is_small_talk_fast_lane || is_session_recall {
+    let mut memory_profile = if is_small_talk_fast_lane || is_session_recall {
         MemoryProfile {
             recent_turns_limit: 0,
             recent_context_max_chars: 0,
@@ -4178,12 +4249,35 @@ pub(crate) async fn run_message_via_llm(
         }
     } else {
         memory_profile_for_task(
-            &message,
+            clean_message,
             &assigned_agent,
             is_subagent,
             orch_disk_deliverables,
         )
     };
+    // For external/transport/general-knowledge queries, always isolate from recent context.
+    // Loading previous dev/Akasha-specific turns from short-term history actively misleads
+    // small local models: they latch onto the most recent topic (e.g. Akasha CLI discussion)
+    // and copy it instead of answering the actual question.
+    // This cap is unconditional — it does NOT require a guardrail prefix to be active.
+    if !is_small_talk_fast_lane && !is_subagent {
+        let clean_flags = compute_message_intent_flags(clean_message);
+        if clean_flags.external_info || clean_flags.transport {
+            memory_profile.recent_turns_limit = 0;
+            memory_profile.episodic_limit = 0;
+            memory_profile.semantic_top_k = 0;
+            memory_profile.facts_limit = 0;
+            memory_profile.allow_project_recall = false;
+        }
+    }
+    // Orchestrated task messages ([Task]\n prefix) already carry full context inside the message.
+    // Loading unrelated recent_turns from the short-term store only introduces noise and causes
+    // context contamination (e.g. bankr venv script appearing for a train/car question).
+    if is_orchestrated_task_msg {
+        memory_profile.recent_turns_limit = 0;
+        memory_profile.semantic_top_k = memory_profile.semantic_top_k.min(1);
+        memory_profile.compact_before_prompt = false;
+    }
 
     let tools_executor_snapshot = match &tools_executor {
         Some(r) => Some((*r.read().await).clone()),
@@ -4376,7 +4470,7 @@ pub(crate) async fn run_message_via_llm(
         episodic_limit: memory_profile.episodic_limit,
         facts_limit: memory_profile.facts_limit,
         filter_by_session: !turns_empty,
-        suggest_project: memory_profile.allow_project_recall && message_suggests_project(&message),
+        suggest_project: memory_profile.allow_project_recall && message_suggests_project(clean_message),
         is_first_message: turns_empty && memory_profile.allow_identity_lookup,
         expand_by_graph: memory_profile.expand_by_graph,
         user_identity_prefix: if user_identity_prefix.is_empty() || !memory_profile.allow_identity_lookup {
@@ -4479,6 +4573,22 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
+    let transport_reminder: &str = if intent_flags.transport {
+        // Always inject a transport reminder so the model cannot mistake a travel question
+        // for a file-creation or project task (e.g. "Quel est le chemin complet du fichier").
+        // Use the full reminder when web_search is available; use the no-search fallback otherwise.
+        let has_web_search = tools_executor_snapshot
+            .as_ref()
+            .map(|e| e.policy.can_use_tool("web_search"))
+            .unwrap_or(false);
+        if has_web_search {
+            TRANSPORT_REMINDER
+        } else {
+            TRANSPORT_REMINDER_NO_SEARCH
+        }
+    } else {
+        ""
+    };
     let social_feed_reminder = if intent_flags.social_feed_fetch
         && tools_executor_snapshot.as_ref().map_or(false, |e| {
             e.policy.can_use_tool("web_search") || e.policy.can_use_tool("browser")
@@ -4517,16 +4627,18 @@ pub(crate) async fn run_message_via_llm(
     let user_message = if !device_camera_reminder.is_empty() {
         format!(
             "[Répondre par: TOOL: device_discover local_media puis TOOL: device_invoke local_media camera capture. Ne pas utiliser ask_user.]\n\n{}",
-            message
+            clean_message
         )
     } else {
-        message.clone()
+        clean_message.to_string()
     };
     let mut current_prompt = if user_prefix.trim().is_empty() {
         format!(
-            "{}{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}{}{}User:\n{}",
+            guardrail_reminder_block,
             write_reminder,
             web_search_reminder,
+            transport_reminder,
             social_feed_reminder,
             device_camera_reminder,
             image_generation_reminder,
@@ -4535,10 +4647,12 @@ pub(crate) async fn run_message_via_llm(
         )
     } else {
         format!(
-            "{}{}{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}{}{}{}User:\n{}",
             user_prefix.trim_end(),
+            guardrail_reminder_block,
             write_reminder,
             web_search_reminder,
+            transport_reminder,
             social_feed_reminder,
             device_camera_reminder,
             image_generation_reminder,
@@ -4679,6 +4793,13 @@ pub(crate) async fn run_message_via_llm(
             } else {
                 None
             },
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repeat_penalty: None,
+            num_ctx: None,
+            num_gpu: None,
         };
         // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
         // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
@@ -5633,9 +5754,12 @@ pub(crate) async fn run_message_via_llm(
     }
 
     // Persist this exchange in short-term memory (spec 06)
-    if !is_small_talk_fast_lane {
+    // Skip orchestrated task messages ([Task]\n prefix): they are internal planner artefacts,
+    // not real user/assistant turns. Storing them pollutes future context with unrelated content.
+    if !is_small_talk_fast_lane && !is_orchestrated_task_msg {
         if let Some(ref st) = short_term {
-            st.append(&session_id, "user", message.clone()).await;
+            // Store the clean user message (without any guardrail prefix) so history is human-readable.
+            st.append(&session_id, "user", clean_message.to_string()).await;
             st.append(&session_id, "assistant", reply_text.clone()).await;
         }
     }
@@ -5737,6 +5861,13 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                 preferred_task_type: Some("system".to_string()),
                 system_prompt: None,
                 image_data_urls: None,
+                top_p: None,
+                top_k: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                repeat_penalty: None,
+                num_ctx: None,
+                num_gpu: None,
             };
             let mut to_promote: Vec<(String, String)> = Vec::new();
             let mut agent_updates: Vec<(String, String)> = Vec::new();
@@ -5868,6 +5999,10 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     if let Some(reg) = &browser_registry {
         crate::browser::close_task(reg, task_id).await;
     }
+    // Release per-task workspace memory immediately — no longer needed once the task finishes.
+    if let Some(ws) = &workspace_store {
+        ws.write().await.remove(&task_id);
+    }
 
     let final_event_type = if is_paused {
         EventType::TaskPaused
@@ -5907,10 +6042,47 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             .flatten()
             .map(|t| t.parent_task_id.is_none())
             .unwrap_or(true);
-        if is_root_task && !is_small_talk_fast_lane {
+        if is_root_task && !is_small_talk_fast_lane && !is_orchestrated_task_msg {
             if let Ok(st) = crate::session_state::merge(data_dir_sess, &session_id, |s| {
                 let fact = reply_text.chars().take(240).collect::<String>();
-                if !fact.trim().is_empty() {
+                // Skip storing agent confusion/redirects as facts — they poison future context.
+                let fact_lower = fact.to_lowercase();
+                let is_confused_redirect = fact_lower.contains("chemin complet")
+                    || fact_lower.contains("quel chemin")
+                    || fact_lower.contains("pouvez-vous me préciser")
+                    || fact_lower.contains("pouvez-vous préciser")
+                    || fact_lower.contains("plan du projet")
+                    || fact_lower.contains("quel texte voulez")
+                    || (fact_lower.contains("fichier") && fact_lower.contains("chemin") && fact_lower.ends_with('?'))
+                    || (fact_lower.contains("dossier") && fact_lower.contains("préciser"))
+                    // Generic LLM "here is…" answers are one-off responses, not session facts.
+                    // Storing them causes context contamination on future unrelated requests.
+                    || fact_lower.starts_with("voici ")
+                    || fact_lower.starts_with("here is ")
+                    || fact_lower.starts_with("here's ")
+                    || fact_lower.starts_with("voilà ")
+                    || fact_lower.contains("```")
+                    || fact_lower.contains("## ")
+                    || fact_lower.contains("| étape ")
+                    || fact_lower.contains("| step ")
+                    || fact_lower.contains("souhaitez-vous")
+                    || fact.starts_with("[Task]\n")
+                    // Confused assistant responses: clarifying questions, enthusiastic capability
+                    // listings, or structured documents that are not user-relevant session facts.
+                    || fact_lower.starts_with("could you ")
+                    || fact_lower.starts_with("sure! ")
+                    || fact_lower.starts_with("sure, ")
+                    || fact_lower.starts_with("bien sûr !")
+                    || fact_lower.starts_with("bien sur !")
+                    || fact_lower.starts_with("bien sûr,")
+                    || fact_lower.starts_with("bien sur,")
+                    || fact_lower.starts_with("vous pouvez me ")
+                    || fact_lower.starts_with("vous pouvez m'")
+                    || fact_lower.starts_with("certainly! ")
+                    || fact_lower.starts_with("certainly, ")
+                    || fact_lower.starts_with("of course! ")
+                    || fact_lower.starts_with("of course, ");
+                if !fact.trim().is_empty() && !is_confused_redirect {
                     s.facts.push(fact);
                 }
             }) {
@@ -7485,6 +7657,13 @@ pub async fn handle_api(
             preferred_task_type: None,
             system_prompt: None,
             image_data_urls: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repeat_penalty: None,
+            num_ctx: None,
+            num_gpu: None,
         };
         match llm_router.complete(&req).await {
             Ok(resp) => {
@@ -7850,6 +8029,13 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
             preferred_task_type: None,
             system_prompt: None,
             image_data_urls: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repeat_penalty: None,
+            num_ctx: None,
+            num_gpu: None,
         };
         let advice_timeout = std::time::Duration::from_secs(120);
         match tokio::time::timeout(advice_timeout, llm_router.complete(&req)).await {

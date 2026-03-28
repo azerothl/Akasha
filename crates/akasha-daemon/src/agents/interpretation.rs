@@ -51,6 +51,19 @@ pub fn interpret_message(message: &str) -> StructuredInterpretation {
         out.intent_slug = out.intent_slug.or(Some("file_save".to_string()));
     }
 
+    // transport: train, bus, metro, flight schedules or routes
+    if lower.contains("train") || lower.contains("tgv") || lower.contains("ter ")
+        || lower.contains("sncf") || lower.contains("gare ")
+        || lower.contains("rer ") || lower.contains("transilien")
+        || lower.contains("métro") || lower.contains("metro ")
+        || lower.contains("tramway") || lower.contains("tram ")
+        || lower.contains("horaires de") || lower.contains("horaires du")
+        || lower.contains("aéroport") || lower.contains("aeroport") || lower.contains("airport")
+        || lower.contains("vol ") || lower.contains("itinéraire") || lower.contains("itineraire")
+    {
+        out.intent_slug = out.intent_slug.or(Some("transport".to_string()));
+    }
+
     out
 }
 

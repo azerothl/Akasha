@@ -9,5 +9,16 @@
 {
 "path": "../Akasha_skills"
 }
-]
+],
+"settings": {
+    "chat.tools.terminal.autoApprove": {
+        "cargo check": true,
+        "Push-Location": true,
+        "touch": true,
+        "Pop-Location": true,
+        "Get-Command": true,
+        "cargo build": true,
+        "Tee-Object": true
+    }
+}
 }

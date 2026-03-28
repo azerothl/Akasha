@@ -227,8 +227,29 @@ User message:\n{}",
             preferred_task_type: Some("system".to_string()),
             system_prompt: None,
             image_data_urls: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repeat_penalty: None,
+            num_ctx: None,
+            num_gpu: None,
         };
         let timeout = env_duration_ms("AKASHA_SELECTOR_TIMEOUT_MS", 2_000);
+        // Ollama needs extra time to load the model on first call (cold start can take 30-90s).
+        // Use is_ollama_registered() rather than is_ollama_primary("system") because users
+        // typically configure Ollama for conversation/orchestrator but not the "system" task type.
+        // If Ollama is registered at all, assume it may be called and use the extended budget.
+        let timeout = if self.llm_router.is_ollama_registered() {
+            let ollama_timeout = env_duration_ms("AKASHA_SELECTOR_TIMEOUT_MS_OLLAMA", 90_000);
+            tracing::debug!(
+                timeout_ms = ollama_timeout.as_millis() as u64,
+                "selector: Ollama registered, using extended timeout"
+            );
+            ollama_timeout
+        } else {
+            timeout
+        };
         match tokio::time::timeout(timeout, self.llm_router.complete(&req)).await {
             Ok(Ok(resp)) => SelectorRunResult {
                 decision: parse_selector_decision(resp.text.trim()),
@@ -323,140 +344,163 @@ User message:\n{}",
             .with_correlation(task_id),
         );
 
-        // Run the LLM selector (up to 8 s) after the task is safely persisted.
-        let skip_selector_for_recall = forward_to_orchestrator && is_session_recall_message(message);
-        let selector_result = if forward_to_orchestrator && !skip_selector_for_recall {
-            emit_timeline_for_task(&self.bus, Some(store_path), task_id, "selector_start", None);
-            self.system_selector_decision(message).await
-        } else {
-            SelectorRunResult {
-                decision: None,
-                enabled: false,
-                timed_out: false,
-                elapsed_ms: 0,
-            }
-        };
-        if forward_to_orchestrator && !skip_selector_for_recall {
-            emit_timeline_for_task(
-                &self.bus,
-                Some(store_path),
-                task_id,
-                "selector_end",
-                Some(serde_json::json!({
-                    "duration_ms": selector_result.elapsed_ms,
-                    "selector_enabled": selector_result.enabled,
-                    "timed_out": selector_result.timed_out,
-                    "decision_found": selector_result.decision.is_some(),
-                })),
-            );
-            tracing::info!(
-                task_id = %task_id,
-                selector_ms = selector_result.elapsed_ms,
-                selector_timed_out = selector_result.timed_out,
-                selector_used = selector_result.decision.is_some(),
-                "selector finished"
-            );
-        }
+        // Selector + dispatch run in a background task so the HTTP response (task_id ack) can
+        // be returned immediately, well within Tauri / HTTP client timeouts.
+        // With Ollama the selector alone can take 30-90 s for model cold-start; blocking the
+        // HTTP handler for that long causes "operation timed out" errors in the frontend even
+        // though the task actually completes correctly in the background.
+        let agent_clone = self.clone();
+        let message_owned = message.to_string();
+        let session_id_owned = session_id.to_string();
+        let store_path_buf = store_path.to_path_buf();
+        let preliminary_agent_str = preliminary_agent.to_string();
+        tokio::spawn(async move {
+            let store_path = store_path_buf.as_path();
+            let message = message_owned.as_str();
+            let session_id = session_id_owned.as_str();
+            let preliminary_agent = preliminary_agent_str.as_str();
 
-        let selector_decision = selector_result.decision;
-
-        let selector_direct = selector_decision
-            .as_ref()
-            .map(|d| d.answer_mode == SelectorAnswerMode::Direct)
-            .unwrap_or(false);
-        let use_direct = forward_to_orchestrator
-            && (selector_direct || execution_mode == Some(ExecutionMode::Direct))
-            && self.direct_conversation_tx.is_some();
-        let preferred_task_type = selector_decision
-            .as_ref()
-            .and_then(|d| d.task_type.clone());
-        let preferred_task_type_event = preferred_task_type.clone();
-        let selector_used = selector_decision.is_some();
-        let selector_mode = selector_decision.as_ref().map(|d| match d.answer_mode {
-            SelectorAnswerMode::Direct => "direct",
-            SelectorAnswerMode::Delegate => "delegate",
-        });
-        let selector_target_agent = selector_decision.as_ref().and_then(|d| d.target_agent.clone());
-        let selector_reason = selector_decision.as_ref().and_then(|d| d.reason.clone());
-
-        let assigned_agent = if !forward_to_orchestrator {
-            "llm".to_string()
-        } else if use_direct {
-            "conversation".to_string()
-        } else {
-            "orchestrator".to_string()
-        };
-
-        // Update the assigned_agent if the selector changed it from our preliminary value.
-        if assigned_agent != preliminary_agent {
-            match TaskStore::open(store_path) {
-                Ok(store) => {
-                    if let Err(e) = store.update_assigned_agent(task_id, &assigned_agent) {
-                        tracing::warn!(task_id = %task_id, assigned_agent = %assigned_agent, err = %e, "failed to update assigned_agent after selector");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(task_id = %task_id, err = %e, "failed to open store to update assigned_agent after selector");
-                }
-            }
-        }
-
-        let _ = self.bus.send(
-            EventEnvelope::new(
-                EventType::TaskCreated,
-                Some(serde_json::json!({
-                    "task_id": task_id.to_string(),
-                    "parent_task_id": null,
-                    "assigned_agent": assigned_agent,
-                    "execution_mode": execution_mode.map(|e| e.as_str()),
-                    "selector_used": selector_used,
-                    "selector_mode": selector_mode,
-                    "selector_task_type": preferred_task_type_event,
-                    "selector_target_agent": selector_target_agent,
-                    "selector_reason": selector_reason,
-                    "fallback_used": !selector_used
-                })),
-            )
-            .with_correlation(task_id),
-        );
-
-        if forward_to_orchestrator {
-            if use_direct {
-                let tx = self.direct_conversation_tx.as_ref().unwrap().clone();
-                let task_msg = OrchestratorTask {
-                    task_id,
-                    message: message.to_string(),
-                    session_id: session_id.to_string(),
-                    image_data_urls,
-                    execution_mode: None,
-                    preferred_task_type: None,
-                };
-                if let Err(e) = tx.try_send(task_msg) {
-                    match e {
-                        mpsc::error::TrySendError::Full(t) => {
-                            tokio::spawn(async move {
-                                let _ = tx.send(t).await;
-                            });
-                        }
-                        mpsc::error::TrySendError::Closed(_) => {
-                            tracing::error!(task_id = %task_id, "direct conversation channel closed; task dropped");
-                        }
-                    }
-                }
+            // Run the LLM selector after the task is safely persisted.
+            let skip_selector_for_recall = forward_to_orchestrator && is_session_recall_message(message);
+            let selector_result = if forward_to_orchestrator && !skip_selector_for_recall {
+                emit_timeline_for_task(&agent_clone.bus, Some(store_path), task_id, "selector_start", None);
+                agent_clone.system_selector_decision(message).await
             } else {
-                self.orchestrator.send(
-                    OrchestratorTask {
-                        task_id,
-                        message: message.to_string(),
-                        session_id: session_id.to_string(),
-                        image_data_urls,
-                        execution_mode,
-                        preferred_task_type,
-                    },
-                    priority,
+                SelectorRunResult {
+                    decision: None,
+                    enabled: false,
+                    timed_out: false,
+                    elapsed_ms: 0,
+                }
+            };
+            if forward_to_orchestrator && !skip_selector_for_recall {
+                emit_timeline_for_task(
+                    &agent_clone.bus,
+                    Some(store_path),
+                    task_id,
+                    "selector_end",
+                    Some(serde_json::json!({
+                        "duration_ms": selector_result.elapsed_ms,
+                        "selector_enabled": selector_result.enabled,
+                        "timed_out": selector_result.timed_out,
+                        "decision_found": selector_result.decision.is_some(),
+                    })),
+                );
+                tracing::info!(
+                    task_id = %task_id,
+                    selector_ms = selector_result.elapsed_ms,
+                    selector_timed_out = selector_result.timed_out,
+                    selector_used = selector_result.decision.is_some(),
+                    "selector finished"
                 );
             }
-        }
+
+            let selector_decision = selector_result.decision;
+
+            let selector_direct = selector_decision
+                .as_ref()
+                .map(|d| d.answer_mode == SelectorAnswerMode::Direct)
+                .unwrap_or(false);
+            let use_direct = forward_to_orchestrator
+                && (selector_direct || execution_mode == Some(ExecutionMode::Direct))
+                && agent_clone.direct_conversation_tx.is_some();
+            let preferred_task_type = selector_decision
+                .as_ref()
+                .and_then(|d| d.task_type.clone());
+            let preferred_task_type_event = preferred_task_type.clone();
+            let selector_used = selector_decision.is_some();
+            let selector_mode = selector_decision.as_ref().map(|d| match d.answer_mode {
+                SelectorAnswerMode::Direct => "direct",
+                SelectorAnswerMode::Delegate => "delegate",
+            });
+            let selector_target_agent = selector_decision.as_ref().and_then(|d| d.target_agent.clone());
+            let selector_reason = selector_decision.as_ref().and_then(|d| d.reason.clone());
+
+            let assigned_agent = if !forward_to_orchestrator {
+                "llm".to_string()
+            } else if use_direct {
+                "conversation".to_string()
+            } else {
+                "orchestrator".to_string()
+            };
+
+            // Update the assigned_agent if the selector changed it from our preliminary value.
+            if assigned_agent != preliminary_agent {
+                match TaskStore::open(store_path) {
+                    Ok(store) => {
+                        if let Err(e) = store.update_assigned_agent(task_id, &assigned_agent) {
+                            tracing::warn!(task_id = %task_id, assigned_agent = %assigned_agent, err = %e, "failed to update assigned_agent after selector");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(task_id = %task_id, err = %e, "failed to open store to update assigned_agent after selector");
+                    }
+                }
+            }
+
+            let _ = agent_clone.bus.send(
+                EventEnvelope::new(
+                    EventType::TaskCreated,
+                    Some(serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "parent_task_id": null,
+                        "assigned_agent": assigned_agent,
+                        "execution_mode": execution_mode.map(|e| e.as_str()),
+                        "selector_used": selector_used,
+                        "selector_mode": selector_mode,
+                        "selector_task_type": preferred_task_type_event,
+                        "selector_target_agent": selector_target_agent,
+                        "selector_reason": selector_reason,
+                        "fallback_used": !selector_used
+                    })),
+                )
+                .with_correlation(task_id),
+            );
+
+            if forward_to_orchestrator {
+                if use_direct {
+                    let tx = agent_clone.direct_conversation_tx.as_ref().unwrap().clone();
+                    let guardrail_prefix = if selector_result.timed_out {
+                        "[Guardrail: the routing selector timed out. Do NOT write any files unless the user explicitly mentioned a file path or asked to save something. For external information (schedules, weather, news, timetables), use TOOL: web_search first. Reformulate the user's intent carefully before taking any action.]\n\n"
+                    } else {
+                        ""
+                    };
+                    let task_msg = OrchestratorTask {
+                        task_id,
+                        message: format!("{}{}", guardrail_prefix, message),
+                        session_id: session_id.to_string(),
+                        image_data_urls,
+                        execution_mode: None,
+                        preferred_task_type: None,
+                    };
+                    if let Err(e) = tx.try_send(task_msg) {
+                        match e {
+                            mpsc::error::TrySendError::Full(t) => {
+                                tokio::spawn(async move {
+                                    let _ = tx.send(t).await;
+                                });
+                            }
+                            mpsc::error::TrySendError::Closed(_) => {
+                                tracing::error!(task_id = %task_id, "direct conversation channel closed; task dropped");
+                            }
+                        }
+                    }
+                } else {
+                    agent_clone.orchestrator.send(
+                        OrchestratorTask {
+                            task_id,
+                            message: message.to_string(),
+                            session_id: session_id.to_string(),
+                            image_data_urls,
+                            execution_mode,
+                            preferred_task_type,
+                        },
+                        priority,
+                    );
+                }
+            }
+        });
+
         Ok(task_id)
     }
 

@@ -2986,6 +2986,82 @@ pre,
   background: color-mix(in srgb, var(--akasha-bg) 75%, var(--akasha-bg-surface));
 }
 
+/* Model metadata display */
+.event-model-metadata {
+  margin: 0.7rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.metadata-label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--akasha-accent);
+  margin-bottom: 0.3rem;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.event-model-thinking {
+  padding: 0.65rem;
+  border-left: 3px solid rgba(139, 92, 246, 0.6);
+  background: color-mix(in srgb, rgba(139, 92, 246, 0.05), var(--akasha-bg-surface));
+  border-radius: 8px;
+}
+
+.thinking-content {
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--akasha-text-muted);
+  font-style: italic;
+}
+
+.event-model-response {
+  padding: 0.65rem;
+  border-left: 3px solid rgba(34, 197, 94, 0.6);
+  background: color-mix(in srgb, rgba(34, 197, 94, 0.05), var(--akasha-bg-surface));
+  border-radius: 8px;
+}
+
+.response-content {
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--akasha-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.event-model-metrics {
+  padding: 0.65rem;
+  border-left: 3px solid rgba(96, 165, 250, 0.6);
+  background: color-mix(in srgb, rgba(96, 165, 250, 0.05), var(--akasha-bg-surface));
+  border-radius: 8px;
+}
+
+.metrics-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.5rem 1rem;
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.metrics-list dt {
+  font-weight: 600;
+  color: var(--akasha-text-muted);
+  word-break: break-word;
+}
+
+.metrics-list dd {
+  margin: 0;
+  color: var(--akasha-text);
+  font-family: "Courier New", monospace;
+  font-size: 0.78rem;
+  text-align: right;
+}
+
 @media (max-width: 900px) {
   .panel-hero,
   .view-header {
@@ -3235,10 +3311,52 @@ pre,
   overflow: hidden;
 }
 
-.task-panel-events-body .activity-events-list {
+.task-panel-events-scroll {
   flex: 1 1 0;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 0.2rem;
+}
+
+.task-panel-events-scroll .activity-events-list {
+  flex: 0 0 auto;
+  min-height: auto;
+  overflow: visible;
+}
+
+.task-events-controls {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 0.5rem;
+  flex-shrink: 0;
+}
+
+.task-events-debug-level-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.82rem;
+  color: var(--akasha-text-muted);
+}
+
+.task-events-debug-level-label {
+  white-space: nowrap;
+}
+
+.task-events-debug-level-select {
+  min-width: 8rem;
+  padding: 0.32rem 0.45rem;
+  font-size: 0.82rem;
+  border: 1px solid var(--akasha-border);
+  border-radius: 6px;
+  background: var(--akasha-bg-elevated);
+  color: var(--akasha-text);
+}
+
+.task-events-debug-level-select:focus-visible {
+  outline: 2px solid var(--akasha-accent);
+  outline-offset: 2px;
 }
 
 .activity-tasks-block .activity-task-list {

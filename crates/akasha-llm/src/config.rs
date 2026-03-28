@@ -57,6 +57,58 @@ pub struct RouteEntry {
     pub config: Option<serde_json::Value>,
 }
 
+impl RouteEntry {
+    /// Extract model config from serde_json::Value and apply to CompletionRequest.
+    /// Supports: temperature, top_p, top_k, frequency_penalty, presence_penalty, repeat_penalty, num_ctx, num_gpu, max_tokens.
+    pub fn apply_config_to_request(&self, request: &mut crate::provider::CompletionRequest) {
+        if let Some(ref config) = self.config {
+            // Accept both YAML styles:
+            // 1) config: { max_tokens: 40960, temperature: 0.7 }
+            // 2) config: [ { max_tokens: 40960 }, { temperature: 0.7 } ]
+            // The second style is not ideal, but we support it for backward compatibility.
+            let get_value = |key: &str| -> Option<&serde_json::Value> {
+                match config {
+                    serde_json::Value::Object(map) => map.get(key),
+                    serde_json::Value::Array(arr) => arr.iter().find_map(|item| item.get(key)),
+                    _ => None,
+                }
+            };
+
+            if let Some(temp) = get_value("temperature").and_then(|v| v.as_f64()) {
+                request.temperature = Some(temp as f32);
+            }
+            if let Some(tp) = get_value("top_p").and_then(|v| v.as_f64()) {
+                request.top_p = Some(tp as f32);
+            }
+            if let Some(tk) = get_value("top_k").and_then(|v| v.as_u64()) {
+                request.top_k = Some(tk as u32);
+            }
+            if let Some(fp) = get_value("frequency_penalty").and_then(|v| v.as_f64()) {
+                request.frequency_penalty = Some(fp as f32);
+            }
+            if let Some(pp) = get_value("presence_penalty").and_then(|v| v.as_f64()) {
+                request.presence_penalty = Some(pp as f32);
+            }
+            if let Some(rp) = get_value("repeat_penalty").and_then(|v| v.as_f64()) {
+                request.repeat_penalty = Some(rp as f32);
+            }
+            if let Some(nc) = get_value("num_ctx").and_then(|v| v.as_u64()) {
+                request.num_ctx = Some(nc as u32);
+            }
+            if let Some(ng) = get_value("num_gpu").and_then(|v| v.as_u64()) {
+                request.num_gpu = Some(ng as u32);
+            }
+            // Accept both max_tokens (preferred) and max_token (legacy typo).
+            if let Some(mt) = get_value("max_tokens")
+                .and_then(|v| v.as_u64())
+                .or_else(|| get_value("max_token").and_then(|v| v.as_u64()))
+            {
+                request.max_tokens = Some(mt as u32);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteConstraints {
     pub max_cost_per_request: Option<f64>,

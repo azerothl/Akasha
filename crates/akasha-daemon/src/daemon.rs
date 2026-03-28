@@ -274,8 +274,11 @@ impl Daemon {
         }
         let llm_router = Arc::new(llm_router);
 
-        // Preload embedded model in background so first user request is fast (avoids 5–15 min load on first use)
-        if llm_router.embedded_available() {
+        // Preload embedded model only when explicitly opted in via AKASHA_EMBEDDED_PRELOAD=1.
+        // Default is OFF: loading the model at startup (~1-2 GB) wastes RAM when an external
+        // LLM provider (Ollama, OpenAI, etc.) is configured. The model still loads lazily on
+        // first use if needed. Set AKASHA_EMBEDDED_PRELOAD=1 in degraded/offline deployments.
+        if llm_router.embedded_available() && std::env::var("AKASHA_EMBEDDED_PRELOAD").as_deref() == Ok("1") {
             let router_preload = llm_router.clone();
             tokio::task::spawn_blocking(move || {
                 if let Err(e) = router_preload.embedded_preload() {
@@ -284,6 +287,8 @@ impl Daemon {
                     info!("Embedded model preloaded and ready");
                 }
             });
+        } else if llm_router.embedded_available() {
+            info!("Embedded model available but not preloaded (set AKASHA_EMBEDDED_PRELOAD=1 to preload)");
         }
 
         // Phase 8: RAG pack (spec + runbooks) for diagnostic advice
@@ -784,6 +789,43 @@ impl Daemon {
                 let persistence_tx = Some(event_persistence_tx);
                 async move {
                     crate::agents::run_events_subscriber(bus, events, persistence_tx).await;
+                }
+            });
+
+            // Background cache eviction: purge ProgressCache and EventsCache entries for
+            // finished tasks every 5 minutes to prevent unbounded HashMap growth.
+            tokio::spawn({
+                let progress = progress.clone();
+                let events = events.clone();
+                let store_path = db_path.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+                    loop {
+                        interval.tick().await;
+                        let task_ids: Vec<uuid::Uuid> = progress.read().await.keys().copied().collect();
+                        if task_ids.is_empty() {
+                            continue;
+                        }
+                        let store = match akasha_store::TaskStore::open(store_path.as_path()) {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        };
+                        let mut p = progress.write().await;
+                        let mut e = events.write().await;
+                        for id in task_ids {
+                            if let Ok(Some(task)) = store.get(id) {
+                                if matches!(
+                                    task.status,
+                                    akasha_store::TaskStatus::Completed
+                                    | akasha_store::TaskStatus::Failed
+                                    | akasha_store::TaskStatus::Cancelled
+                                ) {
+                                    p.remove(&id);
+                                    e.remove(&id);
+                                }
+                            }
+                        }
+                    }
                 }
             });
 

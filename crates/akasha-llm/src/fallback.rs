@@ -56,7 +56,10 @@ impl FallbackEngine {
             // which would block the async runtime and cause "response ended prematurely".
             for attempt in 0..self.max_retries {
                 let start = Instant::now();
-                match provider.complete(request, self.timeout_per_call, Some(&entry.model)).await {
+                // Clone request and apply model-specific config from routing entry.
+                let mut request_with_config = request.clone();
+                entry.apply_config_to_request(&mut request_with_config);
+                match provider.complete(&request_with_config, self.timeout_per_call, Some(&entry.model)).await {
                     Ok(resp) => {
                         // Treat empty/whitespace-only responses as failure so we can retry/fallback.
                         // This happens in practice when a model is still loading or returns an empty completion.
@@ -79,6 +82,50 @@ impl FallbackEngine {
                             }
                             // Give next provider in chain a chance.
                             break;
+                        }
+
+                        // Log detailed response metadata for performance analysis and debugging
+                        {
+                            let max_tokens_used = request_with_config.max_tokens;
+                            let thinking_len = resp.thinking.as_ref().map(|t| t.len()).unwrap_or(0);
+                            let text_len = resp.text.len();
+                            let is_truncated = resp.done_reason.as_deref() == Some("length");
+                            let eval_count = resp.eval_count.unwrap_or(0);
+                            
+                            if is_truncated {
+                                tracing::error!(
+                                    provider = %entry.provider,
+                                    model = %entry.model,
+                                    max_tokens = ?max_tokens_used,
+                                    done_reason = %resp.done_reason.as_deref().unwrap_or("N/A"),
+                                    text_length = text_len,
+                                    thinking_length = thinking_len,
+                                    eval_count = eval_count,
+                                    "WARN: Model response TRUNCATED due to max_tokens limit. Response may be incomplete!"
+                                );
+                            } else if text_len < 50 {
+                                tracing::warn!(
+                                    provider = %entry.provider,
+                                    model = %entry.model,
+                                    max_tokens = ?max_tokens_used,
+                                    done_reason = %resp.done_reason.as_deref().unwrap_or("stop"),
+                                    text_length = text_len,
+                                    thinking_length = thinking_len,
+                                    eval_count = eval_count,
+                                    "Short response from model (may indicate issues)"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    provider = %entry.provider,
+                                    model = %entry.model,
+                                    max_tokens = ?max_tokens_used,
+                                    done_reason = %resp.done_reason.as_deref().unwrap_or("stop"),
+                                    text_length = text_len,
+                                    thinking_length = thinking_len,
+                                    eval_count = eval_count,
+                                    "Model response completed successfully"
+                                );
+                            }
                         }
 
                         let latency_ms = start.elapsed().as_millis() as u64;

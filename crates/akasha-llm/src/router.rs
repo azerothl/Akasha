@@ -147,6 +147,24 @@ impl LLMRouter {
             .and_then(|c| c.base_url.clone())
     }
 
+    /// Returns true when the primary provider for `task_type` is Ollama.
+    /// Used to inflate per-operation timeouts and account for Ollama model loading time.
+    pub fn is_ollama_primary(&self, task_type: &str) -> bool {
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_route(task_type)
+            .and_then(|c| c.primary.as_ref())
+            .map(|p| p.provider == "ollama")
+            .unwrap_or(false)
+    }
+
+    /// Returns true when Ollama is registered as a provider (regardless of which task types use it).
+    /// Used as a broadbrush signal that Ollama model cold-start latency must be accounted for.
+    pub fn is_ollama_registered(&self) -> bool {
+        self.providers.contains_key("ollama")
+    }
+
     /// Whether the embedded provider (akasha_embedded) is registered and available.
     pub fn embedded_available(&self) -> bool {
         self.providers
@@ -391,6 +409,13 @@ mod tests {
             preferred_task_type: Some("conversation".into()),
             system_prompt: None,
             image_data_urls: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repeat_penalty: None,
+            num_ctx: None,
+            num_gpu: None,
         };
         let response = router.complete(&request).await.expect("complete should succeed");
         assert_eq!(response.text, mock_text);
