@@ -430,7 +430,7 @@ function App() {
       const payload = event.payload;
       if (!payload || typeof payload !== "object") return null;
       const p = payload as Record<string, unknown>;
-      
+
       const thinking = typeof p.thinking === "string" ? p.thinking.trim() : null;
       const response = typeof p.response === "string" ? p.response.trim() : null;
       const model = typeof p.model === "string" ? p.model.trim() : null;
@@ -441,9 +441,9 @@ function App() {
       const loadDuration = typeof p.load_duration === "number" ? p.load_duration : null;
       const totalDuration = typeof p.total_duration === "number" ? p.total_duration : null;
       const doneReason = typeof p.done_reason === "string" ? p.done_reason.trim() : null;
-      
+
       if (!thinking && !response && !model && !evalCount) return null;
-      
+
       return {
         thinking,
         response,

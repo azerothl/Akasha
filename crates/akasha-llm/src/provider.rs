@@ -143,13 +143,13 @@ impl OllamaProvider {
             Some(s) if !s.is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
             _ => request.prompt.clone(),
         };
-        
+
         // Build options with all supported parameters (Ollama-compatible).
         let mut options = serde_json::json!({
             "num_predict": request.max_tokens.unwrap_or(4096),
             "temperature": request.temperature.unwrap_or(0.7),
         });
-        
+
         if let Some(top_p) = request.top_p {
             options["top_p"] = serde_json::json!(top_p);
         }
@@ -165,7 +165,7 @@ impl OllamaProvider {
         if let Some(num_gpu) = request.num_gpu {
             options["num_gpu"] = serde_json::json!(num_gpu);
         }
-        
+
         let body = serde_json::json!({
             "model": model,
             "prompt": prompt,
@@ -205,13 +205,13 @@ impl OllamaProvider {
             prompt_tokens: 0,
             completion_tokens: c,
         });
-        
+
         // Extract model metadata for debugging
         let thinking = json.get("thinking").and_then(|v| v.as_str()).map(String::from);
         let done_reason = json.get("done_reason").and_then(|v| v.as_str()).map(String::from);
         let eval_count = json.get("eval_count").and_then(|v| v.as_u64());
         let total_duration_ns = json.get("total_duration").and_then(|v| v.as_u64());
-        
+
         // Log if truncated (done_reason = "length")
         if done_reason.as_deref() == Some("length") {
             warn!(
@@ -222,7 +222,7 @@ impl OllamaProvider {
                 "Model response truncated due to max_tokens limit"
             );
         }
-        
+
         Ok(CompletionResponse {
             text,
             usage,
@@ -313,7 +313,7 @@ impl OpenAIProvider {
             ]),
             _ => serde_json::json!([{ "role": "user", "content": user_content }]),
         };
-        
+
         // Build request body with all supported OpenAI parameters.
         let mut body = serde_json::json!({
             "model": model,
@@ -321,7 +321,7 @@ impl OpenAIProvider {
             "max_tokens": request.max_tokens.unwrap_or(4096),
             "temperature": request.temperature.unwrap_or(0.7)
         });
-        
+
         if let Some(top_p) = request.top_p {
             body["top_p"] = serde_json::json!(top_p);
         }
@@ -331,7 +331,7 @@ impl OpenAIProvider {
         if let Some(pres_penalty) = request.presence_penalty {
             body["presence_penalty"] = serde_json::json!(pres_penalty);
         }
-        
+
         let resp = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
@@ -499,7 +499,7 @@ impl LLMProvider for OpenRouterProvider {
             ]),
             _ => serde_json::json!([{ "role": "user", "content": user_content }]),
         };
-        
+
         // Build request body with all supported OpenAI/OpenRouter parameters.
         let mut body = serde_json::json!({
             "model": model,
@@ -507,7 +507,7 @@ impl LLMProvider for OpenRouterProvider {
             "max_tokens": request.max_tokens.unwrap_or(4096),
             "temperature": request.temperature.unwrap_or(0.7)
         });
-        
+
         if let Some(top_p) = request.top_p {
             body["top_p"] = serde_json::json!(top_p);
         }
@@ -517,7 +517,7 @@ impl LLMProvider for OpenRouterProvider {
         if let Some(pres_penalty) = request.presence_penalty {
             body["presence_penalty"] = serde_json::json!(pres_penalty);
         }
-        
+
         let mut req = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
@@ -738,14 +738,14 @@ impl LLMProvider for AzureOpenAIProvider {
             ]),
             _ => serde_json::json!([{ "role": "user", "content": request.prompt }]),
         };
-        
+
         // Build request body with OpenAI-compatible parameters.
         let mut body = serde_json::json!({
             "messages": messages,
             "max_tokens": request.max_tokens.unwrap_or(1024),
             "temperature": request.temperature.unwrap_or(0.7)
         });
-        
+
         if let Some(top_p) = request.top_p {
             body["top_p"] = serde_json::json!(top_p);
         }
@@ -755,7 +755,7 @@ impl LLMProvider for AzureOpenAIProvider {
         if let Some(pres_penalty) = request.presence_penalty {
             body["presence_penalty"] = serde_json::json!(pres_penalty);
         }
-        
+
         let resp = client
             .post(&url)
             .header("api-key", &self.api_key)
@@ -848,20 +848,20 @@ impl LLMProvider for GoogleAIProvider {
             Some(s) if !s.trim().is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
             _ => request.prompt.clone(),
         };
-        
+
         // Build generation config with all supported parameters.
         let mut generation_config = serde_json::json!({
             "maxOutputTokens": request.max_tokens.unwrap_or(4096),
             "temperature": request.temperature.unwrap_or(0.7)
         });
-        
+
         if let Some(top_p) = request.top_p {
             generation_config["topP"] = serde_json::json!(top_p);
         }
         if let Some(top_k) = request.top_k {
             generation_config["topK"] = serde_json::json!(top_k);
         }
-        
+
         let body = serde_json::json!({
             "contents": [{ "parts": [{ "text": prompt }] }],
             "generationConfig": generation_config
@@ -963,7 +963,7 @@ impl BitNetProvider {
             ]),
             _ => serde_json::json!([{ "role": "user", "content": user_content }]),
         };
-        
+
         // Build request body with all supported OpenAI-compatible parameters.
         let mut body = serde_json::json!({
             "model": model,
@@ -972,7 +972,7 @@ impl BitNetProvider {
             "temperature": request.temperature.unwrap_or(0.7),
             "stream": false
         });
-        
+
         if let Some(top_p) = request.top_p {
             body["top_p"] = serde_json::json!(top_p);
         }
@@ -991,7 +991,7 @@ impl BitNetProvider {
         if let Some(num_ctx) = request.num_ctx {
             body["num_ctx"] = serde_json::json!(num_ctx);
         }
-        
+
         let resp = client
             .post(&url)
             .header("Content-Type", "application/json")

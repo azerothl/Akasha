@@ -91,7 +91,7 @@ impl FallbackEngine {
                             let text_len = resp.text.len();
                             let is_truncated = resp.done_reason.as_deref() == Some("length");
                             let eval_count = resp.eval_count.unwrap_or(0);
-                            
+
                             if is_truncated {
                                 tracing::error!(
                                     provider = %entry.provider,
