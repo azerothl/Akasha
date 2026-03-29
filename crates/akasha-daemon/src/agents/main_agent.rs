@@ -3,6 +3,8 @@
 use akasha_core::{EventEnvelope, EventType};
 use akasha_llm::CompletionRequest;
 use akasha_store::{Task, TaskStatus, TaskStore, TodoStatus};
+use crate::agents::{classify_execution_mode, EventBus, ExecutionMode};
+use crate::latency::{emit_timeline_for_task, env_duration_ms};
 use chrono::Utc;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,6 +17,7 @@ fn is_session_recall_message(message: &str) -> bool {
         .trim()
         .to_lowercase()
         .replace('’', "'")
+        .replace('\'', "'")
         .replace(['!', '?', '.', ',', ';', ':'], " ");
     if lower.is_empty() {
         return false;
@@ -37,9 +40,45 @@ fn is_session_recall_message(message: &str) -> bool {
     .iter()
     .any(|k| lower.contains(k))
 }
-use super::{classify_execution_mode, EventBus, ExecutionMode};
-use crate::latency::{emit_timeline_for_task, env_duration_ms};
 
+fn is_geolocation_request(message: &str) -> bool {
+    let lower = message.trim().to_lowercase();
+    let lower = lower
+        .replace('\u{2019}', "'")
+        .replace(['!', '?', '.', ',', ';', ':'], " ");
+    if lower.is_empty() {
+        return false;
+    }
+    [
+        "distance",
+        "distance entre",
+        "combien de km",
+        "how far",
+        "how many km",
+        "distance from",
+        "distance to",
+        "itineraire",
+        "itinéraire",
+        "route",
+        "trajet",
+        "chemin",
+        "direction",
+        "directions",
+        "navigate",
+        "geolocation",
+        "géolocalisation",
+        "localisation",
+        "location",
+        "coordinate",
+        "coordonnées",
+        "map",
+        "carte",
+        "gps",
+        "position",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+}
 /// Priority for the task queue: high-priority tasks are processed before normal/scheduled (Phase 4.1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TaskPriority {
@@ -207,13 +246,32 @@ impl MainAgent {
                 elapsed_ms: 0,
             };
         }
+
+        // Fast-path for geolocation/distance questions to avoid expensive selector round-trips.
+        if is_geolocation_request(message) {
+            tracing::debug!("selector: geolocation request detected; using direct conversation fast-path");
+            return SelectorRunResult {
+                decision: Some(SelectorDecision {
+                    answer_mode: SelectorAnswerMode::Direct,
+                    task_type: Some("conversation".to_string()),
+                    target_agent: None,
+                    reason: Some(
+                        "geolocation/distance/routing request detected; prefer maps_distance/maps_route or web_search"
+                            .to_string(),
+                    ),
+                }),
+                enabled: true,
+                timed_out: false,
+                elapsed_ms: 0,
+            };
+        }
+
         let started = Instant::now();
         let prompt = format!(
             "You are a strict routing selector for Akasha.\n\
 Return ONLY compact JSON with schema:\n\
 {{\"answer_mode\":\"direct|delegate\",\"task_type\":\"snake_case or empty\",\"target_agent\":\"optional\",\"reason\":\"short\"}}\n\
 Rules:\n\
-- answer_mode=direct when the request can be answered in one pass without decomposition/delegation.\n\
 - answer_mode=delegate for multi-step/project/planning/complex implementation requests.\n\
 - task_type must be one of: conversation, code_generation, creative_writing, scientific_analysis, data_analysis, system_diagnostic, system, orchestrator, image_generation.\n\
 - If unsure, use answer_mode=delegate and task_type=conversation.\n\

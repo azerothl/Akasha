@@ -923,6 +923,102 @@ struct MessageIntentFlags {
     github_with_vault: bool,
     /// User asks about transport schedules, routes, or travel info (train, bus, flight, etc.)
     transport: bool,
+    /// User asks for a geographic distance/route between two places.
+    geolocation_distance: bool,
+}
+
+fn active_intents_from_flags(flags: &MessageIntentFlags) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if flags.save_file {
+        out.push("save_file");
+    }
+    if flags.external_info {
+        out.push("external_info");
+    }
+    if flags.social_feed_fetch {
+        out.push("social_feed_fetch");
+    }
+    if flags.camera_or_mic {
+        out.push("camera_or_mic");
+    }
+    if flags.image_generation {
+        out.push("image_generation");
+    }
+    if flags.code_generation {
+        out.push("code_generation");
+    }
+    if flags.github_with_vault {
+        out.push("github_with_vault");
+    }
+    if flags.transport {
+        out.push("transport");
+    }
+    if flags.geolocation_distance {
+        out.push("geolocation_distance");
+    }
+    out
+}
+
+fn build_plugin_routing_reminders(
+    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
+    message: &str,
+    flags: &MessageIntentFlags,
+    tools_executor_snapshot: Option<&std::sync::Arc<akasha_tools::ToolExecutor>>,
+) -> (String, bool) {
+    let Some(registry) = plugin_registry else {
+        return (String::new(), false);
+    };
+    let intents = active_intents_from_flags(flags);
+    if intents.is_empty() {
+        return (String::new(), false);
+    }
+
+    let rules = registry.match_routing_rules(message, &intents, |tool_name| {
+        tools_executor_snapshot
+            .as_ref()
+            .map(|e| e.policy.can_use_tool(tool_name))
+            .unwrap_or(false)
+    });
+    if rules.is_empty() {
+        return (String::new(), false);
+    }
+
+    let matched_plugins: Vec<String> = rules.iter().map(|r| r.plugin_id.clone()).collect();
+    tracing::info!(
+        intents = ?intents,
+        matched_rules = rules.len(),
+        plugins = ?matched_plugins,
+        "Dynamic plugin routing rules matched"
+    );
+
+    let mut seen = std::collections::HashSet::new();
+    let mut lines = Vec::new();
+    let mut geolocation_handled = false;
+    for rule in rules.into_iter().take(4) {
+        if rule
+            .intent
+            .as_deref()
+            .is_some_and(|intent| intent.eq_ignore_ascii_case("geolocation_distance"))
+        {
+            geolocation_handled = true;
+        }
+        let instruction = rule.instruction.trim();
+        if instruction.is_empty() {
+            continue;
+        }
+        if seen.insert(instruction.to_string()) {
+            lines.push(format!("- {}", instruction));
+        }
+    }
+    if lines.is_empty() {
+        return (String::new(), geolocation_handled);
+    }
+
+    let block = format!(
+        "\n[Dynamic plugin routing rules — auto-loaded from installed plugin manifests]\n{}\n\n",
+        lines.join("\n")
+    );
+    (block, geolocation_handled)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1345,6 +1441,23 @@ fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
             "vol ", "aéroport", "aeroport", "airport", "terminal ",
             "itinéraire", "itineraire", "horaires de métro", "horaires du métro",
             "départ de ", "depart de ", "arrivée à ", "arrivee a ",
+        ]
+        .iter()
+        .any(|k| m.contains(k)),
+        geolocation_distance: [
+            "distance entre",
+            "distance between",
+            "distance from",
+            "distance to",
+            "combien de km",
+            "how far",
+            "itinéraire entre",
+            "itineraire entre",
+            "route entre",
+            "trajet entre",
+            "km entre",
+            "kilomètre",
+            "kilometre",
         ]
         .iter()
         .any(|k| m.contains(k)),
@@ -1883,6 +1996,11 @@ const TRANSPORT_REMINDER: &str = "\n[Reminder: the user is asking about transpor
 
 /// Transport reminder when web_search is not enabled: model cannot use the tool so we only anchor it to the domain.
 const TRANSPORT_REMINDER_NO_SEARCH: &str = "\n[Reminder: the user is asking about transport routes or travel (train, car, bus, etc.). Do NOT write any files, create HTML pages, or ask about project file paths — the user wants travel information only. Answer from your knowledge (e.g. compare train vs car for this route). If you cannot give accurate live schedules, say so clearly and suggest the relevant site (e.g. sncf.com, ratp.fr, transilien.com).  Do NOT ask about file paths or project details — this is a travel question.]\n\n";
+
+/// Generic distance reminder used when no plugin-specific routing rule matched.
+const GEO_DISTANCE_REMINDER_WITH_TOOLS: &str = "\n[Reminder: the user asks for a geographic distance/route between places. PRIORITY: use a relevant distance/route tool available in the current tools list. If location details are missing, use TOOL: web_search with a focused distance query. STRICTLY FORBIDDEN for this request: memory_store, project planning, code generation, file writes, and unrelated queries.]\n\n";
+
+const GEO_DISTANCE_REMINDER_NO_TOOL: &str = "\n[Reminder: the user asks for a geographic distance/route between places. No distance/search tool is available. Provide a concise best-effort estimate and clearly state uncertainty. Do NOT write files, ask for project paths, or perform unrelated tasks.]\n\n";
 
 /// X/Twitter/social feed fetches: do not use ask_user for unrelated onboarding; use tools first.
 const SOCIAL_FEED_REMINDER: &str = "\n[Reminder: SOCIAL / X / TWITTER — PRIORITY: The user wants posts, tweets, or timeline content from X (Twitter) or similar. Do NOT use TOOL: ask_user for generic greetings or unrelated menu choices — fulfill this request with tools. First TOOL: web_search <query> (e.g. site:x.com handle latest posts). If results are empty or insufficient, use TOOL: browser navigate <profile URL> then TOOL: browser snapshot (if browser is enabled in policy). Do not answer \"no context\" or \"blocked\" without having called web_search or browser.]\n\n";
@@ -4686,6 +4804,35 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
+    let (plugin_routing_reminder, plugin_handles_geo_distance) = build_plugin_routing_reminders(
+        plugin_registry.as_ref(),
+        clean_message,
+        &intent_flags,
+        tools_executor_snapshot.as_ref(),
+    );
+    let geolocation_distance_reminder: &str = if intent_flags.geolocation_distance && !plugin_handles_geo_distance {
+        let has_any_tool = tools_executor_snapshot
+            .as_ref()
+            .map(|e| {
+                e.policy.can_use_tool("web_search")
+                    || e.policy.can_use_tool("plugin.call")
+                    || e.policy.can_use_tool("maps_distance")
+                    || e.policy.can_use_tool("maps_route")
+            })
+            .unwrap_or(false);
+        tracing::info!(
+            task_id = %task_id,
+            has_any_tool,
+            "geolocation-distance intent detected; applying generic fallback guardrail"
+        );
+        if has_any_tool {
+            GEO_DISTANCE_REMINDER_WITH_TOOLS
+        } else {
+            GEO_DISTANCE_REMINDER_NO_TOOL
+        }
+    } else {
+        ""
+    };
     let social_feed_reminder = if intent_flags.social_feed_fetch
         && tools_executor_snapshot.as_ref().map_or(false, |e| {
             e.policy.can_use_tool("web_search") || e.policy.can_use_tool("browser")
@@ -4731,11 +4878,13 @@ pub(crate) async fn run_message_via_llm(
     };
     let mut current_prompt = if user_prefix.trim().is_empty() {
         format!(
-            "{}{}{}{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}{}{}{}{}User:\n{}",
             guardrail_reminder_block,
             write_reminder,
             web_search_reminder,
             transport_reminder,
+            geolocation_distance_reminder,
+            plugin_routing_reminder,
             social_feed_reminder,
             device_camera_reminder,
             image_generation_reminder,
@@ -4744,12 +4893,14 @@ pub(crate) async fn run_message_via_llm(
         )
     } else {
         format!(
-            "{}{}{}{}{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
             user_prefix.trim_end(),
             guardrail_reminder_block,
             write_reminder,
             web_search_reminder,
             transport_reminder,
+            geolocation_distance_reminder,
+            plugin_routing_reminder,
             social_feed_reminder,
             device_camera_reminder,
             image_generation_reminder,
@@ -7609,6 +7760,146 @@ pub async fn handle_api(
         let list = plugin_registry.list();
         let body = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
         return json_response("200 OK", &body);
+    }
+    // GET /api/plugins/routing_rules[?message=...] — debug dynamic plugin routing rules
+    // - Without message: returns all declared routing rules from loaded plugin manifests.
+    // - With message: also returns active intents and matched rules for this message.
+    if method == "GET"
+        && (path == "/api/plugins/routing_rules" || path.starts_with("/api/plugins/routing_rules?"))
+    {
+        let query = path.split('?').nth(1).unwrap_or("");
+        let message = query
+            .split('&')
+            .find(|p| p.starts_with("message="))
+            .and_then(|p| p.strip_prefix("message="))
+            .and_then(|raw| urlencoding::decode(raw).ok().map(|d| d.into_owned()));
+
+        let manifests = plugin_registry.manifests();
+        let declared_rules: Vec<serde_json::Value> = manifests
+            .iter()
+            .flat_map(|m| {
+                m.routing_rules.iter().map(|r| {
+                    serde_json::json!({
+                        "plugin_id": m.id,
+                        "intent": r.intent,
+                        "keywords": r.keywords,
+                        "preferred_tools": r.preferred_tools,
+                        "forbidden_tools": r.forbidden_tools,
+                        "instruction": r.instruction,
+                        "priority": r.priority,
+                    })
+                })
+            })
+            .collect();
+
+        let (active_intents, matched_rules) = if let Some(ref msg) = message {
+            let flags = compute_message_intent_flags(msg);
+            let intents = active_intents_from_flags(&flags);
+            let tools_executor_snapshot = if let Some(exec_lock) = _tools_executor {
+                Some(exec_lock.read().await.clone())
+            } else {
+                None
+            };
+            let matched = plugin_registry.match_routing_rules(msg, &intents, |tool_name| {
+                tools_executor_snapshot
+                    .as_ref()
+                    .map(|e| e.policy.can_use_tool(tool_name))
+                    .unwrap_or(true)
+            });
+            (intents, matched)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        let body = serde_json::json!({
+            "rules_count": declared_rules.len(),
+            "rules": declared_rules,
+            "message": message,
+            "active_intents": active_intents,
+            "matched_rules_count": matched_rules.len(),
+            "matched_rules": matched_rules,
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    // POST /api/plugins/routing_rules/match — debug dynamic plugin routing rules with JSON body
+    // Body: { "message": "...", "allowed_tools": ["tool_a", "tool_b"] (optional) }
+    if method == "POST" && path == "/api/plugins/routing_rules/match" {
+        let Some(raw_body) = body.as_deref() else {
+            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
+        };
+
+        let parsed: serde_json::Value = match serde_json::from_slice(raw_body) {
+            Ok(v) => v,
+            Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
+        };
+
+        let Some(message) = parsed
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return json_response("400 Bad Request", r#"{"error":"message_required"}"#);
+        };
+
+        let allowed_tools: Option<std::collections::HashSet<String>> = parsed
+            .get("allowed_tools")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            });
+
+        let manifests = plugin_registry.manifests();
+        let declared_rules: Vec<serde_json::Value> = manifests
+            .iter()
+            .flat_map(|m| {
+                m.routing_rules.iter().map(|r| {
+                    serde_json::json!({
+                        "plugin_id": m.id,
+                        "intent": r.intent,
+                        "keywords": r.keywords,
+                        "preferred_tools": r.preferred_tools,
+                        "forbidden_tools": r.forbidden_tools,
+                        "instruction": r.instruction,
+                        "priority": r.priority,
+                    })
+                })
+            })
+            .collect();
+
+        let flags = compute_message_intent_flags(message);
+        let intents = active_intents_from_flags(&flags);
+        let tools_executor_snapshot = if let Some(exec_lock) = _tools_executor {
+            Some(exec_lock.read().await.clone())
+        } else {
+            None
+        };
+        let matched_rules = plugin_registry.match_routing_rules(message, &intents, |tool_name| {
+            let policy_allowed = tools_executor_snapshot
+                .as_ref()
+                .map(|e| e.policy.can_use_tool(tool_name))
+                .unwrap_or(true);
+            let list_allowed = allowed_tools
+                .as_ref()
+                .map(|set| set.contains(tool_name))
+                .unwrap_or(true);
+            policy_allowed && list_allowed
+        });
+
+        let body = serde_json::json!({
+            "message": message,
+            "rules_count": declared_rules.len(),
+            "rules": declared_rules,
+            "active_intents": intents,
+            "allowed_tools": allowed_tools,
+            "matched_rules_count": matched_rules.len(),
+            "matched_rules": matched_rules,
+        });
+        return json_response("200 OK", &body.to_string());
     }
     if method == "POST" && path == "/api/plugins/reload" {
         plugin_registry.reload();

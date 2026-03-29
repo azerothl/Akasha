@@ -1,7 +1,7 @@
 //! Phase 5 — Plugin registry: load WASM from dir, list, call tool, reputation.
 
 use akasha_core::TrustStore;
-use akasha_plugin_api::{PluginManifest, PluginKind};
+use akasha_plugin_api::{PluginManifest, PluginKind, PluginRoutingRule};
 use akasha_plugin_host::WasmPlugin;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -25,6 +25,16 @@ pub struct PluginRegistry {
     plugins: std::sync::RwLock<HashMap<String, LoadedPlugin>>,
     reputation: Arc<ReputationStore>,
     trust_store: Option<Arc<TrustStore>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MatchedRoutingRule {
+    pub plugin_id: String,
+    pub intent: Option<String>,
+    pub preferred_tools: Vec<String>,
+    pub forbidden_tools: Vec<String>,
+    pub instruction: String,
+    pub priority: u32,
 }
 
 struct LoadedPlugin {
@@ -136,6 +146,78 @@ impl PluginRegistry {
             .collect()
     }
 
+    pub fn manifests(&self) -> Vec<PluginManifest> {
+        let guard = self.plugins.read().unwrap();
+        guard.values().map(|p| p.manifest.clone()).collect()
+    }
+
+    /// Match routing rules declared by installed plugins against user message + semantic intents.
+    pub fn match_routing_rules(
+        &self,
+        message: &str,
+        active_intents: &[&str],
+        can_use_tool: impl Fn(&str) -> bool,
+    ) -> Vec<MatchedRoutingRule> {
+        let lower = message.to_lowercase();
+        let guard = self.plugins.read().unwrap();
+        let mut out: Vec<MatchedRoutingRule> = Vec::new();
+
+        for (plugin_id, loaded) in guard.iter() {
+            if loaded.manifest.kind != PluginKind::Tool {
+                continue;
+            }
+            if loaded.manifest.routing_rules.is_empty() {
+                continue;
+            }
+
+            for rule in &loaded.manifest.routing_rules {
+                if !rule_matches(rule, &lower, active_intents) {
+                    continue;
+                }
+
+                if !rule.preferred_tools.is_empty()
+                    && !rule.preferred_tools.iter().any(|t| can_use_tool(t) || can_use_tool("plugin.call"))
+                {
+                    continue;
+                }
+
+                let instruction = if rule.instruction.trim().is_empty() {
+                    let preferred = if rule.preferred_tools.is_empty() {
+                        "".to_string()
+                    } else {
+                        format!(
+                            " Prefer TOOL: {}.",
+                            rule.preferred_tools.join(" or ")
+                        )
+                    };
+                    let forbidden = if rule.forbidden_tools.is_empty() {
+                        "".to_string()
+                    } else {
+                        format!(" Avoid tools: {}.", rule.forbidden_tools.join(", "))
+                    };
+                    format!(
+                        "[Plugin routing reminder from {}.{}{}]",
+                        plugin_id, preferred, forbidden
+                    )
+                } else {
+                    rule.instruction.clone()
+                };
+
+                out.push(MatchedRoutingRule {
+                    plugin_id: plugin_id.clone(),
+                    intent: rule.intent.clone(),
+                    preferred_tools: rule.preferred_tools.clone(),
+                    forbidden_tools: rule.forbidden_tools.clone(),
+                    instruction,
+                    priority: rule.priority,
+                });
+            }
+        }
+
+        out.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.plugin_id.cmp(&b.plugin_id)));
+        out
+    }
+
     /// Call a tool plugin by id. Updates reputation on success/failure/crash.
     pub fn call_tool(&self, plugin_id: &str, input: &str) -> Result<String, akasha_plugin_api::PluginError> {
         if self.reputation.is_disabled(plugin_id) {
@@ -158,5 +240,25 @@ impl PluginRegistry {
 
     pub fn reload(&self) {
         self.load_all();
+    }
+}
+
+fn rule_matches(rule: &PluginRoutingRule, message_lower: &str, active_intents: &[&str]) -> bool {
+    let intent_match = rule
+        .intent
+        .as_deref()
+        .map(|intent| active_intents.iter().any(|i| i.eq_ignore_ascii_case(intent)))
+        .unwrap_or(false);
+    let keyword_match = !rule.keywords.is_empty()
+        && rule
+            .keywords
+            .iter()
+            .filter(|k| !k.trim().is_empty())
+            .any(|k| message_lower.contains(&k.to_lowercase()));
+
+    if rule.intent.is_some() || !rule.keywords.is_empty() {
+        intent_match || keyword_match
+    } else {
+        false
     }
 }

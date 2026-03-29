@@ -4,6 +4,32 @@ use crate::PluginKind;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PluginRoutingRule {
+    /// Optional semantic intent key (e.g. "geolocation_distance", "transport").
+    #[serde(default)]
+    pub intent: Option<String>,
+    /// Optional keyword list (lower-cased match against user message).
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    /// Optional preferred tool names for this context.
+    #[serde(default)]
+    pub preferred_tools: Vec<String>,
+    /// Optional tool names to avoid in this context.
+    #[serde(default)]
+    pub forbidden_tools: Vec<String>,
+    /// Human-readable instruction injected into prompt when rule matches.
+    #[serde(default)]
+    pub instruction: String,
+    /// Lower means higher priority.
+    #[serde(default = "default_rule_priority")]
+    pub priority: u32,
+}
+
+fn default_rule_priority() -> u32 {
+    100
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
     pub id: String,
@@ -16,6 +42,9 @@ pub struct PluginManifest {
     pub permissions: Vec<String>,
     #[serde(default)]
     pub description: String,
+    /// Optional declarative prompt routing rules loaded automatically when the plugin is installed.
+    #[serde(default)]
+    pub routing_rules: Vec<PluginRoutingRule>,
 }
 
 impl PluginManifest {
