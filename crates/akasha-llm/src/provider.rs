@@ -56,6 +56,19 @@ fn normalized_thinking_level(level: Option<&str>) -> Option<&'static str> {
     }
 }
 
+fn ollama_think_enabled(level: Option<&str>) -> Option<bool> {
+    // Ollama currently exposes a boolean `think` switch (not a graded budget).
+    // We map levels conservatively to reduce runaway reasoning-only outputs:
+    // - off/low -> false
+    // - medium/high -> true
+    match normalized_thinking_level(level) {
+        Some("off") => Some(false),
+        Some("low") => Some(false),
+        Some("medium") | Some("high") => Some(true),
+        _ => None,
+    }
+}
+
 fn supports_openai_reasoning_effort(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
     m.starts_with("o1")
@@ -214,9 +227,9 @@ impl OllamaProvider {
             "options": options
         });
         let mut body = body;
-        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
-            // Ollama supports "think" for reasoning-capable models.
-            body["think"] = serde_json::json!(level != "off");
+        if let Some(enabled) = ollama_think_enabled(request.thinking_level.as_deref()) {
+            // Ollama supports `think` as a boolean toggle.
+            body["think"] = serde_json::json!(enabled);
         }
         let resp = client
             .post(&url)
@@ -1450,6 +1463,7 @@ mod tests {
             prompt: "Hi".into(),
             max_tokens: Some(10),
             temperature: Some(0.0),
+            thinking_level: None,
             preferred_task_type: None,
             system_prompt: None,
             image_data_urls: None,

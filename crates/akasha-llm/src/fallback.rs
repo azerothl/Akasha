@@ -52,6 +52,7 @@ impl FallbackEngine {
                     continue;
                 }
             };
+            let mut disable_thinking_after_empty = false;
             // Do not call provider.is_available() here: OllamaProvider uses blocking reqwest
             // which would block the async runtime and cause "response ended prematurely".
             for attempt in 0..self.max_retries {
@@ -59,11 +60,25 @@ impl FallbackEngine {
                 // Clone request and apply model-specific config from routing entry.
                 let mut request_with_config = request.clone();
                 entry.apply_config_to_request(&mut request_with_config);
+                if disable_thinking_after_empty {
+                    request_with_config.thinking_level = Some("off".to_string());
+                }
                 match provider.complete(&request_with_config, self.timeout_per_call, Some(&entry.model)).await {
                     Ok(resp) => {
                         // Treat empty/whitespace-only responses as failure so we can retry/fallback.
                         // This happens in practice when a model is still loading or returns an empty completion.
                         if resp.text.trim().is_empty() {
+                            let had_thinking = resp
+                                .thinking
+                                .as_ref()
+                                .map(|t| !t.trim().is_empty())
+                                .unwrap_or(false);
+                            let thinking_was_on = request_with_config
+                                .thinking_level
+                                .as_deref()
+                                .map(|s| !s.eq_ignore_ascii_case("off"))
+                                .unwrap_or(false);
+
                             metrics.record_failure(entry.provider.as_str(), &entry.model);
                             if i > 0 {
                                 metrics.record_fallback_triggered(entry.provider.as_str(), &entry.model);
@@ -75,6 +90,19 @@ impl FallbackEngine {
                                 "Provider returned empty text"
                             );
                             last_error = Some(format!("{}: empty response", entry.provider));
+
+                            // Some reasoning-capable models may emit long `thinking` but empty final text.
+                            // Retry once with thinking disabled before moving to next provider.
+                            if had_thinking && thinking_was_on {
+                                disable_thinking_after_empty = true;
+                                warn!(
+                                    provider = %entry.provider,
+                                    model = %entry.model,
+                                    attempt = attempt + 1,
+                                    "Empty response with non-empty thinking; retrying with thinking disabled"
+                                );
+                            }
+
                             if attempt + 1 < self.max_retries {
                                 let backoff_secs = (1u64 << attempt).min(16);
                                 tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
