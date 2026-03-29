@@ -44,12 +44,13 @@ pub async fn read_file(path: &Path, policy: &ToolsPolicy) -> Result<(String, Too
     let bytes = tokio::fs::read(path)
         .await
         .with_context(|| format!("read_file bytes {}", path.display()))?;
-    let content = match String::from_utf8(bytes.clone()) {
+    let content = match String::from_utf8(bytes) {
         Ok(s) => s,
-        Err(_) => {
+        Err(e) => {
             // Common on Windows: many CSV exports are in Windows-1252 (ANSI / cp1252),
             // not UTF-8. Windows-1252 provides a best-effort decoding for arbitrary byte data.
-            let (cow, _, _) = encoding_rs::WINDOWS_1252.decode(&bytes);
+            let raw = e.into_bytes();
+            let (cow, _, _) = encoding_rs::WINDOWS_1252.decode(&raw);
             cow.into_owned()
         }
     };

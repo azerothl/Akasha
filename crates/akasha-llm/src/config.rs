@@ -81,7 +81,7 @@ impl RouteEntry {
                 request.top_p = Some(tp as f32);
             }
             if let Some(tk) = get_value("top_k").and_then(|v| v.as_u64()) {
-                request.top_k = Some(tk as u32);
+                request.top_k = Some(tk.min(u32::MAX as u64) as u32);
             }
             if let Some(fp) = get_value("frequency_penalty").and_then(|v| v.as_f64()) {
                 request.frequency_penalty = Some(fp as f32);
@@ -93,17 +93,17 @@ impl RouteEntry {
                 request.repeat_penalty = Some(rp as f32);
             }
             if let Some(nc) = get_value("num_ctx").and_then(|v| v.as_u64()) {
-                request.num_ctx = Some(nc as u32);
+                request.num_ctx = Some(nc.min(u32::MAX as u64) as u32);
             }
             if let Some(ng) = get_value("num_gpu").and_then(|v| v.as_u64()) {
-                request.num_gpu = Some(ng as u32);
+                request.num_gpu = Some(ng.min(u32::MAX as u64) as u32);
             }
             // Accept both max_tokens (preferred) and max_token (legacy typo).
             if let Some(mt) = get_value("max_tokens")
                 .and_then(|v| v.as_u64())
                 .or_else(|| get_value("max_token").and_then(|v| v.as_u64()))
             {
-                request.max_tokens = Some(mt as u32);
+                request.max_tokens = Some(mt.min(u32::MAX as u64) as u32);
             }
         }
     }

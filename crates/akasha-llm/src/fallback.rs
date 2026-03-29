@@ -93,7 +93,7 @@ impl FallbackEngine {
                             let eval_count = resp.eval_count.unwrap_or(0);
 
                             if is_truncated {
-                                tracing::error!(
+                                tracing::warn!(
                                     provider = %entry.provider,
                                     model = %entry.model,
                                     max_tokens = ?max_tokens_used,
@@ -101,7 +101,7 @@ impl FallbackEngine {
                                     text_length = text_len,
                                     thinking_length = thinking_len,
                                     eval_count = eval_count,
-                                    "WARN: Model response TRUNCATED due to max_tokens limit. Response may be incomplete!"
+                                    "Model response truncated due to max_tokens limit; response may be incomplete"
                                 );
                             } else if text_len < 50 {
                                 tracing::warn!(

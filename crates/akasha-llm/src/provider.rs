@@ -742,7 +742,7 @@ impl LLMProvider for AzureOpenAIProvider {
         // Build request body with OpenAI-compatible parameters.
         let mut body = serde_json::json!({
             "messages": messages,
-            "max_tokens": request.max_tokens.unwrap_or(1024),
+            "max_tokens": request.max_tokens.unwrap_or(4096),
             "temperature": request.temperature.unwrap_or(0.7)
         });
 

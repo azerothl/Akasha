@@ -408,6 +408,10 @@ mod tests {
                 }),
                 model_used: "mock".into(),
                 cost_usd: None,
+                thinking: None,
+                done_reason: None,
+                eval_count: None,
+                total_duration_ns: None,
             })
         }
     }

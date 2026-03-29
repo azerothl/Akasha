@@ -14,23 +14,5 @@
     }
 ],
 "settings": {
-    "chat.tools.terminal.autoApprove": {
-        "cargo check": true,
-        "Push-Location": true,
-        "touch": true,
-        "Pop-Location": true,
-        "Get-Command": true,
-        "cargo build": true,
-        "Tee-Object": true,
-        "/^python c:\\\\www\\\\Akasha_plugins\\\\scripts\\\\build_plugins\\.py$/": {
-            "approve": true,
-            "matchCommandLine": true
-        },
-        "Test-Path": true,
-        "/^pwsh -ExecutionPolicy Bypass -File \\.\\\\scripts\\\\build_maps_plugin\\.ps1$/": {
-            "approve": true,
-            "matchCommandLine": true
-        }
-    }
 }
 }
