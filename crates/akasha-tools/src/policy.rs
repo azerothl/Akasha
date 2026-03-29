@@ -561,4 +561,59 @@ mod tests {
         assert!(p.can_read(Path::new("src/main.rs")));
         assert!(p.can_write(Path::new("output/result.txt")));
     }
+
+    // --- prefix-confusion: Path::starts_with vs string prefix ---
+
+    fn policy_with_abs_read(path: &str) -> ToolsPolicy {
+        ToolsPolicy {
+            allowed_read_paths: vec![path.to_string()],
+            allowed_write_paths: vec![path.to_string()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn path_prefix_confusion_sibling_dir_not_allowed() {
+        // String prefix matching would allow /home/app/database/secret when
+        // /home/app/data is in the allow list.  Path::starts_with must reject this.
+        let p = policy_with_abs_read("/home/app/data");
+        assert!(!p.can_read(Path::new("/home/app/database/secret.txt")),
+            "sibling directory with a shared string prefix must NOT be allowed");
+        assert!(!p.can_write(Path::new("/home/app/database/secret.txt")),
+            "sibling directory with a shared string prefix must NOT be allowed for write");
+    }
+
+    #[test]
+    fn path_prefix_allowed_dir_is_allowed() {
+        // A path strictly inside the allowed directory must be allowed.
+        let p = policy_with_abs_read("/home/app/data");
+        assert!(p.can_read(Path::new("/home/app/data/report.md")),
+            "path inside allowed directory must be allowed");
+        assert!(p.can_write(Path::new("/home/app/data/output.txt")),
+            "path inside allowed directory must be allowed for write");
+    }
+
+    #[test]
+    fn workspace_root_path_containment_uses_path_starts_with() {
+        // workspace_root = /home/app/workspace
+        // /home/app/workspace2/secret must be rejected (string "starts_with" would pass it
+        // since "/home/app/workspace2".starts_with("/home/app/workspace") is true).
+        let root = PathBuf::from("/home/app/workspace");
+        let p = ToolsPolicy {
+            allowed_read_paths: vec![".".to_string()],
+            allowed_write_paths: vec![".".to_string()],
+            workspace_root: Some(root),
+            ..Default::default()
+        };
+        // Absolute path under workspace2 must be rejected.
+        assert!(!p.can_read(Path::new("/home/app/workspace2/secret.txt")),
+            "path in a sibling workspace2 dir must not match workspace_root via Path::starts_with");
+        assert!(!p.can_write(Path::new("/home/app/workspace2/output.txt")),
+            "write to sibling workspace2 dir must not match workspace_root");
+        // Path inside workspace must be allowed.
+        assert!(p.can_read(Path::new("/home/app/workspace/notes.md")),
+            "path inside workspace_root must be allowed");
+        assert!(p.can_write(Path::new("/home/app/workspace/out.txt")),
+            "write inside workspace_root must be allowed");
+    }
 }

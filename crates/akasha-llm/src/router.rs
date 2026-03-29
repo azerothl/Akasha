@@ -472,4 +472,42 @@ mod tests {
         let router = LLMRouter::new(config);
         assert_eq!(router.resolve_task_type_for_agent("conversation"), "conversation");
     }
+
+    #[test]
+    fn router_routes_by_category_contains_orchestrator_when_configured() {
+        // The decomposer uses routes_by_category() to check for an "orchestrator" route
+        // and sets preferred_task_type: "orchestrator" when found (0.7.0 feature).
+        let mut config = RoutingConfig::default_config();
+        config.task_types.insert(
+            "orchestrator".into(),
+            crate::config::TaskTypeConfig {
+                primary: Some(RouteEntry {
+                    provider: "openai".into(),
+                    model: "gpt-4o-mini".into(),
+                    config: None,
+                }),
+                fallback: vec![],
+                constraints: None,
+            },
+        );
+        let router = LLMRouter::new(config);
+        let routes = router.routes_by_category();
+        assert!(
+            routes.contains_key("orchestrator"),
+            "routes_by_category must expose the 'orchestrator' route when it is configured"
+        );
+    }
+
+    #[test]
+    fn router_routes_by_category_no_orchestrator_in_default_config() {
+        // Without an explicit "orchestrator" task_type, the decomposer falls back to
+        // "system" for backward compatibility (pre-0.7.0 llm_router.yaml).
+        let config = RoutingConfig::default_config();
+        let router = LLMRouter::new(config);
+        let routes = router.routes_by_category();
+        assert!(
+            !routes.contains_key("orchestrator"),
+            "default config must NOT have an 'orchestrator' route; decomposer falls back to 'system'"
+        );
+    }
 }

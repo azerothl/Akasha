@@ -9295,11 +9295,15 @@ async fn get_schedule_run_reports(store_path: &Path, progress: &ProgressCache) -
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_role_system_prompt, build_image_markdown, ensure_no_open_code_block,
-        is_pausable, is_resumable, memory_profile_for_task,
-        message_suggests_tool_only_action, parse_content_length, parse_device_invoke_params,
-        parse_tool_calls, rewrite_workspace_plan_key_to_lineage_root,
-        rewrite_workspace_plan_path_str,
+        agent_role_system_prompt, build_image_markdown, build_session_recap_reply,
+        canonicalize_tool_name, classify_small_talk_message, detect_session_recall_intent,
+        ensure_no_open_code_block, extract_how_to_call_from_message, is_pausable, is_resumable,
+        looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
+        normalize_tool_path_hint, parse_content_length, parse_device_invoke_params,
+        parse_tool_calls, parse_write_file_request, response_looks_off_topic_for_small_talk,
+        rewrite_workspace_plan_key_to_lineage_root, rewrite_workspace_plan_path_str,
+        small_talk_fast_lane, SessionRecallIntent, SessionRecallRange, SmallTalkIntent,
+        SmallTalkLanguage,
     };
     use akasha_store::TaskStatus;
     use uuid::Uuid;
@@ -9550,7 +9554,7 @@ mod tests {
         let args = vec![
             "{".to_string(),
             "\"path\": \"workspace/project_plan.md\",".to_string(),
-            "\"content\": \"# Plan\n- item\"".to_string(),
+            "\"content\": \"# Plan\\n- item\"".to_string(),
             "}".to_string(),
         ];
         let (path, content) = parse_write_file_request(&args).expect("json payload should parse");

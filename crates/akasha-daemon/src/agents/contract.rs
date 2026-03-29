@@ -193,8 +193,9 @@ mod tests {
     /// `len - 2000` can land inside a multi-byte UTF-8 char (e.g. `└`); slicing must not panic.
     #[test]
     fn parse_contract_tail_slice_does_not_panic_mid_utf8_char() {
-        // 1999 ASCII bytes + 3-byte '└' + filler so that (len - 2000) points inside '└' (byte index 2000).
-        let filler = "a".repeat(1998);
+        // 1999 ASCII bytes + 3-byte '└' (at bytes 1999-2001) + 1966 ASCII filler + 32-byte
+        // JSON suffix → total 4000 bytes.  r.len() - 2000 = byte 2000 = inside '└'.
+        let filler = "a".repeat(1966);
         let r = format!("{}└{} {{\"status\":\"done\",\"summary\":\"x\"}}", "a".repeat(1999), filler);
         assert!(!r.is_char_boundary(r.len().saturating_sub(2000)));
         let _ = parse_contract_from_response(&r);

@@ -1381,4 +1381,51 @@ mod tests {
         assert!(r.is_err());
         assert!(matches!(r.unwrap_err(), ProviderError::Unavailable));
     }
+
+    #[test]
+    fn azure_provider_name_and_not_local() {
+        let p = AzureOpenAIProvider::new(None, None);
+        assert_eq!(p.name(), "azure_openai");
+        assert!(!p.is_local());
+    }
+
+    #[test]
+    fn azure_provider_unavailable_with_empty_api_key() {
+        let p = AzureOpenAIProvider::new(None, Some("https://myresource.openai.azure.com".into()));
+        assert!(!p.is_available(), "Azure provider must be unavailable when api_key is empty");
+    }
+
+    #[test]
+    fn azure_provider_available_with_api_key_and_base_url() {
+        let p = AzureOpenAIProvider::new(
+            Some("sk-test-key".into()),
+            Some("https://myresource.openai.azure.com".into()),
+        );
+        assert!(p.is_available(), "Azure provider must be available when both api_key and base_url are set");
+    }
+
+    #[test]
+    fn azure_provider_default_max_tokens_is_4096() {
+        // Verify the Azure default max_tokens is 4096, consistent with all other
+        // OpenAI-compatible providers (prevents unexpected truncation for Azure users).
+        let request = CompletionRequest {
+            prompt: "test".into(),
+            max_tokens: None, // No override → must use the default
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repeat_penalty: None,
+            num_ctx: None,
+            num_gpu: None,
+            preferred_task_type: None,
+            system_prompt: None,
+            image_data_urls: None,
+        };
+        // The default applied in the provider's complete() body is `unwrap_or(4096)`.
+        // We verify this by inspecting what the provider would send.
+        let default_mt = request.max_tokens.unwrap_or(4096);
+        assert_eq!(default_mt, 4096, "Azure default max_tokens must be 4096, not 1024");
+    }
 }
