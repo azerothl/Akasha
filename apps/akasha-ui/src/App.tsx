@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import RelationGraph from "relation-graph/react";
 import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
@@ -180,6 +180,225 @@ function trimPreview(text: string, max = 140): string {
   const compact = text.replace(/\s+/g, " ").trim();
   if (compact.length <= max) return compact;
   return `${compact.slice(0, Math.max(0, max - 1))}…`;
+}
+
+type EventChartSeries = {
+  name: string;
+  points: Array<{ x: number; y: number }>;
+};
+
+type EventAdvancedView =
+  | {
+      kind: "map";
+      title?: string;
+      points: Array<{ x: number; y: number }>;
+      distanceM?: number;
+      durationS?: number;
+    }
+  | {
+      kind: "graph" | "timeseries";
+      title?: string;
+      series: EventChartSeries[];
+    };
+
+function asRecord(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
+}
+
+function toFiniteNumber(v: unknown): number | undefined {
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function toPoint(v: unknown): { x: number; y: number } | null {
+  if (Array.isArray(v) && v.length >= 2) {
+    const x = toFiniteNumber(v[0]);
+    const y = toFiniteNumber(v[1]);
+    if (x != null && y != null) return { x, y };
+  }
+  const r = asRecord(v);
+  if (!r) return null;
+  const x = toFiniteNumber(r.x ?? r.lon ?? r.lng ?? r.time ?? r.t);
+  const y = toFiniteNumber(r.y ?? r.lat ?? r.value ?? r.v);
+  if (x != null && y != null) return { x, y };
+  return null;
+}
+
+function normalizeSeries(input: unknown): EventChartSeries[] {
+  const arr = Array.isArray(input) ? input : [];
+  const out: EventChartSeries[] = [];
+  arr.forEach((item, idx) => {
+    const r = asRecord(item);
+    if (!r) return;
+    const name = typeof r.name === "string" && r.name.trim() ? r.name.trim() : `series_${idx + 1}`;
+
+    const pointsFromPoints = Array.isArray(r.points)
+      ? r.points.map((p) => toPoint(p)).filter((p): p is { x: number; y: number } => p != null)
+      : [];
+    if (pointsFromPoints.length > 0) {
+      out.push({ name, points: pointsFromPoints });
+      return;
+    }
+
+    const yValues = Array.isArray(r.y) ? r.y.map((n) => toFiniteNumber(n)).filter((n): n is number => n != null) : [];
+    const xValues = Array.isArray(r.x) ? r.x.map((n) => toFiniteNumber(n)).filter((n): n is number => n != null) : [];
+    if (yValues.length > 0) {
+      const points = yValues.map((y, i) => ({ x: xValues[i] ?? i, y }));
+      out.push({ name, points });
+      return;
+    }
+
+    const dataPoints = Array.isArray(r.data)
+      ? r.data.map((p) => toPoint(p)).filter((p): p is { x: number; y: number } => p != null)
+      : [];
+    if (dataPoints.length > 0) {
+      out.push({ name, points: dataPoints });
+    }
+  });
+  return out;
+}
+
+function scalePoints(points: Array<{ x: number; y: number }>, width: number, height: number, pad = 12) {
+  if (points.length === 0) return [] as Array<{ x: number; y: number }>;
+  const xs = points.map((p) => p.x);
+  const ys = points.map((p) => p.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const spanX = Math.max(maxX - minX, 1e-9);
+  const spanY = Math.max(maxY - minY, 1e-9);
+  return points.map((p) => ({
+    x: pad + ((p.x - minX) / spanX) * (width - pad * 2),
+    y: height - pad - ((p.y - minY) / spanY) * (height - pad * 2),
+  }));
+}
+
+function extractAdvancedViewData(payload: unknown): EventAdvancedView | null {
+  const p0 = asRecord(payload);
+  const candidates = [
+    p0,
+    asRecord(p0?.result),
+    asRecord(p0?.output),
+    asRecord(p0?.data),
+  ].filter((c): c is Record<string, unknown> => c != null);
+
+  for (const c of candidates) {
+    const view = typeof c.view === "string" ? c.view.toLowerCase() : "";
+    if (!view) continue;
+    const title = typeof c.title === "string" ? c.title : undefined;
+
+    if (view === "map") {
+      const geometryRaw = Array.isArray(c.geometry)
+        ? c.geometry
+        : Array.isArray(asRecord(c.route)?.geometry)
+          ? (asRecord(c.route)?.geometry as unknown[])
+          : [];
+      const points = geometryRaw.map((p) => toPoint(p)).filter((p): p is { x: number; y: number } => p != null);
+      const distanceM = toFiniteNumber(c.distance_m ?? c.distanceM);
+      const durationS = toFiniteNumber(c.duration_s ?? c.durationS);
+      if (points.length >= 2 || distanceM != null || durationS != null) {
+        return { kind: "map", title, points, distanceM, durationS };
+      }
+    }
+
+    if (view === "graph" || view === "timeseries") {
+      const series = normalizeSeries(c.series)
+        .concat(normalizeSeries(asRecord(c.figure)?.data))
+        .filter((s) => s.points.length > 0);
+      if (series.length > 0) {
+        return { kind: view, title, series };
+      }
+    }
+  }
+
+  return null;
+}
+
+function formatDistanceLabel(meters?: number): string | null {
+  if (meters == null || !Number.isFinite(meters)) return null;
+  if (meters < 1000) return `${Math.round(meters)} m`;
+  return `${(meters / 1000).toFixed(2)} km`;
+}
+
+function formatDurationLabel(seconds?: number): string | null {
+  if (seconds == null || !Number.isFinite(seconds)) return null;
+  if (seconds < 60) return `${Math.round(seconds)} s`;
+  const min = Math.floor(seconds / 60);
+  const sec = Math.round(seconds % 60);
+  return sec > 0 ? `${min} min ${sec} s` : `${min} min`;
+}
+
+function advancedViewToCsv(visual: EventAdvancedView): string {
+  if (visual.kind === "map") {
+    const header = "index,x,y";
+    const rows = visual.points.map((p, idx) => `${idx},${p.x},${p.y}`);
+    return [header, ...rows].join("\n");
+  }
+  const header = "series,index,x,y";
+  const rows: string[] = [];
+  visual.series.forEach((series) => {
+    series.points.forEach((point, idx) => {
+      rows.push(`"${series.name.replace(/"/g, '""')}",${idx},${point.x},${point.y}`);
+    });
+  });
+  return [header, ...rows].join("\n");
+}
+
+function renderAdvancedViewToCanvas(visual: EventAdvancedView, width: number, height: number): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return canvas;
+
+  ctx.fillStyle = "#0b0f17";
+  ctx.fillRect(0, 0, width, height);
+
+  if (visual.kind === "map") {
+    const scaled = scalePoints(visual.points, width, height);
+    if (scaled.length >= 2) {
+      ctx.strokeStyle = "#0ea5e9";
+      ctx.lineWidth = 2.4;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(scaled[0]!.x, scaled[0]!.y);
+      for (let i = 1; i < scaled.length; i++) {
+        ctx.lineTo(scaled[i]!.x, scaled[i]!.y);
+      }
+      ctx.stroke();
+    }
+    for (let i = 0; i < scaled.length; i++) {
+      const p = scaled[i]!;
+      const r = i === 0 || i === scaled.length - 1 ? 4 : 3;
+      ctx.beginPath();
+      ctx.fillStyle = "#38bdf8";
+      ctx.strokeStyle = "#0ea5e9";
+      ctx.lineWidth = 1;
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    return canvas;
+  }
+
+  const palette = ["#7c8cff", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
+  visual.series.forEach((s, idx) => {
+    const scaled = scalePoints(s.points, width, height);
+    if (scaled.length < 2) return;
+    ctx.strokeStyle = palette[idx % palette.length]!;
+    ctx.lineWidth = 2.2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(scaled[0]!.x, scaled[0]!.y);
+    for (let i = 1; i < scaled.length; i++) {
+      ctx.lineTo(scaled[i]!.x, scaled[i]!.y);
+    }
+    ctx.stroke();
+  });
+  return canvas;
 }
 
 function formatRelativeTimeLabel(value?: string, locale: "fr" | "en" = "fr"): string | null {
@@ -535,6 +754,25 @@ function App() {
       /* ignore */
     }
   }, []);
+  const [eventVisualFullscreen, setEventVisualFullscreen] = useState<{
+    visual: EventAdvancedView;
+    sourceEventType: string;
+  } | null>(null);
+  const [eventVisualHelpOpen, setEventVisualHelpOpen] = useState(false);
+  const [eventVisualTransform, setEventVisualTransform] = useState<{ scale: number; tx: number; ty: number }>({
+    scale: 1,
+    tx: 0,
+    ty: 0,
+  });
+  const [eventVisualDragging, setEventVisualDragging] = useState<{
+    startX: number;
+    startY: number;
+    baseTx: number;
+    baseTy: number;
+  } | null>(null);
+  const eventVisualPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const eventVisualPinchBaseDistanceRef = useRef<number | null>(null);
+  const eventVisualPinchBaseTransformRef = useRef<{ scale: number; tx: number; ty: number } | null>(null);
   const persistCollapsedTaskBranches = useCallback((next: Record<string, boolean>) => {
     try {
       localStorage.setItem(TASK_TREE_COLLAPSE_STORAGE_KEY, JSON.stringify(next));
@@ -1481,6 +1719,181 @@ function App() {
 
   const taskDisplayLabel = (task: TaskListItem) => (task.label && task.label.trim() ? task.label.trim() : t("tasks.task_unnamed") + task.id.slice(-8));
 
+  const exportAdvancedViewCsv = useCallback((visual: EventAdvancedView) => {
+    try {
+      const csv = advancedViewToCsv(visual);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const ts = new Date().toISOString().replace(/[:.]/g, "-");
+      const filename = `akasha_${visual.kind}_${ts}.csv`;
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (err) {
+      console.error("Failed to export visualization CSV", err);
+    }
+  }, []);
+
+  const exportAdvancedViewPng = useCallback((visual: EventAdvancedView) => {
+    try {
+      const width = visual.kind === "map" ? 1200 : 1400;
+      const height = visual.kind === "map" ? 520 : 560;
+      const canvas = renderAdvancedViewToCanvas(visual, width, height);
+      const ts = new Date().toISOString().replace(/[:.]/g, "-");
+      const filename = `akasha_${visual.kind}_${ts}.png`;
+      const saveBlob = (blob: Blob) => {
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+      };
+      canvas.toBlob((blob) => {
+        if (blob) {
+          saveBlob(blob);
+          return;
+        }
+        const dataUrl = canvas.toDataURL("image/png");
+        const anchor = document.createElement("a");
+        anchor.href = dataUrl;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+      }, "image/png");
+    } catch (err) {
+      console.error("Failed to export visualization PNG", err);
+    }
+  }, []);
+
+  const clampEventVisualScale = useCallback((v: number) => Math.max(0.5, Math.min(8, v)), []);
+
+  const clearEventVisualGestures = useCallback(() => {
+    eventVisualPointersRef.current.clear();
+    eventVisualPinchBaseDistanceRef.current = null;
+    eventVisualPinchBaseTransformRef.current = null;
+    setEventVisualDragging(null);
+  }, []);
+
+  const resetEventVisualViewport = useCallback(() => {
+    setEventVisualTransform({ scale: 1, tx: 0, ty: 0 });
+    clearEventVisualGestures();
+  }, [clearEventVisualGestures]);
+
+  const eventVisualZoomPercent = Math.round(eventVisualTransform.scale * 100);
+
+  const zoomEventVisualAt = useCallback((cx: number, cy: number, factor: number) => {
+    setEventVisualTransform((prev) => {
+      const nextScale = clampEventVisualScale(prev.scale * factor);
+      const nextTx = cx - ((cx - prev.tx) / prev.scale) * nextScale;
+      const nextTy = cy - ((cy - prev.ty) / prev.scale) * nextScale;
+      return { scale: nextScale, tx: nextTx, ty: nextTy };
+    });
+  }, [clampEventVisualScale]);
+
+  const handleEventVisualWheel = useCallback((ev: ReactWheelEvent<HTMLDivElement>) => {
+    ev.preventDefault();
+    const rect = ev.currentTarget.getBoundingClientRect();
+    const cx = ev.clientX - rect.left;
+    const cy = ev.clientY - rect.top;
+    const factor = ev.deltaY < 0 ? 1.12 : 1 / 1.12;
+    zoomEventVisualAt(cx, cy, factor);
+  }, [zoomEventVisualAt]);
+
+  const handleEventVisualPointerDown = useCallback((ev: ReactPointerEvent<HTMLDivElement>) => {
+    if (ev.pointerType === "mouse" && ev.button !== 0) return;
+    ev.currentTarget.setPointerCapture(ev.pointerId);
+    eventVisualPointersRef.current.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+
+    const points = Array.from(eventVisualPointersRef.current.values());
+    if (points.length >= 2) {
+      const [a, b] = points;
+      if (!a || !b) return;
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      eventVisualPinchBaseDistanceRef.current = Math.max(dist, 1e-6);
+      eventVisualPinchBaseTransformRef.current = { ...eventVisualTransform };
+      setEventVisualDragging(null);
+      return;
+    }
+
+    setEventVisualDragging({
+      startX: ev.clientX,
+      startY: ev.clientY,
+      baseTx: eventVisualTransform.tx,
+      baseTy: eventVisualTransform.ty,
+    });
+  }, [eventVisualTransform]);
+
+  const handleEventVisualPointerMove = useCallback((ev: ReactPointerEvent<HTMLDivElement>) => {
+    if (!eventVisualPointersRef.current.has(ev.pointerId)) return;
+    eventVisualPointersRef.current.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    const points = Array.from(eventVisualPointersRef.current.values());
+
+    if (points.length >= 2 && eventVisualPinchBaseDistanceRef.current != null && eventVisualPinchBaseTransformRef.current != null) {
+      const [a, b] = points;
+      if (!a || !b) return;
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      const factor = dist / eventVisualPinchBaseDistanceRef.current;
+      const centerX = (a.x + b.x) * 0.5;
+      const centerY = (a.y + b.y) * 0.5;
+      const base = eventVisualPinchBaseTransformRef.current;
+      const nextScale = clampEventVisualScale(base.scale * factor);
+      const nextTx = centerX - ((centerX - base.tx) / base.scale) * nextScale;
+      const nextTy = centerY - ((centerY - base.ty) / base.scale) * nextScale;
+      setEventVisualTransform({ scale: nextScale, tx: nextTx, ty: nextTy });
+      return;
+    }
+
+    if (!eventVisualDragging) return;
+    const dx = ev.clientX - eventVisualDragging.startX;
+    const dy = ev.clientY - eventVisualDragging.startY;
+    setEventVisualTransform((prev) => ({
+      ...prev,
+      tx: eventVisualDragging.baseTx + dx,
+      ty: eventVisualDragging.baseTy + dy,
+    }));
+  }, [eventVisualDragging, clampEventVisualScale]);
+
+  const handleEventVisualPointerEnd = useCallback((ev: ReactPointerEvent<HTMLDivElement>) => {
+    try {
+      ev.currentTarget.releasePointerCapture(ev.pointerId);
+    } catch {
+      /* ignore */
+    }
+    eventVisualPointersRef.current.delete(ev.pointerId);
+    const points = Array.from(eventVisualPointersRef.current.values());
+    if (points.length >= 2) {
+      const [a, b] = points;
+      if (a && b) {
+        const dist = Math.hypot(b.x - a.x, b.y - a.y);
+        eventVisualPinchBaseDistanceRef.current = Math.max(dist, 1e-6);
+      }
+      return;
+    }
+    eventVisualPinchBaseDistanceRef.current = null;
+    eventVisualPinchBaseTransformRef.current = null;
+    if (points.length === 1) {
+      const p = points[0];
+      if (p) {
+        setEventVisualDragging(() => ({
+          startX: p.x,
+          startY: p.y,
+          baseTx: eventVisualTransform.tx,
+          baseTy: eventVisualTransform.ty,
+        }));
+        return;
+      }
+    }
+    setEventVisualDragging(null);
+  }, [eventVisualTransform.tx, eventVisualTransform.ty]);
+
   const fetchTasksEvents = useCallback(async (taskId: string) => {
     try {
       const data = await invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> }>(
@@ -2024,6 +2437,61 @@ function App() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [calendarCellDetail]);
+
+  useEffect(() => {
+    if (!eventVisualFullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest("input, textarea, [contenteditable='true']")) return;
+
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setEventVisualFullscreen(null);
+        return;
+      }
+
+      const isZoomIn = e.key === "+" || e.key === "=" || e.key === "Add";
+      const isZoomOut = e.key === "-" || e.key === "Subtract";
+      const isReset = e.key === "0" || e.key === "Numpad0";
+      const isHelpToggle = e.key === "?" || (e.key === "/" && e.shiftKey);
+
+      if (isZoomIn) {
+        e.preventDefault();
+        setEventVisualTransform((prev) => ({ ...prev, scale: Math.max(0.5, Math.min(8, prev.scale * 1.15)) }));
+        return;
+      }
+
+      if (isZoomOut) {
+        e.preventDefault();
+        setEventVisualTransform((prev) => ({ ...prev, scale: Math.max(0.5, Math.min(8, prev.scale / 1.15)) }));
+        return;
+      }
+
+      if (isReset) {
+        e.preventDefault();
+        resetEventVisualViewport();
+        return;
+      }
+
+      if (isHelpToggle) {
+        e.preventDefault();
+        setEventVisualHelpOpen((prev) => !prev);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [eventVisualFullscreen, resetEventVisualViewport]);
+
+  useEffect(() => {
+    if (!eventVisualFullscreen) return;
+    resetEventVisualViewport();
+  }, [eventVisualFullscreen, resetEventVisualViewport]);
+
+  useEffect(() => {
+    if (!eventVisualFullscreen) {
+      setEventVisualHelpOpen(false);
+    }
+  }, [eventVisualFullscreen]);
 
   useEffect(() => {
     if (!calendarSelectedScheduleId) {
@@ -4426,6 +4894,99 @@ function App() {
                                 }
                                 return null;
                               })()}
+                              {(() => {
+                                const visual = extractAdvancedViewData(e.payload);
+                                if (!visual) return null;
+
+                                if (visual.kind === "map") {
+                                  const width = 460;
+                                  const height = 180;
+                                  const scaled = scalePoints(visual.points, width, height);
+                                  const polyline = scaled.map((p) => `${p.x},${p.y}`).join(" ");
+                                  const distance = formatDistanceLabel(visual.distanceM);
+                                  const duration = formatDurationLabel(visual.durationS);
+                                  return (
+                                    <div className="event-advanced-view event-advanced-view-map">
+                                      <strong className="metadata-label">
+                                        {visual.title ?? t("tasks.plugin_map_title")}
+                                      </strong>
+                                      <div className="event-advanced-toolbar">
+                                        <button type="button" className="event-advanced-action-btn" onClick={() => setEventVisualFullscreen({ visual, sourceEventType: e.event_type })}>
+                                          {t("tasks.open_fullscreen")}
+                                        </button>
+                                        <button type="button" className="event-advanced-action-btn" onClick={() => exportAdvancedViewCsv(visual)}>
+                                          {t("tasks.export_csv")}
+                                        </button>
+                                      </div>
+                                      {(distance || duration) && (
+                                        <div className="event-advanced-metrics-inline" role="list">
+                                          {distance && (
+                                            <span className="event-advanced-chip" role="listitem">
+                                              {t("tasks.distance_label")}: {distance}
+                                            </span>
+                                          )}
+                                          {duration && (
+                                            <span className="event-advanced-chip" role="listitem">
+                                              {t("tasks.duration_label")}: {duration}
+                                            </span>
+                                          )}
+                                        </div>
+                                      )}
+                                      <svg
+                                        className="event-advanced-chart"
+                                        viewBox={`0 0 ${width} ${height}`}
+                                        preserveAspectRatio="none"
+                                        aria-label={t("tasks.plugin_map_title")}
+                                      >
+                                        <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
+                                        {scaled.length >= 2 && <polyline points={polyline} className="event-advanced-map-line" />}
+                                        {scaled.map((p, idx) => (
+                                          <circle key={`map-pt-${idx}`} cx={p.x} cy={p.y} r={idx === 0 || idx === scaled.length - 1 ? 3.5 : 2.5} className="event-advanced-map-point" />
+                                        ))}
+                                      </svg>
+                                    </div>
+                                  );
+                                }
+
+                                const width = 460;
+                                const height = 190;
+                                const palette = ["#7c8cff", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
+                                const totalPoints = visual.series.reduce((acc, s) => acc + s.points.length, 0);
+                                return (
+                                  <div className="event-advanced-view event-advanced-view-chart">
+                                    <strong className="metadata-label">
+                                      {visual.title ?? (visual.kind === "graph" ? t("tasks.plugin_graph_title") : t("tasks.plugin_timeseries_title"))}
+                                    </strong>
+                                    <div className="event-advanced-toolbar">
+                                      <button type="button" className="event-advanced-action-btn" onClick={() => setEventVisualFullscreen({ visual, sourceEventType: e.event_type })}>
+                                        {t("tasks.open_fullscreen")}
+                                      </button>
+                                      <button type="button" className="event-advanced-action-btn" onClick={() => exportAdvancedViewCsv(visual)}>
+                                        {t("tasks.export_csv")}
+                                      </button>
+                                    </div>
+                                    <div className="event-advanced-metrics-inline" role="list">
+                                      <span className="event-advanced-chip" role="listitem">{t("tasks.series_count_label")}: {visual.series.length}</span>
+                                      <span className="event-advanced-chip" role="listitem">{t("tasks.points_count_label")}: {totalPoints}</span>
+                                    </div>
+                                    <svg
+                                      className="event-advanced-chart"
+                                      viewBox={`0 0 ${width} ${height}`}
+                                      preserveAspectRatio="none"
+                                      aria-label={visual.kind === "graph" ? t("tasks.plugin_graph_title") : t("tasks.plugin_timeseries_title")}
+                                    >
+                                      <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
+                                      {visual.series.map((s, idx) => {
+                                        const scaled = scalePoints(s.points, width, height);
+                                        const pts = scaled.map((p) => `${p.x},${p.y}`).join(" ");
+                                        return scaled.length >= 2 ? (
+                                          <polyline key={`series-${idx}`} points={pts} className="event-advanced-series-line" style={{ stroke: palette[idx % palette.length] }} />
+                                        ) : null;
+                                      })}
+                                    </svg>
+                                  </div>
+                                );
+                              })()}
                               {e.payload != null && (isSimpleMode ? (
                                 <details className="event-payload-details">
                                   <summary>{t("tasks.event_details")}</summary>
@@ -5449,6 +6010,179 @@ function App() {
                   </button>
                 )}
                 <button type="button" className="btn-secondary" onClick={() => setMemoryGraphDetail(null)}>{t("memory.close")}</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {eventVisualFullscreen && (
+          <div className="event-visual-overlay" role="dialog" aria-modal="true" aria-labelledby="event-visual-title" onClick={() => setEventVisualFullscreen(null)}>
+            <div className="event-visual-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="event-visual-modal-header">
+                <h2 id="event-visual-title" className="event-visual-modal-title">
+                  {eventVisualFullscreen.visual.title
+                    ?? (eventVisualFullscreen.visual.kind === "map"
+                      ? t("tasks.plugin_map_title")
+                      : eventVisualFullscreen.visual.kind === "graph"
+                        ? t("tasks.plugin_graph_title")
+                        : t("tasks.plugin_timeseries_title"))}
+                </h2>
+                <div className="event-visual-modal-actions">
+                  <span className="event-visual-zoom-badge" title={t("tasks.zoom_level")}>{t("tasks.zoom_level")}: {eventVisualZoomPercent}%</span>
+                  <button
+                    type="button"
+                    className="btn-secondary event-visual-help-btn"
+                    aria-label={t("tasks.visual_help_toggle")}
+                    title={t("tasks.visual_help_toggle")}
+                    aria-pressed={eventVisualHelpOpen}
+                    onClick={() => setEventVisualHelpOpen((prev) => !prev)}
+                  >
+                    ?
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary event-visual-zoom-btn"
+                    onClick={() => setEventVisualTransform((prev) => ({ ...prev, scale: Math.max(0.5, Math.min(8, prev.scale / 1.15)) }))}
+                    aria-label={t("tasks.zoom_out")}
+                    title={t("tasks.zoom_out")}
+                  >
+                    −
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary event-visual-zoom-btn"
+                    onClick={resetEventVisualViewport}
+                    aria-label={t("tasks.reset_view")}
+                    title={t("tasks.reset_view")}
+                  >
+                    {t("tasks.reset_view")}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={resetEventVisualViewport}
+                    aria-label={t("tasks.fit_to_screen")}
+                    title={t("tasks.fit_to_screen")}
+                  >
+                    {t("tasks.fit_to_screen")}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary event-visual-zoom-btn"
+                    onClick={() => setEventVisualTransform((prev) => ({ ...prev, scale: Math.max(0.5, Math.min(8, prev.scale * 1.15)) }))}
+                    aria-label={t("tasks.zoom_in")}
+                    title={t("tasks.zoom_in")}
+                  >
+                    +
+                  </button>
+                  <button type="button" className="btn-secondary" onClick={() => exportAdvancedViewPng(eventVisualFullscreen.visual)}>
+                    {t("tasks.export_png")}
+                  </button>
+                  <button type="button" className="btn-secondary" onClick={() => exportAdvancedViewCsv(eventVisualFullscreen.visual)}>
+                    {t("tasks.export_csv")}
+                  </button>
+                  <button type="button" className="calendar-detail-modal-close" aria-label={t("common.close")} onClick={() => setEventVisualFullscreen(null)}>
+                    ×
+                  </button>
+                </div>
+              </div>
+              <div className="event-visual-modal-body">
+                <p className="event-visual-hint">{t("tasks.pan_zoom_hint")}</p>
+                <p className="event-visual-hint event-visual-shortcuts-hint">{t("tasks.zoom_shortcuts_hint")}</p>
+                {eventVisualHelpOpen && (
+                  <div className="event-visual-help-panel" role="note" aria-label={t("tasks.visual_help_title")}>
+                    <strong className="event-visual-help-title">{t("tasks.visual_help_title")}</strong>
+                    <ul className="event-visual-help-list">
+                      <li>{t("tasks.visual_help_mouse")}</li>
+                      <li>{t("tasks.visual_help_touch")}</li>
+                      <li>{t("tasks.visual_help_keyboard")}</li>
+                    </ul>
+                  </div>
+                )}
+                {eventVisualFullscreen.visual.kind === "map" ? (
+                  (() => {
+                    const width = 1200;
+                    const height = 520;
+                    const scaled = scalePoints(eventVisualFullscreen.visual.points, width, height);
+                    const polyline = scaled.map((p) => `${p.x},${p.y}`).join(" ");
+                    const distance = formatDistanceLabel(eventVisualFullscreen.visual.distanceM);
+                    const duration = formatDurationLabel(eventVisualFullscreen.visual.durationS);
+                    return (
+                      <div className="event-advanced-view event-advanced-view-map event-advanced-view-fullscreen">
+                        {(distance || duration) && (
+                          <div className="event-advanced-metrics-inline" role="list">
+                            {distance && <span className="event-advanced-chip" role="listitem">{t("tasks.distance_label")}: {distance}</span>}
+                            {duration && <span className="event-advanced-chip" role="listitem">{t("tasks.duration_label")}: {duration}</span>}
+                          </div>
+                        )}
+                        <div
+                          className={`event-visual-interactive-surface ${eventVisualDragging ? "is-dragging" : ""}`}
+                          onWheel={handleEventVisualWheel}
+                          onDoubleClick={resetEventVisualViewport}
+                          onPointerDown={handleEventVisualPointerDown}
+                          onPointerMove={handleEventVisualPointerMove}
+                          onPointerUp={handleEventVisualPointerEnd}
+                          onPointerCancel={handleEventVisualPointerEnd}
+                          onPointerLeave={handleEventVisualPointerEnd}
+                        >
+                        <svg className="event-advanced-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label={t("tasks.plugin_map_title")}>
+                          <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
+                          <g transform={`translate(${eventVisualTransform.tx} ${eventVisualTransform.ty}) scale(${eventVisualTransform.scale})`}>
+                            {scaled.length >= 2 && <polyline points={polyline} className="event-advanced-map-line" />}
+                            {scaled.map((p, idx) => (
+                              <circle key={`map-modal-pt-${idx}`} cx={p.x} cy={p.y} r={idx === 0 || idx === scaled.length - 1 ? 4.2 : 3} className="event-advanced-map-point" />
+                            ))}
+                          </g>
+                        </svg>
+                        </div>
+                      </div>
+                    );
+                  })()
+                ) : (
+                  (() => {
+                    const width = 1200;
+                    const height = 560;
+                    const palette = ["#7c8cff", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
+                    const totalPoints = eventVisualFullscreen.visual.series.reduce((acc, s) => acc + s.points.length, 0);
+                    return (
+                      <div className="event-advanced-view event-advanced-view-chart event-advanced-view-fullscreen">
+                        <div className="event-advanced-metrics-inline" role="list">
+                          <span className="event-advanced-chip" role="listitem">{t("tasks.series_count_label")}: {eventVisualFullscreen.visual.series.length}</span>
+                          <span className="event-advanced-chip" role="listitem">{t("tasks.points_count_label")}: {totalPoints}</span>
+                          <span className="event-advanced-chip" role="listitem">event: {eventVisualFullscreen.sourceEventType}</span>
+                        </div>
+                        <div
+                          className={`event-visual-interactive-surface ${eventVisualDragging ? "is-dragging" : ""}`}
+                          onWheel={handleEventVisualWheel}
+                          onDoubleClick={resetEventVisualViewport}
+                          onPointerDown={handleEventVisualPointerDown}
+                          onPointerMove={handleEventVisualPointerMove}
+                          onPointerUp={handleEventVisualPointerEnd}
+                          onPointerCancel={handleEventVisualPointerEnd}
+                          onPointerLeave={handleEventVisualPointerEnd}
+                        >
+                        <svg
+                          className="event-advanced-chart"
+                          viewBox={`0 0 ${width} ${height}`}
+                          preserveAspectRatio="none"
+                          aria-label={eventVisualFullscreen.visual.kind === "graph" ? t("tasks.plugin_graph_title") : t("tasks.plugin_timeseries_title")}
+                        >
+                          <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
+                          <g transform={`translate(${eventVisualTransform.tx} ${eventVisualTransform.ty}) scale(${eventVisualTransform.scale})`}>
+                            {eventVisualFullscreen.visual.series.map((s, idx) => {
+                              const scaled = scalePoints(s.points, width, height);
+                              const pts = scaled.map((p) => `${p.x},${p.y}`).join(" ");
+                              return scaled.length >= 2 ? (
+                                <polyline key={`series-modal-${idx}`} points={pts} className="event-advanced-series-line" style={{ stroke: palette[idx % palette.length] }} />
+                              ) : null;
+                            })}
+                          </g>
+                        </svg>
+                        </div>
+                      </div>
+                    );
+                  })()
+                )}
               </div>
             </div>
           </div>

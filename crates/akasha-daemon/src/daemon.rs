@@ -609,6 +609,7 @@ impl Daemon {
                 let tools_executor = tools_executor.clone();
                 let tools_policy_path = tools_policy_path.clone();
                 let skill_registry = skill_registry.clone();
+                let plugin_registry = plugin_registry.clone();
                 let process_registry = process_registry.clone();
                 let conv_tx = conv_tx.clone();
                 let short_term = short_term.clone();
@@ -669,6 +670,7 @@ impl Daemon {
                             let tools_executor = tools_executor.clone();
                             let tools_policy_path = tools_policy_path.clone();
                             let skill_registry = skill_registry.clone();
+                            let plugin_registry = plugin_registry.clone();
                             let process_registry = process_registry.clone();
                             let conv_tx = conv_tx.clone();
                             let human_input_store = human_input_store.clone();
@@ -698,6 +700,7 @@ impl Daemon {
                                     tools_executor,
                                     Some(tools_policy_path),
                                     Some(skill_registry),
+                                    Some(plugin_registry),
                                     Some(process_registry),
                                     Some(conv_tx),
                                     Some(human_input_store),
@@ -727,6 +730,7 @@ impl Daemon {
                             let tools_executor = tools_executor.clone();
                             let tools_policy_path = tools_policy_path.clone();
                             let skill_registry = skill_registry.clone();
+                            let plugin_registry = plugin_registry.clone();
                             let process_registry = process_registry.clone();
                             let conv_tx = conv_tx.clone();
                             let human_input_store = human_input_store.clone();
@@ -756,6 +760,7 @@ impl Daemon {
                                     tools_executor,
                                     Some(tools_policy_path),
                                     Some(skill_registry),
+                                    Some(plugin_registry),
                                     Some(process_registry),
                                     Some(conv_tx),
                                     Some(human_input_store),

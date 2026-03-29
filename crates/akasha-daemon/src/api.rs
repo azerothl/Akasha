@@ -874,6 +874,13 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("update_todo", "update_todo <index> <status> — marquer l'étape à l'index (1-based) comme status (done, cancelled)."),
     ("list_skills", "list_skills — retourne la liste des skills installés (nom et description). Utiliser avant read_skill pour charger le détail d'un skill."),
     ("read_skill", "read_skill <name> — charge le contenu (instructions, usage) du skill. À utiliser quand tu as besoin du détail d'un skill avant de l'invoquer par son nom."),
+    ("plugin.call", "plugin.call <plugin_id> <json_or_args...> — exécuter un plugin de type tool chargé dans le daemon. Exemple: TOOL: plugin.call maps {\"action\":\"distance\",\"from\":{\"lat\":45.698,\"lon\":0.328},\"to\":{\"lat\":49.009,\"lon\":2.547},\"mode\":\"car\"}"),
+    ("maps_distance", "maps_distance <from_lat> <from_lon> <to_lat> <to_lon> [mode] — via plugin maps, calcule distance et durée estimée."),
+    ("maps_route", "maps_route <from_lat> <from_lon> <to_lat> <to_lon> [mode] — via plugin maps, retourne un itinéraire simplifié avec geometry map-ready."),
+    ("graph_plot", "graph_plot <chart> <y1> <y2> ... | plugin.call graph <json> — via plugin graph, génère une figure Plotly (line/bar/scatter/histogram)."),
+    ("graph_stats", "graph_stats <json_or_args...> — via plugin graph, calcule min/max/moyenne/compte par série et retourne une vue table."),
+    ("sim_run", "sim_run <initial> <growth_rate> <noise> <horizon> | plugin.call simulation <json> — via plugin simulation, exécute une simulation déterministe et retourne une vue timeseries + métriques."),
+    ("sim_compare", "sim_compare <initial> <growth_rate> <noise> <horizon> | plugin.call simulation <json> — via plugin simulation, compare scénario de base et alternatif, retourne delta + tableau de résultats."),
 ];
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -2465,6 +2472,64 @@ async fn sync_workspace_store_from_disk(
     }
 }
 
+fn parse_plugin_tool_invocation(
+    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
+    tool_name: &str,
+    args: &[String],
+) -> Option<(String, String)> {
+    let registry = plugin_registry?;
+    let available_ids: std::collections::HashSet<String> =
+        registry.list().into_iter().map(|p| p.id).collect();
+
+    if available_ids.is_empty() {
+        return None;
+    }
+
+    let (plugin_id, action, forwarded_args): (String, Option<String>, Vec<String>) =
+        if tool_name.eq_ignore_ascii_case("plugin.call")
+            || tool_name.eq_ignore_ascii_case("plugin_call")
+        {
+            let plugin_id = args.first()?.trim().to_string();
+            let forwarded = args.get(1..).map(|v| v.to_vec()).unwrap_or_default();
+            (plugin_id, None, forwarded)
+        } else if let Some(id) = tool_name.strip_prefix("plugin.") {
+            (id.trim().to_string(), None, args.to_vec())
+        } else if available_ids.contains(tool_name) {
+            (tool_name.to_string(), None, args.to_vec())
+        } else if let Some((prefix, suffix)) = tool_name.split_once('_') {
+            if available_ids.contains(prefix) {
+                (
+                    prefix.to_string(),
+                    Some(suffix.trim().to_string()),
+                    args.to_vec(),
+                )
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        };
+
+    if plugin_id.is_empty() || !available_ids.contains(&plugin_id) {
+        return None;
+    }
+
+    let payload = serde_json::json!({
+        "tool": tool_name,
+        "plugin_id": plugin_id,
+        "action": action,
+        "args": forwarded_args,
+    });
+    Some((
+        payload
+            .get("plugin_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        payload.to_string(),
+    ))
+}
+
 async fn execute_tool_call(
     executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
     tool_name: &str,
@@ -2475,13 +2540,15 @@ async fn execute_tool_call(
     store_path: Option<&std::path::Path>,
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     message_webhook_url: Option<&str>,
+    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
     device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
     workspace_store: Option<&TaskWorkspaceStore>,
     browser_registry: Option<&crate::browser::BrowserSessionRegistry>,
     workspace_root: Option<&std::path::Path>,
 ) -> (bool, String, Option<String>) {
     use std::path::Path;
-    if !executor.policy.can_use_tool(tool_name) {
+    let is_plugin_candidate = parse_plugin_tool_invocation(plugin_registry, tool_name, args).is_some();
+    if !executor.policy.can_use_tool(tool_name) && !is_plugin_candidate {
         return (false, format!("[{}] tool not allowed by current profile", tool_name), None);
     }
     let path_arg = |i: usize| args.get(i).map(|s| Path::new(s.as_str()));
@@ -3652,8 +3719,37 @@ async fn execute_tool_call(
             }
         }
         _ => {
-            let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
-            (false, format!("[{}] unknown tool. For shell commands, use: TOOL: run_command <cmd> .... Available: {}.", tool_name, names.join(", ")), None)
+            if let Some((plugin_id, plugin_payload)) =
+                parse_plugin_tool_invocation(plugin_registry, tool_name, args)
+            {
+                match plugin_registry
+                    .and_then(|r| r.call_tool(&plugin_id, &plugin_payload).ok())
+                {
+                    Some(out) => {
+                        let preview = if out.chars().count() > 600 {
+                            format!("{}…", out.chars().take(600).collect::<String>())
+                        } else {
+                            out
+                        };
+                        (
+                            true,
+                            format!("[plugin:{}] {}", plugin_id, preview),
+                            None,
+                        )
+                    }
+                    None => (
+                        false,
+                        format!(
+                            "[plugin:{}] execution failed (plugin not found, disabled, or returned an error)",
+                            plugin_id
+                        ),
+                        None,
+                    ),
+                }
+            } else {
+                let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
+                (false, format!("[{}] unknown tool. For shell commands, use: TOOL: run_command <cmd> .... Available: {}.", tool_name, names.join(", ")), None)
+            }
         }
     };
     result
@@ -4155,6 +4251,7 @@ pub(crate) async fn run_message_via_llm(
     tools_executor: Option<std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>>,
     tools_policy_path: Option<std::path::PathBuf>,
     skill_registry: Option<std::sync::Arc<crate::skills::SkillRegistry>>,
+    plugin_registry: Option<std::sync::Arc<crate::plugins::PluginRegistry>>,
     process_registry: Option<ProcessRegistry>,
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     human_input_store: Option<HumanInputStore>,
@@ -5386,6 +5483,7 @@ pub(crate) async fn run_message_via_llm(
                             Some(store_path.as_path()),
                             conv_tx.clone(),
                             message_webhook_url.as_deref(),
+                            plugin_registry.as_ref(),
                             device_bridge.as_ref(),
                             workspace_store.as_ref(),
                             browser_registry.as_ref(),
@@ -5417,6 +5515,7 @@ pub(crate) async fn run_message_via_llm(
                         Some(store_path.as_path()),
                         conv_tx.clone(),
                         message_webhook_url.as_deref(),
+                        plugin_registry.as_ref(),
                         device_bridge.as_ref(),
                         workspace_store.as_ref(),
                         browser_registry.as_ref(),
