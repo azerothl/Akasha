@@ -132,13 +132,31 @@ impl Daemon {
             ("data_dir", self.data_dir.join("llm_router.yaml")),
             ("project_root", project_root.unwrap_or_else(|| self.data_dir.join("_"))),
         ];
+        
+        // Debug: log all candidate paths
+        for (name, path) in &llm_config_candidates {
+            info!(source = name, path = %path.display(), exists = path.exists(), "LLM router candidate path");
+        }
+        
         let (router_config, loaded_from) = llm_config_candidates
             .iter()
             .find(|(_, p)| p.exists())
             .and_then(|(name, p)| {
-                akasha_llm::RoutingConfig::load_from_path(p).ok().map(|c| (c, (*name, p.display().to_string())))
+                match akasha_llm::RoutingConfig::load_from_path(p) {
+                    Ok(c) => {
+                        info!(source = name, path = %p.display(), "LLM router YAML parsed successfully");
+                        Some((c, (*name, p.display().to_string())))
+                    }
+                    Err(e) => {
+                        warn!(source = name, path = %p.display(), error = %e, "LLM router YAML parsing failed");
+                        None
+                    }
+                }
             })
-            .unwrap_or_else(|| (akasha_llm::RoutingConfig::default_config(), ("default", String::new())));
+            .unwrap_or_else(|| {
+                info!("LLM router config not found — using hardcoded defaults (timeout=300s, retries=2)");
+                (akasha_llm::RoutingConfig::default_config(), ("default", String::new()))
+            });
         if loaded_from.0 != "default" {
             info!(source = loaded_from.0, path = %loaded_from.1, "LLM router config loaded");
         }
@@ -181,6 +199,34 @@ impl Daemon {
         llm_router.register_provider(Arc::new(akasha_llm::OllamaProvider::new(ollama_url)));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaCoreProvider::new()));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaEmbeddedProvider::new()));
+        
+        // Log global LLM configuration with sources
+        let global_cfg = llm_router.global_config();
+        let timeout_secs = llm_router.default_timeout_secs();
+        let timeout_source = if std::env::var("AKASHA_LLM_TIMEOUT_SECS").is_ok() {
+            "env (AKASHA_LLM_TIMEOUT_SECS)"
+        } else if loaded_from.0 != "default" && global_cfg.default_timeout_secs.is_some() {
+            "llm_router.yaml"
+        } else {
+            "default hardcoded"
+        };
+        let max_retries = global_cfg.default_max_retries.unwrap_or(2);
+        let retries_source = if loaded_from.0 != "default" && global_cfg.default_max_retries.is_some() {
+            "llm_router.yaml"
+        } else {
+            "default hardcoded"
+        };
+        
+        info!(
+            enable_metrics = global_cfg.enable_metrics.unwrap_or(true),
+            enable_fallback = global_cfg.enable_fallback.unwrap_or(true),
+            timeout_secs = timeout_secs,
+            timeout_source = timeout_source,
+            max_retries = max_retries,
+            max_retries_source = retries_source,
+            "LLM Router global config loaded"
+        );
+
         // All API keys / secrets: vault first, then env. (vault://key_name or key_name in vault, else env var.)
         let resolve_api_key = |api_key_ref: Option<&String>, default_env: &str| -> Option<String> {
             let ref_str = api_key_ref

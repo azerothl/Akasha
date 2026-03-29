@@ -86,7 +86,7 @@ fn is_confused_fact(fact: &str) -> bool {
     let fl = fact.to_lowercase();
     fl.contains("chemin complet")
         || fl.contains("quel texte voulez")
-        || fl.contains("timed out after 300 seconds")
+        || fl.contains("timed out after")
         || fl.contains("llm response timed out")
         || fl.starts_with("[guardrail:")
         || fact.starts_with("[Task]\n")

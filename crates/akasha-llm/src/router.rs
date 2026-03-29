@@ -120,6 +120,32 @@ impl LLMRouter {
         self.metrics.clone()
     }
 
+    /// Global per-call timeout (seconds) from routing config.
+    /// Priority: env AKASHA_LLM_TIMEOUT_SECS -> llm_router.yaml global.default_timeout_secs -> 300s
+    pub fn default_timeout_secs(&self) -> u64 {
+        if let Ok(env_val) = std::env::var("AKASHA_LLM_TIMEOUT_SECS") {
+            if let Ok(secs) = env_val.parse::<u64>() {
+                return secs;
+            }
+        }
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .global
+            .default_timeout_secs
+            .unwrap_or(300)
+    }
+
+    /// List models per provider from routing config (for GET /api/router/models).
+    /// Get the global configuration settings (timeout, retries, metrics, fallback).
+    pub fn global_config(&self) -> crate::config::GlobalConfig {
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .global
+            .clone()
+    }
+
     /// List models per provider from routing config (for GET /api/router/models).
     pub fn list_models_from_config(&self) -> std::collections::HashMap<String, Vec<String>> {
         self.config.read().unwrap_or_else(|e| e.into_inner()).list_models_by_provider()

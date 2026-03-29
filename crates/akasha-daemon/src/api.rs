@@ -4850,7 +4850,7 @@ pub(crate) async fn run_message_via_llm(
         let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(300);
+            .unwrap_or_else(|| llm_router.default_timeout_secs());
         let idle_timeout_secs = std::env::var("AKASHA_LLM_STREAM_IDLE_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
