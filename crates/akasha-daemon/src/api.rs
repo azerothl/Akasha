@@ -927,6 +927,108 @@ struct MessageIntentFlags {
     geolocation_distance: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+struct RuntimeToolRoutingEnforcer {
+    preferred_tools: std::collections::HashSet<String>,
+    forbidden_tools: std::collections::HashSet<String>,
+}
+
+impl RuntimeToolRoutingEnforcer {
+    fn from_rules(rules: &[crate::plugins::registry::MatchedRoutingRule]) -> Option<Self> {
+        if rules.is_empty() {
+            return None;
+        }
+        let mut preferred_tools = std::collections::HashSet::new();
+        let mut forbidden_tools = std::collections::HashSet::new();
+        for rule in rules {
+            for tool in &rule.preferred_tools {
+                let t = tool.trim().to_lowercase();
+                if !t.is_empty() {
+                    preferred_tools.insert(t);
+                }
+            }
+            for tool in &rule.forbidden_tools {
+                let t = tool.trim().to_lowercase();
+                if !t.is_empty() {
+                    forbidden_tools.insert(t);
+                }
+            }
+        }
+        Some(Self {
+            preferred_tools,
+            forbidden_tools,
+        })
+    }
+
+    fn is_tool_allowed(&self, tool_name: &str, args: &[String]) -> bool {
+        let tool = canonicalize_tool_name(tool_name).to_lowercase();
+
+        if self.is_forbidden(&tool, args) {
+            return false;
+        }
+
+        // If no preferred list is declared, only forbidden list is enforced.
+        if self.preferred_tools.is_empty() {
+            return true;
+        }
+
+        // Always allow ask_user to unblock missing parameters.
+        if tool == "ask_user" {
+            return true;
+        }
+
+        if self.preferred_tools.contains(&tool) {
+            return true;
+        }
+
+        // Allow plugin.call / plugin.<id> when it targets a preferred plugin/tool family.
+        if tool == "plugin.call" || tool == "plugin_call" {
+            if let Some(plugin_id) = args.first().map(|s| s.trim().to_lowercase()) {
+                if self.preferred_tools.contains(&plugin_id)
+                    || self
+                        .preferred_tools
+                        .iter()
+                        .any(|p| p.starts_with(&(plugin_id.clone() + "_")))
+                {
+                    return true;
+                }
+            }
+        }
+
+        if let Some(plugin_id) = tool.strip_prefix("plugin.") {
+            let plugin_id = plugin_id.trim().to_lowercase();
+            if self.preferred_tools.contains(&plugin_id)
+                || self
+                    .preferred_tools
+                    .iter()
+                    .any(|p| p.starts_with(&(plugin_id.clone() + "_")))
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn is_forbidden(&self, tool_name: &str, args: &[String]) -> bool {
+        if self.forbidden_tools.is_empty() {
+            return false;
+        }
+        if self.forbidden_tools.contains(tool_name) {
+            return true;
+        }
+        if (tool_name == "plugin.call" || tool_name == "plugin_call")
+            && args
+                .first()
+                .map(|s| self.forbidden_tools.contains(&s.trim().to_lowercase()))
+                .unwrap_or(false)
+        {
+            return true;
+        }
+        false
+    }
+}
+
 fn active_intents_from_flags(flags: &MessageIntentFlags) -> Vec<&'static str> {
     let mut out = Vec::new();
     if flags.save_file {
@@ -1019,6 +1121,35 @@ fn build_plugin_routing_reminders(
         lines.join("\n")
     );
     (block, geolocation_handled)
+}
+
+fn build_runtime_tool_routing_enforcer(
+    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
+    message: &str,
+    flags: &MessageIntentFlags,
+    tools_executor_snapshot: Option<&std::sync::Arc<akasha_tools::ToolExecutor>>,
+) -> Option<RuntimeToolRoutingEnforcer> {
+    let registry = plugin_registry?;
+    let intents = active_intents_from_flags(flags);
+    if intents.is_empty() {
+        return None;
+    }
+
+    let rules = registry.match_routing_rules(message, &intents, |tool_name| {
+        tools_executor_snapshot
+            .as_ref()
+            .map(|e| e.policy.can_use_tool(tool_name))
+            .unwrap_or(false)
+    });
+
+    let enforcer = RuntimeToolRoutingEnforcer::from_rules(&rules)?;
+    tracing::info!(
+        intents = ?intents,
+        preferred_tools = ?enforcer.preferred_tools,
+        forbidden_tools = ?enforcer.forbidden_tools,
+        "Runtime tool routing enforcement enabled"
+    );
+    Some(enforcer)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4773,6 +4904,12 @@ pub(crate) async fn run_message_via_llm(
         }
     }
     let intent_flags = compute_message_intent_flags(&message);
+    let runtime_tool_routing_enforcer = build_runtime_tool_routing_enforcer(
+        plugin_registry.as_ref(),
+        clean_message,
+        &intent_flags,
+        tools_executor_snapshot.as_ref(),
+    );
     let write_reminder = if intent_flags.save_file {
         WRITE_FILE_REMINDER
     } else {
@@ -5235,6 +5372,39 @@ pub(crate) async fn run_message_via_llm(
                     None => name.clone(),
                 };
                 let actual_tool = canonicalize_tool_name(&actual_tool);
+                let effective_tool_for_routing = if actual_tool.is_empty() {
+                    name.as_str()
+                } else {
+                    actual_tool.as_str()
+                };
+                if let Some(enforcer) = &runtime_tool_routing_enforcer {
+                    if !enforcer.is_tool_allowed(effective_tool_for_routing, args) {
+                        let blocked = format!(
+                            "[tool_blocked_by_routing_rules] tool={} blocked by dynamic plugin routing rules",
+                            effective_tool_for_routing
+                        );
+                        let payload = serde_json::json!({
+                            "tool": effective_tool_for_routing,
+                            "args": args,
+                            "result_preview": blocked,
+                            "success": false,
+                            "reason": "blocked_by_dynamic_plugin_routing_rules"
+                        });
+                        let _ = bus.send(
+                            EventEnvelope::new(EventType::ToolInvoked, Some(payload))
+                                .with_correlation(timeline_correlation),
+                        );
+                        tracing::warn!(
+                            task_id = %task_id,
+                            tool = %effective_tool_for_routing,
+                            preferred = ?enforcer.preferred_tools,
+                            forbidden = ?enforcer.forbidden_tools,
+                            "Tool blocked by runtime routing enforcer"
+                        );
+                        tool_results.push(blocked);
+                        continue;
+                    }
+                }
                 let args_str = args.join(" ");
                 tool_loop_history.push((actual_tool.clone(), args_str.clone()));
                 // Phase 4: loop detection — same tool+args repeated 3 times
