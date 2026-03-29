@@ -53,6 +53,10 @@ Ce document décrit **tous les fichiers de configuration** utilisés par Akasha 
 
 **Types de tâche reconnus** : `conversation`, `code_generation`, `creative_writing`, `scientific_analysis`, `data_analysis`, `system_diagnostic`, `system` (tâches internes : extraction mémoire, décomposition).
 
+**`orchestrator` (nouveauté 0.7.0)** : type de tâche optionnel dédié à la décomposition de requêtes complexes. Quand cette route est présente, l'orchestrateur l'utilise (`preferred_task_type: "orchestrator"`) à la place de `system` pour les appels LLM de décomposition. Sans cette route, l'orchestrateur reste compatible avec les configurations antérieures (fallback automatique sur `system`). Voir [llm_router.example.yaml](llm_router.example.yaml) pour un exemple.
+
+**Note sur les valeurs entières** : les champs `max_tokens`, `top_k`, `num_ctx`, `num_gpu` acceptent des valeurs `u64` dans le YAML mais sont transmis comme `u32` aux providers. Les valeurs supérieures à `u32::MAX` (4 294 967 295) sont automatiquement limitées à `u32::MAX` (pas de troncature silencieuse).
+
 ### Exemple complet
 
 Voir [llm_router.example.yaml](llm_router.example.yaml).

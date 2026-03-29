@@ -346,3 +346,31 @@ cargo run -p akasha-evals
 | Lancer l'interface web | `cd apps/akasha-ui && npm run tauri dev` |
 
 **Où trouver cette doc** : dans le dépôt : [spec/user_guide.md](user_guide.md), [spec/onboarding.md](onboarding.md), [spec/README.md](README.md) (index des specs), [README.md](../README.md) à la racine. Quand le daemon tourne : `GET /api/docs` ou onglet Doc (TUI / UI web).
+
+---
+
+## 9. Nouveautés de la version 0.7.0
+
+### Orchestration renforcée
+
+- **Route `orchestrator` dans le routeur LLM** : ajoutez un bloc `task_types.orchestrator` dans `llm_router.yaml` pour dédier un modèle à la décomposition de requêtes complexes (multi-agents). Sans cette route, l’orchestrateur utilise automatiquement la route `system` (compatibilité ascendante).
+- **Livrables vérifiés** : pour les plans multi-étapes avec `deliverables` (ex. `workspace:/rapport.md`), l’orchestrateur vérifie que les fichiers existent avant de marquer l’étape comme terminée. Les chemins absolus sont rejetés (livraison dans le workspace uniquement).
+- **Trace de plan persistée** : l’orchestrateur écrit un fichier `.akasha/plan_trace_<task_id>.md` dans le workspace à chaque mise à jour du plan — consultable pendant et après l’exécution.
+- **Détection de réponses méta** : les sous-agents qui renvoient une réponse méta (ex. « Je suis prêt à commencer la Phase 2 ») au lieu d’un vrai résultat déclenchent automatiquement un retry.
+
+### Sécurité
+
+- **Politique de chemins renforcée** : `can_read`/`can_write` utilisent `Path::starts_with` (comparaison par composant) au lieu d’un préfixe textuel, éliminant la confusion `/data` ↔ `/database`.
+- **Livrables absolus rejetés** : les chemins absolus Unix (ex. `/tmp/out.md`) dans les livrables sont rejetés pour éviter qu’un plan puisse « satisfaire » un livrable en pointant vers un fichier système préexistant.
+- **Suppression des approbations terminales automatiques** : le fichier `.code-workspace` ne contient plus de règles `chat.tools.terminal.autoApprove` qui activaient silencieusement l’exécution de commandes terminales pour tous les développeurs ouvrant le workspace.
+
+### Robustesse des appels LLM
+
+- **Clamping des entiers de config** : `max_tokens`, `top_k`, `num_ctx`, `num_gpu` supérieurs à `u32::MAX` dans `llm_router.yaml` sont limités à `u32::MAX` (plus de troncature silencieuse).
+- **Azure `max_tokens`** : la valeur par défaut du provider Azure OpenAI est alignée à 4 096 (cohérence avec les autres providers OpenAI-compatible).
+- **Niveau de log** : la troncature de réponse (due à `max_tokens`) est maintenant journalisée en `WARN` et non `ERROR`.
+
+### Correctifs UI
+
+- **Envoi de documents RAG** : les clés `content_base64` / `mime_type` dans le formulaire d’upload correspondent désormais à la signature Rust de la commande Tauri.
+- **Affichage du plan et des livrables** : les vues de sous-agents affichent les étapes du plan et les livrables attendus.

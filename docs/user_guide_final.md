@@ -333,3 +333,20 @@ Les variables d'activation sont chargées depuis le fichier **connectors.env** d
 | Ouvrir la page de téléchargement | `akasha update install` |
 
 Cette documentation est également affichée dans l'**onglet Doc** des interfaces lorsque le daemon est démarré depuis le dossier d'extraction contenant le dossier `docs`. Pour les contributeurs et développeurs, la documentation technique (spécifications, architecture, runbooks) est disponible dans le dépôt source (dossier `spec/` et README à la racine).
+
+---
+
+## 14. Nouveautés de la version 0.7.0
+
+### Orchestration multi-agents
+
+- **Route `orchestrator` dédiée** : si votre `llm_router.yaml` contient un bloc `task_types.orchestrator`, l’orchestrateur l’utilise pour la décomposition de requêtes complexes. Sans cette route, la route `system` est utilisée (compatibilité ascendante).
+- **Livrables vérifiés sur disque** : l’orchestrateur s’assure que les fichiers attendus (`workspace:/rapport.md`, etc.) ont bien été créés avant de valider une étape.
+- **Trace de plan** : un fichier `.akasha/plan_trace_<id>.md` est maintenu en temps réel dans le workspace pour les requêtes multi-étapes — consultable à tout moment.
+
+### Sécurité et correctifs
+
+- **Politique de chemins** : comparaison stricte par composant de chemin (`Path::starts_with`) — évite la confusion entre `/data` et `/database`.
+- **Envoi de documents RAG** : l’upload de documents fonctionne désormais correctement depuis l’interface Tauri.
+- **Paramètres LLM** : les valeurs `max_tokens` / `top_k` / `num_ctx` / `num_gpu` très grandes dans `llm_router.yaml` sont limitées proprement (plus de comportement imprévisible).
+- **Azure OpenAI** : `max_tokens` par défaut aligné à 4 096 (comme les autres providers).

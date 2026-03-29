@@ -53,8 +53,9 @@ cargo test -p akasha-daemon --no-default-features --features "embedded" --lib
 | Domaine | Fichier | Ce qui est testé | Commande |
 |--------|---------|-------------------|----------|
 | **Découverte** | `discovery.rs` | `discover_local()` ne panique pas (Ollama local) | `cargo test -p akasha-llm discovery` |
-| **Providers (modèles locaux / cloud)** | `provider.rs` | Ollama : nom `ollama`, `is_local()` true, `is_available()` sans panique. Akasha embedded : nom `akasha_embedded`, `is_local()` true, `is_available()` cohérent avec la feature et avec `EmbeddedLlm::is_available()` ; `complete()` renvoie `Unavailable` quand le modèle embedded n’est pas dispo | `cargo test -p akasha-llm provider::tests` |
-| **Routeur** | `router.rs` | Complétion via un provider local mock enregistré ; `embedded_available()` après enregistrement de l’embedded ; `resolve_task_type_for_agent("conversation")` → `"conversation"` | `cargo test -p akasha-llm router::tests` |
+| **Providers (modèles locaux / cloud)** | `provider.rs` | Ollama : nom `ollama`, `is_local()` true, `is_available()` sans panique. Akasha embedded : nom `akasha_embedded`, `is_local()` true, `is_available()` cohérent avec la feature et avec `EmbeddedLlm::is_available()` ; `complete()` renvoie `Unavailable` quand le modèle embedded n’est pas dispo. **Azure (0.7.0)** : nom `azure_openai`, `is_local()` false, `is_available()` selon clé API, défaut `max_tokens` = 4096 (aligné avec les autres providers OpenAI-compatible). | `cargo test -p akasha-llm provider::tests` |
+| **Routeur** | `router.rs` | Complétion via un provider local mock enregistré ; `embedded_available()` après enregistrement de l’embedded ; `resolve_task_type_for_agent("conversation")` → `"conversation"`. **0.7.0** : `routes_by_category()` expose la route `"orchestrator"` quand configurée ; absente par défaut (l’orchestrateur retombe sur `"system"`). | `cargo test -p akasha-llm router::tests` |
+| **Config – clamping (0.7.0)** | `config.rs` | `apply_config_to_request` : `max_tokens`, `top_k`, `num_ctx`, `num_gpu` > `u32::MAX` sont limités à `u32::MAX` (pas de troncature) ; valeurs normales inchangées ; style de config tableau (backward-compat). | `cargo test -p akasha-llm --no-default-features config::tests` |
 
 Sans feature `embedded` (pas d’appel au modèle Candle/Baguettotron) :
 
@@ -122,6 +123,8 @@ cargo test -p akasha-llm -F embedded
 |--------|-------------------|
 | **Interfaces appareils** | Wildcard `*`, liste vide, liste explicite, blocage qui prime sur autorisation, casse |
 | **Outils device** | `device_discover` / `device_invoke` selon interfaces et profils (refus sans interface, autorisation avec wildcard, blocage par profil, combinaison profil + interfaces) |
+| **Path traversal** | Rejet de `../secret`, `a/..`, `a/../b` via `Component::ParentDir` ; chemins relatifs normaux autorisés |
+| **Confusion préfixe (0.7.0)** | `/home/app/data` n’autorise PAS `/home/app/database/secret` (`Path::starts_with` vs string prefix) ; chemins dans le répertoire autorisé acceptés ; `workspace_root` utilise `Path::starts_with` (test `/home/app/workspace` vs `/home/app/workspace2`) |
 
 **Commande** : `cargo test -p akasha-tools`.
 
@@ -218,4 +221,26 @@ RUN_E2E=1 cargo test -p akasha-daemon --test e2e_health -- --ignored
 
 # Complétion embedded (modèle téléchargé au premier run)
 cargo test -p akasha-embedded-llm --lib -- --ignored
+```
+
+---
+
+## 6. Nouveaux tests 0.7.0
+
+Les tests ci-dessous ont été ajoutés dans la version 0.7.0 pour couvrir les nouvelles fonctionnalités et les corrections de sécurité.
+
+| Crate | Module | Ce qui est testé |
+|-------|--------|-----------------|
+| `akasha-tools` | `policy::tests` | **Confusion de préfixe** : `Path::starts_with` interdit `/home/app/database` quand `/home/app/data` est autorisé (string prefix serait vulnérable) ; `workspace_root` utilise correctement `Path::starts_with` |
+| `akasha-llm` | `config::tests` | **Clamping u64→u32** : `max_tokens`, `top_k`, `num_ctx`, `num_gpu` > `u32::MAX` sont limités (pas de troncature silencieuse) |
+| `akasha-llm` | `provider::tests` | **Azure `max_tokens`** : défaut aligné à 4096 (cohérence avec les autres providers OpenAI-compatible) |
+| `akasha-llm` | `router::tests` | **Route orchestrateur** : `routes_by_category()` expose la route `"orchestrator"` quand configurée ; absente du config par défaut |
+| `akasha-daemon` | `api::tests` | **`normalize_tool_path_hint`**, **`canonicalize_tool_name`**, **`looks_like_meta_agent_response`**, **`parse_write_file_request`**, **détection small talk / session recall** (imports manquants corrigés) |
+| `akasha-daemon` | `agents::contract::tests` | **UTF-8 boundary** : `parse_contract_tail_slice_does_not_panic_mid_utf8_char` (calcul du décalage corrigé) |
+
+```bash
+# Lancer l'ensemble des nouveaux tests
+cargo test -p akasha-tools --lib policy::tests
+cargo test -p akasha-llm --no-default-features
+cargo test -p akasha-daemon --no-default-features --lib
 ```
