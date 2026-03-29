@@ -1396,6 +1396,7 @@ impl App {
   /reload           — recharger les plugins
   /skills            — liste des skills installés
   /skills list       — idem
+  /skills install <url> — installer un skill depuis une URL (GitHub ou hôte autorisé)
   /skills reload     — recharger les skills (data_dir/skills, spec/skills)
   /skills uninstall <nom> — désinstaller un skill (ex. /skills uninstall bankr)
   /restart          — redémarrer le daemon (superviseur)
@@ -1667,6 +1668,29 @@ impl App {
                         Err(e) => return format!("Erreur: {}", e),
                     }
                 }
+                if sub == "install" {
+                    let skill_url = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                    if skill_url.is_empty() {
+                        return "Usage: /skills install <url> (ex. /skills install https://github.com/BankrBot/skills/tree/main/bankr)".to_string();
+                    }
+                    let url = format!("{}/api/skills/install", base);
+                    let body = serde_json::json!({ "url": skill_url });
+                    match client.post(&url).json(&body).send() {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(json) = r.json::<serde_json::Value>() {
+                                let msg = json.get("message").and_then(|v| v.as_str()).unwrap_or("Skill installé.");
+                                return msg.to_string();
+                            }
+                            return "Skill installé.".to_string();
+                        }
+                        Ok(r) => {
+                            let status = r.status();
+                            let err_body = r.text().unwrap_or_default();
+                            return format!("Erreur: {} — {}", status, err_body);
+                        }
+                        Err(e) => return format!("Erreur: {}", e),
+                    }
+                }
                 if sub == "uninstall" {
                     let name = parts.get(2).map(|s| s.trim()).unwrap_or("");
                     if name.is_empty() {
@@ -1690,7 +1714,7 @@ impl App {
                         Err(e) => return format!("Erreur: {}", e),
                     }
                 }
-                return "Usage: /skills [list] — lister les skills ; /skills reload — recharger ; /skills uninstall <nom> — désinstaller.".to_string();
+                return "Usage: /skills [list] — lister les skills ; /skills install <url> — installer ; /skills reload — recharger ; /skills uninstall <nom> — désinstaller.".to_string();
             }
             "metrics" => {
                 let url = format!("{}/api/router/metrics", base);

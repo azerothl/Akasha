@@ -661,6 +661,28 @@ async fn reload_skills(port: Option<u16>) -> Result<serde_json::Value, String> {
     Ok(json)
 }
 
+/// POST /api/skills/install — install a skill from a URL. Body: { "url": "<skill_url>" }.
+#[tauri::command]
+async fn install_skill(url: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let api_url = format!("{}/api/skills/install", daemon_base_url(port));
+    let client = http_client();
+    let body = serde_json::json!({ "url": url.trim() });
+    let resp = client
+        .post(&api_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// POST /api/skills/uninstall — uninstall a skill by name. Body: { "name": "<skill_name>" }.
 #[tauri::command]
 async fn uninstall_skill(name: String, port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -1466,6 +1488,7 @@ pub fn run() {
             reload_plugins,
             get_skills,
             reload_skills,
+            install_skill,
             uninstall_skill,
             get_router_routes,
             set_router_route,

@@ -8129,6 +8129,55 @@ pub async fn handle_api(
         }
     }
 
+    // POST /api/skills/install — install a skill from a URL (GitHub or any allowed HTTPS host).
+    // Body: { "url": "<skill_url>" }
+    if method == "POST" && path == "/api/skills/install" {
+        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let url = body_json
+            .as_ref()
+            .and_then(|j| j.get("url"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        match url {
+            Some(skill_url) => {
+                let allowed_hosts = if let Some(exec_lock) = _tools_executor {
+                    exec_lock.read().await.policy.skill_install_allowed_hosts()
+                } else {
+                    vec![
+                        "github.com".into(),
+                        "raw.githubusercontent.com".into(),
+                        "www.github.com".into(),
+                    ]
+                };
+                let policy_path = data_dir.join("tools_policy.yaml");
+                // tools_reload: passed to do_install_skill so it can hot-reload tools_policy
+                // after the new skill command entry is registered.
+                let tools_reload = _tools_executor.map(|r| (r, policy_path.as_path()));
+                let (ok, msg) = do_install_skill(
+                    &skill_url,
+                    data_dir,
+                    spec_dir,
+                    skill_registry,
+                    &allowed_hosts,
+                    tools_reload,
+                )
+                .await;
+                if ok {
+                    let body = serde_json::json!({ "installed": true, "message": msg }).to_string();
+                    return json_response("200 OK", &body);
+                }
+                let body = serde_json::json!({ "error": "install_failed", "detail": msg }).to_string();
+                return json_response("400 Bad Request", &body);
+            }
+            None => {
+                let body = serde_json::json!({ "error": "missing_url", "detail": "Body must be JSON with \"url\": \"<skill_url>\"" }).to_string();
+                return json_response("400 Bad Request", &body);
+            }
+        }
+    }
+
     // Liste des outils machine disponibles (Phase A)
     if method == "GET" && path == "/api/tools" {
         let list: Vec<serde_json::Value> = AVAILABLE_TOOLS
@@ -9300,10 +9349,10 @@ mod tests {
         ensure_no_open_code_block, extract_how_to_call_from_message, is_pausable, is_resumable,
         looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
         normalize_tool_path_hint, parse_content_length, parse_device_invoke_params,
-        parse_tool_calls, parse_write_file_request, response_looks_off_topic_for_small_talk,
-        rewrite_workspace_plan_key_to_lineage_root, rewrite_workspace_plan_path_str,
-        small_talk_fast_lane, SessionRecallIntent, SessionRecallRange, SmallTalkIntent,
-        SmallTalkLanguage,
+        parse_skill_install_url, parse_tool_calls, parse_write_file_request,
+        response_looks_off_topic_for_small_talk, rewrite_workspace_plan_key_to_lineage_root,
+        rewrite_workspace_plan_path_str, small_talk_fast_lane, SessionRecallIntent,
+        SessionRecallRange, SmallTalkIntent, SmallTalkLanguage,
     };
     use akasha_store::TaskStatus;
     use uuid::Uuid;
@@ -9911,5 +9960,55 @@ mod tests {
         assert_eq!(TaskStatus::Cancelled.as_str(), "cancelled");
         assert_eq!(TaskStatus::Interrupted.as_str(), "interrupted");
         assert_eq!(TaskStatus::WaitingUserInput.as_str(), "waiting_user_input");
+    }
+
+    #[test]
+    fn parse_skill_install_url_accepts_github_tree_url() {
+        // Standard GitHub tree URL for a skill directory
+        let allowed = vec!["github.com".into(), "raw.githubusercontent.com".into()];
+        let r = parse_skill_install_url(
+            "https://github.com/BankrBot/skills/tree/main/bankr",
+            &allowed,
+        );
+        assert!(r.is_some(), "GitHub tree URL must be accepted");
+        let parsed = r.unwrap();
+        assert_eq!(parsed.skill_name, "bankr");
+        assert!(
+            parsed.raw_skill_url.contains("raw.githubusercontent.com"),
+            "raw URL must point to raw.githubusercontent.com"
+        );
+    }
+
+    #[test]
+    fn parse_skill_install_url_rejects_disallowed_host() {
+        // Host not in the allowed list must be rejected to prevent SSRF
+        let allowed = vec!["github.com".into(), "raw.githubusercontent.com".into()];
+        let r = parse_skill_install_url("https://evil.example.com/bad.md", &allowed);
+        assert!(
+            r.is_none(),
+            "URL from a non-allowed host must be rejected by parse_skill_install_url"
+        );
+    }
+
+    #[test]
+    fn parse_skill_install_url_wildcard_allows_any_https() {
+        // When allowed_hosts contains "*", any HTTPS URL is allowed
+        let allowed = vec!["*".into()];
+        let r = parse_skill_install_url("https://example.com/my-skill/SKILL.md", &allowed);
+        assert!(
+            r.is_some(),
+            "Wildcard allowed_hosts must accept any HTTPS URL"
+        );
+    }
+
+    #[test]
+    fn parse_skill_install_url_rejects_http_scheme() {
+        // Only HTTPS is allowed; plain HTTP must be rejected
+        let allowed = vec!["*".into()];
+        let r = parse_skill_install_url("http://github.com/user/skills/tree/main/bankr", &allowed);
+        assert!(
+            r.is_none(),
+            "HTTP scheme must be rejected (only HTTPS is allowed)"
+        );
     }
 }

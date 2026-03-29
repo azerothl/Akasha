@@ -2574,6 +2574,7 @@ function App() {
 /reload           — recharger les plugins
 /skills            — liste des skills installés
 /skills list       — idem
+/skills install <url> — installer un skill depuis une URL (GitHub ou hôte autorisé)
 /skills reload     — recharger les skills (data_dir/skills, spec/skills)
 /skills uninstall <nom> — désinstaller un skill (ex. /skills uninstall bankr)
 /restart          — redémarrer le daemon (superviseur)
@@ -2712,6 +2713,19 @@ function App() {
           return "Impossible de recharger les skills (daemon déconnecté ou erreur).";
         }
       }
+      if (sub === "install") {
+        const skillUrl = parts[2]?.trim();
+        if (!skillUrl) return "Usage: /skills install <url> (ex. /skills install https://github.com/BankrBot/skills/tree/main/bankr)";
+        try {
+          const json = await invoke<{ installed?: boolean; message?: string }>("install_skill", {
+            url: skillUrl,
+            port,
+          });
+          return json?.installed ? (json?.message ?? `Skill installé depuis ${skillUrl}.`) : (json?.message ?? `Échec de l'installation du skill depuis ${skillUrl}.`);
+        } catch (err) {
+          return `Impossible d'installer le skill : ${String(err)}`;
+        }
+      }
       if (sub === "uninstall") {
         const skillName = parts[2]?.trim();
         if (!skillName) return "Usage: /skills uninstall <nom> (ex. /skills uninstall bankr)";
@@ -2725,7 +2739,7 @@ function App() {
           return `Impossible de désinstaller le skill : ${String(err)}`;
         }
       }
-      return "Usage: /skills [list] — lister les skills ; /skills reload — recharger ; /skills uninstall <nom> — désinstaller.";
+      return "Usage: /skills [list] — lister les skills ; /skills install <url> — installer ; /skills reload — recharger ; /skills uninstall <nom> — désinstaller.";
     }
     if (cmd === "metrics") {
       const data = await invoke<Record<string, ModelMetricsEntry>>("get_router_metrics", { port });
