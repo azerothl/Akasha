@@ -446,6 +446,7 @@ mod tests {
             repeat_penalty: None,
             num_ctx: None,
             num_gpu: None,
+            thinking_level: None,
         };
         let response = router.complete(&request).await.expect("complete should succeed");
         assert_eq!(response.text, mock_text);

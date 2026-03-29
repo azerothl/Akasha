@@ -256,7 +256,7 @@ impl MainAgent {
                     task_type: Some("conversation".to_string()),
                     target_agent: None,
                     reason: Some(
-                        "geolocation/distance/routing request detected; prefer maps_distance/maps_route or web_search"
+                        "geolocation/distance/routing request detected; prefer tools matched by dynamic plugin routing rules"
                             .to_string(),
                     ),
                 }),
@@ -292,6 +292,7 @@ User message:\n{}",
             repeat_penalty: None,
             num_ctx: None,
             num_gpu: None,
+            thinking_level: None,
         };
         let timeout = env_duration_ms("AKASHA_SELECTOR_TIMEOUT_MS", 2_000);
         // Ollama needs extra time to load the model on first call (cold start can take 30-90s).

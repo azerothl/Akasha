@@ -610,6 +610,45 @@ pub async fn run_delegation_handler(
                 }
             }
         }
+        // Build a delegation message that always includes the root user request context,
+        // so child agents don't lose intent when the delegating LLM emits a terse/ambiguous subtask.
+        let root_user_request = {
+            let mut current = requesting.clone();
+            let mut depth = 0usize;
+            let mut root = current.initial_message.clone().unwrap_or_default();
+            while let Some(pid) = current.parent_task_id {
+                if depth >= 8 {
+                    break;
+                }
+                match store.get(pid) {
+                    Ok(Some(parent)) => {
+                        if let Some(msg) = parent.initial_message.clone() {
+                            if !msg.trim().is_empty() {
+                                root = msg;
+                            }
+                        }
+                        current = parent;
+                        depth += 1;
+                    }
+                    _ => break,
+                }
+            }
+            root
+        };
+        let delegated_message = if req.message.trim_start().starts_with("[Task]\n") {
+            req.message.clone()
+        } else {
+            let root_trim = root_user_request.trim();
+            if root_trim.is_empty() {
+                req.message.clone()
+            } else {
+                format!(
+                    "[Parent user request]\n{}\n\n[Delegated subtask]\n{}",
+                    root_trim,
+                    req.message.trim()
+                )
+            }
+        };
         let child_id = Uuid::new_v4();
         const WORKER_AGENT_TYPES: &[&str] = &[
             "search", "code", "conversation", "financial", "documentalist", "project_manager",
@@ -621,12 +660,12 @@ pub async fn run_delegation_handler(
             "conversation".to_string()
         };
         const MAX_INITIAL_MSG: usize = 500;
-        let initial_message = if req.message.chars().count() > MAX_INITIAL_MSG {
-            Some(req.message.chars().take(MAX_INITIAL_MSG).chain(std::iter::once('…')).collect::<String>())
-        } else if req.message.is_empty() {
+        let initial_message = if delegated_message.chars().count() > MAX_INITIAL_MSG {
+            Some(delegated_message.chars().take(MAX_INITIAL_MSG).chain(std::iter::once('…')).collect::<String>())
+        } else if delegated_message.is_empty() {
             None
         } else {
-            Some(req.message.clone())
+            Some(delegated_message.clone())
         };
         let child_task = Task {
             id: child_id,
@@ -654,7 +693,7 @@ pub async fn run_delegation_handler(
         if conv_tx
             .send(OrchestratorTask {
                 task_id: child_id,
-                message: req.message.clone(),
+                message: delegated_message,
                 session_id: String::new(),
                 image_data_urls: None,
                 execution_mode: None,
@@ -4056,6 +4095,7 @@ async fn compact_short_term_if_needed(
         repeat_penalty: None,
         num_ctx: None,
         num_gpu: None,
+        thinking_level: None,
     };
     let compaction_timeout = env_duration_ms("AKASHA_COMPACTION_TIMEOUT_MS", 1_500);
     match tokio::time::timeout(compaction_timeout, llm_router.complete(&req)).await {
@@ -4144,6 +4184,7 @@ Factual response in English.\n\n{}",
         repeat_penalty: None,
         num_ctx: None,
         num_gpu: None,
+        thinking_level: None,
     };
     match llm_router.complete(&req).await {
         Ok(resp) => {
@@ -4953,8 +4994,6 @@ pub(crate) async fn run_message_via_llm(
             .map(|e| {
                 e.policy.can_use_tool("web_search")
                     || e.policy.can_use_tool("plugin.call")
-                    || e.policy.can_use_tool("maps_distance")
-                    || e.policy.can_use_tool("maps_route")
             })
             .unwrap_or(false);
         tracing::info!(
@@ -5131,6 +5170,28 @@ pub(crate) async fn run_message_via_llm(
         let mut last_tool_results_blob: Option<String> = None;
         let mut force_synthesis_attempted = false;
         let mut meta_response_retry_count = 0u32;
+        let strict_tools_first = runtime_tool_routing_enforcer
+            .as_ref()
+            .map(|e| !e.preferred_tools.is_empty())
+            .unwrap_or(false);
+        let strict_tools_instruction = if strict_tools_first {
+            let preferred = runtime_tool_routing_enforcer
+                .as_ref()
+                .map(|e| {
+                    let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
+                    v.sort();
+                    v.join(", ")
+                })
+                .unwrap_or_default();
+            format!(
+                "\n\n[TOOLS-FIRST STRICT MODE]\n- PRIMARY USER REQUEST (must be satisfied): {}\n- You MUST output TOOL lines only until at least one allowed tool succeeds.\n- Preferred tools: {}\n- If inputs are missing, output ONLY: TOOL: ask_user {{\"question\":\"...\",\"context\":\"...\",\"choices\":[...]}}\n- Do NOT output prose, role acknowledgements, policy acknowledgements, or generic greetings.\n",
+                user_message, preferred
+            )
+        } else {
+            String::new()
+        };
+        let mut strict_no_tool_rounds = 0u32;
+        let mut strict_successful_tool_calls = 0u32;
         // Orchestrated deliverables: re-prompts when the model returns no parseable TOOL lines.
         let mut orch_disk_write_nags = 0u32;
         let mut last_captured_image_base64: Option<String> = None;
@@ -5150,6 +5211,20 @@ pub(crate) async fn run_message_via_llm(
             .unwrap_or_else(|| llm_timeout_secs.min(300));
 
     'tool_rounds: loop {
+        if strict_tools_first {
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::ProgressUpdate,
+                    Some(serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "progress_pct": 30,
+                        "message": "Applying dynamic plugin routing rules (tools-first)…"
+                    })),
+                )
+                .with_correlation(task_id),
+            );
+        }
+
         // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
         if let Some(ref store) = task_usage_store {
             let (session_tokens, session_cost) = store.get_session(&session_id).await.unwrap_or((0, 0.0));
@@ -5168,7 +5243,11 @@ pub(crate) async fn run_message_via_llm(
         }
         let preferred_task_type = Some(llm_router.resolve_task_type_for_agent(&assigned_agent));
         let request = CompletionRequest {
-            prompt: format!("{}{}", current_prompt, tool_instruction),
+            prompt: if strict_tools_first {
+                format!("{}{}", current_prompt, strict_tools_instruction)
+            } else {
+                format!("{}{}", current_prompt, tool_instruction)
+            },
             max_tokens: Some(max_tokens),
             temperature: Some(0.7),
             preferred_task_type,
@@ -5185,6 +5264,7 @@ pub(crate) async fn run_message_via_llm(
             repeat_penalty: None,
             num_ctx: None,
             num_gpu: None,
+            thinking_level: None,
         };
         // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
         // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
@@ -5347,6 +5427,37 @@ pub(crate) async fn run_message_via_llm(
             .join("\n")
             .trim()
             .to_string();
+
+        if strict_tools_first
+            && no_parseable_tools_this_round
+            && strict_successful_tool_calls == 0
+        {
+            strict_no_tool_rounds = strict_no_tool_rounds.saturating_add(1);
+            let preferred_tools_hint = runtime_tool_routing_enforcer
+                .as_ref()
+                .map(|e| {
+                    let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
+                    v.sort();
+                    v.join(", ")
+                })
+                .unwrap_or_default();
+
+            if strict_no_tool_rounds <= 1 {
+                current_prompt = format!(
+                    "User request: {}\n\nYour previous reply:\n{}\n\nDynamic plugin routing rules are active for this request. You MUST emit TOOL lines only. Preferred tools: {}. If inputs are missing, call TOOL: ask_user with one precise question. Do NOT output prose-only answers now.",
+                    user_message,
+                    response_plain,
+                    preferred_tools_hint
+                );
+                continue;
+            }
+
+            reply_text = format!(
+                "Impossible de répondre de façon fiable sans exécuter un outil autorisé. Outils attendus: {}. Vérifiez les règles de routage des plugins installés ou fournissez les paramètres manquants.",
+                preferred_tools_hint
+            );
+            break 'tool_rounds;
+        }
 
         if no_parseable_tools_this_round
             && meta_response_retry_count < 2
@@ -5890,6 +6001,7 @@ pub(crate) async fn run_message_via_llm(
                     .with_correlation(timeline_correlation),
                 );
                 if success {
+                    strict_successful_tool_calls = strict_successful_tool_calls.saturating_add(1);
                     log_tool_journal_if_write(&actual_tool, args, &res).await;
                 }
                 tool_results.push(res);
@@ -6114,6 +6226,21 @@ pub(crate) async fn run_message_via_llm(
             .join("\n")
             .trim()
             .to_string();
+        if strict_tools_first && strict_successful_tool_calls == 0 {
+            let preferred_tools_hint = runtime_tool_routing_enforcer
+                .as_ref()
+                .map(|e| {
+                    let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
+                    v.sort();
+                    v.join(", ")
+                })
+                .unwrap_or_default();
+            reply_text = format!(
+                "Réponse bloquée: aucune exécution d'outil autorisé n'a réussi pour cette demande. Outils attendus: {}. Merci de vérifier la configuration des plugins/routing rules ou de préciser les paramètres requis.",
+                preferred_tools_hint
+            );
+            break;
+        }
         // If we already ran tools but the model returned a placeholder ("Je vais… Une seconde."), force one more round to get the actual answer.
         if !tool_loop_history.is_empty()
             && last_tool_results_blob.as_ref().map_or(false, |b| !b.is_empty())
@@ -6288,6 +6415,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                 repeat_penalty: None,
                 num_ctx: None,
                 num_gpu: None,
+                thinking_level: None,
             };
             let mut to_promote: Vec<(String, String)> = Vec::new();
             let mut agent_updates: Vec<(String, String)> = Vec::new();
@@ -8273,6 +8401,7 @@ pub async fn handle_api(
             repeat_penalty: None,
             num_ctx: None,
             num_gpu: None,
+            thinking_level: None,
         };
         match llm_router.complete(&req).await {
             Ok(resp) => {
@@ -8645,6 +8774,7 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
             repeat_penalty: None,
             num_ctx: None,
             num_gpu: None,
+            thinking_level: None,
         };
         let advice_timeout = std::time::Duration::from_secs(120);
         match tokio::time::timeout(advice_timeout, llm_router.complete(&req)).await {

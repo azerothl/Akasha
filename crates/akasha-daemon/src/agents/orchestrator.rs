@@ -929,6 +929,7 @@ async fn decompose_to_plan(
         repeat_penalty: None,
         num_ctx: None,
         num_gpu: None,
+        thinking_level: None,
     };
     let decompose_timeout = {
         let base = decompose_timeout();
@@ -989,6 +990,7 @@ async fn decompose_to_plan(
         repeat_penalty: None,
         num_ctx: None,
         num_gpu: None,
+        thinking_level: None,
     };
     let retry_timeout = {
         let base = decompose_retry_timeout();
@@ -1112,6 +1114,7 @@ Output only: SATISFACTORY, CANNOT_DO, or NEEDS_REFINEMENT"#,
         repeat_penalty: None,
         num_ctx: None,
         num_gpu: None,
+        thinking_level: None,
     };
     match tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -2484,6 +2487,7 @@ Reply in the SAME LANGUAGE as the user's question above. Do not add any informat
                 repeat_penalty: None,
                 num_ctx: None,
                 num_gpu: None,
+                thinking_level: None,
             };
             match tokio::time::timeout(
                 std::time::Duration::from_secs(120),

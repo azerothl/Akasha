@@ -51,6 +51,8 @@ task_types:
         temperature: 0.7
         top_p: 0.9
         top_k: 40
+        # Optional thinking/reasoning effort (if provider/model supports it): off|low|medium|high
+        thinking_level: medium
     fallback:
       - provider: akasha_core
         model: core
@@ -64,6 +66,7 @@ task_types:
         temperature: 0.3
         top_p: 0.95
         top_k: 20
+        thinking_level: low
         max_tokens: 4096
     fallback:
       - provider: akasha_core
@@ -78,6 +81,7 @@ task_types:
         temperature: 1.2
         top_p: 0.95
         repeat_penalty: 1.1  # Prevent repetition (Ollama-compatible)
+        thinking_level: medium
     fallback:
       - provider: akasha_core
         model: core
@@ -145,6 +149,7 @@ task_types:
 #    - num_ctx (int, context window size)
 #    - num_gpu (int, GPU layers to use)
 #    - max_tokens (int, length limit)
+#    - thinking_level (off|low|medium|high, mapped to provider-specific thinking mode when available)
 #
 #  OpenAI / Azure OpenAI / OpenRouter / BitNet (OpenAI-compatible):
 #    - temperature (float, default 0.7, range 0.0-2.0)
@@ -152,9 +157,11 @@ task_types:
 #    - frequency_penalty (float, range -2.0 to 2.0)
 #    - presence_penalty (float, range -2.0 to 2.0)
 #    - max_tokens (int, length limit)
+#    - thinking_level (off|low|medium|high, mapped to reasoning_effort on supported models)
 #
 #  Google Gemini:
 #    - temperature (float)
 #    - top_p (float)
 #    - top_k (int)
 #    - max_tokens (int, as maxOutputTokens)
+#    - thinking_level (off|low|medium|high, mapped to thinkingConfig for Gemini 2.5 models)

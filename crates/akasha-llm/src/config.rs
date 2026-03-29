@@ -59,7 +59,8 @@ pub struct RouteEntry {
 
 impl RouteEntry {
     /// Extract model config from serde_json::Value and apply to CompletionRequest.
-    /// Supports: temperature, top_p, top_k, frequency_penalty, presence_penalty, repeat_penalty, num_ctx, num_gpu, max_tokens.
+    /// Supports: temperature, top_p, top_k, frequency_penalty, presence_penalty, repeat_penalty,
+    /// num_ctx, num_gpu, max_tokens, thinking_level.
     pub fn apply_config_to_request(&self, request: &mut crate::provider::CompletionRequest) {
         if let Some(ref config) = self.config {
             // Accept both YAML styles:
@@ -104,6 +105,13 @@ impl RouteEntry {
                 .or_else(|| get_value("max_token").and_then(|v| v.as_u64()))
             {
                 request.max_tokens = Some(mt.min(u32::MAX as u64) as u32);
+            }
+            if let Some(level) = get_value("thinking_level")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                request.thinking_level = Some(level.to_string());
             }
         }
     }
@@ -258,6 +266,7 @@ mod tests {
             repeat_penalty: None,
             num_ctx: None,
             num_gpu: None,
+            thinking_level: None,
             preferred_task_type: None,
             system_prompt: None,
             image_data_urls: None,

@@ -31,6 +31,10 @@ pub struct CompletionRequest {
     /// Number of GPU layers (local providers like Ollama).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub num_gpu: Option<u32>,
+    /// Model thinking/reasoning effort level when supported by provider/model.
+    /// Expected values: off, low, medium, high.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
     /// When set, router uses this task type instead of classifying from the prompt (e.g. "system" for memory extraction, decomposition).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_task_type: Option<String>,
@@ -40,6 +44,43 @@ pub struct CompletionRequest {
     /// Optional image data URLs (data:image/png;base64,...) for vision-capable providers; appended to user message content.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_data_urls: Option<Vec<String>>,
+}
+
+fn normalized_thinking_level(level: Option<&str>) -> Option<&'static str> {
+    match level.map(|s| s.trim().to_ascii_lowercase()) {
+        Some(s) if s == "off" || s == "none" || s == "disabled" => Some("off"),
+        Some(s) if s == "low" => Some("low"),
+        Some(s) if s == "medium" || s == "med" => Some("medium"),
+        Some(s) if s == "high" => Some("high"),
+        _ => None,
+    }
+}
+
+fn supports_openai_reasoning_effort(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+        || m.contains("gpt-5")
+}
+
+fn anthropic_thinking_budget_tokens(level: &str) -> Option<u32> {
+    match level {
+        "low" => Some(1024),
+        "medium" => Some(4096),
+        "high" => Some(8192),
+        _ => None,
+    }
+}
+
+fn supports_anthropic_thinking(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.contains("claude-3-7") || m.contains("claude-sonnet-4")
+}
+
+fn supports_google_thinking(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.contains("gemini-2.5")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +213,11 @@ impl OllamaProvider {
             "stream": false,
             "options": options
         });
+        let mut body = body;
+        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
+            // Ollama supports "think" for reasoning-capable models.
+            body["think"] = serde_json::json!(level != "off");
+        }
         let resp = client
             .post(&url)
             .json(&body)
@@ -330,6 +376,11 @@ impl OpenAIProvider {
         }
         if let Some(pres_penalty) = request.presence_penalty {
             body["presence_penalty"] = serde_json::json!(pres_penalty);
+        }
+        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
+            if level != "off" && supports_openai_reasoning_effort(model) {
+                body["reasoning_effort"] = serde_json::json!(level);
+            }
         }
 
         let resp = client
@@ -517,6 +568,11 @@ impl LLMProvider for OpenRouterProvider {
         if let Some(pres_penalty) = request.presence_penalty {
             body["presence_penalty"] = serde_json::json!(pres_penalty);
         }
+        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
+            if level != "off" && supports_openai_reasoning_effort(model) {
+                body["reasoning_effort"] = serde_json::json!(level);
+            }
+        }
 
         let mut req = client
             .post(&url)
@@ -638,6 +694,17 @@ impl LLMProvider for AnthropicProvider {
             "max_tokens": request.max_tokens.unwrap_or(4096),
             "messages": [{ "role": "user", "content": prompt }]
         });
+        let mut body = body;
+        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
+            if level != "off" && supports_anthropic_thinking(model) {
+                if let Some(budget_tokens) = anthropic_thinking_budget_tokens(level) {
+                    body["thinking"] = serde_json::json!({
+                        "type": "enabled",
+                        "budget_tokens": budget_tokens
+                    });
+                }
+            }
+        }
         let resp = client
             .post(&url)
             .header("x-api-key", &self.api_key)
@@ -755,6 +822,11 @@ impl LLMProvider for AzureOpenAIProvider {
         if let Some(pres_penalty) = request.presence_penalty {
             body["presence_penalty"] = serde_json::json!(pres_penalty);
         }
+        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
+            if level != "off" && supports_openai_reasoning_effort(deployment) {
+                body["reasoning_effort"] = serde_json::json!(level);
+            }
+        }
 
         let resp = client
             .post(&url)
@@ -860,6 +932,18 @@ impl LLMProvider for GoogleAIProvider {
         }
         if let Some(top_k) = request.top_k {
             generation_config["topK"] = serde_json::json!(top_k);
+        }
+        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
+            if supports_google_thinking(model) {
+                let budget = match level {
+                    "off" => 0u32,
+                    "low" => 512u32,
+                    "medium" => 2048u32,
+                    "high" => 4096u32,
+                    _ => 0u32,
+                };
+                generation_config["thinkingConfig"] = serde_json::json!({ "thinkingBudget": budget });
+            }
         }
 
         let body = serde_json::json!({
@@ -1419,6 +1503,7 @@ mod tests {
             repeat_penalty: None,
             num_ctx: None,
             num_gpu: None,
+            thinking_level: None,
             preferred_task_type: None,
             system_prompt: None,
             image_data_urls: None,
