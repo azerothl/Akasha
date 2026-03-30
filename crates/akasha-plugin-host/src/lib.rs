@@ -50,6 +50,16 @@ impl WasmPlugin {
             .get_typed_func::<i32, i32>(&mut store, RUN_FUNC)
             .map_err(|_| PluginError::Message("wasm must export 'run'(i32)->i32".into()))?;
 
+        // Resolve the actual I/O buffer offset.  Plugins that export
+        // `buffer_ptr() -> i32` place their I/O buffer elsewhere in linear
+        // memory (e.g. in the BSS segment at ~1 MB when the shadow-stack
+        // occupies the low 1 MB).  Plugins without this export fall back to
+        // offset 0 (legacy / hand-written WASM that really does use offset 0).
+        let io_offset: usize = instance
+            .get_typed_func::<(), i32>(&mut store, "buffer_ptr")
+            .and_then(|f| f.call(&mut store, ()).map(|v| v.max(0) as usize))
+            .unwrap_or(0);
+
         let data = input.as_bytes();
         let len = data.len() as usize;
         if len == 0 {
@@ -60,16 +70,16 @@ impl WasmPlugin {
                 ));
             }
             let mut out = vec![0u8; out_len as usize];
-            memory.read(&store, 0, &mut out).map_err(|_| PluginError::Crashed)?;
+            memory.read(&store, io_offset, &mut out).map_err(|_| PluginError::Crashed)?;
             return Ok(String::from_utf8_lossy(&out).into_owned());
         }
-        let need = len.max(4096);
+        let need = io_offset + len.max(4096);
         if memory.data_size(&store) < need {
             return Err(PluginError::Message(
                 "wasm memory too small for input".into(),
             ));
         }
-        memory.write(&mut store, 0, data).map_err(|_| PluginError::Crashed)?;
+        memory.write(&mut store, io_offset, data).map_err(|_| PluginError::Crashed)?;
         let out_len = run.call(&mut store, len as i32).map_err(|_| PluginError::Crashed)?;
         if out_len <= 0 {
             return Err(PluginError::Message(
@@ -78,7 +88,7 @@ impl WasmPlugin {
         }
         let out_len = out_len as usize;
         let mut out = vec![0u8; out_len];
-        memory.read(&store, 0, &mut out).map_err(|_| PluginError::Crashed)?;
+        memory.read(&store, io_offset, &mut out).map_err(|_| PluginError::Crashed)?;
         String::from_utf8(out).map_err(|_| PluginError::Message("plugin returned invalid UTF-8".into()))
     }
 }

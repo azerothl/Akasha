@@ -8356,6 +8356,44 @@ pub async fn handle_api(
         plugin_registry.reload();
         return json_response("200 OK", r#"{"reloaded":true}"#);
     }
+    // POST /api/plugins/reputation/reset
+    // Body optional:
+    // - { "plugin_id": "maps" } to reset one plugin
+    // - {} or empty body to reset all plugins
+    if method == "POST" && path == "/api/plugins/reputation/reset" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let plugin_id = body_json
+            .as_ref()
+            .and_then(|j| j.get("plugin_id"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+
+        let result = if let Some(id) = plugin_id.as_deref() {
+            plugin_registry.reset_reputation(id)
+        } else {
+            plugin_registry.reset_all_reputation()
+        };
+
+        match result {
+            Ok(_) => {
+                plugin_registry.reload();
+                let body = serde_json::json!({
+                    "ok": true,
+                    "plugin_id": plugin_id,
+                    "reloaded": true,
+                });
+                return json_response("200 OK", &body.to_string());
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": "reputation_reset_failed", "detail": e.to_string() });
+                return json_response("500 Internal Server Error", &body.to_string());
+            }
+        }
+    }
 
     // Phase D: Skills (loadable skills for agents; Agent Skills spec + flat YAML)
     if method == "GET" && path == "/api/skills" {

@@ -241,6 +241,14 @@ impl PluginRegistry {
     pub fn reload(&self) {
         self.load_all();
     }
+
+    pub fn reset_reputation(&self, plugin_id: &str) -> std::io::Result<()> {
+        self.reputation.reset(plugin_id)
+    }
+
+    pub fn reset_all_reputation(&self) -> std::io::Result<()> {
+        self.reputation.reset_all()
+    }
 }
 
 fn rule_matches(rule: &PluginRoutingRule, message_lower: &str, active_intents: &[&str]) -> bool {

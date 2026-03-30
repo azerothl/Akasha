@@ -438,7 +438,7 @@ function classifyEventKind(eventType?: string | null): string {
   if (value === "progress_update" || value === "todo_list_updated") return "progress";
   if (value === "deterministic_preferred_tool_attempt" || value === "deterministic_preferred_tool_result") return "tool";
   if (value === "deterministic_preferred_tool_no_success") return "failure";
-  if (value === "tool_call_started" || value === "tool_call_finished") return "tool";
+  if (value === "tool_call_started" || value === "tool_call_finished" || value === "tool_invoked") return "tool";
   if (value === "sub_agent_spawned" || value === "task_decomposed" || value === "plan_proposed" || value === "plan_committed" || value === "timeline_milestone" || value === "subagent_startup_started") return "orchestration";
   if (value === "task_completed") return "success";
   if (value === "task_failed") return "failure";
@@ -604,6 +604,13 @@ function App() {
       if ((event.event_type === "tool_call_started" || event.event_type === "tool_call_finished") && payload && typeof payload === "object" && "tool" in payload && (payload as { tool?: string }).tool) {
         return `${t("tasks.tool_summary_prefix")}: ${String((payload as { tool: string }).tool)}`;
       }
+      if (event.event_type === "tool_invoked" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const tool = typeof p.tool === "string" ? p.tool : "?";
+        const success = typeof p.success === "boolean" ? p.success : null;
+        const suffix = success !== null ? ` · ${success ? t("common.yes") : t("common.no")}` : "";
+        return `${t("tasks.tool_summary_prefix")}: ${tool}${suffix}`;
+      }
       if (event.event_type === "sub_agent_spawned" && payload && typeof payload === "object" && "agent" in payload && (payload as { agent?: string }).agent) {
         return `${t("tasks.agent_summary_prefix")}: ${String((payload as { agent: string }).agent)}`;
       }
@@ -690,6 +697,16 @@ function App() {
       if (event.event_type === "deterministic_preferred_tool_no_success") {
         if (Array.isArray(p.attempted_tools) && p.attempted_tools.length > 0) {
           out.push(`${t("tasks.tool_summary_prefix")}: ${(p.attempted_tools as unknown[]).map((x) => String(x)).join(", ")}`);
+        }
+      }
+
+      if (event.event_type === "tool_invoked") {
+        pushLabeled(t("tasks.tool_summary_prefix"), p.tool);
+        if (typeof p.success === "boolean") {
+          out.push(`${t("tasks.result_label")}: ${p.success ? t("common.yes") : t("common.no")}`);
+        }
+        if (typeof p.result_preview === "string" && p.result_preview.trim()) {
+          out.push(`${t("tasks.result_preview_label")}: ${trimPreview(p.result_preview.trim(), 200)}`);
         }
       }
 
@@ -1061,6 +1078,10 @@ function App() {
   }
 
   const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
+  const [pluginReputationTarget, setPluginReputationTarget] = useState("maps");
+  const [pluginReputationResetLoading, setPluginReputationResetLoading] = useState(false);
+  const [pluginReputationResetMessage, setPluginReputationResetMessage] = useState<string | null>(null);
+  const [pluginReputationResetError, setPluginReputationResetError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(() => {
     try {
       return localStorage.getItem(AKASHA_SESSION_ID_KEY);
@@ -1753,6 +1774,7 @@ function App() {
       "deterministic_preferred_tool_attempt",
       "deterministic_preferred_tool_result",
       "deterministic_preferred_tool_no_success",
+      "tool_invoked",
     ]);
 
     const signalTypes = taskOrchestrationDebugLevel === "minimal" ? minimalSignalTypes : normalSignalTypes;
@@ -2339,6 +2361,40 @@ function App() {
   useEffect(() => {
     if (tab === "scheduled") fetchScheduleReports();
   }, [tab, fetchScheduleReports]);
+
+  const resetPluginReputation = useCallback(async (pluginId?: string) => {
+    setPluginReputationResetLoading(true);
+    setPluginReputationResetError(null);
+    setPluginReputationResetMessage(null);
+    try {
+      const trimmed = (pluginId ?? "").trim();
+      const res = await fetch(`http://127.0.0.1:${DAEMON_PORT}/api/plugins/reputation/reset`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: trimmed ? JSON.stringify({ plugin_id: trimmed }) : JSON.stringify({}),
+      });
+
+      const text = await res.text();
+      let payload: { message?: string } | null = null;
+      try {
+        payload = text ? (JSON.parse(text) as { message?: string }) : null;
+      } catch {
+        payload = null;
+      }
+
+      if (!res.ok) {
+        throw new Error(payload?.message || text || `HTTP ${res.status}`);
+      }
+
+      setPluginReputationResetMessage(
+        payload?.message || (trimmed ? t("settings.plugin_reputation_reset_ok") : t("settings.plugin_reputation_reset_all_ok"))
+      );
+    } catch (e) {
+      setPluginReputationResetError(String(e));
+    } finally {
+      setPluginReputationResetLoading(false);
+    }
+  }, [t]);
 
   const fetchUserRagDocuments = useCallback(async () => {
     setUserRagLoading(true);
@@ -4008,6 +4064,18 @@ function App() {
                                                   {ev.payload && typeof ev.payload === "object" && (ev.event_type === "tool_call_started" || ev.event_type === "tool_call_finished") && "tool" in ev.payload ? (
                                                     <span className="chat-subagents-event-agent">— {String((ev.payload as { tool?: string }).tool ?? "")}</span>
                                                   ) : null}
+                                                  {ev.payload && typeof ev.payload === "object" && ev.event_type === "tool_invoked" ? (() => {
+                                                    const p = ev.payload as Record<string, unknown>;
+                                                    const tool = typeof p.tool === "string" ? p.tool : null;
+                                                    const success = typeof p.success === "boolean" ? p.success : null;
+                                                    const preview = typeof p.result_preview === "string" && p.result_preview.trim() ? p.result_preview.trim() : null;
+                                                    return (
+                                                      <>
+                                                        {tool && <span className="chat-subagents-event-agent">— {tool}{success !== null && <span className={`event-tool-result-badge ${success ? "event-tool-result-ok" : "event-tool-result-err"}`}>{success ? "✓" : "✗"}</span>}</span>}
+                                                        {preview && <span className="chat-subagents-event-result-preview" title={p.result_preview as string}>{trimPreview(preview, 120)}</span>}
+                                                      </>
+                                                    );
+                                                  })() : null}
                                                   {ev.payload && typeof ev.payload === "object" && (ev.event_type === "task_completed" || ev.event_type === "task_failed") && "model_used" in ev.payload && (ev.payload as { model_used?: string | null }).model_used ? (
                                                     <span className="chat-subagents-event-model">— {t("tasks.model_used")}: {(ev.payload as { model_used: string }).model_used}</span>
                                                   ) : null}
@@ -6379,6 +6447,52 @@ function App() {
                     <span className="settings-doc muted"> — {t("settings.doc_from_daemon")}</span>
                   </dd>
                 </dl>
+
+                <h3 className="settings-subtitle">{t("settings.plugin_reputation_title")}</h3>
+                <p className="settings-doc muted">{t("settings.plugin_reputation_desc")}</p>
+                <div className="settings-plugin-reputation-controls">
+                  <div className="settings-plugin-reputation-row">
+                    <label htmlFor="plugin-reputation-target" className="settings-label">
+                      {t("settings.plugin_reputation_plugin_id")}
+                    </label>
+                    <input
+                      id="plugin-reputation-target"
+                      type="text"
+                      className="settings-input"
+                      value={pluginReputationTarget}
+                      onChange={(e) => setPluginReputationTarget(e.target.value)}
+                      placeholder="maps"
+                    />
+                    <button
+                      type="button"
+                      className="settings-link-btn"
+                      disabled={pluginReputationResetLoading || !pluginReputationTarget.trim()}
+                      onClick={() => resetPluginReputation(pluginReputationTarget)}
+                    >
+                      {pluginReputationResetLoading ? t("common.loading") : t("settings.plugin_reputation_reset_one")}
+                    </button>
+                  </div>
+                  <div className="settings-plugin-reputation-row">
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={pluginReputationResetLoading}
+                      onClick={() => resetPluginReputation()}
+                    >
+                      {t("settings.plugin_reputation_reset_all")}
+                    </button>
+                  </div>
+                  {pluginReputationResetMessage && (
+                    <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-ok" role="status">
+                      {pluginReputationResetMessage}
+                    </p>
+                  )}
+                  {pluginReputationResetError && (
+                    <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err" role="alert">
+                      {pluginReputationResetError}
+                    </p>
+                  )}
+                </div>
               </div>
             )}
             {settingsSection === "agent" && (

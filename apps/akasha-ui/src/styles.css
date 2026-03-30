@@ -1745,6 +1745,48 @@ pre,
   color: var(--akasha-accent);
 }
 
+.event-tool-result-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 50%;
+  font-size: 0.625rem;
+  font-weight: 700;
+  margin-left: 0.3rem;
+  vertical-align: middle;
+  line-height: 1;
+}
+
+.event-tool-result-ok {
+  background: color-mix(in srgb, var(--akasha-success, #22c55e) 20%, transparent);
+  color: var(--akasha-success, #22c55e);
+  border: 1px solid var(--akasha-success, #22c55e);
+}
+
+.event-tool-result-err {
+  background: color-mix(in srgb, var(--akasha-error, #ef4444) 20%, transparent);
+  color: var(--akasha-error, #ef4444);
+  border: 1px solid var(--akasha-error, #ef4444);
+}
+
+.chat-subagents-event-result-preview {
+  display: block;
+  margin-top: 0.2rem;
+  padding: 0.2rem 0.4rem;
+  background: color-mix(in srgb, var(--akasha-text, #fafafa) 5%, transparent);
+  border-left: 2px solid var(--akasha-text-dim, #6b7280);
+  border-radius: 2px;
+  font-size: 0.72rem;
+  color: var(--akasha-text-dim, #9ca3af);
+  font-family: var(--akasha-font-mono, monospace);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-width: 100%;
+  overflow: hidden;
+}
+
 .chat-subagents-event-at {
   color: var(--akasha-text-dim);
   font-size: 0.75rem;
@@ -2595,6 +2637,38 @@ pre,
 }
 .settings-link-btn:hover {
   filter: brightness(1.1);
+}
+
+.settings-plugin-reputation-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-width: 48rem;
+}
+
+.settings-plugin-reputation-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.settings-plugin-reputation-row .settings-input {
+  min-width: 14rem;
+  max-width: 20rem;
+}
+
+.settings-plugin-reputation-feedback {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.settings-plugin-reputation-feedback-ok {
+  color: var(--akasha-success);
+}
+
+.settings-plugin-reputation-feedback-err {
+  color: var(--akasha-error);
 }
 
 .settings-list code {
