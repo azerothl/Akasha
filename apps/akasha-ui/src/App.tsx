@@ -566,6 +566,16 @@ interface ModelMetricsEntry {
 
 type RouterMetrics = Record<string, ModelMetricsEntry>;
 
+type PluginStatusEntry = {
+  id?: string;
+  name?: string;
+  version?: string;
+  kind?: string;
+  enabled?: boolean;
+  score?: number;
+  disabled_reason?: string | null;
+};
+
 function App() {
   const { t, locale, setLocale } = useI18n();
   const themes = useMemo(
@@ -1082,6 +1092,9 @@ function App() {
   const [pluginReputationResetLoading, setPluginReputationResetLoading] = useState(false);
   const [pluginReputationResetMessage, setPluginReputationResetMessage] = useState<string | null>(null);
   const [pluginReputationResetError, setPluginReputationResetError] = useState<string | null>(null);
+  const [pluginStatusList, setPluginStatusList] = useState<PluginStatusEntry[]>([]);
+  const [pluginStatusLoading, setPluginStatusLoading] = useState(false);
+  const [pluginStatusError, setPluginStatusError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(() => {
     try {
       return localStorage.getItem(AKASHA_SESSION_ID_KEY);
@@ -2358,6 +2371,20 @@ function App() {
     }
   }, []);
 
+  const fetchPluginStatus = useCallback(async () => {
+    setPluginStatusLoading(true);
+    setPluginStatusError(null);
+    try {
+      const list = await invoke<PluginStatusEntry[]>("get_plugins", { port: DAEMON_PORT });
+      setPluginStatusList(Array.isArray(list) ? list : []);
+    } catch (e) {
+      setPluginStatusError(String(e));
+      setPluginStatusList([]);
+    } finally {
+      setPluginStatusLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (tab === "scheduled") fetchScheduleReports();
   }, [tab, fetchScheduleReports]);
@@ -2389,12 +2416,13 @@ function App() {
       setPluginReputationResetMessage(
         payload?.message || (trimmed ? t("settings.plugin_reputation_reset_ok") : t("settings.plugin_reputation_reset_all_ok"))
       );
+      await fetchPluginStatus();
     } catch (e) {
       setPluginReputationResetError(String(e));
     } finally {
       setPluginReputationResetLoading(false);
     }
-  }, [t]);
+  }, [t, fetchPluginStatus]);
 
   const fetchUserRagDocuments = useCallback(async () => {
     setUserRagLoading(true);
@@ -2502,6 +2530,12 @@ function App() {
   useEffect(() => {
     if (tab === "settings" && settingsSection === "user") fetchUserProfile();
   }, [tab, settingsSection, fetchUserProfile]);
+
+  useEffect(() => {
+    if (tab === "settings" && settingsSection === "system") {
+      fetchPluginStatus();
+    }
+  }, [tab, settingsSection, fetchPluginStatus]);
 
   useEffect(() => {
     if (!calendarSelectedTaskId) {
@@ -2796,9 +2830,21 @@ function App() {
       }
     }
     if (cmd === "plugins") {
-      const list = await invoke<Array<{ id?: string; name?: string; version?: string }>>("get_plugins", { port });
+      const list = await invoke<Array<{ id?: string; name?: string; version?: string; enabled?: boolean; disabled_reason?: string | null; score?: number }>>("get_plugins", { port });
       if (!list?.length) return "Aucun plugin installé.";
-      return list.map((p) => `${p.id ?? "?"} — ${p.name ?? "?"} (${p.version ?? "?"})`).join("\n");
+      return list
+        .map((p) => {
+          const enabled = p.enabled !== false;
+          const disabledReason = typeof p.disabled_reason === "string" ? p.disabled_reason : null;
+          const status = enabled
+            ? "enabled"
+            : disabledReason === "reputation"
+              ? "disabled (reputation)"
+              : "disabled";
+          const score = typeof p.score === "number" ? ` score=${p.score}` : "";
+          return `${p.id ?? "?"} — ${p.name ?? "?"} (${p.version ?? "?"}) [${status}${score}]`;
+        })
+        .join("\n");
     }
     if (cmd === "reload") {
       await invoke("reload_plugins", { port });
@@ -6451,6 +6497,57 @@ function App() {
                 <h3 className="settings-subtitle">{t("settings.plugin_reputation_title")}</h3>
                 <p className="settings-doc muted">{t("settings.plugin_reputation_desc")}</p>
                 <div className="settings-plugin-reputation-controls">
+                  <div className="settings-plugin-status-row">
+                    <div className="settings-plugin-status-header">
+                      <h4 className="settings-plugin-status-title">{t("settings.plugins_status_title")}</h4>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={pluginStatusLoading}
+                        onClick={fetchPluginStatus}
+                      >
+                        {pluginStatusLoading ? t("common.loading") : t("sidebar.refresh_tasks")}
+                      </button>
+                    </div>
+                    {pluginStatusError && (
+                      <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err" role="alert">
+                        {pluginStatusError}
+                      </p>
+                    )}
+                    {!pluginStatusError && pluginStatusList.length === 0 && !pluginStatusLoading && (
+                      <p className="settings-doc muted">{t("doctor.no_plugins")}</p>
+                    )}
+                    {pluginStatusList.length > 0 && (
+                      <ul className="settings-plugin-status-list" role="list">
+                        {pluginStatusList.map((p) => {
+                          const id = p.id ?? "?";
+                          const enabled = p.enabled !== false;
+                          const disabledByReputation = !enabled && p.disabled_reason === "reputation";
+                          return (
+                            <li key={id} className="settings-plugin-status-item">
+                              <div className="settings-plugin-status-main">
+                                <span className="settings-plugin-status-id">{id}</span>
+                                <span className="settings-plugin-status-meta">{p.name ?? "?"} · {p.version ?? "?"}</span>
+                              </div>
+                              <div className="settings-plugin-status-badges">
+                                <span className={`settings-plugin-status-pill ${enabled ? "settings-plugin-status-pill-ok" : "settings-plugin-status-pill-off"}`}>
+                                  {enabled ? t("settings.plugins_status_enabled") : t("settings.plugins_status_disabled")}
+                                </span>
+                                {disabledByReputation && (
+                                  <span className="settings-plugin-status-pill settings-plugin-status-pill-reputation">
+                                    {t("settings.plugins_status_disabled_reputation")}
+                                  </span>
+                                )}
+                                {typeof p.score === "number" && (
+                                  <span className="settings-plugin-status-score">score: {p.score}</span>
+                                )}
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </div>
                   <div className="settings-plugin-reputation-row">
                     <label htmlFor="plugin-reputation-target" className="settings-label">
                       {t("settings.plugin_reputation_plugin_id")}

@@ -18,6 +18,8 @@ pub struct PluginEntry {
     pub kind: String,
     pub enabled: bool,
     pub score: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
 }
 
 pub struct PluginRegistry {
@@ -133,17 +135,65 @@ impl PluginRegistry {
 
     pub fn list(&self) -> Vec<PluginEntry> {
         let guard = self.plugins.read().unwrap();
-        guard
+        let mut out: Vec<PluginEntry> = guard
             .values()
-            .map(|p| PluginEntry {
-                id: p.manifest.id.clone(),
-                name: p.manifest.name.clone(),
-                version: p.manifest.version.clone(),
-                kind: p.manifest.kind.to_string(),
-                enabled: !self.reputation.is_disabled(&p.manifest.id),
-                score: self.reputation.score(&p.manifest.id),
+            .map(|p| {
+                let disabled = self.reputation.is_disabled(&p.manifest.id);
+                PluginEntry {
+                    id: p.manifest.id.clone(),
+                    name: p.manifest.name.clone(),
+                    version: p.manifest.version.clone(),
+                    kind: p.manifest.kind.to_string(),
+                    enabled: !disabled,
+                    score: self.reputation.score(&p.manifest.id),
+                    disabled_reason: if disabled {
+                        Some("reputation".to_string())
+                    } else {
+                        None
+                    },
+                }
             })
-            .collect()
+            .collect();
+
+        // Add plugins that are currently disabled by reputation and therefore not loaded in memory.
+        let mut known_ids: std::collections::HashSet<String> =
+            out.iter().map(|p| p.id.clone()).collect();
+        if let Ok(read_dir) = std::fs::read_dir(&self.plugins_dir) {
+            for entry in read_dir.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                for name in &["manifest.toml", "manifest.json"] {
+                    let manifest_path = path.join(name);
+                    if !manifest_path.exists() {
+                        continue;
+                    }
+                    if let Ok(manifest) = PluginManifest::load_from_path(&manifest_path) {
+                        if known_ids.contains(&manifest.id) {
+                            break;
+                        }
+                        let disabled = self.reputation.is_disabled(&manifest.id);
+                        if disabled {
+                            known_ids.insert(manifest.id.clone());
+                            out.push(PluginEntry {
+                                id: manifest.id.clone(),
+                                name: manifest.name.clone(),
+                                version: manifest.version.clone(),
+                                kind: manifest.kind.to_string(),
+                                enabled: false,
+                                score: self.reputation.score(&manifest.id),
+                                disabled_reason: Some("reputation".to_string()),
+                            });
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out
     }
 
     pub fn manifests(&self) -> Vec<PluginManifest> {
