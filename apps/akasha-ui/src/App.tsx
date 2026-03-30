@@ -436,6 +436,8 @@ function classifyEventKind(eventType?: string | null): string {
   if (!value) return "neutral";
   if (/(received|created|queued|accepted|started)$/.test(value) || value === "task_received") return "received";
   if (value === "progress_update" || value === "todo_list_updated") return "progress";
+  if (value === "deterministic_preferred_tool_attempt" || value === "deterministic_preferred_tool_result") return "tool";
+  if (value === "deterministic_preferred_tool_no_success") return "failure";
   if (value === "tool_call_started" || value === "tool_call_finished") return "tool";
   if (value === "sub_agent_spawned" || value === "task_decomposed" || value === "plan_proposed" || value === "plan_committed" || value === "timeline_milestone" || value === "subagent_startup_started") return "orchestration";
   if (value === "task_completed") return "success";
@@ -443,6 +445,15 @@ function classifyEventKind(eventType?: string | null): string {
   if (/(ask_user|human_input|approval|confirmation)/.test(value)) return "question";
   if (value === "subagent_startup_pending") return "progress";
   return "neutral";
+}
+
+function isDeterministicAutoToolEvent(eventType?: string | null): boolean {
+  const value = (eventType ?? "").trim().toLowerCase();
+  return (
+    value === "deterministic_preferred_tool_attempt" ||
+    value === "deterministic_preferred_tool_result" ||
+    value === "deterministic_preferred_tool_no_success"
+  );
 }
 
 type Tab = "chat" | "scheduled" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
@@ -602,6 +613,29 @@ function App() {
       if ((event.event_type === "task_completed" || event.event_type === "task_failed") && payload && typeof payload === "object" && "model_used" in payload && (payload as { model_used?: string | null }).model_used) {
         return `${t("tasks.model_used")}: ${String((payload as { model_used: string }).model_used)}`;
       }
+      if (event.event_type === "deterministic_preferred_tool_attempt" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const tool = typeof p.tool === "string" ? p.tool : "?";
+        const round = typeof p.round === "number" ? p.round : undefined;
+        return round != null
+          ? `${t("tasks.deterministic_tool_attempt_summary")} ${tool} · ${t("tasks.attempt_label")} #${round}`
+          : `${t("tasks.deterministic_tool_attempt_summary")} ${tool}`;
+      }
+      if (event.event_type === "deterministic_preferred_tool_result" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const tool = typeof p.tool === "string" ? p.tool : "?";
+        const success = typeof p.success === "boolean" ? p.success : false;
+        return `${t("tasks.deterministic_tool_result_summary")} ${tool} · ${success ? t("common.yes") : t("common.no")}`;
+      }
+      if (event.event_type === "deterministic_preferred_tool_no_success" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const tools = Array.isArray(p.attempted_tools)
+          ? (p.attempted_tools as unknown[]).map((x) => String(x)).filter(Boolean)
+          : [];
+        return tools.length > 0
+          ? `${t("tasks.deterministic_tool_no_success_summary")} ${tools.join(", ")}`
+          : t("tasks.deterministic_tool_no_success_summary");
+      }
       return "";
     },
     [t]
@@ -638,6 +672,25 @@ function App() {
       }
       if (event.event_type === "timeline_milestone") {
         pushLabeled(t("tasks.phase_label"), p.milestone);
+      }
+
+      if (event.event_type === "deterministic_preferred_tool_attempt") {
+        pushLabeled(t("tasks.tool_summary_prefix"), p.tool);
+        pushLabeled(t("tasks.attempt_label"), p.round);
+      }
+
+      if (event.event_type === "deterministic_preferred_tool_result") {
+        pushLabeled(t("tasks.tool_summary_prefix"), p.tool);
+        if (typeof p.success === "boolean") {
+          out.push(`${t("tasks.result_label")}: ${p.success ? t("common.yes") : t("common.no")}`);
+        }
+        pushLabeled(t("tasks.reason_label"), p.reason);
+      }
+
+      if (event.event_type === "deterministic_preferred_tool_no_success") {
+        if (Array.isArray(p.attempted_tools) && p.attempted_tools.length > 0) {
+          out.push(`${t("tasks.tool_summary_prefix")}: ${(p.attempted_tools as unknown[]).map((x) => String(x)).join(", ")}`);
+        }
       }
 
       return Array.from(new Set(out));
@@ -1682,6 +1735,7 @@ function App() {
       "plan_committed",
       "timeline_milestone",
       "contract_violation",
+      "deterministic_preferred_tool_no_success",
     ]);
 
     const normalSignalTypes = new Set([
@@ -1696,6 +1750,9 @@ function App() {
       "contract_violation",
       "subtask_started",
       "subtask_completed",
+      "deterministic_preferred_tool_attempt",
+      "deterministic_preferred_tool_result",
+      "deterministic_preferred_tool_no_success",
     ]);
 
     const signalTypes = taskOrchestrationDebugLevel === "minimal" ? minimalSignalTypes : normalSignalTypes;
@@ -3939,6 +3996,9 @@ function App() {
                                               <div className="chat-subagents-event-body">
                                                 <div className="chat-subagents-event-topline">
                                                   <span className="chat-subagents-event-type event-kind-pill" data-event-kind={classifyEventKind(ev.event_type)}>{eventLabel(ev.event_type)}</span>
+                                                  {isDeterministicAutoToolEvent(ev.event_type) && (
+                                                    <span className="event-auto-tool-badge">{t("tasks.auto_tool_badge")}</span>
+                                                  )}
                                                   {ev.at && <span className="chat-subagents-event-at">{ev.at.slice(0, 19)}</span>}
                                                 </div>
                                                 <div className="chat-subagents-event-meta">
@@ -4751,6 +4811,9 @@ function App() {
                               <div className="activity-event-body">
                                 <div className="activity-event-topline">
                                   <strong className="event-kind-pill" data-event-kind={classifyEventKind(event.event_type)}>{eventLabel(event.event_type)}</strong>
+                                  {isDeterministicAutoToolEvent(event.event_type) && (
+                                    <span className="event-auto-tool-badge">{t("tasks.auto_tool_badge")}</span>
+                                  )}
                                   <span className="activity-event-at">{event.at}</span>
                                   {event.task_id && selectedTask && event.task_id !== selectedTask.id && (
                                     <span className="activity-event-subtask">{t("chat.sub_task")}{event.task_id.slice(-8)}</span>
@@ -4825,6 +4888,9 @@ function App() {
                             <div className="activity-event-body">
                               <div className="activity-event-topline">
                                 <strong className="event-kind-pill" data-event-kind={classifyEventKind(e.event_type)}>{eventLabel(e.event_type)}</strong>
+                                {isDeterministicAutoToolEvent(e.event_type) && (
+                                  <span className="event-auto-tool-badge">{t("tasks.auto_tool_badge")}</span>
+                                )}
                                 <span className="activity-event-at">{e.at}</span>
                                 {e.task_id && selectedTask && e.task_id !== selectedTask.id && (
                                   <span className="activity-event-subtask">{t("chat.sub_task")}{e.task_id.slice(-8)}</span>

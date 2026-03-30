@@ -1507,6 +1507,21 @@ pre,
   border-color: var(--akasha-border);
 }
 
+.event-auto-tool-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+  padding: 0.12rem 0.44rem;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  line-height: 1.2;
+  color: #0ea5e9;
+  background: rgba(14, 165, 233, 0.14);
+  border: 1px solid rgba(14, 165, 233, 0.3);
+  white-space: nowrap;
+}
+
 .chat-subagents-plan-intent {
   color: var(--akasha-text);
 }

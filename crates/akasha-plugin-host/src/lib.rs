@@ -55,7 +55,9 @@ impl WasmPlugin {
         if len == 0 {
             let out_len = run.call(&mut store, 0).map_err(|_| PluginError::Crashed)?;
             if out_len <= 0 {
-                return Ok(String::new());
+                return Err(PluginError::Message(
+                    "plugin returned empty output".into(),
+                ));
             }
             let mut out = vec![0u8; out_len as usize];
             memory.read(&store, 0, &mut out).map_err(|_| PluginError::Crashed)?;
@@ -70,7 +72,9 @@ impl WasmPlugin {
         memory.write(&mut store, 0, data).map_err(|_| PluginError::Crashed)?;
         let out_len = run.call(&mut store, len as i32).map_err(|_| PluginError::Crashed)?;
         if out_len <= 0 {
-            return Ok(String::new());
+            return Err(PluginError::Message(
+                "plugin returned empty output".into(),
+            ));
         }
         let out_len = out_len as usize;
         let mut out = vec![0u8; out_len];

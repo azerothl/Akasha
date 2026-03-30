@@ -4010,10 +4010,19 @@ async fn execute_tool_call(
             if let Some((plugin_id, plugin_payload)) =
                 parse_plugin_tool_invocation(plugin_registry, tool_name, args)
             {
-                match plugin_registry
-                    .and_then(|r| r.call_tool(&plugin_id, &plugin_payload).ok())
-                {
-                    Some(out) => {
+                match plugin_registry {
+                    Some(r) => match r.call_tool(&plugin_id, &plugin_payload) {
+                        Ok(out) => {
+                        if out.trim().is_empty() {
+                            return (
+                                false,
+                                format!(
+                                    "[plugin:{}] execution returned empty output (check plugin input/action)",
+                                    plugin_id
+                                ),
+                                None,
+                            );
+                        }
                         let preview = if out.chars().count() > 600 {
                             format!("{}…", out.chars().take(600).collect::<String>())
                         } else {
@@ -4024,11 +4033,17 @@ async fn execute_tool_call(
                             format!("[plugin:{}] {}", plugin_id, preview),
                             None,
                         )
-                    }
+                        }
+                        Err(err) => (
+                            false,
+                            format!("[plugin:{}] execution failed: {}", plugin_id, err),
+                            None,
+                        ),
+                    },
                     None => (
                         false,
                         format!(
-                            "[plugin:{}] execution failed (plugin not found, disabled, or returned an error)",
+                            "[plugin:{}] execution failed: plugin registry unavailable",
                             plugin_id
                         ),
                         None,
@@ -5192,6 +5207,7 @@ pub(crate) async fn run_message_via_llm(
         };
         let mut strict_no_tool_rounds = 0u32;
         let mut strict_successful_tool_calls = 0u32;
+        let mut strict_preferred_tool_replay_input: Option<String> = None;
         // Orchestrated deliverables: re-prompts when the model returns no parseable TOOL lines.
         let mut orch_disk_write_nags = 0u32;
         let mut last_captured_image_base64: Option<String> = None;
@@ -5211,7 +5227,8 @@ pub(crate) async fn run_message_via_llm(
             .unwrap_or_else(|| llm_timeout_secs.min(300));
 
     'tool_rounds: loop {
-        if strict_tools_first {
+        let strict_mode_active = strict_tools_first && strict_successful_tool_calls == 0;
+        if strict_mode_active {
             let _ = bus.send(
                 EventEnvelope::new(
                     EventType::ProgressUpdate,
@@ -5223,6 +5240,113 @@ pub(crate) async fn run_message_via_llm(
                 )
                 .with_correlation(task_id),
             );
+        }
+
+        // Deterministic first attempt in strict tools-first mode:
+        // try preferred tools with the full user request as input before asking the LLM again.
+        if strict_mode_active && (round == 0 || strict_preferred_tool_replay_input.is_some()) {
+            if let (Some(enforcer), Some(exec)) = (
+                &runtime_tool_routing_enforcer,
+                tools_executor_snapshot.as_ref(),
+            ) {
+                let preferred_tool_request = strict_preferred_tool_replay_input
+                    .take()
+                    .unwrap_or_else(|| user_message.clone());
+                let mut deterministic_results: Vec<String> = Vec::new();
+                for preferred_tool in enforcer.preferred_tools.iter().take(3) {
+                    let args_preview = if preferred_tool_request.chars().count() > 240 {
+                        format!("{}…", preferred_tool_request.chars().take(240).collect::<String>())
+                    } else {
+                        preferred_tool_request.clone()
+                    };
+                    let _ = bus.send(
+                        EventEnvelope::new(
+                            EventType::TimelineMilestone,
+                            Some(serde_json::json!({
+                                "name": "deterministic_preferred_tool_attempt",
+                                "task_id": task_id.to_string(),
+                                "round": round,
+                                "tool": preferred_tool,
+                                "args_preview": args_preview,
+                            })),
+                        )
+                        .with_correlation(task_id),
+                    );
+                    let auto_args = vec![preferred_tool_request.clone()];
+                    let (success, res, captured_image) = execute_tool_call(
+                        exec,
+                        preferred_tool,
+                        &auto_args,
+                        process_registry.as_ref(),
+                        long_term_client.as_ref(),
+                        task_id,
+                        Some(store_path.as_path()),
+                        conv_tx.clone(),
+                        message_webhook_url.as_deref(),
+                        plugin_registry.as_ref(),
+                        device_bridge.as_ref(),
+                        workspace_store.as_ref(),
+                        browser_registry.as_ref(),
+                        store_path.parent(),
+                    )
+                    .await;
+                    let result_preview = if res.chars().count() > 320 {
+                        format!("{}…", res.chars().take(320).collect::<String>())
+                    } else {
+                        res.clone()
+                    };
+                    let _ = bus.send(
+                        EventEnvelope::new(
+                            EventType::TimelineMilestone,
+                            Some(serde_json::json!({
+                                "name": "deterministic_preferred_tool_result",
+                                "task_id": task_id.to_string(),
+                                "round": round,
+                                "tool": preferred_tool,
+                                "success": success,
+                                "result_preview": result_preview,
+                            })),
+                        )
+                        .with_correlation(task_id),
+                    );
+                    tool_loop_history.push((
+                        preferred_tool.clone(),
+                        if success { "success" } else { "failure" }.to_string(),
+                    ));
+                    if let Some(img) = captured_image {
+                        last_captured_image_base64 = Some(img);
+                    }
+                    deterministic_results.push(res.clone());
+                    if success {
+                        strict_successful_tool_calls = strict_successful_tool_calls.saturating_add(1);
+                        log_tool_journal_if_write(preferred_tool, &auto_args, &res).await;
+                        break;
+                    }
+                }
+                if strict_successful_tool_calls > 0 {
+                    let results_blob = deterministic_results.join("\n");
+                    last_tool_results_blob = Some(results_blob.clone());
+                    current_prompt = format!(
+                        "User request: {}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, answer the user's request now. Do NOT reply with a promise. No TOOL: lines.",
+                        user_message,
+                        results_blob
+                    );
+                    // Continue to next round so the model synthesizes from concrete tool results.
+                    continue;
+                }
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::TimelineMilestone,
+                        Some(serde_json::json!({
+                            "name": "deterministic_preferred_tool_no_success",
+                            "task_id": task_id.to_string(),
+                            "round": round,
+                            "attempted_tools": enforcer.preferred_tools.iter().cloned().collect::<Vec<_>>(),
+                        })),
+                    )
+                    .with_correlation(task_id),
+                );
+            }
         }
 
         // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
@@ -5243,7 +5367,7 @@ pub(crate) async fn run_message_via_llm(
         }
         let preferred_task_type = Some(llm_router.resolve_task_type_for_agent(&assigned_agent));
         let request = CompletionRequest {
-            prompt: if strict_tools_first {
+            prompt: if strict_mode_active {
                 format!("{}{}", current_prompt, strict_tools_instruction)
             } else {
                 format!("{}{}", current_prompt, tool_instruction)
@@ -5483,20 +5607,33 @@ pub(crate) async fn run_message_via_llm(
                     None => name.clone(),
                 };
                 let actual_tool = canonicalize_tool_name(&actual_tool);
+                let should_forward_user_request = strict_tools_first
+                    && args.is_empty()
+                    && !actual_tool.eq_ignore_ascii_case("ask_user")
+                    && runtime_tool_routing_enforcer
+                        .as_ref()
+                        .map(|e| e.preferred_tools.contains(&actual_tool))
+                        .unwrap_or(false);
+                let forwarded_args: Vec<String> = if should_forward_user_request {
+                    vec![user_message.clone()]
+                } else {
+                    args.clone()
+                };
+                let tool_args: &[String] = &forwarded_args;
                 let effective_tool_for_routing = if actual_tool.is_empty() {
                     name.as_str()
                 } else {
                     actual_tool.as_str()
                 };
                 if let Some(enforcer) = &runtime_tool_routing_enforcer {
-                    if !enforcer.is_tool_allowed(effective_tool_for_routing, args) {
+                    if !enforcer.is_tool_allowed(effective_tool_for_routing, tool_args) {
                         let blocked = format!(
                             "[tool_blocked_by_routing_rules] tool={} blocked by dynamic plugin routing rules",
                             effective_tool_for_routing
                         );
                         let payload = serde_json::json!({
                             "tool": effective_tool_for_routing,
-                            "args": args,
+                            "args": tool_args,
                             "result_preview": blocked,
                             "success": false,
                             "reason": "blocked_by_dynamic_plugin_routing_rules"
@@ -5516,7 +5653,7 @@ pub(crate) async fn run_message_via_llm(
                         continue;
                     }
                 }
-                let args_str = args.join(" ");
+                let args_str = tool_args.join(" ");
                 tool_loop_history.push((actual_tool.clone(), args_str.clone()));
                 // Phase 4: loop detection — same tool+args repeated 3 times
                 if tool_loop_history.len() >= 3 {
@@ -5528,7 +5665,7 @@ pub(crate) async fn run_message_via_llm(
                 }
                 // User-friendly progress at key step: what we are doing right now (use skill name when actual_tool is empty, e.g. bankr skill).
                 let display_tool = if actual_tool.is_empty() { name.as_str() } else { &actual_tool };
-                let progress_msg = progress_message_for_tool(display_tool, args);
+                let progress_msg = progress_message_for_tool(display_tool, tool_args);
                 if !first_meaningful_progress_sent {
                     first_meaningful_progress_sent = true;
                     cancel_progress_watchdog(&mut watchdog_cancel);
@@ -5566,7 +5703,7 @@ pub(crate) async fn run_message_via_llm(
                             let args_preview: String = if matches!(actual_tool.as_str(), "apply_patch" | "edit_file" | "write_file") {
                                 "[redacted]".to_string()
                             } else {
-                                let truncated: Vec<String> = args.iter()
+                                let truncated: Vec<String> = tool_args.iter()
                                     .take(3)
                                     .map(|a| if a.chars().count() > MAX_APPROVAL_ARG_LEN {
                                         format!("{}…", a.chars().take(MAX_APPROVAL_ARG_LEN).collect::<String>())
@@ -5574,7 +5711,7 @@ pub(crate) async fn run_message_via_llm(
                                         a.clone()
                                     })
                                     .collect();
-                                let suffix = if args.len() > 3 { format!(" … ({} args)", args.len()) } else { String::new() };
+                                let suffix = if tool_args.len() > 3 { format!(" … ({} args)", tool_args.len()) } else { String::new() };
                                 truncated.join(" ") + &suffix
                             };
                             let question = format!("Approuver l'action : {} — {} ?", actual_tool, args_preview);
@@ -5779,7 +5916,7 @@ pub(crate) async fn run_message_via_llm(
                         }
                     }
                 } else if actual_tool == "uninstall_skill" {
-                    let skill_name = args.get(0).map(String::as_str).unwrap_or("").trim();
+                    let skill_name = tool_args.get(0).map(String::as_str).unwrap_or("").trim();
                     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
                     let tools_reload = tools_executor.as_ref().and_then(|arc| {
                         tools_policy_path.as_ref().map(|p| (arc, p.as_path()))
@@ -5886,7 +6023,7 @@ pub(crate) async fn run_message_via_llm(
                         None => (false, "[list_skills] skill registry not available.".to_string(), None),
                     }
                 } else if actual_tool == "read_skill" {
-                    let skill_name = args.get(0).map(String::as_str).unwrap_or("").trim();
+                    let skill_name = tool_args.get(0).map(String::as_str).unwrap_or("").trim();
                     if skill_name.is_empty() {
                         (false, "[read_skill] usage: read_skill <name>".to_string(), None)
                     } else {
@@ -5903,8 +6040,8 @@ pub(crate) async fn run_message_via_llm(
                     }
                 } else if actual_tool.is_empty() {
                     // Skill with no tool_ref: if args provided, run as run_command(skill_name, ...args) (e.g. bankr whoami)
-                    if !args.is_empty() {
-                        let run_args: Vec<String> = std::iter::once(name.clone()).chain(args.iter().cloned()).collect();
+                    if !tool_args.is_empty() {
+                        let run_args: Vec<String> = std::iter::once(name.clone()).chain(tool_args.iter().cloned()).collect();
                         let (s, r, _) = execute_tool_call(
                             exec,
                             "run_command",
@@ -5940,7 +6077,7 @@ pub(crate) async fn run_message_via_llm(
                     execute_tool_call(
                         exec,
                         &actual_tool,
-                        args,
+                        tool_args,
                         process_registry.as_ref(),
                         long_term_client.as_ref(),
                         task_id,
@@ -5958,13 +6095,24 @@ pub(crate) async fn run_message_via_llm(
                 if let Some(img) = captured_image {
                     last_captured_image_base64 = Some(img);
                 }
+                if success && strict_tools_first && actual_tool.eq_ignore_ascii_case("ask_user") {
+                    if let Some(reply) = res.strip_prefix("[ask_user] User replied: ") {
+                        let reply = reply.trim();
+                        if !reply.is_empty() {
+                            strict_preferred_tool_replay_input = Some(format!(
+                                "Original user request: {}\n\nUser clarification: {}",
+                                user_message, reply
+                            ));
+                        }
+                    }
+                }
                 // Phase F: emit ToolInvoked for Actions tab (spec 33)
                 // Redact or truncate args in the event to avoid leaking large blobs or secrets.
                 let redacted_args: Vec<String> = if matches!(actual_tool.as_str(), "apply_patch" | "edit_file" | "write_file") {
                     vec!["[redacted for write-like tool]".to_string()]
                 } else {
                     const MAX_ARG_PREVIEW_LEN: usize = 512;
-                    args.iter()
+                    tool_args.iter()
                         .map(|arg| {
                             if arg.len() > MAX_ARG_PREVIEW_LEN {
                                 format!("{}...[truncated {} chars]", &arg[..arg.floor_char_boundary(MAX_ARG_PREVIEW_LEN)], arg.len().saturating_sub(MAX_ARG_PREVIEW_LEN))
@@ -6001,8 +6149,13 @@ pub(crate) async fn run_message_via_llm(
                     .with_correlation(timeline_correlation),
                 );
                 if success {
-                    strict_successful_tool_calls = strict_successful_tool_calls.saturating_add(1);
-                    log_tool_journal_if_write(&actual_tool, args, &res).await;
+                    // In tools-first strict mode, ask_user is a clarification step, not
+                    // a terminal success for the primary objective. Keep strict mode active
+                    // until a non-ask_user tool actually succeeds.
+                    if !actual_tool.eq_ignore_ascii_case("ask_user") {
+                        strict_successful_tool_calls = strict_successful_tool_calls.saturating_add(1);
+                    }
+                    log_tool_journal_if_write(&actual_tool, tool_args, &res).await;
                 }
                 tool_results.push(res);
             }
