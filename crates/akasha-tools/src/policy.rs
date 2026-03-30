@@ -146,6 +146,10 @@ impl ToolsPolicy {
     /// When prefix is "." or "", any relative path (not absolute) is allowed (current directory).
     pub fn can_read(&self, path: &Path) -> bool {
         let path_n = path_normalize(path);
+        // Reject any path that contains ".." components (path traversal) before checking prefixes
+        if path_n.components().any(|c| c == Component::ParentDir) {
+            return false;
+        }
         let path_str = path_n.to_string_lossy();
         self.allowed_read_paths.iter().any(|prefix| {
             let p = path_normalize(Path::new(prefix));
@@ -155,12 +159,9 @@ impl ToolsPolicy {
                 if path_str.is_empty() {
                     return false;
                 }
-                // Relative path: no ".." (ParentDir) components, not absolute
+                // Relative path: no ".." (ParentDir) components (already checked above), not absolute
                 if !path_str.starts_with('/') && (path_str.len() < 2 || path_str.chars().nth(1) != Some(':')) {
-                    let has_parent_dir = path_n.components().any(|c| c == Component::ParentDir);
-                    if !has_parent_dir {
-                        return true;
-                    }
+                    return true;
                 }
                 // Absolute path: allow if under process current_dir or under policy.workspace_root
                 if let Ok(cwd) = std::env::current_dir() {
@@ -185,6 +186,10 @@ impl ToolsPolicy {
     /// When prefix is "." or "", any relative path is allowed (same as can_read).
     pub fn can_write(&self, path: &Path) -> bool {
         let path_n = path_normalize(path);
+        // Reject any path that contains ".." components (path traversal) before checking prefixes
+        if path_n.components().any(|c| c == Component::ParentDir) {
+            return false;
+        }
         let path_str = path_n.to_string_lossy();
         self.allowed_write_paths.iter().any(|prefix| {
             let p = path_normalize(Path::new(prefix));
@@ -193,11 +198,9 @@ impl ToolsPolicy {
                 if path_str.is_empty() {
                     return false;
                 }
+                // Relative path: no ".." (ParentDir) components (already checked above), not absolute
                 if !path_str.starts_with('/') && (path_str.len() < 2 || path_str.chars().nth(1) != Some(':')) {
-                    let has_parent_dir = path_n.components().any(|c| c == Component::ParentDir);
-                    if !has_parent_dir {
-                        return true;
-                    }
+                    return true;
                 }
                 if let Ok(cwd) = std::env::current_dir() {
                     let cwd_n = path_normalize(&cwd);

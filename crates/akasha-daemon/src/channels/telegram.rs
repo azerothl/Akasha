@@ -15,7 +15,7 @@ const TELEGRAM_GETUPDATES_RETRIES: u32 = 4;
 const TELEGRAM_RETRY_DELAYS_SECS: [u64; 4] = [2, 5, 10, 20];
 
 fn is_telegram_unauthorized(err: &str, status: reqwest::StatusCode) -> bool {
-    status == 401 || err.contains("401") || err.to_lowercase().contains("unauthorized")
+    status == reqwest::StatusCode::UNAUTHORIZED || err.contains("401") || err.to_lowercase().contains("unauthorized")
 }
 
 fn telegram_error_description(json: &serde_json::Value) -> String {
@@ -172,7 +172,7 @@ pub async fn run_telegram_bot(
         };
         let status = resp.status();
         if !status.is_success() {
-            if status == 401 {
+            if status == reqwest::StatusCode::UNAUTHORIZED {
                 warn!(status = %status, "{}", TELEGRAM_401_HELP);
                 return Err(anyhow::anyhow!("Telegram bot token rejected (HTTP 401)"));
             }

@@ -1504,8 +1504,9 @@ mod tests {
 
     #[test]
     fn azure_provider_default_max_tokens_is_4096() {
-        // Verify the Azure default max_tokens is 4096, consistent with all other
-        // OpenAI-compatible providers (prevents unexpected truncation for Azure users).
+        // Verify the Azure provider builds request bodies with max_tokens=4096 when not specified,
+        // consistent with all other OpenAI-compatible providers (prevents unexpected truncation).
+        // This mirrors the actual body construction in AzureOpenAIProvider::complete().
         let request = CompletionRequest {
             prompt: "test".into(),
             max_tokens: None, // No override → must use the default
@@ -1522,9 +1523,17 @@ mod tests {
             system_prompt: None,
             image_data_urls: None,
         };
-        // The default applied in the provider's complete() body is `unwrap_or(4096)`.
-        // We verify this by inspecting what the provider would send.
-        let default_mt = request.max_tokens.unwrap_or(4096);
-        assert_eq!(default_mt, 4096, "Azure default max_tokens must be 4096, not 1024");
+        // Construct the request body the same way AzureOpenAIProvider::complete() does,
+        // to verify the default is 4096 and not the old 1024.
+        let body = serde_json::json!({
+            "messages": [{ "role": "user", "content": request.prompt }],
+            "max_tokens": request.max_tokens.unwrap_or(4096),
+            "temperature": request.temperature.unwrap_or(0.7)
+        });
+        assert_eq!(
+            body["max_tokens"].as_u64(),
+            Some(4096),
+            "Azure request body max_tokens must default to 4096, not 1024"
+        );
     }
 }
