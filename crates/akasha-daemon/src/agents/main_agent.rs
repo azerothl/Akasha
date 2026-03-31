@@ -81,10 +81,14 @@ fn is_geolocation_request(message: &str) -> bool {
 }
 
 /// Fast-path detect: message is a weather / news / external-facts query.
-/// Uses a focused subset of the keywords from `compute_message_intent_flags::external_info`
-/// restricted to unambiguous weather/forecast terms to avoid false positives.
+/// Uses a focused subset of the keywords from `compute_message_intent_flags::external_info`,
+/// targeting clear weather and news-related terms to avoid common false positives.
 fn is_external_info_request(message: &str) -> bool {
-    let lower = message.trim().to_lowercase();
+    let lower = message
+        .trim()
+        .to_lowercase()
+        .replace('\u{2019}', "'")
+        .replace(['!', '?', '.', ',', ';', ':'], " ");
     if lower.is_empty() {
         return false;
     }
@@ -98,12 +102,10 @@ fn is_external_info_request(message: &str) -> bool {
         "il fait quel temps",
         "il va faire",
         "forecast",
-        "les prévisions",
-        "les previsions",
         "actualités",
         "actualites",
         "les news",
-        "l'actu ",
+        "l'actu",
     ]
     .iter()
     .any(|k| lower.contains(k))
@@ -131,6 +133,7 @@ const SPECIALIST_AGENTS: &[&str] = &[
     "system",
     "financial",
     "documentalist",
+    "project_manager",
     "technical_writer",
     "security_audit",
     "analyst",

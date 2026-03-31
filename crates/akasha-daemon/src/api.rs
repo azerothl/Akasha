@@ -4976,16 +4976,23 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
+    // web_search is effectively available only when the tool is allowed by the active profile,
+    // web_search_enabled is true in the policy, and a Brave API key is present (vault or env).
+    let web_search_effectively_available = tools_executor_snapshot
+        .as_ref()
+        .map(|e| {
+            e.policy.can_use_tool("web_search")
+                && e.policy.web_search_enabled
+                && (e.policy.brave_api_key.is_some()
+                    || std::env::var("BRAVE_API_KEY").is_ok())
+        })
+        .unwrap_or(false);
     let web_search_reminder: &str = if intent_flags.external_info {
-        if tools_executor_snapshot
-            .as_ref()
-            .map(|e| e.policy.can_use_tool("web_search"))
-            .unwrap_or(false)
-        {
+        if web_search_effectively_available {
             // web_search is available: instruct the model to use it.
             WEB_SEARCH_REMINDER
         } else {
-            // web_search is absent (no tools configured or not allowed): prevent the model
+            // web_search is absent (not allowed, not enabled, or no API key): prevent the model
             // from ignoring the question and returning a generic capability introduction.
             WEB_SEARCH_UNAVAILABLE_REMINDER
         }
@@ -4996,10 +5003,7 @@ pub(crate) async fn run_message_via_llm(
         // Always inject a transport reminder so the model cannot mistake a travel question
         // for a file-creation or project task (e.g. "Quel est le chemin complet du fichier").
         // Use the full reminder when web_search is available; use the no-search fallback otherwise.
-        let has_web_search = tools_executor_snapshot
-            .as_ref()
-            .map(|e| e.policy.can_use_tool("web_search"))
-            .unwrap_or(false);
+        let has_web_search = web_search_effectively_available;
         if has_web_search {
             TRANSPORT_REMINDER
         } else {
