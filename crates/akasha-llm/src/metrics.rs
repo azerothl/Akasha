@@ -7,6 +7,7 @@ use std::sync::{Arc, RwLock};
 use std::collections::VecDeque;
 
 const LATENCY_SAMPLE_CAP: usize = 1000;
+const EVENT_BUFFER_CAP: usize = 256;
 
 /// Optional persistence for metrics (e.g. SQLite). Implemented by the daemon.
 pub trait MetricsPersistence: Send + Sync {
@@ -22,6 +23,11 @@ pub trait MetricsPersistence: Send + Sync {
         fallback_triggered: bool,
         fallback_success: bool,
     );
+}
+
+/// Optional in-memory fanout sink for lightweight analytics events.
+pub trait MetricsEventSink: Send + Sync {
+    fn on_event(&self, event: &serde_json::Value);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +68,8 @@ pub struct MetricsCollector {
     by_provider_model: RwLock<HashMap<String, ModelMetrics>>,
     persistence: Option<Arc<dyn MetricsPersistence>>,
     stability: RwLock<StabilityMetrics>,
+    event_buffer: RwLock<VecDeque<serde_json::Value>>,
+    event_sinks: RwLock<Vec<Arc<dyn MetricsEventSink>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -88,6 +96,8 @@ impl MetricsCollector {
             by_provider_model: RwLock::new(HashMap::new()),
             persistence: None,
             stability: RwLock::new(StabilityMetrics::default()),
+            event_buffer: RwLock::new(VecDeque::new()),
+            event_sinks: RwLock::new(Vec::new()),
         }
     }
 
@@ -96,6 +106,45 @@ impl MetricsCollector {
             by_provider_model: RwLock::new(HashMap::new()),
             persistence: Some(persistence),
             stability: RwLock::new(StabilityMetrics::default()),
+            event_buffer: RwLock::new(VecDeque::new()),
+            event_sinks: RwLock::new(Vec::new()),
+        }
+    }
+
+    pub fn attach_event_sink(&self, sink: Arc<dyn MetricsEventSink>) {
+        self.event_sinks.write().unwrap().push(sink);
+        self.flush_event_buffer();
+    }
+
+    fn emit_event(&self, mut event: serde_json::Value) {
+        // guardrail: strip protocol-level private fields if present
+        if let Some(obj) = event.as_object_mut() {
+            obj.retain(|k, _| !k.starts_with("_PROTO_"));
+        }
+        let sinks = self.event_sinks.read().unwrap().clone();
+        if sinks.is_empty() {
+            let mut b = self.event_buffer.write().unwrap();
+            b.push_back(event);
+            if b.len() > EVENT_BUFFER_CAP {
+                b.pop_front();
+            }
+            return;
+        }
+        for sink in &sinks {
+            sink.on_event(&event);
+        }
+    }
+
+    fn flush_event_buffer(&self) {
+        let sinks = self.event_sinks.read().unwrap().clone();
+        if sinks.is_empty() {
+            return;
+        }
+        let mut buffered = self.event_buffer.write().unwrap();
+        while let Some(event) = buffered.pop_front() {
+            for sink in &sinks {
+                sink.on_event(&event);
+            }
         }
     }
 
@@ -121,6 +170,16 @@ impl MetricsCollector {
         if let Some(ref p) = self.persistence {
             p.record_event(now, provider, model, true, latency_ms, tokens, cost, fallback_triggered, fallback_success);
         }
+        self.emit_event(serde_json::json!({
+            "kind": "llm_success",
+            "provider": provider,
+            "model": model,
+            "latency_ms": latency_ms,
+            "tokens": tokens,
+            "cost_usd": cost,
+            "fallback_triggered": fallback_triggered,
+            "fallback_success": fallback_success
+        }));
         let mut g = self.by_provider_model.write().unwrap();
         let m = g.entry(Self::key(provider, model)).or_default();
         m.total_requests += 1;
@@ -150,6 +209,12 @@ impl MetricsCollector {
         if let Some(ref p) = self.persistence {
             p.record_event(now, provider, model, false, 0, 0, 0.0, fallback_triggered, false);
         }
+        self.emit_event(serde_json::json!({
+            "kind": "llm_failure",
+            "provider": provider,
+            "model": model,
+            "fallback_triggered": fallback_triggered
+        }));
         let mut g = self.by_provider_model.write().unwrap();
         let m = g.entry(Self::key(provider, model)).or_default();
         m.total_requests += 1;
@@ -307,6 +372,18 @@ impl MetricsCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct TestSink {
+        events: Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl MetricsEventSink for TestSink {
+        fn on_event(&self, event: &serde_json::Value) {
+            self.events.lock().unwrap().push(event.clone());
+        }
+    }
 
     #[test]
     fn stability_metrics_are_recorded_and_exposed() {
@@ -327,5 +404,15 @@ mod tests {
         assert!(score > 0.0);
         assert_eq!(retry_max, 4);
         assert!(fail_rate > 0.0);
+    }
+
+    #[test]
+    fn buffered_events_are_flushed_on_sink_attach() {
+        let m = MetricsCollector::new();
+        m.record_failure("p", "m");
+        let sink = Arc::new(TestSink::default());
+        m.attach_event_sink(sink.clone());
+        let guard = sink.events.lock().unwrap();
+        assert!(!guard.is_empty());
     }
 }

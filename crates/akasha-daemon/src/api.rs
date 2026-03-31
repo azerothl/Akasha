@@ -13,6 +13,7 @@ use crate::user_profile::UserProfile;
 use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
+use crate::protocol_adapter::unknown_external_message_count;
 use crate::latency::{clear_task_milestones, emit_timeline_once_for_task, env_duration_ms, log_latency_metric, resolve_root_task_id};
 use std::path::{Path, PathBuf};
 use std::cmp::Ordering;
@@ -5631,7 +5632,24 @@ pub(crate) async fn run_message_via_llm(
         if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls) {
             round += 1;
             let mut tool_results = Vec::new();
-            for (name, args) in &calls {
+            let scheduled_lanes = akasha_tools::schedule_tool_calls(&calls);
+            for (lane, lane_calls) in scheduled_lanes {
+                let lane_name = match lane {
+                    akasha_tools::ToolExecutionLane::ParallelSafe => "parallel_safe",
+                    akasha_tools::ToolExecutionLane::SerialExclusive => "serial_exclusive",
+                };
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 50,
+                            "message": format!("Tool lane execution: {} ({} call(s))", lane_name, lane_calls.len())
+                        })),
+                    )
+                    .with_correlation(task_id),
+                );
+                for (name, args) in &lane_calls {
                 // Phase D: resolve skill name to tool_ref (spec 33)
                 let actual_tool = match &skill_registry {
                     Some(reg) => reg.get(name).await.map(|s| s.tool_ref).unwrap_or_else(|| name.clone()),
@@ -6189,6 +6207,7 @@ pub(crate) async fn run_message_via_llm(
                     log_tool_journal_if_write(&actual_tool, tool_args, &res).await;
                 }
                 tool_results.push(res);
+            }
             }
             let results_blob = tool_results.join("\n");
             last_tool_results_blob = Some(results_blob.clone());
@@ -7691,7 +7710,8 @@ pub async fn handle_api(
         };
         let body_json = serde_json::json!({
             "tasks": { "pending": pending, "running": running, "completed": completed, "failed": failed, "paused": paused, "interrupted": interrupted },
-            "stability": llm_router.metrics().stability_summary()
+            "stability": llm_router.metrics().stability_summary(),
+            "protocol": { "unknown_message_count": unknown_external_message_count() }
         });
         return json_response("200 OK", &body_json.to_string());
     }

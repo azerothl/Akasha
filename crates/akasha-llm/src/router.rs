@@ -5,6 +5,7 @@ use crate::config::{RoutingConfig, TaskTypeConfig};
 use crate::fallback::{FallbackEngine, ProviderResolver};
 use crate::metrics::{MetricsCollector, MetricsPersistence};
 use crate::provider::{CompletionRequest, CompletionResponse, LLMProvider};
+use crate::retry::RetryPolicy;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::{info, Instrument};
@@ -89,6 +90,10 @@ impl LLMRouter {
         let fallback = FallbackEngine {
             max_retries,
             timeout_per_call: std::time::Duration::from_secs(timeout_secs),
+            retry_policy: RetryPolicy {
+                max_retries,
+                ..RetryPolicy::default()
+            },
         };
         let metrics = match persistence {
             Some(p) => Arc::new(MetricsCollector::with_persistence(p)),

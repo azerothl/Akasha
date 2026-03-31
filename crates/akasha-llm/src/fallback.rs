@@ -2,7 +2,8 @@
 
 use crate::config::{RouteEntry, TaskTypeConfig};
 use crate::metrics::MetricsCollector;
-use crate::provider::{CompletionRequest, CompletionResponse, LLMProvider, ProviderError};
+use crate::provider::{CompletionRequest, CompletionResponse, LLMProvider};
+use crate::retry::{RetryClass, RetryPolicy};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::warn;
@@ -10,6 +11,7 @@ use tracing::warn;
 pub struct FallbackEngine {
     pub max_retries: u32,
     pub timeout_per_call: Duration,
+    pub retry_policy: RetryPolicy,
 }
 
 impl Default for FallbackEngine {
@@ -17,6 +19,7 @@ impl Default for FallbackEngine {
         Self {
             max_retries: 2,
             timeout_per_call: Duration::from_secs(300),
+            retry_policy: RetryPolicy::default(),
         }
     }
 }
@@ -104,8 +107,7 @@ impl FallbackEngine {
                             }
 
                             if attempt + 1 < self.max_retries {
-                                let backoff_secs = (1u64 << attempt).min(16);
-                                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                                tokio::time::sleep(self.retry_policy.delay_for_attempt(attempt)).await;
                                 continue;
                             }
                             // Give next provider in chain a chance.
@@ -186,10 +188,12 @@ impl FallbackEngine {
                             metrics.record_failure(entry.provider.as_str(), &entry.model);
                         }
                         last_error = Some(format!("{}: {}", entry.provider, e));
-                        let retry = matches!(e, ProviderError::Timeout | ProviderError::RateLimit);
+                        let retry = matches!(
+                            RetryPolicy::classify_provider_error(&e),
+                            RetryClass::Transient | RetryClass::RateLimited
+                        );
                         if retry && attempt + 1 < self.max_retries {
-                            let backoff_secs = (1u64 << attempt).min(16);
-                            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                            tokio::time::sleep(self.retry_policy.delay_for_attempt(attempt)).await;
                             continue;
                         }
                         warn!(provider = %entry.provider, error = %e, "Attempt failed, try next in chain");

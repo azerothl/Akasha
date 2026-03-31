@@ -2,11 +2,16 @@
 
 mod policy;
 mod tools;
+mod tool_contract;
 
 #[cfg(feature = "container")]
 mod container;
 
 pub use policy::ToolsPolicy;
+pub use tool_contract::{
+    built_in_tool_capabilities, schedule_tool_calls, ToolCall, ToolCapabilities, ToolExecutionLane,
+    ToolInterruptBehavior,
+};
 pub use tools::{apply_patch, edit_file, file_diff, grep_content, read_file, run_command, search_files, search_replace, write_file, ToolResult};
 #[cfg(feature = "web")]
 pub use tools::{web_fetch, web_search};
