@@ -5,7 +5,7 @@ mod kinds;
 mod manifest;
 
 pub use kinds::PluginKind;
-pub use manifest::{PluginManifest, PluginRoutingRule};
+pub use manifest::{PluginManifest, PluginNetworkConfig, PluginRoutingRule};
 
 /// Common metadata for any plugin.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

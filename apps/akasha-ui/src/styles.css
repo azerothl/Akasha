@@ -3237,6 +3237,20 @@ pre,
   line-height: 1.45;
 }
 
+.event-map-geo-leaflet {
+  margin: 0.45rem 0 0.65rem;
+}
+
+.event-map-geo-leaflet-head {
+  margin-bottom: 0.3rem;
+}
+
+.geo-map-view {
+  z-index: 0;
+  border: 1px solid var(--akasha-border);
+  overflow: hidden;
+}
+
 .event-map-geometry-note {
   margin: 0 0 0.55rem;
   padding: 0.45rem 0.55rem;

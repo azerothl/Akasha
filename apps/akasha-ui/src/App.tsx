@@ -6,6 +6,7 @@ import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
 import { preprocessMessagePaths } from "./preprocessMessagePaths";
 import { getCached, setCached } from "./useTabCache";
 import { useI18n } from "./useI18n";
+import { GeoMapView } from "./GeoMapView";
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -195,8 +196,8 @@ type EventAdvancedView =
       kind: "map";
       title?: string;
       summary?: string;
-      /** Plugin sends `great_circle_estimate` when polyline is geographic shortest path, not OSM roads. */
-      geometryKind?: "great_circle_estimate";
+      /** `great_circle_estimate` | `road_network` (from routing engine in plugin output). */
+      geometryKind?: "great_circle_estimate" | "road_network";
       points: Array<{ x: number; y: number }>;
       distanceM?: number;
       durationS?: number;
@@ -414,8 +415,12 @@ function extractAdvancedViewData(payload: unknown): EventAdvancedView | null {
       const durationS = toFiniteNumber(c.duration_s ?? c.durationS) ?? routesIn[0]?.durationS;
       const summary = typeof c.summary === "string" && c.summary.trim() ? c.summary.trim() : undefined;
       const gk = typeof c.geometry_kind === "string" ? c.geometry_kind.toLowerCase() : "";
-      const geometryKind: "great_circle_estimate" | undefined =
-        gk === "great_circle_estimate" ? "great_circle_estimate" : undefined;
+      const geometryKind: "great_circle_estimate" | "road_network" | undefined =
+        gk === "great_circle_estimate"
+          ? "great_circle_estimate"
+          : gk === "road_network"
+            ? "road_network"
+            : undefined;
       const osmEmbedUrl =
         typeof c.osm_embed_url === "string" && c.osm_embed_url.startsWith("http") ? c.osm_embed_url : undefined;
       const osmBrowseUrl =
@@ -551,11 +556,12 @@ function salvageMapVisualFromPluginPrefix(raw: string): ChatMapVisual | null {
     summary = sm[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\").trim();
   }
 
-  const geometryKind: "great_circle_estimate" | undefined = /"geometry_kind"\s*:\s*"great_circle_estimate"/.test(
-    body,
-  )
-    ? "great_circle_estimate"
-    : undefined;
+  let geometryKind: "great_circle_estimate" | "road_network" | undefined;
+  if (/"geometry_kind"\s*:\s*"road_network"/.test(body)) {
+    geometryKind = "road_network";
+  } else if (/"geometry_kind"\s*:\s*"great_circle_estimate"/.test(body)) {
+    geometryKind = "great_circle_estimate";
+  }
 
   const osmEmbedM = body.match(/"osm_embed_url"\s*:\s*"([^"]+)"/);
   const osmBrowseM = body.match(/"osm_browse_url"\s*:\s*"([^"]+)"/);
@@ -828,6 +834,9 @@ function MapPluginEventView({
       {visual.geometryKind === "great_circle_estimate" ? (
         <p className="event-map-geometry-note">{t("tasks.map_geometry_great_circle_note")}</p>
       ) : null}
+      {visual.geometryKind === "road_network" ? (
+        <p className="event-map-geometry-note">{t("tasks.map_geometry_road_network_note")}</p>
+      ) : null}
       {toolbar === "inline" && (onFullscreen || onExportCsv) && (
         <div className="event-advanced-toolbar">
           {onFullscreen && (
@@ -877,6 +886,18 @@ function MapPluginEventView({
           )}
         </div>
       )}
+      {points.length >= 2 ? (
+        <div className="event-map-geo-leaflet">
+          <div className="event-map-geo-leaflet-head">
+            <span className="metadata-label">{t("tasks.map_interactive_layer")}</span>
+          </div>
+          <GeoMapView
+            points={points}
+            height={variant === "chat" ? 260 : layout === "fullscreen" ? 360 : 300}
+            ariaLabel={t("tasks.map_interactive_layer")}
+          />
+        </div>
+      ) : null}
       {(() => {
         const schematicBlock = interactive ? (
           <div
