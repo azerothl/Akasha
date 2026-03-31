@@ -135,6 +135,22 @@ fn canonicalize_tool_name(tool_name: &str) -> String {
     }
 }
 
+/// Strips `--no-ignore`, `--no-gitignore`, `--regex`, `-r` from tool args (any position).
+/// Returns filtered args, `respect_gitignore` (default true), `use_regex` (default false; grep only).
+fn strip_file_search_flags(args: &[String]) -> (Vec<String>, bool, bool) {
+    let mut respect_gitignore = true;
+    let mut use_regex = false;
+    let mut out = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "--no-ignore" | "--no-gitignore" => respect_gitignore = false,
+            "--regex" | "-r" => use_regex = true,
+            _ => out.push(a.clone()),
+        }
+    }
+    (out, respect_gitignore, use_regex)
+}
+
 /// Banner injected by `compose_orchestrated_child_message(..., deliverables_required: true)` for subtasks and remediation.
 const ORCH_DISK_DELIVERABLES_MARKER: &str = "[Orchestrated — disk deliverables REQUIRED]";
 
@@ -888,8 +904,8 @@ pub fn json_response(status: &str, body: &str) -> String {
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Pour les fichiers .pdf, le texte est extrait automatiquement (équivalent à pdf <path>) ; ne vous attendez pas au binaire PDF. Pour les gros fichiers, lire d'abord le fichier puis cibler seulement les sections utiles avec grep_content/search_files avant d'éditer. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
     ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (création/remplacement complet). Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). TOUJOURS utiliser le chemin EXACT fourni par l'utilisateur. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace plutôt que de tout réécrire. Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel."),
-    ("search_files", "search_files <dir> <pattern> — chercher des fichiers (glob) sous un répertoire"),
-    ("grep_content", "grep_content <dir> <pattern> [file_glob] — chercher le motif dans le contenu des fichiers (ex. grep_content . \"fn \" \"*.rs\")"),
+    ("search_files", "search_files <dir> <pattern> [--no-ignore] — chercher des fichiers (glob) sous un répertoire ; par défaut respecte .gitignore et ignore node_modules/target/dist/… ; --no-ignore pour tout parcourir."),
+    ("grep_content", "grep_content <dir> <pattern> [file_glob] [--regex|-r] [--no-ignore] — chercher dans les fichiers ; défaut = sous-chaîne insensible à la casse + .gitignore ; --regex = motif regex insensible à la casse ; --no-ignore = ignorer .gitignore."),
     ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
     ("run_terminal", "run_terminal <cmd> [args...] — exécuter une commande (même que run_command)"),
     ("run_command_background", "run_command_background <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
@@ -3569,11 +3585,12 @@ async fn execute_tool_call(
             }
         }
         "search_files" => {
+            let (args, respect_gitignore, _) = strip_file_search_flags(args);
             let raw_dir = args.get(0).map(String::as_str).unwrap_or(".");
             let dir_pb = resolve_tool_disk_path(raw_dir, workspace_root);
             let pattern = args.get(1).map(String::as_str).unwrap_or("*");
             let dir = dir_pb.as_path();
-            match executor.search_files(dir, pattern).await {
+            match executor.search_files(dir, pattern, respect_gitignore).await {
                 Ok((paths, res)) => {
                     let msg = if res.success {
                         let list: Vec<String> = paths.iter().take(20).map(|p| p.display().to_string()).collect();
@@ -3587,15 +3604,23 @@ async fn execute_tool_call(
             }
         }
         "grep_content" => {
+            let (args, respect_gitignore, use_regex) = strip_file_search_flags(args);
             let raw_dir = args.get(0).map(String::as_str).unwrap_or(".");
             let dir_pb = resolve_tool_disk_path(raw_dir, workspace_root);
             let dir = dir_pb.as_path();
             let pattern = args.get(1).map(String::as_str).unwrap_or("");
             let file_glob = args.get(2).map(String::as_str).filter(|s| !s.is_empty());
             if pattern.is_empty() {
-                return (false, "[grep_content] usage: grep_content <dir> <pattern> [file_glob]".to_string(), None);
+                return (
+                    false,
+                    "[grep_content] usage: grep_content <dir> <pattern> [file_glob] [--regex] [--no-ignore]".to_string(),
+                    None,
+                );
             }
-            match executor.grep_content(dir, pattern, file_glob, 50).await {
+            match executor
+                .grep_content(dir, pattern, file_glob, 50, use_regex, respect_gitignore)
+                .await
+            {
                 Ok((matches, res)) => {
                     let msg = if res.success {
                         let lines: Vec<String> = matches

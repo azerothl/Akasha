@@ -74,16 +74,28 @@ impl ToolExecutor {
         pattern: &str,
         file_glob: Option<&str>,
         max_results: usize,
+        use_regex: bool,
+        respect_gitignore: bool,
     ) -> anyhow::Result<(Vec<(std::path::PathBuf, u32, String)>, ToolResult)> {
-        grep_content(dir, pattern, file_glob, max_results, &self.policy).await
+        grep_content(
+            dir,
+            pattern,
+            file_glob,
+            max_results,
+            use_regex,
+            respect_gitignore,
+            &self.policy,
+        )
+        .await
     }
 
     pub async fn search_files(
         &self,
         dir: &Path,
         pattern: &str,
+        respect_gitignore: bool,
     ) -> anyhow::Result<(Vec<std::path::PathBuf>, ToolResult)> {
-        search_files(dir, pattern, &self.policy).await
+        search_files(dir, pattern, respect_gitignore, &self.policy).await
     }
 
     pub async fn run_command(

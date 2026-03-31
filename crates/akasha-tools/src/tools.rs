@@ -328,15 +328,39 @@ fn parse_hunk_header(s: &str) -> (u32, u32) {
     }
 }
 
-/// Search for a pattern in file contents under a directory. Directory and each file path must be allowed for read.
-/// Returns (path, line_no, line_content) matches, up to max_results (default 50).
-pub async fn grep_content(
+/// Directory names always skipped under search roots (in addition to `.gitignore` when enabled).
+fn should_skip_dir_component(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | "node_modules"
+            | "target"
+            | "dist"
+            | "build"
+            | ".venv"
+            | "venv"
+            | "__pycache__"
+            | ".next"
+            | "out"
+            | "coverage"
+            | ".turbo"
+            | ".parcel-cache"
+            | ".idea"
+            | ".vs"
+    )
+}
+
+fn grep_content_inner(
     dir: &Path,
     pattern: &str,
     file_glob: Option<&str>,
     max_results: usize,
+    use_regex: bool,
+    respect_gitignore: bool,
     policy: &ToolsPolicy,
 ) -> Result<(Vec<(std::path::PathBuf, u32, String)>, ToolResult)> {
+    use regex::RegexBuilder;
+
     if !policy.can_read(dir) {
         return Ok((
             vec![],
@@ -348,48 +372,92 @@ pub async fn grep_content(
             },
         ));
     }
-    let pattern_lower = pattern.to_lowercase();
+
     let max_results = if max_results == 0 { 50 } else { max_results.min(200) };
+    let regex_opt: Option<regex::Regex> = if use_regex {
+        match RegexBuilder::new(pattern).case_insensitive(true).build() {
+            Ok(r) => Some(r),
+            Err(e) => {
+                return Ok((
+                    vec![],
+                    ToolResult {
+                        tool: "grep_content".to_string(),
+                        success: false,
+                        summary: format!("invalid regex: {}", e),
+                        detail: Some(pattern.to_string()),
+                    },
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    let pattern_lower = pattern.to_lowercase();
+
+    let mut wb = ignore::WalkBuilder::new(dir);
+    wb.standard_filters(respect_gitignore);
+    wb.hidden(false);
+    if respect_gitignore {
+        wb.parents(true);
+    }
+
+    let pol = policy.clone();
+    wb.filter_entry(move |entry| {
+        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+            if let Some(name) = entry.file_name().to_str() {
+                if should_skip_dir_component(name) {
+                    return false;
+                }
+            }
+            if !pol.can_read(entry.path()) {
+                return false;
+            }
+        }
+        true
+    });
+
     let mut matches = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while !stack.is_empty() && matches.len() < max_results {
-        let current = stack.pop().unwrap();
-        let mut entries = match tokio::fs::read_dir(&current).await {
-            Ok(e) => e,
+    let walker = wb.build();
+    for entry in walker.filter_map(|e| e.ok()) {
+        if matches.len() >= max_results {
+            break;
+        }
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if !policy.can_read(path) {
+            continue;
+        }
+        if let Some(glob) = file_glob {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default();
+            if !match_glob(glob, &name) {
+                continue;
+            }
+        }
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
             Err(_) => continue,
         };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if path.is_dir() {
-                if policy.can_read(&path) {
-                    stack.push(path);
-                }
-                continue;
+        for (i, line) in content.lines().enumerate() {
+            if matches.len() >= max_results {
+                break;
             }
-            if let Some(glob) = file_glob {
-                let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
-                if !match_glob(glob, &name) {
-                    continue;
-                }
-            }
-            if !policy.can_read(&path) {
-                continue;
-            }
-            let content = match tokio::fs::read_to_string(&path).await {
-                Ok(c) => c,
-                Err(_) => continue,
+            let line_no = (i + 1) as u32;
+            let hit = if let Some(ref re) = regex_opt {
+                re.is_match(line)
+            } else {
+                line.to_lowercase().contains(&pattern_lower)
             };
-            for (i, line) in content.lines().enumerate() {
-                if matches.len() >= max_results {
-                    break;
-                }
-                let line_no = (i + 1) as u32;
-                if line.to_lowercase().contains(&pattern_lower) {
-                    matches.push((path.clone(), line_no, line.to_string()));
-                }
+            if hit {
+                matches.push((path.to_path_buf(), line_no, line.to_string()));
             }
         }
     }
+
     let count = matches.len();
     Ok((
         matches,
@@ -397,15 +465,53 @@ pub async fn grep_content(
             tool: "grep_content".to_string(),
             success: true,
             summary: format!("found {} match(es)", count),
-            detail: Some(format!("dir={} pattern={}", dir.display(), pattern)),
+            detail: Some(format!(
+                "dir={} pattern={} regex={} respect_gitignore={}",
+                dir.display(),
+                pattern,
+                use_regex,
+                respect_gitignore
+            )),
         },
     ))
 }
 
-/// Search for files by glob pattern under a directory. Directory must be allowed for read.
-pub async fn search_files(
+/// Search for a pattern in file contents under a directory. Directory and each file path must be allowed for read.
+/// Returns (path, line_no, line_content) matches, up to max_results (default 50).
+/// When `respect_gitignore` is true, applies `.gitignore` (and parents). Always skips bulky dirs (node_modules, target, …).
+/// When `use_regex` is true, `pattern` is a case-insensitive regex; otherwise a case-insensitive substring.
+pub async fn grep_content(
     dir: &Path,
     pattern: &str,
+    file_glob: Option<&str>,
+    max_results: usize,
+    use_regex: bool,
+    respect_gitignore: bool,
+    policy: &ToolsPolicy,
+) -> Result<(Vec<(std::path::PathBuf, u32, String)>, ToolResult)> {
+    let dir = dir.to_path_buf();
+    let pattern = pattern.to_string();
+    let file_glob = file_glob.map(|s| s.to_string());
+    let policy = policy.clone();
+    tokio::task::spawn_blocking(move || {
+        grep_content_inner(
+            &dir,
+            &pattern,
+            file_glob.as_deref(),
+            max_results,
+            use_regex,
+            respect_gitignore,
+            &policy,
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("grep_content join error: {}", e))?
+}
+
+fn search_files_inner(
+    dir: &Path,
+    pattern: &str,
+    respect_gitignore: bool,
     policy: &ToolsPolicy,
 ) -> Result<(Vec<std::path::PathBuf>, ToolResult)> {
     if !policy.can_read(dir) {
@@ -419,26 +525,43 @@ pub async fn search_files(
             },
         ));
     }
-    let mut out = Vec::new();
     let full_pattern = dir.join(pattern);
     let glob_pattern = full_pattern.to_string_lossy();
-    let mut entries = tokio::fs::read_dir(dir).await.with_context(|| format!("read_dir {}", dir.display()))?;
-    let mut stack = vec![];
-    while let Some(entry) = entries.next_entry().await? {
-        stack.push(entry.path());
+
+    let mut wb = ignore::WalkBuilder::new(dir);
+    wb.standard_filters(respect_gitignore);
+    wb.hidden(false);
+    if respect_gitignore {
+        wb.parents(true);
     }
-    while let Some(p) = stack.pop() {
-        if p.is_dir() {
-            if let Ok(mut entries) = tokio::fs::read_dir(&p).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    stack.push(entry.path());
+
+    let pol = policy.clone();
+    wb.filter_entry(move |entry| {
+        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+            if let Some(name) = entry.file_name().to_str() {
+                if should_skip_dir_component(name) {
+                    return false;
                 }
             }
+            if !pol.can_read(entry.path()) {
+                return false;
+            }
+        }
+        true
+    });
+
+    let mut out = Vec::new();
+    for entry in wb.build().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
             continue;
         }
-        let s = p.to_string_lossy().replace('\\', "/");
+        if !policy.can_read(path) {
+            continue;
+        }
+        let s = path.to_string_lossy().replace('\\', "/");
         if match_glob(&glob_pattern, &s) {
-            out.push(p);
+            out.push(path.to_path_buf());
         }
     }
     let count = out.len();
@@ -448,9 +571,32 @@ pub async fn search_files(
             tool: "search_files".to_string(),
             success: true,
             summary: format!("found {} files", count),
-            detail: Some(format!("dir={} pattern={}", dir.display(), pattern)),
+            detail: Some(format!(
+                "dir={} pattern={} respect_gitignore={}",
+                dir.display(),
+                pattern,
+                respect_gitignore
+            )),
         },
     ))
+}
+
+/// Search for files by glob pattern under a directory. Directory must be allowed for read.
+/// When `respect_gitignore` is true, applies `.gitignore` rules when walking.
+pub async fn search_files(
+    dir: &Path,
+    pattern: &str,
+    respect_gitignore: bool,
+    policy: &ToolsPolicy,
+) -> Result<(Vec<std::path::PathBuf>, ToolResult)> {
+    let dir = dir.to_path_buf();
+    let pattern = pattern.to_string();
+    let policy = policy.clone();
+    tokio::task::spawn_blocking(move || {
+        search_files_inner(&dir, &pattern, respect_gitignore, &policy)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("search_files join error: {}", e))?
 }
 
 fn match_glob(glob: &str, path: &str) -> bool {
