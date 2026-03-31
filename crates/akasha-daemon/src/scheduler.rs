@@ -52,6 +52,24 @@ async fn tick(
         let task_store = TaskStore::open(store_path)?;
 
         sync_terminal_task_run_statuses(&schedule_store, &task_store, now)?;
+        // Heartbeat/lease watchdog: interrupted tasks whose lease expired.
+        if let Ok(expired) = task_store.expired_leases(now, 100) {
+            for task_id in expired {
+                let _ = task_store.update_status(task_id, TaskStatus::Interrupted);
+                let _ = task_store.clear_lease(task_id);
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 0,
+                            "message": "Task lease expired; marked interrupted for recovery."
+                        })),
+                    )
+                    .with_correlation(task_id),
+                );
+            }
+        }
 
         let _ = bus.send(EventEnvelope::new(
             EventType::SchedulerTick,

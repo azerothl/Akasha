@@ -61,6 +61,19 @@ impl Default for ModelMetrics {
 pub struct MetricsCollector {
     by_provider_model: RwLock<HashMap<String, ModelMetrics>>,
     persistence: Option<Arc<dyn MetricsPersistence>>,
+    stability: RwLock<StabilityMetrics>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StabilityMetrics {
+    pub plan_runs: u64,
+    pub plan_stability_score_sum: f64,
+    pub retry_chain_depth_sum: u64,
+    pub retry_chain_depth_max: u64,
+    pub qa_gate_runs: u64,
+    pub qa_gate_failures: u64,
+    pub deterministic_replay_delta_sum: f64,
+    pub deterministic_replay_delta_samples: u64,
 }
 
 impl Default for MetricsCollector {
@@ -74,6 +87,7 @@ impl MetricsCollector {
         Self {
             by_provider_model: RwLock::new(HashMap::new()),
             persistence: None,
+            stability: RwLock::new(StabilityMetrics::default()),
         }
     }
 
@@ -81,6 +95,7 @@ impl MetricsCollector {
         Self {
             by_provider_model: RwLock::new(HashMap::new()),
             persistence: Some(persistence),
+            stability: RwLock::new(StabilityMetrics::default()),
         }
     }
 
@@ -224,5 +239,67 @@ impl MetricsCollector {
                 (key.clone(), obj)
             })
             .collect()
+    }
+
+    pub fn record_plan_stability_score(&self, score: f64) {
+        let mut s = self.stability.write().unwrap();
+        s.plan_runs = s.plan_runs.saturating_add(1);
+        s.plan_stability_score_sum += score.clamp(0.0, 1.0);
+    }
+
+    pub fn record_retry_chain_depth(&self, depth: u64) {
+        let mut s = self.stability.write().unwrap();
+        s.retry_chain_depth_sum = s.retry_chain_depth_sum.saturating_add(depth);
+        s.retry_chain_depth_max = s.retry_chain_depth_max.max(depth);
+    }
+
+    pub fn record_qa_gate_result(&self, passed: bool) {
+        let mut s = self.stability.write().unwrap();
+        s.qa_gate_runs = s.qa_gate_runs.saturating_add(1);
+        if !passed {
+            s.qa_gate_failures = s.qa_gate_failures.saturating_add(1);
+        }
+    }
+
+    pub fn record_deterministic_replay_delta(&self, delta: f64) {
+        let mut s = self.stability.write().unwrap();
+        s.deterministic_replay_delta_sum += delta.max(0.0);
+        s.deterministic_replay_delta_samples = s.deterministic_replay_delta_samples.saturating_add(1);
+    }
+
+    pub fn stability_summary(&self) -> serde_json::Value {
+        let s = self.stability.read().unwrap().clone();
+        let avg_plan_stability_score = if s.plan_runs == 0 {
+            0.0
+        } else {
+            s.plan_stability_score_sum / s.plan_runs as f64
+        };
+        let avg_retry_chain_depth = if s.plan_runs == 0 {
+            0.0
+        } else {
+            s.retry_chain_depth_sum as f64 / s.plan_runs as f64
+        };
+        let qa_gate_fail_rate = if s.qa_gate_runs == 0 {
+            0.0
+        } else {
+            s.qa_gate_failures as f64 / s.qa_gate_runs as f64
+        };
+        let deterministic_replay_delta = if s.deterministic_replay_delta_samples == 0 {
+            0.0
+        } else {
+            s.deterministic_replay_delta_sum / s.deterministic_replay_delta_samples as f64
+        };
+        serde_json::json!({
+            "plan_stability_score": avg_plan_stability_score,
+            "retry_chain_depth_avg": avg_retry_chain_depth,
+            "retry_chain_depth_max": s.retry_chain_depth_max,
+            "qa_gate_fail_rate": qa_gate_fail_rate,
+            "deterministic_replay_delta": deterministic_replay_delta,
+            "samples": {
+                "plan_runs": s.plan_runs,
+                "qa_gate_runs": s.qa_gate_runs,
+                "replay_samples": s.deterministic_replay_delta_samples
+            }
+        })
     }
 }

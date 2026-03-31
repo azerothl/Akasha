@@ -7690,7 +7690,8 @@ pub async fn handle_api(
             Err(_) => (0, 0, 0, 0, 0, 0),
         };
         let body_json = serde_json::json!({
-            "tasks": { "pending": pending, "running": running, "completed": completed, "failed": failed, "paused": paused, "interrupted": interrupted }
+            "tasks": { "pending": pending, "running": running, "completed": completed, "failed": failed, "paused": paused, "interrupted": interrupted },
+            "stability": llm_router.metrics().stability_summary()
         });
         return json_response("200 OK", &body_json.to_string());
     }

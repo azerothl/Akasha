@@ -25,6 +25,7 @@ use crate::api::{learn_from_task_outcome_async, message_suggests_tool_only_actio
 use crate::latency::{clear_task_milestones, emit_timeline_for_task, emit_timeline_once_for_task, env_duration_ms, log_latency_metric};
 use crate::session_state;
 use crate::memory_actor::LongTermMemoryClient;
+use crate::policy_engine::PolicyEngine;
 
 /// Outcome of evaluating whether the aggregated sub-agent response satisfies the user request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,73 @@ enum SatisfactionOutcome {
     CannotDo,
     /// Response is incomplete or does not directly address the request → run one refinement round.
     NeedsRefinement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrchestrationState {
+    Received,
+    ReadinessChecked,
+    Planning,
+    Executing,
+    Evaluating,
+    Completed,
+    Failed,
+}
+
+fn stable_mode_enabled(message: &str) -> bool {
+    if std::env::var("AKASHA_STABLE_MODE_DEFAULT")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let lower = message.to_lowercase();
+    lower.contains("[stable]") || lower.contains("/stable") || lower.contains("mode stable")
+}
+
+fn critical_review_enabled(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("[critical]") || lower.contains("critique") || lower.contains("production")
+}
+
+fn qa_gate_passed(user_message: &str, aggregated: &str) -> bool {
+    let answer = aggregated.trim();
+    if answer.is_empty() || answer == "(No response)" || answer.contains("No response from sub-agents.") {
+        return false;
+    }
+    // Long asks should not return ultra-short responses.
+    if user_message.chars().count() > 200 && answer.chars().count() < 80 {
+        return false;
+    }
+    true
+}
+
+fn emit_orchestration_state(bus: &EventBus, task_id: Uuid, state: OrchestrationState, extra: Option<serde_json::Value>) {
+    let mut payload = serde_json::json!({
+        "task_id": task_id.to_string(),
+        "orchestration_state": format!("{:?}", state).to_lowercase(),
+    });
+    if let Some(extra_obj) = extra {
+        payload["extra"] = extra_obj;
+    }
+    let _ = bus.send(
+        EventEnvelope::new(EventType::ProgressUpdate, Some(payload)).with_correlation(task_id),
+    );
+}
+
+fn compute_plan_hash(plan: &ExecutionPlan) -> String {
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+    let material = plan
+        .steps
+        .iter()
+        .map(|s| format!("{}|{}|{}", s.step_id, s.agent_type, s.intent))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut hasher = DefaultHasher::new();
+    material.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 /// One subtask from decomposition: (agent_type, message for that agent).
@@ -1258,6 +1326,55 @@ async fn process_root_task(
     if !akasha_core::Role::OrchestratorAgent.can_spawn_agents() {
         anyhow::bail!("RBAC: orchestrator not allowed to spawn agents");
     }
+    emit_orchestration_state(&bus, root_task_id, OrchestrationState::Received, None);
+
+    // Readiness gates (policy/budget/retries/circuit) before any expensive orchestration.
+    let policy_path = data_dir.join("policy_engine.yaml");
+    if let Ok(policy) = PolicyEngine::load_from_path(&policy_path) {
+        let spent_usd = llm_router
+            .metrics()
+            .list()
+            .values()
+            .map(|m| m.total_cost_usd)
+            .sum::<f64>();
+        let attempt_count = PipelineStore::open(store_path)
+            .ok()
+            .and_then(|p| p.get(root_task_id).ok().flatten())
+            .map(|s| s.attempt_count)
+            .unwrap_or(0);
+        let circuit_scope = "orchestrator/root";
+        let readiness_ok = policy.budget_allows(spent_usd)
+            && policy.retries_allow(attempt_count)
+            && policy.circuit_allows(circuit_scope);
+        if !readiness_ok {
+            emit_orchestration_state(
+                &bus,
+                root_task_id,
+                OrchestrationState::Failed,
+                Some(serde_json::json!({
+                    "reason": "readiness_gates_failed",
+                    "spent_usd": spent_usd,
+                    "attempt_count": attempt_count,
+                    "escalation_mode": policy.escalation_mode(),
+                })),
+            );
+            let store = TaskStore::open(store_path)?;
+            store.update_status(root_task_id, TaskStatus::Failed)?;
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::TaskFailed,
+                    Some(serde_json::json!({
+                        "task_id": root_task_id.to_string(),
+                        "reason": "readiness_gates_failed",
+                        "escalation_mode": policy.escalation_mode(),
+                    })),
+                )
+                .with_correlation(root_task_id),
+            );
+            return Ok(());
+        }
+        emit_orchestration_state(&bus, root_task_id, OrchestrationState::ReadinessChecked, None);
+    }
     if execution_mode == Some(ExecutionMode::Orchestrated) {
         if let Ok(pipeline) = PipelineStore::open(store_path) {
             let _ = pipeline.init_if_missing(root_task_id);
@@ -1265,6 +1382,21 @@ async fn process_root_task(
     }
     let store = TaskStore::open(store_path)?;
     store.update_status(root_task_id, TaskStatus::Running)?;
+    let _ = store.upsert_lease(root_task_id, "orchestrator", 90);
+    let (lease_stop_tx, mut lease_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let lease_store_path = store_path.to_path_buf();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(20)) => {
+                    if let Ok(s) = TaskStore::open(&lease_store_path) {
+                        let _ = s.upsert_lease(root_task_id, "orchestrator", 90);
+                    }
+                }
+                _ = &mut lease_stop_rx => break,
+            }
+        }
+    });
 
     // Immediate progress so the TUI shows feedback before the first LLM call (model loading may take time).
     let _ = bus.send(
@@ -1321,6 +1453,7 @@ async fn process_root_task(
     let mut startup_watchdog_tx = Some(startup_watchdog_tx);
     emit_timeline_for_task(&bus, Some(store_path), root_task_id, "decompose_start", None);
     let decompose_started = Instant::now();
+    emit_orchestration_state(&bus, root_task_id, OrchestrationState::Planning, None);
 
     let (mut plan, decompose_diag) = decompose_to_plan(
         &llm_router,
@@ -1370,7 +1503,22 @@ async fn process_root_task(
             plan = ExecutionPlan::from_legacy(&steps_after);
         }
     }
-    let steps = plan.to_subtasks();
+    let mut steps = plan.to_subtasks();
+    let stable_mode = stable_mode_enabled(&message);
+    if stable_mode {
+        // Stable mode: keep deterministic order and trim to a bounded fan-out.
+        let mut stable_steps = plan.steps.clone();
+        stable_steps.sort_by(|a, b| a.step_id.cmp(&b.step_id));
+        let cap = std::env::var("AKASHA_STABLE_MODE_MAX_STEPS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(3);
+        stable_steps.truncate(cap.max(1));
+        plan.steps = stable_steps;
+        steps = plan.to_subtasks();
+    }
+    let plan_hash = compute_plan_hash(&plan);
+    llm_router.metrics().record_plan_stability_score(if stable_mode { 1.0 } else { 0.7 });
     let _ = bus.send(
         EventEnvelope::new(
             EventType::TaskDecomposed,
@@ -1381,7 +1529,9 @@ async fn process_root_task(
                 "plan_id": plan.plan_id.to_string(),
                 "decompose_model_task_type": decompose_diag.task_type_used,
                 "decompose_reason": decompose_diag.reason,
-                "decompose_attempt": decompose_diag.attempt
+                "decompose_attempt": decompose_diag.attempt,
+                "stable_mode": stable_mode,
+                "plan_hash": plan_hash
             })),
         )
         .with_correlation(root_task_id),
@@ -1393,6 +1543,7 @@ async fn process_root_task(
                 "schema_version": 1,
                 "task_id": root_task_id.to_string(),
                 "plan_id": plan.plan_id.to_string(),
+                "plan_hash": plan_hash,
                 "steps": plan.steps.iter().map(|s| serde_json::json!({
                     "step_id": s.step_id,
                     "agent_type": s.agent_type,
@@ -1404,6 +1555,12 @@ async fn process_root_task(
             })),
         )
         .with_correlation(root_task_id),
+    );
+    emit_orchestration_state(
+        &bus,
+        root_task_id,
+        OrchestrationState::Executing,
+        Some(serde_json::json!({"stable_mode": stable_mode, "steps": plan.steps.len()})),
     );
 
     // Progress message so UIs can show "task delegated to specialized agent(s)"
@@ -1539,6 +1696,10 @@ async fn process_root_task(
             .with_correlation(root_task_id),
         );
         let _ = store.update_status(root_task_id, TaskStatus::Completed);
+        let _ = lease_stop_tx.send(());
+        if let Ok(s) = TaskStore::open(store_path) {
+            let _ = s.clear_lease(root_task_id);
+        }
         learn_from_task_outcome_async(
             long_term_client.clone(),
             root_task_id,
@@ -2628,6 +2789,54 @@ Formatting rules (Markdown):
                 }
             }
         }
+        emit_orchestration_state(&bus, root_task_id, OrchestrationState::Evaluating, None);
+        // Auto QA gate: prevent publishing clearly incomplete output.
+        let qa_pass = qa_gate_passed(&user_message, &final_aggregated);
+        llm_router.metrics().record_qa_gate_result(qa_pass);
+        if !qa_pass {
+            final_aggregated = format!(
+                "La réponse agrégée est jugée incomplète par le QA gate.\n\nDemande initiale:\n{}\n\nRéponse actuelle:\n{}",
+                user_message.trim(),
+                final_aggregated.trim()
+            );
+        }
+
+        // Critical cross-model review (best-effort): run a second evaluator pass and append verdict.
+        if critical_review_enabled(&user_message) {
+            let review_prompt = format!(
+                "You are an external reviewer. Check if the answer fully satisfies the request. Reply with:\nPASS|<short reason>\nor\nFAIL|<short reason>\n\nREQUEST:\n{}\n\nANSWER:\n{}",
+                user_message.trim(),
+                final_aggregated.trim()
+            );
+            let review_req = CompletionRequest {
+                prompt: review_prompt,
+                max_tokens: Some(256),
+                temperature: Some(0.0),
+                preferred_task_type: Some("system".to_string()),
+                system_prompt: Some("You are strict and skeptical. Prefer FAIL when uncertain.".to_string()),
+                image_data_urls: None,
+                top_p: None,
+                top_k: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                repeat_penalty: None,
+                num_ctx: None,
+                num_gpu: None,
+                thinking_level: Some("off".to_string()),
+            };
+            if let Ok(Ok(review_resp)) = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                llm_router.complete(&review_req),
+            )
+            .await
+            {
+                let verdict = review_resp.text.trim();
+                let pass = verdict.starts_with("PASS|");
+                llm_router.metrics().record_qa_gate_result(pass);
+                final_aggregated.push_str("\n\n---\nCross-review: ");
+                final_aggregated.push_str(verdict);
+            }
+        }
         // Ensure the UI receives a readable message (never raw JSON): extract summary or strip trailing contract.
         let display_message_original = user_facing_message(&final_aggregated);
         let any_failed = children.iter().any(|t| t.status == TaskStatus::Failed);
@@ -2718,8 +2927,23 @@ Formatting rules (Markdown):
             }
         }
         if let Ok(s) = TaskStore::open(&store_path_buf) {
-            let _ = s.update_status(root_task_id, root_status);
+            let _ = s.update_status(root_task_id, root_status.clone());
+            let _ = s.clear_lease(root_task_id);
         }
+        let _ = lease_stop_tx.send(());
+        emit_orchestration_state(
+            &bus,
+            root_task_id,
+            if root_status == TaskStatus::Completed {
+                OrchestrationState::Completed
+            } else {
+                OrchestrationState::Failed
+            },
+            Some(serde_json::json!({
+                "status": root_status.as_str(),
+                "qa_gate_failed": !qa_gate_passed(&user_message, &final_aggregated),
+            })),
+        );
         let summary_preview: String = display_message.chars().take(300).collect();
         let sid_merge = session_id_aggregator.clone();
         let plan_id_merge = root_plan_id.clone();

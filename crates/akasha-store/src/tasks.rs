@@ -120,6 +120,13 @@ impl TaskStore {
                 PRIMARY KEY (task_id, seq)
             );
             CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id);
+            CREATE TABLE IF NOT EXISTS task_leases (
+                task_id TEXT PRIMARY KEY,
+                owner TEXT NOT NULL,
+                heartbeat_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_task_leases_expires_at ON task_leases(expires_at);
             "#,
         )?;
         // Migration: add initial_message if missing (existing DBs).
@@ -133,6 +140,42 @@ impl TaskStore {
         }
         crate::todos::create_task_todos_table(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// Acquire or refresh a lease for a running task.
+    pub fn upsert_lease(&self, task_id: Uuid, owner: &str, ttl_secs: u64) -> anyhow::Result<()> {
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
+        self.conn.execute(
+            "INSERT INTO task_leases (task_id, owner, heartbeat_at, expires_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(task_id) DO UPDATE SET owner = excluded.owner, heartbeat_at = excluded.heartbeat_at, expires_at = excluded.expires_at",
+            rusqlite::params![task_id.to_string(), owner, now.to_rfc3339(), expires_at.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_lease(&self, task_id: Uuid) -> anyhow::Result<()> {
+        self.conn
+            .execute("DELETE FROM task_leases WHERE task_id = ?1", [task_id.to_string()])?;
+        Ok(())
+    }
+
+    /// Return task ids with expired leases.
+    pub fn expired_leases(&self, now: DateTime<Utc>, limit: usize) -> anyhow::Result<Vec<Uuid>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT task_id FROM task_leases WHERE expires_at <= ?1 ORDER BY expires_at ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![now.to_rfc3339(), limit as i64], |row| {
+            let id: String = row.get(0)?;
+            Ok(Uuid::parse_str(&id).ok())
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Some(id) = row? {
+                out.push(id);
+            }
+        }
+        Ok(out)
     }
 
     /// Get the todo list for a task (Deep Agents-style write_todos).
