@@ -226,3 +226,77 @@ impl PolicyEngine {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_temp_policy(contents: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("akasha_policy_test_{}.yaml", uuid::Uuid::new_v4()));
+        std::fs::write(&path, contents).expect("write policy yaml");
+        path
+    }
+
+    #[test]
+    fn evaluate_matches_specific_rule() {
+        let path = write_temp_policy(
+            r#"
+default_allow: false
+rules:
+  - actor_role: conversation
+    resource_kind: tool
+    resource_name: read_file
+    action: read
+    allow: true
+"#,
+        );
+        let engine = PolicyEngine::load_from_path(&path).expect("load");
+        let actor = Actor {
+            role: Some("conversation".to_string()),
+            channel: None,
+        };
+        let resource = Resource {
+            kind: "tool".to_string(),
+            name: "read_file".to_string(),
+        };
+        assert!(engine.evaluate(&actor, &resource, Action::Read));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn budget_and_retry_limits_apply() {
+        let path = write_temp_policy(
+            r#"
+default_allow: false
+max_task_budget_usd: 2.5
+max_task_retries: 3
+"#,
+        );
+        let engine = PolicyEngine::load_from_path(&path).expect("load");
+        assert!(engine.budget_allows(2.49));
+        assert!(!engine.budget_allows(2.51));
+        assert!(engine.retries_allow(3));
+        assert!(!engine.retries_allow(4));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn circuit_breaker_opens_after_threshold() {
+        let path = write_temp_policy(
+            r#"
+default_allow: false
+circuit_breaker_failure_threshold: 2
+circuit_breaker_cooldown_secs: 60
+"#,
+        );
+        let engine = PolicyEngine::load_from_path(&path).expect("load");
+        let scope = "orchestrator/root";
+        assert!(engine.circuit_allows(scope));
+        engine.record_circuit_result(scope, false);
+        assert!(engine.circuit_allows(scope));
+        engine.record_circuit_result(scope, false);
+        assert!(!engine.circuit_allows(scope));
+        let _ = std::fs::remove_file(path);
+    }
+}

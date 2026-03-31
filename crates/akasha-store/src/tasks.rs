@@ -451,3 +451,28 @@ impl TaskStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lease_lifecycle_and_expiry() {
+        let tmp = tempfile::NamedTempFile::new().expect("temp db");
+        let store = TaskStore::open(tmp.path()).expect("open");
+        let id = Uuid::new_v4();
+
+        store.upsert_lease(id, "orchestrator", 1).expect("upsert lease");
+        let now = Utc::now();
+        let expired_now = store.expired_leases(now, 10).expect("expired now");
+        assert!(expired_now.is_empty(), "fresh lease should not be expired immediately");
+
+        let future = now + chrono::Duration::seconds(2);
+        let expired_future = store.expired_leases(future, 10).expect("expired future");
+        assert!(expired_future.contains(&id), "lease should expire after ttl");
+
+        store.clear_lease(id).expect("clear lease");
+        let expired_after_clear = store.expired_leases(future, 10).expect("expired after clear");
+        assert!(!expired_after_clear.contains(&id), "cleared lease must not be listed");
+    }
+}

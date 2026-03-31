@@ -303,3 +303,29 @@ impl MetricsCollector {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stability_metrics_are_recorded_and_exposed() {
+        let m = MetricsCollector::new();
+        m.record_plan_stability_score(1.0);
+        m.record_plan_stability_score(0.5);
+        m.record_retry_chain_depth(2);
+        m.record_retry_chain_depth(4);
+        m.record_qa_gate_result(true);
+        m.record_qa_gate_result(false);
+        m.record_deterministic_replay_delta(0.2);
+
+        let summary = m.stability_summary();
+        let score = summary.get("plan_stability_score").and_then(|v| v.as_f64()).unwrap_or(-1.0);
+        let retry_max = summary.get("retry_chain_depth_max").and_then(|v| v.as_u64()).unwrap_or(0);
+        let fail_rate = summary.get("qa_gate_fail_rate").and_then(|v| v.as_f64()).unwrap_or(-1.0);
+
+        assert!(score > 0.0);
+        assert_eq!(retry_max, 4);
+        assert!(fail_rate > 0.0);
+    }
+}
