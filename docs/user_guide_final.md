@@ -345,7 +345,7 @@ Cette documentation est également affichée dans l'**onglet Doc** des interface
 - **Livrables vérifiés sur disque** : l’orchestrateur s’assure que les fichiers attendus (`workspace:/rapport.md`, etc.) ont bien été créés avant de valider une étape.
 - **Sécurité des livrables** : les chemins absolus et les chemins qui sortent du workspace (`..`) sont rejetés. Les livrables restent confinés au workspace autorisé.
 - **Retry automatique ciblé** : si un livrable attendu manque, l’orchestrateur peut relancer une tentative focalisée sur la création du fichier manquant.
-- **Trace de plan** : un fichier `.akasha/plan_trace_<id>.md` est maintenu en temps réel dans le workspace pour les requêtes multi-étapes — consultable à tout moment.
+- **Trace de plan** : un fichier `.akasha/plan_<id>.md` est maintenu en temps réel dans le workspace pour les requêtes multi-étapes — consultable à tout moment.
 
 ### Sécurité et correctifs
 

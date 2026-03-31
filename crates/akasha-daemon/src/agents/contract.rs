@@ -145,18 +145,19 @@ pub fn user_facing_message(response: &str) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
+    let stripped = strip_trailing_contract(response);
     if let Some(contract) = parse_contract_from_response(trimmed) {
         if let Some(ref summary) = contract.summary {
             if !summary.trim().is_empty() {
-                // Only use the summary if the response is essentially raw JSON (starts with '{')
-                // When there is text before the JSON block, strip the block instead.
-                if trimmed.starts_with('{') {
+                // Use the summary when the response is effectively only contract data
+                // (raw JSON or fenced JSON without user-facing prose).
+                if trimmed.starts_with('{') || stripped.trim().is_empty() {
                     return format_summary_for_display(summary);
                 }
             }
         }
     }
-    strip_trailing_contract(response)
+    stripped
 }
 
 #[cfg(test)]
@@ -188,6 +189,13 @@ mod tests {
         let r = "Voici l'analyse.\n\n```json\n{\"status\": \"done\", \"summary\": \"Done.\"}\n```";
         let out = user_facing_message(r);
         assert_eq!(out, "Voici l'analyse.");
+    }
+
+    #[test]
+    fn user_facing_message_fenced_json_only_returns_summary() {
+        let r = "```json\n{\"status\": \"done\", \"summary\": \"Résumé lisible.\"}\n```";
+        let out = user_facing_message(r);
+        assert_eq!(out, "Résumé lisible.");
     }
 
     /// `len - 2000` can land inside a multi-byte UTF-8 char (e.g. `└`); slicing must not panic.

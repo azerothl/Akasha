@@ -457,6 +457,24 @@ fn plan_trace_rel_path(root_task_id: Uuid) -> String {
     format!(".akasha/plan_{}.md", root_task_id)
 }
 
+fn compute_root_status(
+    any_failed: bool,
+    has_missing_deliverables: bool,
+    display_message_trimmed: &str,
+) -> TaskStatus {
+    if has_missing_deliverables {
+        return TaskStatus::Failed;
+    }
+    if any_failed
+        && (display_message_trimmed.is_empty()
+            || display_message_trimmed == "No response from sub-agents.")
+    {
+        TaskStatus::Failed
+    } else {
+        TaskStatus::Completed
+    }
+}
+
 /// Preserves **Fait (agent):** / **Reste (agent):** bodies per `### step_id` when the orchestrator rewrites the plan file.
 fn parse_agent_fait_reste_from_plan(content: &str) -> HashMap<String, (String, String)> {
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2335,6 +2353,7 @@ Do not only describe the files — execute the tools."#,
                     root_task_id,
                 )
                 .await;
+                missing_deliverables = collect_missing_plan_deliverables(&plan_spawn, &workspace_root);
             }
         }
         // Collect final child statuses in a synchronous scope before the await-heavy aggregation.
@@ -2668,15 +2687,17 @@ Formatting rules (Markdown):
             .with_correlation(root_task_id),
         );
         // If some subtasks failed but we have a usable aggregated message (e.g. timeout/partial), still complete the root so the user sees the synthesis instead of a global "failed".
-        let root_status = if any_failed {
-            if msg_trim_original.is_empty() || msg_trim_original == "No response from sub-agents." {
-                TaskStatus::Failed
-            } else {
-                TaskStatus::Completed
-            }
-        } else {
-            TaskStatus::Completed
-        };
+        let deliverables_still_missing = !missing_deliverables.is_empty();
+        if deliverables_still_missing {
+            let missing_list = missing_deliverables
+                .iter()
+                .map(|d| format!("- {}", d))
+                .collect::<Vec<_>>()
+                .join("\n");
+            display_message.push_str("\n\nMissing required deliverables:\n");
+            display_message.push_str(&missing_list);
+        }
+        let root_status = compute_root_status(any_failed, deliverables_still_missing, msg_trim_original);
         let status_str = root_status.as_str();
         let event_type = if root_status == TaskStatus::Failed {
             EventType::TaskFailed
@@ -2749,8 +2770,9 @@ Formatting rules (Markdown):
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_decomposition_override, build_deterministic_project_fallback_plan, child_output_needs_retry, child_retry_timeout, extract_workspace_paths_from_message, is_project_like_request, Subtask};
+    use super::{apply_decomposition_override, build_deterministic_project_fallback_plan, child_output_needs_retry, child_retry_timeout, compute_root_status, extract_workspace_paths_from_message, is_project_like_request, Subtask};
     use super::super::execution_plan::{ExecutionPlan, PlanStep};
+    use akasha_store::TaskStatus;
     use uuid::Uuid;
 
     fn step(agent: &str, msg: &str) -> Subtask {
@@ -2870,6 +2892,12 @@ mod tests {
     #[test]
     fn child_retry_timeout_has_reasonable_default() {
         assert_eq!(child_retry_timeout(), std::time::Duration::from_millis(90_000));
+    }
+
+    #[test]
+    fn root_status_fails_when_deliverables_missing_even_with_message() {
+        let status = compute_root_status(false, true, "Voici une synthèse partielle.");
+        assert_eq!(status, TaskStatus::Failed);
     }
 
     #[test]

@@ -189,7 +189,7 @@ Les variables définies via `akasha config env set` sont enregistrées dans `dat
 
 Pour les **formats, types de données et exemples** de chaque fichier, voir [35_configuration_reference.md](35_configuration_reference.md).
 
-- **llm_router.yaml** : recherché dans l'ordre : data_dir, puis racine du projet. Définit les providers (Ollama, OpenAI, OpenRouter) et les modèles par type de tâche. **Section `providers` vide** : ce n'est pas la cause de timeouts. Le daemon enregistre Ollama (URL = `OLLAMA_HOST` ou découverte auto), le modèle embarqué, et **OpenRouter/OpenAI dès qu’une clé API est disponible** (env `OPENROUTER_API_KEY` / `OPENAI_API_KEY` ou vault). Vous pouvez donc définir une route primary vers openrouter/openai (TUI ou fichier) sans ajouter `providers.openrouter` dans le YAML si la clé est en variable d’environnement. Pour les modèles avec « thinking » (ex. glm-4.7-flash) qui renvoient une réponse vide (done_reason: length), augmenter **AKASHA_SYSTEM_TASK_MAX_TOKENS** (défaut 4096). Voir `spec/llm_router.example.yaml`.
+- **llm_router.yaml** : recherché dans l'ordre : data_dir, puis racine du projet. Définit les providers (Ollama, OpenAI, OpenRouter) et les modèles par type de tâche. **Section `providers` vide** : ce n'est pas la cause de timeouts. Le daemon enregistre Ollama (URL = `OLLAMA_HOST` ou découverte auto), le modèle embarqué, et **OpenRouter dès qu’une clé API est disponible** (env `OPENROUTER_API_KEY` ou vault). Pour OpenAI, conserver une section `providers.openai` (avec `api_key_ref`) dans `llm_router.yaml`. Pour les modèles avec « thinking » (ex. glm-4.7-flash) qui renvoient une réponse vide (done_reason: length), augmenter **AKASHA_SYSTEM_TASK_MAX_TOKENS** (défaut 4096). Voir `spec/llm_router.example.yaml`.
 - **voice_router.yaml** (dans le data_dir, optionnel) : configuration TTS/STT. Créé automatiquement par `akasha services install --voice` ou par `akasha init` si vous choisissez d’installer les services Docker (option Voice). Sinon, copier `spec/voice_router.example.yaml` vers `data_dir/voice_router.yaml` et renseigner `tts.base_url` et/ou `stt.base_url`. Lorsque STT est configuré, l’interface web affiche un bouton **Message vocal** (micro). Voir [35_configuration_reference.md](35_configuration_reference.md) et [akasha-models/README.md](../akasha-models/README.md).
 - **connectors.env** : variables d'activation des connecteurs (chargé par `akasha start`).
 - **akasha.env** : variables persistantes (chargé après connectors.env).
@@ -261,7 +261,7 @@ L'UI se connecte au daemon sur le port 3876 (configurable via `AKASHA_PORT`). **
 **RAG utilisateur (interface web uniquement)** : dans l’onglet Paramètres, la section « Mes documents (RAG utilisateur) » permet d’ajouter ou supprimer des documents (texte). Ces documents sont indexés et les extraits pertinents sont injectés dans le contexte des agents lors des réponses. En TUI ou sans interface web, le RAG utilisateur peut être géré via l’API : `GET/POST/DELETE /api/user-rag/documents`.
 
 **Contrat pièces jointes / RAG (API)** :
-- **Chat** (`POST /api/chat`) : le champ `attachments` attend une liste d’objets `{ "name": "...", "type": "image|document", "content_base64": "...", "mime_type": "..." }`.  
+- **Chat** (`POST /api/message`) : le champ `attachments` attend une liste d’objets `{ "name": "...", "type": "image|document", "content_base64": "...", "mime_type": "..." }`.  
   - `type: "image"` : transmis au modèle sous forme de data URL vision.  
   - `type: "document"` : texte extrait puis injecté dans le message.
 - **RAG utilisateur** (`POST /api/user-rag/documents`) : body `{ "name": "...", "content_base64": "...", "mime_type": "..." }` (`content_base64` requis).
@@ -363,7 +363,7 @@ cargo run -p akasha-evals
 - **Livrables vérifiés** : pour les plans multi-étapes avec `deliverables` (ex. `workspace:/rapport.md`), l’orchestrateur vérifie que les fichiers existent avant de marquer l’étape comme terminée.
 - **Sécurité des chemins de livrables** : les chemins absolus et les sorties du workspace (`..`) sont rejetés ; les chemins `workspace:/...` restent obligatoirement résolus dans le workspace autorisé.
 - **Retry ciblé si livrable manquant** : lorsqu’un agent termine sans produire un livrable attendu, l’orchestrateur relance une tentative focalisée sur la production du fichier manquant.
-- **Trace de plan persistée** : l’orchestrateur écrit un fichier `.akasha/plan_trace_<task_id>.md` dans le workspace à chaque mise à jour du plan — consultable pendant et après l’exécution.
+- **Trace de plan persistée** : l’orchestrateur écrit un fichier `.akasha/plan_<task_id>.md` dans le workspace à chaque mise à jour du plan — consultable pendant et après l’exécution.
 - **Détection de réponses méta** : les sous-agents qui renvoient une réponse méta (ex. « Je suis prêt à commencer la Phase 2 ») au lieu d’un vrai résultat déclenchent automatiquement un retry.
 
 ### Sécurité

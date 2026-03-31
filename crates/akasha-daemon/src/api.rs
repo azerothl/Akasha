@@ -110,6 +110,22 @@ fn parse_write_file_request(args: &[String]) -> Option<(String, String)> {
     Some((path, content))
 }
 
+enum PluginReputationResetBody {
+    Empty,
+    Parsed(serde_json::Value),
+    Invalid(String),
+}
+
+fn parse_plugin_reputation_reset_body(body: Option<&[u8]>) -> PluginReputationResetBody {
+    match body {
+        Some(raw) if !raw.is_empty() => match serde_json::from_slice::<serde_json::Value>(raw) {
+            Ok(v) => PluginReputationResetBody::Parsed(v),
+            Err(e) => PluginReputationResetBody::Invalid(e.to_string()),
+        },
+        _ => PluginReputationResetBody::Empty,
+    }
+}
+
 fn canonicalize_tool_name(tool_name: &str) -> String {
     match tool_name.to_lowercase().as_str() {
         "create_todos" => "write_todos".to_string(),
@@ -8376,9 +8392,17 @@ pub async fn handle_api(
     // - { "plugin_id": "maps" } to reset one plugin
     // - {} or empty body to reset all plugins
     if method == "POST" && path == "/api/plugins/reputation/reset" {
-        let body_json = body
-            .as_deref()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let body_json = match parse_plugin_reputation_reset_body(body.as_deref()) {
+            PluginReputationResetBody::Parsed(v) => Some(v),
+            PluginReputationResetBody::Empty => None,
+            PluginReputationResetBody::Invalid(detail) => {
+                let body = serde_json::json!({
+                    "error": "invalid_json",
+                    "detail": detail
+                });
+                return json_response("400 Bad Request", &body.to_string());
+            }
+        };
         let plugin_id = body_json
             .as_ref()
             .and_then(|j| j.get("plugin_id"))
@@ -9685,10 +9709,12 @@ mod tests {
         ensure_no_open_code_block, extract_how_to_call_from_message, is_pausable, is_resumable,
         looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
         normalize_tool_path_hint, parse_content_length, parse_device_invoke_params,
+        parse_plugin_reputation_reset_body,
         parse_skill_install_url, parse_tool_calls, parse_write_file_request,
+        PluginReputationResetBody,
         response_looks_off_topic_for_small_talk, rewrite_workspace_plan_key_to_lineage_root,
         rewrite_workspace_plan_path_str, small_talk_fast_lane, SessionRecallIntent,
-        SessionRecallRange, SmallTalkIntent, SmallTalkLanguage,
+        SessionRecallRange, SmallTalkLanguage,
     };
     use akasha_store::TaskStatus;
     use uuid::Uuid;
@@ -9945,6 +9971,18 @@ mod tests {
         let (path, content) = parse_write_file_request(&args).expect("json payload should parse");
         assert_eq!(path, "workspace:/project_plan.md");
         assert!(content.contains("# Plan"));
+    }
+
+    #[test]
+    fn parse_plugin_reputation_reset_body_rejects_invalid_json() {
+        let parsed = parse_plugin_reputation_reset_body(Some(br#"{"plugin_id":"maps""#));
+        assert!(matches!(parsed, PluginReputationResetBody::Invalid(_)));
+    }
+
+    #[test]
+    fn parse_plugin_reputation_reset_body_accepts_empty_body_as_reset_all() {
+        let parsed = parse_plugin_reputation_reset_body(None);
+        assert!(matches!(parsed, PluginReputationResetBody::Empty));
     }
 
     #[test]
