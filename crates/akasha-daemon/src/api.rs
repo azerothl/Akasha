@@ -2162,6 +2162,11 @@ const WRITE_FILE_REMINDER: &str = "\n[Reminder: the user is asking to save a fil
 
 const WEB_SEARCH_REMINDER: &str = "\n[Reminder: the user is asking for external information (weather/météo, news, etc.). You MUST use TOOL: web_search <query> to search — do NOT use bankr or portfolio for weather. Then reply with the results. Do not suggest visiting a site without having used web_search first.]\n\n";
 
+/// Reminder injected when the user asks for external information (weather, news, etc.) but
+/// web_search is not available in the current tools policy. Prevents the model from ignoring
+/// the question and falling back to a generic capability introduction.
+const WEB_SEARCH_UNAVAILABLE_REMINDER: &str = "\n[Note: the user is asking for weather, news, or other live external information. web_search is not currently enabled. Answer as best you can from your training knowledge, clearly state that the data may be outdated, and explain how to enable web search: set web_search_enabled: true in tools_policy.yaml and configure BRAVE_API_KEY. Do NOT respond with a generic capabilities introduction — address the user's question directly.]\n\n";
+
 const TRANSPORT_REMINDER: &str = "\n[Reminder: the user is asking about transport schedules, routes, or travel information. You MUST use TOOL: web_search <query> first (e.g. web_search \"horaires train Angoulême Paris CDG dimanche\"). Do NOT write any files, generate HTML, or ask about project file paths — the user wants travel information only. If web_search is unavailable, say so clearly and suggest the relevant site (e.g. sncf.com, ratp.fr, transilien.com).]\n\n";
 
 /// Transport reminder when web_search is not enabled: model cannot use the tool so we only anchor it to the domain.
@@ -4971,13 +4976,19 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let web_search_reminder = if intent_flags.external_info
-        && tools_executor_snapshot
+    let web_search_reminder: &str = if intent_flags.external_info {
+        if tools_executor_snapshot
             .as_ref()
             .map(|e| e.policy.can_use_tool("web_search"))
             .unwrap_or(false)
-    {
-        WEB_SEARCH_REMINDER
+        {
+            // web_search is available: instruct the model to use it.
+            WEB_SEARCH_REMINDER
+        } else {
+            // web_search is absent (no tools configured or not allowed): prevent the model
+            // from ignoring the question and returning a generic capability introduction.
+            WEB_SEARCH_UNAVAILABLE_REMINDER
+        }
     } else {
         ""
     };
