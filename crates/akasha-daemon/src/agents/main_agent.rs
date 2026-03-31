@@ -79,6 +79,72 @@ fn is_geolocation_request(message: &str) -> bool {
     .iter()
     .any(|k| lower.contains(k))
 }
+
+/// Fast-path detect: message is a weather / news / external-facts query.
+/// Uses a focused subset of the keywords from `compute_message_intent_flags::external_info`,
+/// targeting clear weather and news-related terms to avoid common false positives.
+fn is_external_info_request(message: &str) -> bool {
+    let lower = message
+        .trim()
+        .to_lowercase()
+        .replace('\u{2019}', "'")
+        .replace(['!', '?', '.', ',', ';', ':'], " ");
+    if lower.is_empty() {
+        return false;
+    }
+    [
+        "météo",
+        "meteo",
+        "weather",
+        "prévisions météo",
+        "previsions meteo",
+        "quel temps",
+        "il fait quel temps",
+        "il va faire",
+        "forecast",
+        "actualités",
+        "actualites",
+        "les news",
+        "l'actu",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+}
+
+/// Strip `<think>…</think>` blocks emitted by reasoning models (e.g. Qwen3 via Ollama) before
+/// the actual model output. Returns the text after the last `</think>` tag, or the original
+/// text unchanged when no such tag is present.
+fn strip_thinking_tokens(text: &str) -> &str {
+    if let Some(pos) = text.rfind("</think>") {
+        text[pos + "</think>".len()..].trim_start()
+    } else {
+        text
+    }
+}
+
+/// Specialist agent names that can be forwarded as `assigned_agent` for direct-mode tasks.
+/// These correspond to the non-None branches of `agent_role_system_prompt` (api.rs).
+/// "conversation" is intentionally absent — it is the default fallback.
+const SPECIALIST_AGENTS: &[&str] = &[
+    "search",
+    "code",
+    "creative",
+    "research",
+    "system",
+    "financial",
+    "documentalist",
+    "project_manager",
+    "technical_writer",
+    "security_audit",
+    "analyst",
+    "architect",
+    "frontend",
+    "backend",
+    "database",
+    "integration",
+    "qa",
+    "image_generation",
+];
 /// Priority for the task queue: high-priority tasks are processed before normal/scheduled (Phase 4.1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TaskPriority {
@@ -266,6 +332,27 @@ impl MainAgent {
             };
         }
 
+        // Fast-path for weather / news / external-facts queries.
+        // These always require web_search and map cleanly to the "search" agent role.
+        // Bypassing the LLM selector removes 5-90 s cold-start delays for local Ollama models.
+        if is_external_info_request(message) {
+            tracing::debug!("selector: external-info request detected; routing direct to search agent");
+            return SelectorRunResult {
+                decision: Some(SelectorDecision {
+                    answer_mode: SelectorAnswerMode::Direct,
+                    task_type: Some("conversation".to_string()),
+                    target_agent: Some("search".to_string()),
+                    reason: Some(
+                        "weather/news/external-info request detected; route to search agent with web_search"
+                            .to_string(),
+                    ),
+                }),
+                enabled: true,
+                timed_out: false,
+                elapsed_ms: 0,
+            };
+        }
+
         let started = Instant::now();
         let prompt = format!(
             "You are a strict routing selector for Akasha.\n\
@@ -311,7 +398,7 @@ User message:\n{}",
         };
         match tokio::time::timeout(timeout, self.llm_router.complete(&req)).await {
             Ok(Ok(resp)) => SelectorRunResult {
-                decision: parse_selector_decision(resp.text.trim()),
+                decision: parse_selector_decision(strip_thinking_tokens(resp.text.trim())),
                 enabled: true,
                 timed_out: false,
                 elapsed_ms: started.elapsed().as_millis() as u64,
@@ -478,7 +565,15 @@ User message:\n{}",
             let assigned_agent = if !forward_to_orchestrator {
                 "llm".to_string()
             } else if use_direct {
-                "conversation".to_string()
+                // Use the selector's target_agent when it names a recognised specialist agent.
+                // This allows fast-path detectors (e.g. is_external_info_request) to route
+                // directly to "search" (or other agents) without an extra round-trip.
+                selector_decision
+                    .as_ref()
+                    .and_then(|d| d.target_agent.as_deref())
+                    .filter(|a| SPECIALIST_AGENTS.contains(a))
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "conversation".to_string())
             } else {
                 "orchestrator".to_string()
             };
@@ -642,7 +737,10 @@ User message:\n{}",
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_task_type, parse_selector_decision, SelectorAnswerMode};
+    use super::{
+        is_external_info_request, normalize_task_type, parse_selector_decision,
+        strip_thinking_tokens, SelectorAnswerMode,
+    };
 
     #[test]
     fn selector_parse_valid_direct() {
@@ -661,5 +759,62 @@ mod tests {
     #[test]
     fn selector_normalize_rejects_unknown_task_type() {
         assert_eq!(normalize_task_type(Some("unknown_type")), None);
+    }
+
+    // --- strip_thinking_tokens ---
+
+    #[test]
+    fn strip_thinking_tokens_removes_think_block() {
+        let input = "<think>reasoning here</think>\n{\"answer_mode\":\"direct\"}";
+        assert_eq!(strip_thinking_tokens(input), "{\"answer_mode\":\"direct\"}");
+    }
+
+    #[test]
+    fn strip_thinking_tokens_returns_original_when_no_tag() {
+        let input = "{\"answer_mode\":\"direct\"}";
+        assert_eq!(strip_thinking_tokens(input), input);
+    }
+
+    #[test]
+    fn strip_thinking_tokens_uses_last_tag() {
+        let input = "<think>first</think><think>second</think>\njson";
+        assert_eq!(strip_thinking_tokens(input), "json");
+    }
+
+    #[test]
+    fn selector_parse_survives_thinking_tokens() {
+        let raw = "<think>let me think about this</think>\n{\"answer_mode\":\"direct\",\"task_type\":\"conversation\",\"reason\":\"weather\"}";
+        let stripped = strip_thinking_tokens(raw.trim());
+        let d = parse_selector_decision(stripped).expect("should parse after stripping");
+        assert_eq!(d.answer_mode, SelectorAnswerMode::Direct);
+    }
+
+    // --- is_external_info_request ---
+
+    #[test]
+    fn external_info_detects_french_weather() {
+        assert!(is_external_info_request("quel temps il va faire aujourd'hui à Cognac ?"));
+        assert!(is_external_info_request("météo demain à Paris"));
+        assert!(is_external_info_request("donne-moi les prévisions météo"));
+    }
+
+    #[test]
+    fn external_info_detects_english_weather() {
+        assert!(is_external_info_request("what's the weather in London today?"));
+        assert!(is_external_info_request("weather forecast for tomorrow"));
+    }
+
+    #[test]
+    fn external_info_rejects_unrelated_messages() {
+        assert!(!is_external_info_request("crée-moi un site web"));
+        assert!(!is_external_info_request("écris un script Python"));
+        assert!(!is_external_info_request("bonjour, comment vas-tu ?"));
+        assert!(!is_external_info_request(""));
+    }
+
+    #[test]
+    fn external_info_detects_news() {
+        assert!(is_external_info_request("quelles sont les actualités du jour ?"));
+        assert!(is_external_info_request("les news de ce matin"));
     }
 }
