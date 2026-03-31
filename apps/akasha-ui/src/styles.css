@@ -967,6 +967,40 @@ pre,
   border-radius: 10px;
 }
 
+.chat-message-map-embed .event-map-osm-block {
+  margin-top: 0.35rem;
+}
+
+.chat-message-map-embed .event-map-osm-iframe {
+  height: 15rem;
+  min-height: 240px;
+}
+
+.event-map-schematic-details {
+  margin-top: 0.45rem;
+  border-radius: 8px;
+  border: 1px solid var(--akasha-border);
+  background: var(--akasha-bg-surface);
+  padding: 0.15rem 0.45rem 0.45rem;
+}
+
+.event-map-schematic-details-summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--akasha-text-muted);
+  padding: 0.25rem 0;
+  list-style-position: outside;
+}
+
+.event-map-schematic-details-summary:hover {
+  color: var(--akasha-text);
+}
+
+.event-map-schematic-details .event-advanced-chart {
+  display: block;
+  max-height: 9rem;
+}
+
 .message.system {
   background: var(--akasha-bg-elevated);
   border-left: 3px solid var(--akasha-accent);
@@ -3201,6 +3235,17 @@ pre,
   font-size: 0.84rem;
   color: var(--akasha-text-muted);
   line-height: 1.45;
+}
+
+.event-map-geometry-note {
+  margin: 0 0 0.55rem;
+  padding: 0.45rem 0.55rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--akasha-text-muted);
+  background: color-mix(in srgb, var(--akasha-accent) 8%, var(--akasha-bg-surface));
+  border: 1px solid color-mix(in srgb, var(--akasha-accent) 28%, var(--akasha-border));
+  border-radius: 8px;
 }
 
 .event-map-route-tabs {

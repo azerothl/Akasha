@@ -195,6 +195,8 @@ type EventAdvancedView =
       kind: "map";
       title?: string;
       summary?: string;
+      /** Plugin sends `great_circle_estimate` when polyline is geographic shortest path, not OSM roads. */
+      geometryKind?: "great_circle_estimate";
       points: Array<{ x: number; y: number }>;
       distanceM?: number;
       durationS?: number;
@@ -213,6 +215,39 @@ type ChatMapVisual = Extract<EventAdvancedView, { kind: "map" }>;
 
 function asRecord(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
+}
+
+/** GET /api/tasks/:id/events → { task_id, events } — tolerate alternate key casings after IPC. */
+function normalizeTaskEventsInvokeResponse(data: unknown): Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> {
+  if (data == null || typeof data !== "object") return [];
+  const o = data as Record<string, unknown>;
+  const raw = o.events ?? o.Events;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((e) => {
+    if (e && typeof e === "object") {
+      const ev = e as Record<string, unknown>;
+      return {
+        event_type: (ev.event_type ?? ev.EventType ?? ev.eventType) as string | undefined,
+        payload: ev.payload ?? ev.Payload,
+        at: (ev.at ?? ev.created_at ?? ev.At) as string | undefined,
+        task_id: (ev.task_id ?? ev.taskId) as string | undefined,
+      };
+    }
+    return { event_type: "?" };
+  });
+}
+
+/** Milestone payload is usually an object; DB round-trips may yield a JSON string. */
+function timelineMilestonePayloadRecord(payload: unknown): Record<string, unknown> | null {
+  if (payload == null) return null;
+  if (typeof payload === "string") {
+    try {
+      return asRecord(JSON.parse(payload) as unknown);
+    } catch {
+      return null;
+    }
+  }
+  return asRecord(payload);
 }
 
 function toFiniteNumber(v: unknown): number | undefined {
@@ -256,6 +291,10 @@ function geojsonLineStringToPoints(geom: unknown): Array<{ x: number; y: number 
       }
     }
     return out;
+  }
+  const coordsLoose = o.coordinates;
+  if (Array.isArray(coordsLoose) && coordsLoose.length > 0 && Array.isArray(coordsLoose[0])) {
+    return coordsLoose.map((p) => toPoint(p)).filter((p): p is { x: number; y: number } => p != null);
   }
   return [];
 }
@@ -374,6 +413,9 @@ function extractAdvancedViewData(payload: unknown): EventAdvancedView | null {
       const distanceM = toFiniteNumber(c.distance_m ?? c.distanceM) ?? routesIn[0]?.distanceM;
       const durationS = toFiniteNumber(c.duration_s ?? c.durationS) ?? routesIn[0]?.durationS;
       const summary = typeof c.summary === "string" && c.summary.trim() ? c.summary.trim() : undefined;
+      const gk = typeof c.geometry_kind === "string" ? c.geometry_kind.toLowerCase() : "";
+      const geometryKind: "great_circle_estimate" | undefined =
+        gk === "great_circle_estimate" ? "great_circle_estimate" : undefined;
       const osmEmbedUrl =
         typeof c.osm_embed_url === "string" && c.osm_embed_url.startsWith("http") ? c.osm_embed_url : undefined;
       const osmBrowseUrl =
@@ -385,6 +427,7 @@ function extractAdvancedViewData(payload: unknown): EventAdvancedView | null {
           kind: "map",
           title,
           summary,
+          geometryKind,
           points,
           distanceM,
           durationS,
@@ -418,6 +461,14 @@ type ChatMessageRow = {
   mapVisual?: ChatMapVisual;
 };
 
+function findLastChatAssistantIndex(messages: ChatMessageRow[], taskId: string): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role === "assistant" && m.taskId === taskId) return i;
+  }
+  return -1;
+}
+
 function parsePluginToolResultBody(raw: string): unknown | null {
   const s = raw.trim();
   const m = s.match(/^\[plugin:[^\]]+\]\s*([\s\S]*)$/);
@@ -430,15 +481,121 @@ function parsePluginToolResultBody(raw: string): unknown | null {
   }
 }
 
+/** Build OSM embed + browse URLs from route vertices (lon, lat in `x`/`y`). */
+function osmUrlsFromLonLatPoints(points: Array<{ x: number; y: number }>): { embed: string; browse: string } | undefined {
+  if (points.length < 2) return undefined;
+  const lons = points.map((p) => p.x);
+  const lats = points.map((p) => p.y);
+  let minLon = Math.min(...lons);
+  let maxLon = Math.max(...lons);
+  let minLat = Math.min(...lats);
+  let maxLat = Math.max(...lats);
+  let lonSpan = maxLon - minLon;
+  let latSpan = maxLat - minLat;
+  const minSpan = 1e-4;
+  if (lonSpan < minSpan) {
+    const half = minSpan / 2;
+    const mid = (minLon + maxLon) / 2;
+    minLon = mid - half;
+    maxLon = mid + half;
+    lonSpan = minSpan;
+  }
+  if (latSpan < minSpan) {
+    const half = minSpan / 2;
+    const mid = (minLat + maxLat) / 2;
+    minLat = mid - half;
+    maxLat = mid + half;
+    latSpan = minSpan;
+  }
+  const padX = lonSpan * 0.1;
+  const padY = latSpan * 0.1;
+  const west = minLon - padX;
+  const south = minLat - padY;
+  const east = maxLon + padX;
+  const north = maxLat + padY;
+  const embed = `https://www.openstreetmap.org/export/embed.html?bbox=${west},${south},${east},${north}&layer=mapnik`;
+  const browse = `https://www.openstreetmap.org/?minlat=${south}&minlon=${west}&maxlat=${north}&maxlon=${east}`;
+  return { embed, browse };
+}
+
+/** When `result_full` is truncated (invalid JSON) or IPC clips the string, recover map metrics + polyline from the readable prefix. */
+function salvageMapVisualFromPluginPrefix(raw: string): ChatMapVisual | null {
+  const s = raw.trim();
+  const plug = s.match(/^\[plugin:[^\]]+\]\s*/);
+  const body = plug ? s.slice(plug[0].length) : s;
+  if (!body.startsWith("{")) return null;
+  if (!/"view"\s*:\s*"map"/i.test(body)) return null;
+
+  const numField = (key: string): number | undefined => {
+    const re = new RegExp(`"${key}"\\s*:\\s*([0-9.+-eE]+)`);
+    const mm = body.match(re);
+    if (!mm) return undefined;
+    const n = Number(mm[1]);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const distanceM = numField("distance_m") ?? numField("distanceM");
+  const durationS = numField("duration_s") ?? numField("durationS");
+
+  const coordRe = /\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]/g;
+  const points: Array<{ x: number; y: number }> = [];
+  let cm: RegExpExecArray | null;
+  while ((cm = coordRe.exec(body)) !== null) {
+    const x = Number(cm[1]);
+    const y = Number(cm[2]);
+    if (Number.isFinite(x) && Number.isFinite(y)) points.push({ x, y });
+  }
+
+  let summary: string | undefined;
+  const sm = body.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (sm?.[1]) {
+    summary = sm[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\").trim();
+  }
+
+  const geometryKind: "great_circle_estimate" | undefined = /"geometry_kind"\s*:\s*"great_circle_estimate"/.test(
+    body,
+  )
+    ? "great_circle_estimate"
+    : undefined;
+
+  const osmEmbedM = body.match(/"osm_embed_url"\s*:\s*"([^"]+)"/);
+  const osmBrowseM = body.match(/"osm_browse_url"\s*:\s*"([^"]+)"/);
+  let osmEmbedUrl =
+    osmEmbedM?.[1]?.startsWith("http") ? osmEmbedM[1] : undefined;
+  let osmBrowseUrl =
+    osmBrowseM?.[1]?.startsWith("http") ? osmBrowseM[1] : undefined;
+  if (!osmEmbedUrl && points.length >= 2) {
+    const syn = osmUrlsFromLonLatPoints(points);
+    if (syn) {
+      osmEmbedUrl = syn.embed;
+      osmBrowseUrl = osmBrowseUrl ?? syn.browse;
+    }
+  }
+
+  if (points.length >= 2 || distanceM != null || durationS != null) {
+    return {
+      kind: "map",
+      summary: summary || undefined,
+      geometryKind,
+      points,
+      distanceM,
+      durationS,
+      osmEmbedUrl,
+      osmBrowseUrl,
+    };
+  }
+  return null;
+}
+
 function extractChatMapVisualFromTaskEvents(
   events: Array<{ event_type?: string; payload?: unknown }>,
 ): ChatMapVisual | null {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
-    if (e.event_type !== "timeline_milestone") continue;
-    const p = asRecord(e.payload);
+    const et = e.event_type ?? "";
+    if (et !== "timeline_milestone" && et !== "deterministic_preferred_tool_result") continue;
+    const p = timelineMilestonePayloadRecord(e.payload);
     if (!p || p.name !== "deterministic_preferred_tool_result") continue;
-    if (p.success !== true) continue;
+    if (p.success === false || p.success === 0 || p.success === "false") continue;
     const tool = typeof p.tool === "string" ? p.tool : "";
     if (!tool.startsWith("maps_")) continue;
     const full =
@@ -449,9 +606,10 @@ function extractChatMapVisualFromTaskEvents(
           : null;
     if (!full) continue;
     const parsed = parsePluginToolResultBody(full);
-    if (!parsed) continue;
-    const vis = extractAdvancedViewData(parsed);
+    const vis = parsed ? extractAdvancedViewData(parsed) : null;
     if (vis?.kind === "map") return vis;
+    const salvaged = salvageMapVisualFromPluginPrefix(full);
+    if (salvaged) return salvaged;
   }
   return null;
 }
@@ -460,10 +618,11 @@ function extractChatMapVisualFromTaskEvents(
 function extractChatMapVisualFromAssistantText(text: string): ChatMapVisual | null {
   const idx = text.indexOf("[plugin:");
   if (idx < 0) return null;
-  const parsed = parsePluginToolResultBody(text.slice(idx));
-  if (!parsed) return null;
-  const vis = extractAdvancedViewData(parsed);
-  return vis?.kind === "map" ? vis : null;
+  const slice = text.slice(idx);
+  const parsed = parsePluginToolResultBody(slice);
+  const vis = parsed ? extractAdvancedViewData(parsed) : null;
+  if (vis?.kind === "map") return vis;
+  return salvageMapVisualFromPluginPrefix(slice);
 }
 
 function formatDistanceLabel(meters?: number): string | null {
@@ -573,6 +732,8 @@ type MapPluginEventViewProps = {
   toolbar: "inline" | "hidden";
   /** Adds full-screen panel spacing class (modal body). */
   layout?: "default" | "fullscreen";
+  /** Chat: OSM iframe first and taller; SVG schematic in a collapsible block. */
+  variant?: "default" | "chat";
   /** When false, hide title (modal already has a heading). */
   showPanelHeading?: boolean;
   onFullscreen?: () => void;
@@ -599,6 +760,7 @@ function MapPluginEventView({
   height,
   toolbar,
   layout = "default",
+  variant = "default",
   showPanelHeading = true,
   onFullscreen,
   onExportCsv,
@@ -635,6 +797,11 @@ function MapPluginEventView({
   const distance = formatDistanceLabel(active.distanceM ?? visual.distanceM);
   const duration = formatDurationLabel(active.durationS ?? visual.durationS);
 
+  const synthesizedOsm =
+    !visual.osmEmbedUrl && variant === "chat" && points.length >= 2 ? osmUrlsFromLonLatPoints(points) : null;
+  const effectiveOsmEmbed = visual.osmEmbedUrl ?? synthesizedOsm?.embed;
+  const effectiveOsmBrowse = visual.osmBrowseUrl ?? synthesizedOsm?.browse;
+
   const lineAndPoints = (
     <>
       {scaled.length >= 2 && <polyline points={polyline} className="event-advanced-map-line" />}
@@ -658,6 +825,9 @@ function MapPluginEventView({
     >
       {showPanelHeading && <strong className="metadata-label">{visual.title ?? t("tasks.plugin_map_title")}</strong>}
       {visual.summary && <p className="event-map-summary">{visual.summary}</p>}
+      {visual.geometryKind === "great_circle_estimate" ? (
+        <p className="event-map-geometry-note">{t("tasks.map_geometry_great_circle_note")}</p>
+      ) : null}
       {toolbar === "inline" && (onFullscreen || onExportCsv) && (
         <div className="event-advanced-toolbar">
           {onFullscreen && (
@@ -707,42 +877,66 @@ function MapPluginEventView({
           )}
         </div>
       )}
-      {interactive ? (
-        <div
-          className={`event-visual-interactive-surface ${interactive.dragging ? "is-dragging" : ""}`}
-          onWheel={interactive.onWheel}
-          onDoubleClick={interactive.onDoubleClick}
-          onPointerDown={interactive.onPointerDown}
-          onPointerMove={interactive.onPointerMove}
-          onPointerUp={interactive.onPointerUp}
-          onPointerCancel={interactive.onPointerCancel}
-          onPointerLeave={interactive.onPointerLeave}
-        >
+      {(() => {
+        const schematicBlock = interactive ? (
+          <div
+            className={`event-visual-interactive-surface ${interactive.dragging ? "is-dragging" : ""}`}
+            onWheel={interactive.onWheel}
+            onDoubleClick={interactive.onDoubleClick}
+            onPointerDown={interactive.onPointerDown}
+            onPointerMove={interactive.onPointerMove}
+            onPointerUp={interactive.onPointerUp}
+            onPointerCancel={interactive.onPointerCancel}
+            onPointerLeave={interactive.onPointerLeave}
+          >
+            <svg className="event-advanced-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label={t("tasks.plugin_map_title")}>
+              <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
+              <g transform={interactive.transform}>{lineAndPoints}</g>
+            </svg>
+          </div>
+        ) : (
           <svg className="event-advanced-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label={t("tasks.plugin_map_title")}>
             <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
-            <g transform={interactive.transform}>{lineAndPoints}</g>
+            {lineAndPoints}
           </svg>
-        </div>
-      ) : (
-        <svg className="event-advanced-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label={t("tasks.plugin_map_title")}>
-          <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
-          {lineAndPoints}
-        </svg>
-      )}
-      {visual.osmEmbedUrl && (
-        <div className="event-map-osm-block">
-          <div className="event-map-osm-head">
-            <span className="metadata-label">{t("tasks.map_openstreetmap")}</span>
-            {visual.osmBrowseUrl ? (
-              <a className="event-map-osm-link" href={visual.osmBrowseUrl} target="_blank" rel="noreferrer">
-                {t("tasks.map_open_in_browser")}
-              </a>
-            ) : null}
+        );
+
+        const osmBlock = effectiveOsmEmbed ? (
+          <div className="event-map-osm-block">
+            <div className="event-map-osm-head">
+              <span className="metadata-label">{t("tasks.map_openstreetmap")}</span>
+              {effectiveOsmBrowse ? (
+                <a className="event-map-osm-link" href={effectiveOsmBrowse} target="_blank" rel="noreferrer">
+                  {t("tasks.map_open_in_browser")}
+                </a>
+              ) : null}
+            </div>
+            <p className="event-map-osm-hint">{variant === "chat" ? t("tasks.map_osm_hint_chat") : t("tasks.map_osm_hint")}</p>
+            <iframe title={t("tasks.map_openstreetmap")} className="event-map-osm-iframe" src={effectiveOsmEmbed} loading="lazy" referrerPolicy="no-referrer-when-downgrade" />
           </div>
-          <p className="event-map-osm-hint">{t("tasks.map_osm_hint")}</p>
-          <iframe title={t("tasks.map_openstreetmap")} className="event-map-osm-iframe" src={visual.osmEmbedUrl} loading="lazy" referrerPolicy="no-referrer-when-downgrade" />
-        </div>
-      )}
+        ) : null;
+
+        if (variant === "chat" && effectiveOsmEmbed) {
+          return (
+            <>
+              {osmBlock}
+              {scaled.length >= 2 ? (
+                <details className="event-map-schematic-details">
+                  <summary className="event-map-schematic-details-summary">{t("tasks.map_schematic_details_summary")}</summary>
+                  {schematicBlock}
+                </details>
+              ) : null}
+            </>
+          );
+        }
+
+        return (
+          <>
+            {schematicBlock}
+            {osmBlock}
+          </>
+        );
+      })()}
       {active.steps && active.steps.length > 0 && (
         <div className="event-map-steps-wrap">
           <strong className="metadata-label">{t("tasks.map_itinerary_steps")}</strong>
@@ -1123,6 +1317,8 @@ function App() {
   const [health, setHealth] = useState<HealthState | null>(null);
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState<ChatMessageRow[]>([]);
+  /** Map visuals keyed by chat task_id — fallback when message.mapVisual was overwritten during streaming. */
+  const [chatMapByTaskId, setChatMapByTaskId] = useState<Record<string, ChatMapVisual>>({});
   const [loading, setLoading] = useState(false);
   const [routerMetrics, setRouterMetrics] = useState<RouterMetrics | null>(null);
   const [routerLoading, setRouterLoading] = useState(false);
@@ -1259,6 +1455,7 @@ function App() {
   const handleSendRef = useRef<(overrideMessage?: string, fromVoice?: boolean) => Promise<void>>(() => Promise.resolve());
   /** Dernière tâche chat : seule elle met à jour la bulle assistant (stream + réponse finale). */
   const lastChatTaskIdRef = useRef<string | null>(null);
+  const chatMapByTaskIdRef = useRef<Record<string, ChatMapVisual>>({});
   const ackTextByTaskRef = useRef<Record<string, string>>({});
   const [humanInputFreeText, setHumanInputFreeText] = useState("");
   /** Reply text for the inline ask_user form in the chat (when modal is not used). */
@@ -2350,11 +2547,8 @@ function App() {
 
   const fetchTasksEvents = useCallback(async (taskId: string) => {
     try {
-      const data = await invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> }>(
-        "get_task_events",
-        { taskId, port: DAEMON_PORT }
-      );
-      const list = data?.events ?? [];
+      const data = await invoke<unknown>("get_task_events", { taskId, port: DAEMON_PORT });
+      const list = normalizeTaskEventsInvokeResponse(data);
       setTasksEvents(
         list.map((e) => ({
           event_type: e.event_type ?? "?",
@@ -2483,15 +2677,16 @@ function App() {
     if (!msg.trim()) return;
     if (isChatStreamToolPhase(msg)) {
       setMessages((prev) => {
-        const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+        const idx = findLastChatAssistantIndex(prev, taskId);
         if (idx < 0) return prev;
         const next = [...prev];
+        const cachedMap = next[idx].mapVisual ?? chatMapByTaskIdRef.current[taskId];
         next[idx] = {
           role: "assistant",
           text: ackTextByTaskRef.current[taskId] ?? next[idx].text,
           taskId,
           streaming: false,
-          mapVisual: next[idx].mapVisual,
+          mapVisual: cachedMap,
         };
         return next;
       });
@@ -2499,10 +2694,11 @@ function App() {
     }
     if (shouldChatStreamProgress(msg)) {
       setMessages((prev) => {
-        const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+        const idx = findLastChatAssistantIndex(prev, taskId);
         if (idx < 0) return prev;
         const next = [...prev];
-        next[idx] = { role: "assistant", text: msg, taskId, streaming: true, mapVisual: next[idx].mapVisual };
+        const cachedMap = next[idx].mapVisual ?? chatMapByTaskIdRef.current[taskId];
+        next[idx] = { role: "assistant", text: msg, taskId, streaming: true, mapVisual: cachedMap };
         return next;
       });
     }
@@ -3144,7 +3340,7 @@ function App() {
       const taskId = parts[1]?.trim();
       if (!taskId) return "Usage: /stop TASK_ID ou /cancel TASK_ID (ex: /stop 412e7256-f808-4e83-b371-b7dd9b6fc4f8)";
       try {
-        await invoke<{ cancelled?: boolean }>("cancel_task", { task_id: taskId, port: DAEMON_PORT });
+        await invoke<{ cancelled?: boolean }>("cancel_task", { taskId, port: DAEMON_PORT });
         return `Tâche ${taskId.slice(-8)} annulée.`;
       } catch (err) {
         return `Erreur: ${String(err)}`;
@@ -3558,11 +3754,12 @@ function App() {
           for (let i = 0; i < maxWait; i++) {
             await new Promise((r) => setTimeout(r, pollIntervalMs));
             try {
-              const [raw, eventsData, humanInputData] = await Promise.all([
+              const [raw, eventsPayloadRaw, humanInputData] = await Promise.all([
                 invoke<string>("get_task_status", { taskId, port: DAEMON_PORT }),
-                invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> }>("get_task_events", { taskId, port: DAEMON_PORT }).catch(() => ({ events: [] })),
+                invoke<unknown>("get_task_events", { taskId, port: DAEMON_PORT }).catch(() => null),
                 invoke<{ question?: string; context?: string; choices?: string[] }>("get_task_human_input", { taskId, port: DAEMON_PORT }).catch(() => null),
               ]);
+              const eventsData = { events: normalizeTaskEventsInvokeResponse(eventsPayloadRaw ?? {}) };
               const status = JSON.parse(raw) as {
                 status?: string;
                 progress?: Array<{ progress_pct?: number; message?: string }>;
@@ -3594,9 +3791,13 @@ function App() {
               setRunningTaskEvents((prev) => (prev[taskId] !== undefined ? { ...prev, [taskId]: events } : prev));
               const chatMapVis =
                 extractChatMapVisualFromTaskEvents(events) ?? extractChatMapVisualFromAssistantText(msg);
+              if (chatMapVis) {
+                chatMapByTaskIdRef.current[taskId] = chatMapVis;
+                setChatMapByTaskId((prev) => (prev[taskId] === chatMapVis ? prev : { ...prev, [taskId]: chatMapVis }));
+              }
               if (chatMapVis && taskId === lastChatTaskIdRef.current) {
                 setMessages((prev) => {
-                  const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+                  const idx = findLastChatAssistantIndex(prev, taskId);
                   if (idx < 0) return prev;
                   if (prev[idx]?.mapVisual) return prev;
                   const next = [...prev];
@@ -3629,17 +3830,24 @@ function App() {
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 const finalMsg = status?.progress?.slice(-1)[0]?.message ?? "Terminé.";
                 const doneMapVis =
-                  extractChatMapVisualFromTaskEvents(events) ?? extractChatMapVisualFromAssistantText(finalMsg);
+                  extractChatMapVisualFromTaskEvents(events) ??
+                  extractChatMapVisualFromAssistantText(finalMsg) ??
+                  chatMapByTaskIdRef.current[taskId] ??
+                  null;
+                if (doneMapVis) {
+                  chatMapByTaskIdRef.current[taskId] = doneMapVis;
+                  setChatMapByTaskId((prev) => (prev[taskId] === doneMapVis ? prev : { ...prev, [taskId]: doneMapVis }));
+                }
                 if (taskId === lastChatTaskIdRef.current) {
                   setMessages((prev) => {
-                    const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+                    const idx = findLastChatAssistantIndex(prev, taskId);
                     if (idx >= 0) {
                       const next = [...prev];
-                      const keepMap = next[idx]!.mapVisual ?? doneMapVis ?? undefined;
-                      next[idx] = { role: "assistant", text: finalMsg, mapVisual: keepMap };
+                      const keepMap = next[idx]!.mapVisual ?? doneMapVis ?? chatMapByTaskIdRef.current[taskId] ?? undefined;
+                      next[idx] = { role: "assistant", text: finalMsg, taskId, mapVisual: keepMap };
                       return next;
                     }
-                    return [...prev, { role: "assistant", text: finalMsg, mapVisual: doneMapVis ?? undefined }];
+                    return [...prev, { role: "assistant", text: finalMsg, taskId, mapVisual: doneMapVis ?? undefined }];
                   });
                   delete ackTextByTaskRef.current[taskId];
                 }
@@ -3667,7 +3875,7 @@ function App() {
                 replyWithTtsRef.current = false;
                 if (taskId === lastChatTaskIdRef.current) {
                   setMessages((prev) => {
-                    const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+                    const idx = findLastChatAssistantIndex(prev, taskId);
                     if (idx >= 0) {
                       const next = [...prev];
                       const MAX_FAILURE_CHAT_CHARS = 2500;
@@ -3716,13 +3924,13 @@ function App() {
           });
           if (taskId === lastChatTaskIdRef.current) {
             setMessages((prev) => {
-              const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+              const idx = findLastChatAssistantIndex(prev, taskId);
               if (idx >= 0) {
                 const next = [...prev];
-                next[idx] = { role: "assistant", text: "Délai dépassé. Consultez Tâches." };
+                next[idx] = { role: "assistant", text: "Délai dépassé. Consultez Tâches.", taskId };
                 return next;
               }
-              return [...prev, { role: "assistant", text: "Délai dépassé. Consultez Tâches." }];
+              return [...prev, { role: "assistant", text: "Délai dépassé. Consultez Tâches.", taskId }];
             });
             delete ackTextByTaskRef.current[taskId];
           }
@@ -4259,6 +4467,8 @@ function App() {
                 <>
                   {messages.map((m, i) => {
                     const askUserData = m.role === "assistant" ? parseAskUserMessage(m.text) : null;
+                    const assistantMapVisual =
+                      m.role === "assistant" ? (m.mapVisual ?? (m.taskId ? chatMapByTaskId[m.taskId] : undefined)) : undefined;
                     return (
                       <div
                         key={i}
@@ -4321,17 +4531,18 @@ function App() {
                             {m.streaming ? <span className="message-streaming-caret" aria-hidden /> : null}
                           </div>
                         )}
-                        {m.role === "assistant" && m.mapVisual ? (
+                        {assistantMapVisual ? (
                           <div className="chat-message-map-embed">
                             <MapPluginEventView
-                              visual={m.mapVisual}
+                              visual={assistantMapVisual}
                               t={t}
                               width={460}
                               height={160}
                               toolbar="inline"
+                              variant="chat"
                               showPanelHeading={false}
-                              onFullscreen={() => setEventVisualFullscreen({ visual: m.mapVisual!, sourceEventType: "chat_map" })}
-                              onExportCsv={() => exportAdvancedViewCsv(m.mapVisual!)}
+                              onFullscreen={() => setEventVisualFullscreen({ visual: assistantMapVisual, sourceEventType: "chat_map" })}
+                              onExportCsv={() => exportAdvancedViewCsv(assistantMapVisual)}
                             />
                           </div>
                         ) : null}
@@ -5355,7 +5566,7 @@ function App() {
                               onClick={async () => {
                                 if (!sel?.id) return;
                                 try {
-                                  await invoke<{ cancelled?: boolean }>("cancel_task", { task_id: sel.id, port: DAEMON_PORT });
+                                  await invoke<{ cancelled?: boolean }>("cancel_task", { taskId: sel.id, port: DAEMON_PORT });
                                   fetchTasksList();
                                 } catch (e) {
                                   console.error(e);
