@@ -2857,8 +2857,19 @@ async fn execute_tool_call(
     workspace_root: Option<&std::path::Path>,
 ) -> (bool, String, Option<String>) {
     use std::path::Path;
-    let is_plugin_candidate = parse_plugin_tool_invocation(plugin_registry, tool_name, args).is_some();
-    if !executor.policy.can_use_tool(tool_name) && !is_plugin_candidate {
+    let plugin_invocation = parse_plugin_tool_invocation(plugin_registry, tool_name, args);
+    let is_plugin_candidate = plugin_invocation.is_some();
+    let can_use_named_tool = executor.policy.can_use_tool(tool_name);
+    let can_use_plugin_call = executor.policy.can_use_tool("plugin.call")
+        || executor.policy.can_use_tool("plugin_call");
+    if is_plugin_candidate && !can_use_plugin_call {
+        return (
+            false,
+            "[plugin] tool not allowed by current profile (enable plugin.call)".to_string(),
+            None,
+        );
+    }
+    if !can_use_named_tool && !is_plugin_candidate {
         return (false, format!("[{}] tool not allowed by current profile", tool_name), None);
     }
     let path_arg = |i: usize| args.get(i).map(|s| Path::new(s.as_str()));
@@ -4029,9 +4040,7 @@ async fn execute_tool_call(
             }
         }
         _ => {
-            if let Some((plugin_id, plugin_payload)) =
-                parse_plugin_tool_invocation(plugin_registry, tool_name, args)
-            {
+            if let Some((plugin_id, plugin_payload)) = plugin_invocation {
                 match plugin_registry {
                     Some(r) => match r.call_tool(&plugin_id, &plugin_payload) {
                         Ok(out) => {
@@ -4045,11 +4054,24 @@ async fn execute_tool_call(
                                 None,
                             );
                         }
+                        let plugin_ok = serde_json::from_str::<serde_json::Value>(&out)
+                            .ok()
+                            .and_then(|v| v.get("ok").and_then(|b| b.as_bool()));
                         let preview = if out.chars().count() > 600 {
                             format!("{}…", out.chars().take(600).collect::<String>())
                         } else {
                             out
                         };
+                        if plugin_ok == Some(false) {
+                            return (
+                                false,
+                                format!(
+                                    "[plugin:{}] execution failed: plugin returned ok=false: {}",
+                                    plugin_id, preview
+                                ),
+                                None,
+                            );
+                        }
                         (
                             true,
                             format!("[plugin:{}] {}", plugin_id, preview),
@@ -4557,6 +4579,25 @@ fn looks_like_meta_agent_response(text: &str) -> bool {
         "today, i will execute the phase 2 task",
         "phase 2 task",
         "click, fill, screenshot, and wait",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+}
+
+/// Returns true when the model output looks like generic greeting/small-talk
+/// instead of an answer to a concrete tool-backed request.
+fn looks_like_off_topic_greeting(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    [
+        "bonjour ! je suis prêt à vous aider",
+        "bonjour ! je suis pret a vous aider",
+        "que souhaitez-vous faire aujourd'hui",
+        "que souhaitez vous faire aujourd'hui",
+        "hi! i'm ready to help",
+        "what would you like to do today",
     ]
     .iter()
     .any(|p| lower.contains(p))
@@ -5285,6 +5326,7 @@ pub(crate) async fn run_message_via_llm(
                     .take()
                     .unwrap_or_else(|| user_message.clone());
                 let mut deterministic_results: Vec<String> = Vec::new();
+                const MAPS_RESULT_FULL_MAX: usize = 400_000;
                 for preferred_tool in enforcer.preferred_tools.iter().take(3) {
                     let args_preview = if preferred_tool_request.chars().count() > 240 {
                         format!("{}…", preferred_tool_request.chars().take(240).collect::<String>())
@@ -5302,7 +5344,7 @@ pub(crate) async fn run_message_via_llm(
                                 "args_preview": args_preview,
                             })),
                         )
-                        .with_correlation(task_id),
+                        .with_correlation(timeline_correlation),
                     );
                     let auto_args = vec![preferred_tool_request.clone()];
                     let (success, res, captured_image) = execute_tool_call(
@@ -5327,19 +5369,24 @@ pub(crate) async fn run_message_via_llm(
                     } else {
                         res.clone()
                     };
+                    // UI (chat) needs full plugin JSON for rich views (e.g. maps); preview is truncated.
+                    let mut milestone = serde_json::json!({
+                        "name": "deterministic_preferred_tool_result",
+                        "task_id": task_id.to_string(),
+                        "round": round,
+                        "tool": preferred_tool,
+                        "success": success,
+                        "result_preview": result_preview,
+                    });
+                    if success
+                        && preferred_tool.starts_with("maps_")
+                        && res.len() <= MAPS_RESULT_FULL_MAX
+                    {
+                        milestone["result_full"] = serde_json::Value::String(res.clone());
+                    }
                     let _ = bus.send(
-                        EventEnvelope::new(
-                            EventType::TimelineMilestone,
-                            Some(serde_json::json!({
-                                "name": "deterministic_preferred_tool_result",
-                                "task_id": task_id.to_string(),
-                                "round": round,
-                                "tool": preferred_tool,
-                                "success": success,
-                                "result_preview": result_preview,
-                            })),
-                        )
-                        .with_correlation(task_id),
+                        EventEnvelope::new(EventType::TimelineMilestone, Some(milestone))
+                            .with_correlation(timeline_correlation),
                     );
                     tool_loop_history.push((
                         preferred_tool.clone(),
@@ -5376,7 +5423,7 @@ pub(crate) async fn run_message_via_llm(
                             "attempted_tools": enforcer.preferred_tools.iter().cloned().collect::<Vec<_>>(),
                         })),
                     )
-                    .with_correlation(task_id),
+                    .with_correlation(timeline_correlation),
                 );
             }
         }
@@ -6197,6 +6244,30 @@ pub(crate) async fn run_message_via_llm(
                     )
                     .with_correlation(timeline_correlation),
                 );
+                // Chat UI loads map / rich views from timeline_milestone + result_full (same as strict tools-first path).
+                if success
+                    && tool_display.starts_with("maps_")
+                    && res.len() <= 400_000usize
+                {
+                    let result_preview = if res.chars().count() > 320 {
+                        format!("{}…", res.chars().take(320).collect::<String>())
+                    } else {
+                        res.clone()
+                    };
+                    let milestone = serde_json::json!({
+                        "name": "deterministic_preferred_tool_result",
+                        "task_id": task_id.to_string(),
+                        "round": round,
+                        "tool": tool_display,
+                        "success": true,
+                        "result_preview": result_preview,
+                        "result_full": res.clone(),
+                    });
+                    let _ = bus.send(
+                        EventEnvelope::new(EventType::TimelineMilestone, Some(milestone))
+                            .with_correlation(timeline_correlation),
+                    );
+                }
                 if success {
                     // In tools-first strict mode, ask_user is a clarification step, not
                     // a terminal success for the primary objective. Keep strict mode active
@@ -6453,6 +6524,22 @@ pub(crate) async fn run_message_via_llm(
             force_synthesis_attempted = true;
             current_prompt = format!(
                 "User request: {}\n\nTool results:\n{}\n\nThe user is waiting for the actual answer. Your previous message was a promise — the task is about to close, so you must answer NOW. Using the tool results above, write ONLY the final answer to the user's request. No TOOL: lines, no \"action in progress\".",
+                user_message,
+                last_tool_results_blob.as_deref().unwrap_or("")
+            );
+            continue;
+        }
+        // Guardrail: when a plugin/tool already succeeded, reject generic
+        // greeting responses and force one synthesis round from tool outputs.
+        if strict_tools_first
+            && strict_successful_tool_calls > 0
+            && last_tool_results_blob.as_ref().map_or(false, |b| !b.is_empty())
+            && looks_like_off_topic_greeting(&response_for_user)
+            && !force_synthesis_attempted
+        {
+            force_synthesis_attempted = true;
+            current_prompt = format!(
+                "User request: {}\n\nTool results:\n{}\n\nYour previous reply was off-topic greeting text. Answer the user's request NOW using the tool results above. Return only the concrete final answer (distance/itinerary if available). No greeting, no TOOL: lines.",
                 user_message,
                 last_tool_results_blob.as_deref().unwrap_or("")
             );

@@ -22,14 +22,6 @@ type TaskOrchestrationDebugLevel = "minimal" | "normal" | "full";
 
 const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "light_latte"];
 
-type ChatMessageRow = {
-  role: "user" | "assistant" | "system";
-  text: string;
-  error?: boolean;
-  streaming?: boolean;
-  taskId?: string;
-};
-
 function shouldChatStreamProgress(message: string): boolean {
   const m = message?.trim() ?? "";
   if (!m) return false;
@@ -187,19 +179,37 @@ type EventChartSeries = {
   points: Array<{ x: number; y: number }>;
 };
 
+/** Parsed maps plugin route option (GeoJSON → schematic points). */
+type MapRouteLeg = {
+  id: string;
+  label: string;
+  mode?: string;
+  points: Array<{ x: number; y: number }>;
+  distanceM?: number;
+  durationS?: number;
+  steps?: Array<{ instruction: string; distance_m?: number }>;
+};
+
 type EventAdvancedView =
   | {
       kind: "map";
       title?: string;
+      summary?: string;
       points: Array<{ x: number; y: number }>;
       distanceM?: number;
       durationS?: number;
+      routes?: MapRouteLeg[];
+      osmEmbedUrl?: string;
+      osmBrowseUrl?: string;
+      mapAttribution?: string;
     }
   | {
       kind: "graph" | "timeseries";
       title?: string;
       series: EventChartSeries[];
     };
+
+type ChatMapVisual = Extract<EventAdvancedView, { kind: "map" }>;
 
 function asRecord(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
@@ -222,6 +232,39 @@ function toPoint(v: unknown): { x: number; y: number } | null {
   const y = toFiniteNumber(r.y ?? r.lat ?? r.value ?? r.v);
   if (x != null && y != null) return { x, y };
   return null;
+}
+
+/** GeoJSON LineString / MultiLineString → schematic points (x=lon, y=lat). */
+function geojsonLineStringToPoints(geom: unknown): Array<{ x: number; y: number }> {
+  const o = asRecord(geom);
+  if (!o) return [];
+  const typ = typeof o.type === "string" ? o.type : "";
+  if (typ === "LineString") {
+    const coords = o.coordinates;
+    if (!Array.isArray(coords)) return [];
+    return coords.map((p) => toPoint(p)).filter((p): p is { x: number; y: number } => p != null);
+  }
+  if (typ === "MultiLineString") {
+    const coords = o.coordinates;
+    if (!Array.isArray(coords)) return [];
+    const out: Array<{ x: number; y: number }> = [];
+    for (const line of coords) {
+      if (!Array.isArray(line)) continue;
+      for (const p of line) {
+        const pt = toPoint(p);
+        if (pt) out.push(pt);
+      }
+    }
+    return out;
+  }
+  return [];
+}
+
+function pointsFromMapGeometryField(geometry: unknown): Array<{ x: number; y: number }> {
+  if (Array.isArray(geometry)) {
+    return geometry.map((p) => toPoint(p)).filter((p): p is { x: number; y: number } => p != null);
+  }
+  return geojsonLineStringToPoints(geometry);
 }
 
 function normalizeSeries(input: unknown): EventChartSeries[] {
@@ -289,16 +332,67 @@ function extractAdvancedViewData(payload: unknown): EventAdvancedView | null {
     const title = typeof c.title === "string" ? c.title : undefined;
 
     if (view === "map") {
-      const geometryRaw = Array.isArray(c.geometry)
-        ? c.geometry
-        : Array.isArray(asRecord(c.route)?.geometry)
-          ? (asRecord(c.route)?.geometry as unknown[])
-          : [];
-      const points = geometryRaw.map((p) => toPoint(p)).filter((p): p is { x: number; y: number } => p != null);
-      const distanceM = toFiniteNumber(c.distance_m ?? c.distanceM);
-      const durationS = toFiniteNumber(c.duration_s ?? c.durationS);
+      const geoPoints = pointsFromMapGeometryField(c.geometry);
+      const routeObj = asRecord(c.route);
+      const fallbackGeo =
+        routeObj && routeObj.geometry != null ? pointsFromMapGeometryField(routeObj.geometry) : [];
+      const routesIn: MapRouteLeg[] = [];
+      if (Array.isArray(c.routes)) {
+        c.routes.forEach((raw, i) => {
+          const rr = asRecord(raw);
+          if (!rr) return;
+          const id = typeof rr.id === "string" && rr.id.trim() ? rr.id.trim() : `route_${i}`;
+          const label = typeof rr.label === "string" ? rr.label : `Option ${i + 1}`;
+          const mode = typeof rr.mode === "string" ? rr.mode : undefined;
+          const pts = pointsFromMapGeometryField(rr.geometry);
+          const distanceM = toFiniteNumber(rr.distance_m ?? rr.distanceM);
+          const durationS = toFiniteNumber(rr.duration_s ?? rr.durationS);
+          let steps: MapRouteLeg["steps"];
+          if (Array.isArray(rr.steps)) {
+            steps = rr.steps
+              .map((s) => {
+                const sr = asRecord(s);
+                if (!sr) return null;
+                const instruction = typeof sr.instruction === "string" ? sr.instruction : "";
+                if (!instruction.trim()) return null;
+                const distance_m = toFiniteNumber(sr.distance_m ?? sr.distanceM);
+                return distance_m != null ? { instruction, distance_m } : { instruction };
+              })
+              .filter((x): x is NonNullable<typeof x> => x != null);
+          }
+          if (pts.length >= 2 || distanceM != null) {
+            routesIn.push({ id, label, mode, points: pts, distanceM, durationS, steps: steps?.length ? steps : undefined });
+          }
+        });
+      }
+      const points =
+        routesIn.length > 0 && routesIn[0]!.points.length >= 2
+          ? routesIn[0]!.points
+          : geoPoints.length >= 2
+            ? geoPoints
+            : fallbackGeo;
+      const distanceM = toFiniteNumber(c.distance_m ?? c.distanceM) ?? routesIn[0]?.distanceM;
+      const durationS = toFiniteNumber(c.duration_s ?? c.durationS) ?? routesIn[0]?.durationS;
+      const summary = typeof c.summary === "string" && c.summary.trim() ? c.summary.trim() : undefined;
+      const osmEmbedUrl =
+        typeof c.osm_embed_url === "string" && c.osm_embed_url.startsWith("http") ? c.osm_embed_url : undefined;
+      const osmBrowseUrl =
+        typeof c.osm_browse_url === "string" && c.osm_browse_url.startsWith("http") ? c.osm_browse_url : undefined;
+      const mapAttribution =
+        typeof c.map_attribution === "string" && c.map_attribution.trim() ? c.map_attribution.trim() : undefined;
       if (points.length >= 2 || distanceM != null || durationS != null) {
-        return { kind: "map", title, points, distanceM, durationS };
+        return {
+          kind: "map",
+          title,
+          summary,
+          points,
+          distanceM,
+          durationS,
+          routes: routesIn.length > 0 ? routesIn : undefined,
+          osmEmbedUrl,
+          osmBrowseUrl,
+          mapAttribution,
+        };
       }
     }
 
@@ -313,6 +407,63 @@ function extractAdvancedViewData(payload: unknown): EventAdvancedView | null {
   }
 
   return null;
+}
+
+type ChatMessageRow = {
+  role: "user" | "assistant" | "system";
+  text: string;
+  error?: boolean;
+  streaming?: boolean;
+  taskId?: string;
+  mapVisual?: ChatMapVisual;
+};
+
+function parsePluginToolResultBody(raw: string): unknown | null {
+  const s = raw.trim();
+  const m = s.match(/^\[plugin:[^\]]+\]\s*([\s\S]*)$/);
+  const jsonStr = ((m ? m[1] : s) ?? "").trim();
+  if (!jsonStr) return null;
+  try {
+    return JSON.parse(jsonStr) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function extractChatMapVisualFromTaskEvents(
+  events: Array<{ event_type?: string; payload?: unknown }>,
+): ChatMapVisual | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.event_type !== "timeline_milestone") continue;
+    const p = asRecord(e.payload);
+    if (!p || p.name !== "deterministic_preferred_tool_result") continue;
+    if (p.success !== true) continue;
+    const tool = typeof p.tool === "string" ? p.tool : "";
+    if (!tool.startsWith("maps_")) continue;
+    const full =
+      typeof p.result_full === "string"
+        ? p.result_full
+        : typeof p.result_preview === "string"
+          ? p.result_preview
+          : null;
+    if (!full) continue;
+    const parsed = parsePluginToolResultBody(full);
+    if (!parsed) continue;
+    const vis = extractAdvancedViewData(parsed);
+    if (vis?.kind === "map") return vis;
+  }
+  return null;
+}
+
+/** When the model pastes raw plugin JSON in the reply, still show the map (no milestone / truncated preview). */
+function extractChatMapVisualFromAssistantText(text: string): ChatMapVisual | null {
+  const idx = text.indexOf("[plugin:");
+  if (idx < 0) return null;
+  const parsed = parsePluginToolResultBody(text.slice(idx));
+  if (!parsed) return null;
+  const vis = extractAdvancedViewData(parsed);
+  return vis?.kind === "map" ? vis : null;
 }
 
 function formatDistanceLabel(meters?: number): string | null {
@@ -331,7 +482,18 @@ function formatDurationLabel(seconds?: number): string | null {
 
 function advancedViewToCsv(visual: EventAdvancedView): string {
   if (visual.kind === "map") {
-    const header = "index,x,y";
+    if (visual.routes && visual.routes.length > 0) {
+      const header = "route_id,route_label,index,lon,lat";
+      const rows: string[] = [];
+      visual.routes.forEach((rt) => {
+        const safeLabel = rt.label.replace(/"/g, '""');
+        rt.points.forEach((p, idx) => {
+          rows.push(`${rt.id},"${safeLabel}",${idx},${p.x},${p.y}`);
+        });
+      });
+      return [header, ...rows].join("\n");
+    }
+    const header = "index,lon,lat";
     const rows = visual.points.map((p, idx) => `${idx},${p.x},${p.y}`);
     return [header, ...rows].join("\n");
   }
@@ -399,6 +561,206 @@ function renderAdvancedViewToCanvas(visual: EventAdvancedView, width: number, he
     ctx.stroke();
   });
   return canvas;
+}
+
+type MapVisual = Extract<EventAdvancedView, { kind: "map" }>;
+
+type MapPluginEventViewProps = {
+  visual: MapVisual;
+  t: (key: string) => string;
+  width: number;
+  height: number;
+  toolbar: "inline" | "hidden";
+  /** Adds full-screen panel spacing class (modal body). */
+  layout?: "default" | "fullscreen";
+  /** When false, hide title (modal already has a heading). */
+  showPanelHeading?: boolean;
+  onFullscreen?: () => void;
+  onExportCsv?: () => void;
+  endPointR?: number;
+  midPointR?: number;
+  interactive?: {
+    dragging: boolean;
+    transform: string;
+    onWheel: (e: ReactWheelEvent<HTMLDivElement>) => void;
+    onDoubleClick: () => void;
+    onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => void;
+    onPointerMove: (e: ReactPointerEvent<HTMLDivElement>) => void;
+    onPointerUp: (e: ReactPointerEvent<HTMLDivElement>) => void;
+    onPointerCancel: (e: ReactPointerEvent<HTMLDivElement>) => void;
+    onPointerLeave: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  };
+};
+
+function MapPluginEventView({
+  visual,
+  t,
+  width,
+  height,
+  toolbar,
+  layout = "default",
+  showPanelHeading = true,
+  onFullscreen,
+  onExportCsv,
+  endPointR = 3.5,
+  midPointR = 2.5,
+  interactive,
+}: MapPluginEventViewProps) {
+  const routes = useMemo(() => {
+    if (visual.routes && visual.routes.length > 0) {
+      return visual.routes;
+    }
+    return [
+      {
+        id: "default",
+        label: t("tasks.map_route_primary"),
+        points: visual.points,
+        distanceM: visual.distanceM,
+        durationS: visual.durationS,
+        steps: [],
+      },
+    ];
+  }, [visual, t]);
+
+  const [routeIx, setRouteIx] = useState(0);
+  useEffect(() => {
+    setRouteIx(0);
+  }, [visual]);
+
+  const safeIx = Math.min(routeIx, Math.max(0, routes.length - 1));
+  const active = routes[safeIx] ?? routes[0]!;
+  const points = active.points.length >= 2 ? active.points : visual.points;
+  const scaled = scalePoints(points, width, height);
+  const polyline = scaled.map((p) => `${p.x},${p.y}`).join(" ");
+  const distance = formatDistanceLabel(active.distanceM ?? visual.distanceM);
+  const duration = formatDurationLabel(active.durationS ?? visual.durationS);
+
+  const lineAndPoints = (
+    <>
+      {scaled.length >= 2 && <polyline points={polyline} className="event-advanced-map-line" />}
+      {scaled.map((p, idx) => (
+        <circle
+          key={`mapv-pt-${idx}`}
+          cx={p.x}
+          cy={p.y}
+          r={idx === 0 || idx === scaled.length - 1 ? endPointR : midPointR}
+          className="event-advanced-map-point"
+        />
+      ))}
+    </>
+  );
+
+  return (
+    <div
+      className={`event-advanced-view event-advanced-view-map${interactive ? " event-advanced-view-map--fullscreen" : ""}${
+        layout === "fullscreen" ? " event-advanced-view-fullscreen" : ""
+      }`}
+    >
+      {showPanelHeading && <strong className="metadata-label">{visual.title ?? t("tasks.plugin_map_title")}</strong>}
+      {visual.summary && <p className="event-map-summary">{visual.summary}</p>}
+      {toolbar === "inline" && (onFullscreen || onExportCsv) && (
+        <div className="event-advanced-toolbar">
+          {onFullscreen && (
+            <button type="button" className="event-advanced-action-btn" onClick={onFullscreen}>
+              {t("tasks.open_fullscreen")}
+            </button>
+          )}
+          {onExportCsv && (
+            <button type="button" className="event-advanced-action-btn" onClick={onExportCsv}>
+              {t("tasks.export_csv")}
+            </button>
+          )}
+        </div>
+      )}
+      {routes.length > 1 && (
+        <div className="event-map-route-tabs" role="tablist" aria-label={t("tasks.map_route_options")}>
+          {routes.map((r, i) => (
+            <button
+              key={r.id}
+              type="button"
+              role="tab"
+              aria-selected={i === safeIx}
+              className={i === safeIx ? "event-map-route-tab is-active" : "event-map-route-tab"}
+              onClick={() => setRouteIx(i)}
+            >
+              {r.label || `${t("tasks.map_route_primary")} ${i + 1}`}
+            </button>
+          ))}
+        </div>
+      )}
+      {(distance || duration) && (
+        <div className="event-advanced-metrics-inline" role="list">
+          {distance && (
+            <span className="event-advanced-chip" role="listitem">
+              {t("tasks.distance_label")}: {distance}
+            </span>
+          )}
+          {duration && (
+            <span className="event-advanced-chip" role="listitem">
+              {t("tasks.duration_label")}: {duration}
+            </span>
+          )}
+          {active.mode && (
+            <span className="event-advanced-chip" role="listitem">
+              {t("tasks.map_mode_label")}: {active.mode}
+            </span>
+          )}
+        </div>
+      )}
+      {interactive ? (
+        <div
+          className={`event-visual-interactive-surface ${interactive.dragging ? "is-dragging" : ""}`}
+          onWheel={interactive.onWheel}
+          onDoubleClick={interactive.onDoubleClick}
+          onPointerDown={interactive.onPointerDown}
+          onPointerMove={interactive.onPointerMove}
+          onPointerUp={interactive.onPointerUp}
+          onPointerCancel={interactive.onPointerCancel}
+          onPointerLeave={interactive.onPointerLeave}
+        >
+          <svg className="event-advanced-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label={t("tasks.plugin_map_title")}>
+            <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
+            <g transform={interactive.transform}>{lineAndPoints}</g>
+          </svg>
+        </div>
+      ) : (
+        <svg className="event-advanced-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label={t("tasks.plugin_map_title")}>
+          <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
+          {lineAndPoints}
+        </svg>
+      )}
+      {visual.osmEmbedUrl && (
+        <div className="event-map-osm-block">
+          <div className="event-map-osm-head">
+            <span className="metadata-label">{t("tasks.map_openstreetmap")}</span>
+            {visual.osmBrowseUrl ? (
+              <a className="event-map-osm-link" href={visual.osmBrowseUrl} target="_blank" rel="noreferrer">
+                {t("tasks.map_open_in_browser")}
+              </a>
+            ) : null}
+          </div>
+          <p className="event-map-osm-hint">{t("tasks.map_osm_hint")}</p>
+          <iframe title={t("tasks.map_openstreetmap")} className="event-map-osm-iframe" src={visual.osmEmbedUrl} loading="lazy" referrerPolicy="no-referrer-when-downgrade" />
+        </div>
+      )}
+      {active.steps && active.steps.length > 0 && (
+        <div className="event-map-steps-wrap">
+          <strong className="metadata-label">{t("tasks.map_itinerary_steps")}</strong>
+          <ol className="event-map-steps">
+            {active.steps.map((s, si) => (
+              <li key={`st-${si}`}>
+                {s.instruction}
+                {s.distance_m != null && Number.isFinite(s.distance_m) ? (
+                  <span className="event-map-step-dist"> · {formatDistanceLabel(s.distance_m)}</span>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+      {visual.mapAttribution && <p className="event-map-attribution">{visual.mapAttribution}</p>}
+    </div>
+  );
 }
 
 function formatRelativeTimeLabel(value?: string, locale: "fr" | "en" = "fr"): string | null {
@@ -2129,6 +2491,7 @@ function App() {
           text: ackTextByTaskRef.current[taskId] ?? next[idx].text,
           taskId,
           streaming: false,
+          mapVisual: next[idx].mapVisual,
         };
         return next;
       });
@@ -2139,7 +2502,7 @@ function App() {
         const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
         if (idx < 0) return prev;
         const next = [...prev];
-        next[idx] = { role: "assistant", text: msg, taskId, streaming: true };
+        next[idx] = { role: "assistant", text: msg, taskId, streaming: true, mapVisual: next[idx].mapVisual };
         return next;
       });
     }
@@ -3229,6 +3592,18 @@ function App() {
                 task_id: e.task_id,
               }));
               setRunningTaskEvents((prev) => (prev[taskId] !== undefined ? { ...prev, [taskId]: events } : prev));
+              const chatMapVis =
+                extractChatMapVisualFromTaskEvents(events) ?? extractChatMapVisualFromAssistantText(msg);
+              if (chatMapVis && taskId === lastChatTaskIdRef.current) {
+                setMessages((prev) => {
+                  const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+                  if (idx < 0) return prev;
+                  if (prev[idx]?.mapVisual) return prev;
+                  const next = [...prev];
+                  next[idx] = { ...next[idx]!, mapVisual: chatMapVis };
+                  return next;
+                });
+              }
               if (humanInputData?.question) {
                 setPendingHumanInput((prev) => ({ ...prev, [taskId]: { question: humanInputData.question ?? "", context: humanInputData.context ?? "", choices: humanInputData.choices } }));
                 if (!humanInputAutoOpenedRef.current.has(taskId)) {
@@ -3253,15 +3628,18 @@ function App() {
                 humanInputAutoOpenedRef.current.delete(taskId);
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 const finalMsg = status?.progress?.slice(-1)[0]?.message ?? "Terminé.";
+                const doneMapVis =
+                  extractChatMapVisualFromTaskEvents(events) ?? extractChatMapVisualFromAssistantText(finalMsg);
                 if (taskId === lastChatTaskIdRef.current) {
                   setMessages((prev) => {
                     const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
                     if (idx >= 0) {
                       const next = [...prev];
-                      next[idx] = { role: "assistant", text: finalMsg };
+                      const keepMap = next[idx]!.mapVisual ?? doneMapVis ?? undefined;
+                      next[idx] = { role: "assistant", text: finalMsg, mapVisual: keepMap };
                       return next;
                     }
-                    return [...prev, { role: "assistant", text: finalMsg }];
+                    return [...prev, { role: "assistant", text: finalMsg, mapVisual: doneMapVis ?? undefined }];
                   });
                   delete ackTextByTaskRef.current[taskId];
                 }
@@ -3943,6 +4321,20 @@ function App() {
                             {m.streaming ? <span className="message-streaming-caret" aria-hidden /> : null}
                           </div>
                         )}
+                        {m.role === "assistant" && m.mapVisual ? (
+                          <div className="chat-message-map-embed">
+                            <MapPluginEventView
+                              visual={m.mapVisual}
+                              t={t}
+                              width={460}
+                              height={160}
+                              toolbar="inline"
+                              showPanelHeading={false}
+                              onFullscreen={() => setEventVisualFullscreen({ visual: m.mapVisual!, sourceEventType: "chat_map" })}
+                              onExportCsv={() => exportAdvancedViewCsv(m.mapVisual!)}
+                            />
+                          </div>
+                        ) : null}
                       </div>
                     );
                   })}
@@ -5093,52 +5485,17 @@ function App() {
                                 if (!visual) return null;
 
                                 if (visual.kind === "map") {
-                                  const width = 460;
-                                  const height = 180;
-                                  const scaled = scalePoints(visual.points, width, height);
-                                  const polyline = scaled.map((p) => `${p.x},${p.y}`).join(" ");
-                                  const distance = formatDistanceLabel(visual.distanceM);
-                                  const duration = formatDurationLabel(visual.durationS);
                                   return (
-                                    <div className="event-advanced-view event-advanced-view-map">
-                                      <strong className="metadata-label">
-                                        {visual.title ?? t("tasks.plugin_map_title")}
-                                      </strong>
-                                      <div className="event-advanced-toolbar">
-                                        <button type="button" className="event-advanced-action-btn" onClick={() => setEventVisualFullscreen({ visual, sourceEventType: e.event_type })}>
-                                          {t("tasks.open_fullscreen")}
-                                        </button>
-                                        <button type="button" className="event-advanced-action-btn" onClick={() => exportAdvancedViewCsv(visual)}>
-                                          {t("tasks.export_csv")}
-                                        </button>
-                                      </div>
-                                      {(distance || duration) && (
-                                        <div className="event-advanced-metrics-inline" role="list">
-                                          {distance && (
-                                            <span className="event-advanced-chip" role="listitem">
-                                              {t("tasks.distance_label")}: {distance}
-                                            </span>
-                                          )}
-                                          {duration && (
-                                            <span className="event-advanced-chip" role="listitem">
-                                              {t("tasks.duration_label")}: {duration}
-                                            </span>
-                                          )}
-                                        </div>
-                                      )}
-                                      <svg
-                                        className="event-advanced-chart"
-                                        viewBox={`0 0 ${width} ${height}`}
-                                        preserveAspectRatio="none"
-                                        aria-label={t("tasks.plugin_map_title")}
-                                      >
-                                        <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
-                                        {scaled.length >= 2 && <polyline points={polyline} className="event-advanced-map-line" />}
-                                        {scaled.map((p, idx) => (
-                                          <circle key={`map-pt-${idx}`} cx={p.x} cy={p.y} r={idx === 0 || idx === scaled.length - 1 ? 3.5 : 2.5} className="event-advanced-map-point" />
-                                        ))}
-                                      </svg>
-                                    </div>
+                                    <MapPluginEventView
+                                      key={`map-ev-${e.at}-${i}`}
+                                      visual={visual}
+                                      t={t}
+                                      width={460}
+                                      height={180}
+                                      toolbar="inline"
+                                      onFullscreen={() => setEventVisualFullscreen({ visual, sourceEventType: e.event_type })}
+                                      onExportCsv={() => exportAdvancedViewCsv(visual)}
+                                    />
                                   );
                                 }
 
@@ -6294,44 +6651,28 @@ function App() {
                   </div>
                 )}
                 {eventVisualFullscreen.visual.kind === "map" ? (
-                  (() => {
-                    const width = 1200;
-                    const height = 520;
-                    const scaled = scalePoints(eventVisualFullscreen.visual.points, width, height);
-                    const polyline = scaled.map((p) => `${p.x},${p.y}`).join(" ");
-                    const distance = formatDistanceLabel(eventVisualFullscreen.visual.distanceM);
-                    const duration = formatDurationLabel(eventVisualFullscreen.visual.durationS);
-                    return (
-                      <div className="event-advanced-view event-advanced-view-map event-advanced-view-fullscreen">
-                        {(distance || duration) && (
-                          <div className="event-advanced-metrics-inline" role="list">
-                            {distance && <span className="event-advanced-chip" role="listitem">{t("tasks.distance_label")}: {distance}</span>}
-                            {duration && <span className="event-advanced-chip" role="listitem">{t("tasks.duration_label")}: {duration}</span>}
-                          </div>
-                        )}
-                        <div
-                          className={`event-visual-interactive-surface ${eventVisualDragging ? "is-dragging" : ""}`}
-                          onWheel={handleEventVisualWheel}
-                          onDoubleClick={resetEventVisualViewport}
-                          onPointerDown={handleEventVisualPointerDown}
-                          onPointerMove={handleEventVisualPointerMove}
-                          onPointerUp={handleEventVisualPointerEnd}
-                          onPointerCancel={handleEventVisualPointerEnd}
-                          onPointerLeave={handleEventVisualPointerEnd}
-                        >
-                        <svg className="event-advanced-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label={t("tasks.plugin_map_title")}>
-                          <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
-                          <g transform={`translate(${eventVisualTransform.tx} ${eventVisualTransform.ty}) scale(${eventVisualTransform.scale})`}>
-                            {scaled.length >= 2 && <polyline points={polyline} className="event-advanced-map-line" />}
-                            {scaled.map((p, idx) => (
-                              <circle key={`map-modal-pt-${idx}`} cx={p.x} cy={p.y} r={idx === 0 || idx === scaled.length - 1 ? 4.2 : 3} className="event-advanced-map-point" />
-                            ))}
-                          </g>
-                        </svg>
-                        </div>
-                      </div>
-                    );
-                  })()
+                  <MapPluginEventView
+                    visual={eventVisualFullscreen.visual}
+                    t={t}
+                    width={1200}
+                    height={520}
+                    toolbar="hidden"
+                    layout="fullscreen"
+                    showPanelHeading={false}
+                    endPointR={4.2}
+                    midPointR={3}
+                    interactive={{
+                      dragging: eventVisualDragging != null,
+                      transform: `translate(${eventVisualTransform.tx} ${eventVisualTransform.ty}) scale(${eventVisualTransform.scale})`,
+                      onWheel: handleEventVisualWheel,
+                      onDoubleClick: resetEventVisualViewport,
+                      onPointerDown: handleEventVisualPointerDown,
+                      onPointerMove: handleEventVisualPointerMove,
+                      onPointerUp: handleEventVisualPointerEnd,
+                      onPointerCancel: handleEventVisualPointerEnd,
+                      onPointerLeave: handleEventVisualPointerEnd,
+                    }}
+                  />
                 ) : (
                   (() => {
                     const width = 1200;

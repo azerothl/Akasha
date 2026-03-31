@@ -121,11 +121,22 @@ impl FallbackEngine {
                             let text_len = resp.text.len();
                             let is_truncated = resp.done_reason.as_deref() == Some("length");
                             let eval_count = resp.eval_count.unwrap_or(0);
+                            let task_type_label = request_with_config
+                                .preferred_task_type
+                                .as_deref()
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or("(classifier)");
+                            let is_system_task = request_with_config
+                                .preferred_task_type
+                                .as_deref()
+                                .map(|s| s.eq_ignore_ascii_case("system"))
+                                .unwrap_or(false);
 
                             if is_truncated {
                                 tracing::warn!(
                                     provider = %entry.provider,
                                     model = %entry.model,
+                                    task_type = task_type_label,
                                     max_tokens = ?max_tokens_used,
                                     done_reason = %resp.done_reason.as_deref().unwrap_or("N/A"),
                                     text_length = text_len,
@@ -134,20 +145,36 @@ impl FallbackEngine {
                                     "Model response truncated due to max_tokens limit; response may be incomplete"
                                 );
                             } else if text_len < 50 {
-                                tracing::warn!(
-                                    provider = %entry.provider,
-                                    model = %entry.model,
-                                    max_tokens = ?max_tokens_used,
-                                    done_reason = %resp.done_reason.as_deref().unwrap_or("stop"),
-                                    text_length = text_len,
-                                    thinking_length = thinking_len,
-                                    eval_count = eval_count,
-                                    "Short response from model (may indicate issues)"
-                                );
+                                if is_system_task {
+                                    tracing::debug!(
+                                        provider = %entry.provider,
+                                        model = %entry.model,
+                                        task_type = task_type_label,
+                                        max_tokens = ?max_tokens_used,
+                                        done_reason = %resp.done_reason.as_deref().unwrap_or("stop"),
+                                        text_length = text_len,
+                                        thinking_length = thinking_len,
+                                        eval_count = eval_count,
+                                        "Brief LLM output for task_type=system (memory/fact extraction etc.); this is not the user-facing streamed reply"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        provider = %entry.provider,
+                                        model = %entry.model,
+                                        task_type = task_type_label,
+                                        max_tokens = ?max_tokens_used,
+                                        done_reason = %resp.done_reason.as_deref().unwrap_or("stop"),
+                                        text_length = text_len,
+                                        thinking_length = thinking_len,
+                                        eval_count = eval_count,
+                                        "Short response from model for this task_type (may indicate issues)"
+                                    );
+                                }
                             } else {
                                 tracing::debug!(
                                     provider = %entry.provider,
                                     model = %entry.model,
+                                    task_type = task_type_label,
                                     max_tokens = ?max_tokens_used,
                                     done_reason = %resp.done_reason.as_deref().unwrap_or("stop"),
                                     text_length = text_len,
@@ -196,7 +223,15 @@ impl FallbackEngine {
                             tokio::time::sleep(self.retry_policy.delay_for_attempt(attempt)).await;
                             continue;
                         }
-                        warn!(provider = %entry.provider, error = %e, "Attempt failed, try next in chain");
+                        warn!(
+                            provider = %entry.provider,
+                            model = %entry.model,
+                            attempt = attempt + 1,
+                            max_retries = self.max_retries,
+                            timeout_per_call_secs = self.timeout_per_call.as_secs(),
+                            error = %e,
+                            "Attempt failed, try next in chain"
+                        );
                     }
                 }
             }

@@ -4,12 +4,13 @@
 
 use akasha_plugin_api::PluginError;
 use std::path::Path;
-use wasmtime::{Engine, Linker, Module, Store};
+use wasmtime::{Config, Engine, Linker, Module, Store};
 
 /// ABI: module exports "memory" and "run(input_len: i32) -> i32".
 /// Host writes input at memory[0..input_len], then calls run(input_len). Guest writes output at memory[0..], returns output_len.
 const RUN_FUNC: &str = "run";
 const MEMORY_NAME: &str = "memory";
+const DEFAULT_MAX_FUEL: u64 = 100_000_000;
 
 /// Sandboxed WASM plugin instance. One per loaded .wasm.
 pub struct WasmPlugin {
@@ -22,7 +23,10 @@ pub struct WasmPlugin {
 impl WasmPlugin {
     /// Load a WASM module from path. Does not instantiate yet (instantiate per call or keep one Store).
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let engine = Engine::default();
+        let mut config = Config::new();
+        // Bound plugin execution with fuel to prevent runaway loops.
+        config.consume_fuel(true);
+        let engine = Engine::new(&config)?;
         let module = Module::from_file(&engine, path)?;
         Ok(Self {
             engine,
@@ -40,6 +44,14 @@ impl WasmPlugin {
     pub fn run(&self, input: &str) -> Result<String, PluginError> {
         let linker = Linker::new(&self.engine);
         let mut store = Store::new(&self.engine, ());
+        let max_fuel = std::env::var("AKASHA_PLUGIN_MAX_FUEL")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_MAX_FUEL);
+        store
+            .set_fuel(max_fuel)
+            .map_err(|_| PluginError::Message("failed to initialize wasm fuel budget".into()))?;
         let instance = linker
             .instantiate(&mut store, &self.module)
             .map_err(|_| PluginError::Crashed)?;
@@ -63,7 +75,9 @@ impl WasmPlugin {
         let data = input.as_bytes();
         let len = data.len() as usize;
         if len == 0 {
-            let out_len = run.call(&mut store, 0).map_err(|_| PluginError::Crashed)?;
+            let out_len = run
+                .call(&mut store, 0)
+                .map_err(map_wasm_run_error)?;
             if out_len <= 0 {
                 return Err(PluginError::Message(
                     "plugin returned empty output".into(),
@@ -80,7 +94,9 @@ impl WasmPlugin {
             ));
         }
         memory.write(&mut store, io_offset, data).map_err(|_| PluginError::Crashed)?;
-        let out_len = run.call(&mut store, len as i32).map_err(|_| PluginError::Crashed)?;
+        let out_len = run
+            .call(&mut store, len as i32)
+            .map_err(map_wasm_run_error)?;
         if out_len <= 0 {
             return Err(PluginError::Message(
                 "plugin returned empty output".into(),
@@ -96,4 +112,13 @@ impl WasmPlugin {
 /// Build a minimal Engine config (no WASI, no network). Used for strict sandbox.
 pub fn default_engine() -> Engine {
     Engine::default()
+}
+
+fn map_wasm_run_error(err: wasmtime::Error) -> PluginError {
+    let msg = err.to_string().to_lowercase();
+    if msg.contains("all fuel consumed") || msg.contains("out of fuel") {
+        PluginError::Message("plugin execution timed out (fuel exhausted)".into())
+    } else {
+        PluginError::Crashed
+    }
 }

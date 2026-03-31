@@ -958,6 +958,15 @@ pre,
   background: var(--akasha-bg-surface);
 }
 
+.chat-message-map-embed {
+  margin-top: 0.55rem;
+  max-width: min(100%, 520px);
+}
+
+.chat-message-map-embed .event-advanced-view-map {
+  border-radius: 10px;
+}
+
 .message.system {
   background: var(--akasha-bg-elevated);
   border-left: 3px solid var(--akasha-accent);
@@ -3185,6 +3194,106 @@ pre,
 
 .event-advanced-view-map {
   border-left-color: rgba(14, 165, 233, 0.65);
+}
+
+.event-map-summary {
+  margin: 0.35rem 0 0.5rem;
+  font-size: 0.84rem;
+  color: var(--akasha-text-muted);
+  line-height: 1.45;
+}
+
+.event-map-route-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.45rem 0 0.35rem;
+}
+
+.event-map-route-tab {
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--akasha-border);
+  background: var(--akasha-bg-surface);
+  color: var(--akasha-text-muted);
+  font-size: 0.72rem;
+  cursor: pointer;
+  max-width: 100%;
+  text-align: left;
+}
+
+.event-map-route-tab:hover {
+  border-color: var(--akasha-accent);
+  color: var(--akasha-text);
+}
+
+.event-map-route-tab.is-active {
+  border-color: rgba(14, 165, 233, 0.85);
+  color: var(--akasha-accent-contrast, var(--akasha-text));
+  background: color-mix(in srgb, var(--akasha-accent) 18%, var(--akasha-bg-surface));
+}
+
+.event-map-osm-block {
+  margin-top: 0.65rem;
+}
+
+.event-map-osm-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+  margin-bottom: 0.25rem;
+}
+
+.event-map-osm-link {
+  font-size: 0.78rem;
+  color: var(--akasha-accent, #0ea5e9);
+}
+
+.event-map-osm-hint {
+  margin: 0 0 0.35rem;
+  font-size: 0.72rem;
+  color: var(--akasha-text-muted);
+  line-height: 1.35;
+}
+
+.event-map-osm-iframe {
+  width: 100%;
+  height: 11.5rem;
+  border: 1px solid var(--akasha-border);
+  border-radius: 10px;
+  background: var(--akasha-bg);
+}
+
+.event-advanced-view-map--fullscreen .event-map-osm-iframe {
+  height: 16rem;
+  min-height: 240px;
+}
+
+.event-map-steps-wrap {
+  margin-top: 0.6rem;
+}
+
+.event-map-steps {
+  margin: 0.35rem 0 0;
+  padding-left: 1.25rem;
+  font-size: 0.8rem;
+  color: var(--akasha-text-muted);
+  line-height: 1.45;
+  max-height: 10rem;
+  overflow-y: auto;
+}
+
+.event-map-step-dist {
+  opacity: 0.88;
+}
+
+.event-map-attribution {
+  margin: 0.5rem 0 0;
+  font-size: 0.68rem;
+  color: var(--akasha-text-muted);
+  opacity: 0.85;
 }
 
 .event-advanced-view-chart {

@@ -161,7 +161,7 @@ pub trait LLMProvider: Send + Sync {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
-    #[error("timeout")]
+    #[error("timeout (HTTP request deadline exceeded; logs should include base_url, model, timeout_secs)")]
     Timeout,
     #[error("api error: {0}")]
     Api(String),
@@ -239,6 +239,16 @@ impl OllamaProvider {
             .await
             .map_err(|e| {
                 if e.is_timeout() {
+                    warn!(
+                        provider = "ollama",
+                        base_url = %self.base_url,
+                        endpoint = %url,
+                        model = %model,
+                        timeout_secs = timeout.as_secs(),
+                        prompt_chars = prompt.chars().count(),
+                        reqwest_error = %e,
+                        "Ollama request timed out (reqwest total deadline: cold model load, slow generation, or unreachable host often exceed this; check network and llm_router timeout_per_call)"
+                    );
                     ProviderError::Timeout
                 } else {
                     ProviderError::Api(e.to_string())
@@ -250,7 +260,23 @@ impl OllamaProvider {
         if !resp.status().is_success() {
             return Err(ProviderError::Api(format!("status {}", resp.status())));
         }
-        let json: serde_json::Value = resp.json().await.map_err(|e| ProviderError::Api(e.to_string()))?;
+        let json: serde_json::Value = resp.json().await.map_err(|e| {
+            if e.is_timeout() {
+                warn!(
+                    provider = "ollama",
+                    base_url = %self.base_url,
+                    endpoint = %url,
+                    model = %model,
+                    timeout_secs = timeout.as_secs(),
+                    phase = "read_body",
+                    reqwest_error = %e,
+                    "Ollama response body read timed out (same total deadline as send; very large JSON or slow link)"
+                );
+                ProviderError::Timeout
+            } else {
+                ProviderError::Api(e.to_string())
+            }
+        })?;
         let text = json.get("response").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if text.trim().is_empty() {
             let full = serde_json::to_string_pretty(&json).unwrap_or_else(|_| json.to_string());
