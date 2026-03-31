@@ -260,6 +260,12 @@ L'UI se connecte au daemon sur le port 3876 (configurable via `AKASHA_PORT`). **
 
 **RAG utilisateur (interface web uniquement)** : dans l’onglet Paramètres, la section « Mes documents (RAG utilisateur) » permet d’ajouter ou supprimer des documents (texte). Ces documents sont indexés et les extraits pertinents sont injectés dans le contexte des agents lors des réponses. En TUI ou sans interface web, le RAG utilisateur peut être géré via l’API : `GET/POST/DELETE /api/user-rag/documents`.
 
+**Contrat pièces jointes / RAG (API)** :
+- **Chat** (`POST /api/chat`) : le champ `attachments` attend une liste d’objets `{ "name": "...", "type": "image|document", "content_base64": "...", "mime_type": "..." }`.  
+  - `type: "image"` : transmis au modèle sous forme de data URL vision.  
+  - `type: "document"` : texte extrait puis injecté dans le message.
+- **RAG utilisateur** (`POST /api/user-rag/documents`) : body `{ "name": "...", "content_base64": "...", "mime_type": "..." }` (`content_base64` requis).
+
 **OpenRouter** : pour que l’application apparaisse dans le dashboard OpenRouter (usage, identification), définir `site_url` et `app_title` dans `providers.openrouter` du fichier `llm_router.yaml`, ou les variables d’environnement `OPENROUTER_SITE_URL` et `OPENROUTER_APP_TITLE`. Voir [35_configuration_reference.md](35_configuration_reference.md).
 
 **Différences TUI / Web** : la TUI propose les onglets Chat, Routeur, Doc, Tâches, Calendrier, Mémoire (pas d’onglet Paramètres). L’envoi de pièces jointes, le **message vocal** (micro, lorsque STT est configuré) et la gestion du RAG utilisateur sont disponibles dans l’interface web uniquement ; en TUI, les messages sont envoyés sans pièces jointes ni message vocal, et le RAG utilisateur se configure via l’API ou l’interface web.
@@ -354,7 +360,9 @@ cargo run -p akasha-evals
 ### Orchestration renforcée
 
 - **Route `orchestrator` dans le routeur LLM** : ajoutez un bloc `task_types.orchestrator` dans `llm_router.yaml` pour dédier un modèle à la décomposition de requêtes complexes (multi-agents). Sans cette route, l’orchestrateur utilise automatiquement la route `system` (compatibilité ascendante).
-- **Livrables vérifiés** : pour les plans multi-étapes avec `deliverables` (ex. `workspace:/rapport.md`), l’orchestrateur vérifie que les fichiers existent avant de marquer l’étape comme terminée. Les chemins absolus sont rejetés (livraison dans le workspace uniquement).
+- **Livrables vérifiés** : pour les plans multi-étapes avec `deliverables` (ex. `workspace:/rapport.md`), l’orchestrateur vérifie que les fichiers existent avant de marquer l’étape comme terminée.
+- **Sécurité des chemins de livrables** : les chemins absolus et les sorties du workspace (`..`) sont rejetés ; les chemins `workspace:/...` restent obligatoirement résolus dans le workspace autorisé.
+- **Retry ciblé si livrable manquant** : lorsqu’un agent termine sans produire un livrable attendu, l’orchestrateur relance une tentative focalisée sur la production du fichier manquant.
 - **Trace de plan persistée** : l’orchestrateur écrit un fichier `.akasha/plan_trace_<task_id>.md` dans le workspace à chaque mise à jour du plan — consultable pendant et après l’exécution.
 - **Détection de réponses méta** : les sous-agents qui renvoient une réponse méta (ex. « Je suis prêt à commencer la Phase 2 ») au lieu d’un vrai résultat déclenchent automatiquement un retry.
 
@@ -374,3 +382,4 @@ cargo run -p akasha-evals
 
 - **Envoi de documents RAG** : les clés `content_base64` / `mime_type` dans le formulaire d’upload correspondent désormais à la signature Rust de la commande Tauri.
 - **Affichage du plan et des livrables** : les vues de sous-agents affichent les étapes du plan et les livrables attendus.
+- **Plugins (routing/réputation)** : l’UI expose le statut des plugins, les règles de routage dynamiques, et les actions de reset de réputation (plugin unique ou global) via l’API (`POST /api/plugins/reputation/reset`).

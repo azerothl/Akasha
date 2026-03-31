@@ -215,6 +215,7 @@ Les variables définies via `akasha config env set` sont enregistrées dans le f
 - **Pièces jointes** : dans le Chat, vous pouvez joindre des images ou des documents (texte, PDF) ; l'agent les reçoit pour analyse.
 - **RAG utilisateur** : dans Paramètres, section « Mes documents (RAG utilisateur) », vous pouvez ajouter ou supprimer des documents ; les extraits pertinents sont utilisés par l'agent lors des réponses.
 - **Profil de l'agent** : dans Paramètres → Profil de l'agent, vous pouvez définir le nom, le rôle, la personnalité, les règles et les comportements autorisés/interdits ; des modèles (Neutre, Bienveillant, Concis/technique, etc.) sont proposés.
+- **Plugins** : la vue plugins affiche l’état d’activation, les règles de routage dynamiques et permet de réinitialiser la réputation d’un plugin (ou de tous les plugins) si nécessaire.
 
 Le daemon écoute par défaut sur le port **3876**. Pour que l'onglet Doc affiche ce guide, lancez `akasha start` depuis le dossier où vous avez extrait l'archive (contenant le dossier `docs`).
 
@@ -342,11 +343,14 @@ Cette documentation est également affichée dans l'**onglet Doc** des interface
 
 - **Route `orchestrator` dédiée** : si votre `llm_router.yaml` contient un bloc `task_types.orchestrator`, l’orchestrateur l’utilise pour la décomposition de requêtes complexes. Sans cette route, la route `system` est utilisée (compatibilité ascendante).
 - **Livrables vérifiés sur disque** : l’orchestrateur s’assure que les fichiers attendus (`workspace:/rapport.md`, etc.) ont bien été créés avant de valider une étape.
+- **Sécurité des livrables** : les chemins absolus et les chemins qui sortent du workspace (`..`) sont rejetés. Les livrables restent confinés au workspace autorisé.
+- **Retry automatique ciblé** : si un livrable attendu manque, l’orchestrateur peut relancer une tentative focalisée sur la création du fichier manquant.
 - **Trace de plan** : un fichier `.akasha/plan_trace_<id>.md` est maintenu en temps réel dans le workspace pour les requêtes multi-étapes — consultable à tout moment.
 
 ### Sécurité et correctifs
 
 - **Politique de chemins** : comparaison stricte par composant de chemin (`Path::starts_with`) — évite la confusion entre `/data` et `/database`.
 - **Envoi de documents RAG** : l’upload de documents fonctionne désormais correctement depuis l’interface Tauri.
+- **Contrat d’upload unifié** : côté API, les uploads utilisent `content_base64` + `mime_type` (chat via `attachments[]`, RAG via `POST /api/user-rag/documents`).
 - **Paramètres LLM** : les valeurs `max_tokens` / `top_k` / `num_ctx` / `num_gpu` très grandes dans `llm_router.yaml` sont limitées proprement (plus de comportement imprévisible).
 - **Azure OpenAI** : `max_tokens` par défaut aligné à 4 096 (comme les autres providers).

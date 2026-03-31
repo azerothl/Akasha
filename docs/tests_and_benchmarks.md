@@ -238,6 +238,11 @@ Les tests ci-dessous ont été ajoutés dans la version 0.7.0 pour couvrir les n
 | `akasha-daemon` | `api::tests` | **`normalize_tool_path_hint`**, **`canonicalize_tool_name`**, **`looks_like_meta_agent_response`**, **`parse_write_file_request`**, **détection small talk / session recall** (imports manquants corrigés) |
 | `akasha-daemon` | `agents::contract::tests` | **UTF-8 boundary** : `parse_contract_tail_slice_does_not_panic_mid_utf8_char` (calcul du décalage corrigé) |
 
+**Liens docs associés (0.7.0)** :
+- Routage/orchestrator : `spec/32_llm_router_architecture.md`, `spec/user_guide.md`
+- Configuration providers/limites : `spec/35_configuration_reference.md`, `spec/llm_router.example.yaml`
+- Guide binaire utilisateur : `docs/user_guide_final.md`
+
 ```bash
 # Lancer l'ensemble des nouveaux tests
 cargo test -p akasha-tools --lib policy::tests

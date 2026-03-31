@@ -141,7 +141,15 @@ struct AnthropicProvider {
 struct OpenRouterProvider {
     api_key: SecretRef,
     site_url: Option<String>,
-    app_name: Option<String>,
+    app_title: Option<String>,
+}
+```
+
+#### Azure OpenAI Provider
+```rust
+struct AzureOpenAIProvider {
+    api_key: SecretRef,
+    base_url: String, // ex: https://<resource>.openai.azure.com
 }
 ```
 
@@ -278,17 +286,14 @@ struct ModelMetrics {
 ### Interface CLI
 
 ```bash
-# Lister les providers disponibles
-akasha router providers list
+# Voir les routes par catégorie (primary + fallback)
+akasha config models routes
 
 # Configurer un modèle pour un type de tâche
-akasha router config set code_generation \
-  --primary anthropic/claude-3.5-sonnet \
-  --fallback openai/gpt-4 \
-  --fallback ollama/deepseek-coder
+akasha config models set code_generation anthropic claude-3.5-sonnet-20241022
 
-# Voir la configuration actuelle
-akasha router config show
+# Vérifier la route d'une catégorie
+akasha config models get code_generation
 
 # Tester un provider
 akasha router test anthropic
@@ -403,7 +408,11 @@ providers:
   openrouter:
     api_key_ref: vault://openrouter_api_key
     site_url: https://akasha.local
-    app_name: Akasha
+    app_title: Akasha
+
+  azure_openai:
+    api_key_ref: vault://azure_openai_api_key
+    base_url: https://my-resource.openai.azure.com
 
   ollama:
     base_url: http://localhost:11434
