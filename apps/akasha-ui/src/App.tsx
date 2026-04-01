@@ -1931,6 +1931,27 @@ function App() {
     const day = Math.floor(Date.now() / 86400000);
     return lines[day % lines.length];
   }, [buddyLineEnabled, t, locale]);
+  const companionBubbleText = useMemo(() => {
+    if (!buddyLineEnabled) return null;
+    if (Object.keys(pendingHumanInput).length > 0) return t("chat.companion_action_required");
+    if (loading) return t("chat.companion_thinking");
+    if (message.trim().length > 0) return t("chat.companion_draft");
+    const runningCount = Object.keys(runningTaskChips).length;
+    if (runningCount > 0) return t("chat.active_tasks").replace("{{count}}", String(runningCount));
+    if (chatTipsEnabled && tipBannerText && !tipBannerDismissed) return tipBannerText;
+    return buddyCaption ?? t("chat.companion_idle");
+  }, [
+    buddyLineEnabled,
+    pendingHumanInput,
+    loading,
+    message,
+    runningTaskChips,
+    chatTipsEnabled,
+    tipBannerText,
+    tipBannerDismissed,
+    buddyCaption,
+    t,
+  ]);
 
   const checkHealth = useCallback(async () => {
     try {
@@ -4776,30 +4797,6 @@ function App() {
                 </div>
               )}
             </div>
-            {chatTipsEnabled && tipBannerText && !tipBannerDismissed && (
-              <div className="chat-tip-banner" role="status">
-                <span className="chat-tip-banner-icon" aria-hidden>
-                  💡
-                </span>
-                <span className="chat-tip-banner-text">{tipBannerText}</span>
-                <button
-                  type="button"
-                  className="chat-tip-dismiss"
-                  onClick={() => {
-                    setTipBannerDismissed(true);
-                    setTipBannerText(null);
-                  }}
-                  aria-label={t("chat.tip_dismiss")}
-                >
-                  ×
-                </button>
-              </div>
-            )}
-            {buddyLineEnabled && buddyCaption && (
-              <div className="chat-buddy-line" role="note">
-                <span aria-hidden>🦆</span> {buddyCaption}
-              </div>
-            )}
             <div className="chat-area">
               {messages.length === 0 ? (
                 <div className="chat-placeholder">
@@ -5215,6 +5212,30 @@ function App() {
                     {label}
                   </button>
                 ))}
+              </div>
+            )}
+            {companionBubbleText && (
+              <div className="chat-companion-row" role="status" aria-live="polite">
+                <span className="chat-companion-avatar" aria-hidden>
+                  🦆
+                </span>
+                <div className="chat-companion-bubble">
+                  <span className="chat-companion-label">{t("chat.companion_label")}</span>
+                  <span className="chat-companion-text">{companionBubbleText}</span>
+                </div>
+                {chatTipsEnabled && tipBannerText && !tipBannerDismissed && (
+                  <button
+                    type="button"
+                    className="chat-companion-dismiss"
+                    onClick={() => {
+                      setTipBannerDismissed(true);
+                      setTipBannerText(null);
+                    }}
+                    aria-label={t("chat.tip_dismiss")}
+                  >
+                    ×
+                  </button>
+                )}
               </div>
             )}
             <div className="input-area">

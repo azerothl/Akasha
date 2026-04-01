@@ -2936,54 +2936,68 @@ pre,
   background: color-mix(in srgb, var(--akasha-bg-elevated) 92%, transparent);
 }
 
-.chat-tip-banner {
+.chat-companion-row {
   display: flex;
   align-items: flex-start;
   gap: 0.5rem;
-  margin: 0.75rem 1.25rem 0;
-  padding: 0.65rem 0.85rem;
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--akasha-accent) 25%, var(--akasha-border));
-  background: color-mix(in srgb, var(--akasha-accent) 8%, transparent);
-  font-size: 0.875rem;
-  line-height: 1.45;
+  margin: 0.55rem 1.25rem 0;
 }
 
-.chat-tip-banner-icon {
-  flex-shrink: 0;
+.chat-companion-avatar {
+  width: 1.65rem;
+  height: 1.65rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--akasha-accent) 28%, var(--akasha-border));
+  background: color-mix(in srgb, var(--akasha-accent) 8%, transparent);
+  font-size: 0.9rem;
+  line-height: 1;
+  margin-top: 0.1rem;
+}
+
+.chat-companion-bubble {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--akasha-accent) 25%, var(--akasha-border));
+  background: color-mix(in srgb, var(--akasha-accent) 8%, transparent);
+}
+
+.chat-companion-label {
+  font-size: 0.69rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+  color: var(--akasha-text-muted);
+}
+
+.chat-companion-text {
+  font-size: 0.84rem;
   line-height: 1.4;
 }
 
-.chat-tip-banner-text {
-  flex: 1;
-  min-width: 0;
-}
-
-.chat-tip-dismiss {
+.chat-companion-dismiss {
   flex-shrink: 0;
-  margin: -0.2rem 0 0;
+  margin-top: 0.1rem;
   padding: 0 0.35rem;
   border: none;
   background: transparent;
   color: var(--akasha-text-muted);
-  font-size: 1.25rem;
+  font-size: 1.1rem;
   line-height: 1;
   cursor: pointer;
   border-radius: 6px;
 }
 
-.chat-tip-dismiss:hover {
+.chat-companion-dismiss:hover {
   color: var(--akasha-text);
   background: color-mix(in srgb, var(--akasha-border) 40%, transparent);
-}
-
-.chat-buddy-line {
-  margin: 0.5rem 1.25rem 0;
-  padding: 0.35rem 0.65rem;
-  font-size: 0.8125rem;
-  color: var(--akasha-text-muted);
-  border-left: 3px solid color-mix(in srgb, var(--akasha-accent) 45%, var(--akasha-border));
-  padding-left: 0.65rem;
 }
 
 .chat-prompt-chips {

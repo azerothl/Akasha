@@ -8367,7 +8367,7 @@ pub async fn handle_api(
         }
     }
     if method == "GET" && path == "/api/schedule_run_reports" {
-        return get_schedule_run_reports(store_path, progress).await;
+        return get_schedule_run_reports(store_path).await;
     }
 
     // Phase 5: Plugins
@@ -9784,8 +9784,12 @@ async fn get_task_run_by_id(store_path: &Path, id: Uuid) -> String {
 }
 
 /// GET /api/schedule_run_reports — recent completed schedule runs with schedule name and task result message (for chat).
-async fn get_schedule_run_reports(store_path: &Path, progress: &ProgressCache) -> String {
+async fn get_schedule_run_reports(store_path: &Path) -> String {
     let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let task_store = match TaskStore::open(store_path) {
         Ok(s) => s,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
@@ -9809,16 +9813,15 @@ async fn get_schedule_run_reports(store_path: &Path, progress: &ProgressCache) -
             }
         }
     }
-    let progress_guard = progress.read().await;
     let reports: Vec<serde_json::Value> = completed
         .into_iter()
         .filter_map(|r| {
             let schedule_id = r.schedule_id?;
             let schedule_name = schedule_names.get(&schedule_id)?.clone();
-            let message = progress_guard
-                .get(&r.task_id)
-                .and_then(|q| q.back())
-                .map(|e| e.message.clone())
+            let message = task_store
+                .get_progress(r.task_id)
+                .ok()
+                .and_then(|entries| entries.last().map(|(_, msg)| msg.clone()))
                 .unwrap_or_else(|| "Exécuté.".to_string());
             Some(serde_json::json!({
                 "schedule_id": schedule_id.to_string(),
