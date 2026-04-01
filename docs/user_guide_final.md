@@ -2,6 +2,8 @@
 
 Ce guide s'adresse aux utilisateurs qui ont téléchargé les **binaires précompilés** d'Akasha (sans compiler l'application). Il décrit les commandes, la configuration et les interfaces disponibles. Cette documentation est affichée dans l'onglet **Doc** des interfaces lorsque le daemon est démarré depuis le dossier d'extraction contenant le dossier `docs`.
 
+**Maintenance** : le workflow Release copie ce fichier vers `docs/user_guide.md` dans les archives. Le guide **développeur** (dépôt source, build, détails techniques) est [spec/user_guide.md](../spec/user_guide.md). Le site public **Akasha_app** (`docs.html`, anglais) est tenu manuellement ; une checklist de synchronisation figure dans le dépôt **Akasha_app** (`docs/DOCUMENTATION_SYNC.md`).
+
 ---
 
 ## 1. Obtenir et lancer Akasha
@@ -151,7 +153,7 @@ Le répertoire de données est créé automatiquement par `akasha init` ou `akas
 
 | Commande | Description |
 |----------|-------------|
-| `akasha tui` | Lance l'interface en terminal (Chat, Routeur, Doc, Tâches, Calendrier, Mémoire). |
+| `akasha tui` | Lance l'interface en terminal (Chat, Retours planifiés, Routeur, Doc, Tâches, Calendrier, Mémoire). |
 
 Si vous avez installé l'**application desktop** (Akasha UI), lancez-la ; elle se connecte au daemon sur le port 3876 (configurable via la variable d'environnement `AKASHA_PORT`).
 

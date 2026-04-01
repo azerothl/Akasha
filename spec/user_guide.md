@@ -2,7 +2,7 @@
 
 Documentation accessible depuis l'interface TUI et l'interface web. Elle décrit les commandes, l'onboarding, les options de configuration et le lancement des différentes interfaces.
 
-**Utilisateurs des binaires uniquement** : le guide dédié aux utilisateurs qui n'ont pas accès au code source est dans [docs/user_guide_final.md](../docs/user_guide_final.md). Il est servi dans l'onglet Doc des interfaces lorsque vous lancez le daemon depuis le dossier d'extraction contenant `docs/user_guide.md` (voir [spec/distribution.md](distribution.md)).
+**Utilisateurs des binaires uniquement** : le guide dédié aux utilisateurs qui n'ont pas accès au code source est dans [docs/user_guide_final.md](../docs/user_guide_final.md). Il est servi dans l'onglet Doc des interfaces lorsque vous lancez le daemon depuis le dossier d'extraction contenant `docs/user_guide.md` (voir [spec/distribution.md](distribution.md)). **En dev** depuis ce dépôt, `GET /api/docs` lit ce fichier (`spec/user_guide.md`) en priorité — garder les commandes et onglets alignés avec `user_guide_final.md` sauf sections réservées au build / contributeurs.
 
 ---
 
@@ -125,7 +125,7 @@ Les services du projet **akasha-models** (Docker Compose) peuvent être install�
 
 | Commande | Description |
 |----------|-------------|
-| `akasha tui` | Lance l'interface terminal (TUI) : Chat + métriques routeur + Documentation |
+| `akasha tui` | Lance la TUI : Chat, Retours planifiés, Routeur, Doc, Tâches, Calendrier, Mémoire |
 
 Pour une description détaillée de la gestion des interfaces (TUI, desktop Tauri, onglets, raccourcis) et des **interfaces matérielles du poste client** (clavier, affichage, souris, accessibilité, prérequis terminal), voir [38_interfaces.md](38_interfaces.md).
 
@@ -237,12 +237,14 @@ cargo build -p akasha-cli -p akasha-tui
 akasha tui
 ```
 
+**Onglets** : Chat, **Retours planifiés** (réponses des tâches récurrentes), Routeur (métriques), Doc (documentation utilisateur), Tâches, Calendrier, Mémoire.
+
 Raccourcis TUI :
-- **Tab** : basculer entre Chat, Routeur (métriques), Doc (documentation) et Activité (tâches et événements)
+- **Tab** : changer d’onglet (ordre ci-dessus)
 - **Entrée** : envoyer le message (mode Chat)
-- **↑ / ↓, PgUp / PgDn, Home / End** : défilement du contenu (Chat, Doc, panneau détail Activité)
-- **R** : rafraîchir les métriques (Routeur), la doc (Doc) ou la liste des tâches (Activité)
-- **Échap** ou **Ctrl+Q** : quitter
+- **↑ / ↓, PgUp / PgDn, Home / End** : défilement (Chat, Doc, listes)
+- **R** : rafraîchir Routeur, Retours planifiés ou liste des tâches selon l’onglet
+- **Échap** ou **Ctrl+Q** : quitter — **Tâches** : ↑/↓ (sélection), D (racines seules) — **Mémoire** : / ou S (recherche), G (graphe), D ou Suppr (supprimer entrée long terme)
 
 ### Interface web (Tauri)
 
@@ -252,7 +254,7 @@ npm install
 npm run tauri dev
 ```
 
-L'UI se connecte au daemon sur le port 3876 (configurable via `AKASHA_PORT`). **Onglets** : Chat, Routeur (métriques), Documentation, Tâches, Calendrier, Mémoire, Paramètres. **Paramètres** : quatre sections (Affichage, Système, Agent, Data). Dans Agent : sous-onglets pour le profil (Identité, Personnalité, Règles, Autorisé, Interdit), sélecteur de template de personnalité (Neutre, Bienveillant, Concis/technique, Créatif, Strict/sécurisé), limites de caractères affichées.
+L'UI se connecte au daemon sur le port 3876 (configurable via `AKASHA_PORT`). **Onglets** : Chat, **Retours planifiés**, Routeur (métriques), Documentation, Tâches, Calendrier, Mémoire, Paramètres. Touches **1–8** pour changer d’onglet si le focus n’est pas dans un champ. **Paramètres** : quatre sections (Affichage, Système, Agent, Data). Dans Agent : sous-onglets pour le profil (Identité, Personnalité, Règles, Autorisé, Interdit), sélecteur de template de personnalité (Neutre, Bienveillant, Concis/technique, Créatif, Strict/sécurisé), limites de caractères affichées.
 
 **Pièces jointes (interface web uniquement)** : dans le Chat, le bouton « Joindre » permet d’ajouter des images ou des documents (texte, PDF). Les images sont envoyées au modèle (vision) ; les documents texte et PDF sont extraits et inclus dans le message pour l’agent. Utile pour « analyse ce document » ou pour fournir un fichier sans le copier-coller.
 

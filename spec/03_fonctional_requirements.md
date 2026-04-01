@@ -1,5 +1,7 @@
 # Functional Requirements
 
+> **Spécification détaillée** — une section par FR avec description et critères. Résumé liste seule : [01_functional_requirements.md](01_functional_requirements.md). *Nom de fichier : orthographe historique « fonctional ».*
+
 FR-001 — Accusé de réception immédiat
 Description:
 > Toute requête utilisateur doit recevoir un accusé de réception en moins de 500ms.

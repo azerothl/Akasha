@@ -22,4 +22,6 @@ Ce dossier est le point d'entrée vers la documentation du projet.
 - **Premier lancement** : [spec/onboarding.md](../spec/onboarding.md)
 - **Vue d'ensemble** : [README.md](../README.md) à la racine du projet
 
-Quand le daemon tourne, le guide utilisateur (contenu de `user_guide_final.md` une fois livré sous `docs/user_guide.md`) est disponible via **GET /api/docs** et dans l'onglet **Doc** des interfaces TUI et web.
+Quand le daemon tourne, le guide affiché via **GET /api/docs** et l’onglet **Doc** est : en développement depuis le dépôt, d’abord `spec/user_guide.md` ; sinon `docs/user_guide.md` (copie de `user_guide_final.md` dans les releases). Voir [spec/51_doc_vs_code_audit.md](../spec/51_doc_vs_code_audit.md) § 9.
+
+Le site public **Akasha_app** (`docs.html`, anglais) est tenu manuellement ; checklist : `Akasha_app/docs/DOCUMENTATION_SYNC.md`.

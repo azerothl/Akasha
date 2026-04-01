@@ -1,5 +1,7 @@
 # Non Functional Requirements
 
+> **Spécification détaillée** — une section par NFR. Résumé liste seule : [02_non_functional_requirements.md](02_non_functional_requirements.md). *Nom de fichier : orthographe historique « fonctional », aligné sur [03_fonctional_requirements.md](03_fonctional_requirements.md).*
+
 NFR-001 — Disponibilité continue
 > Le système doit fonctionner 24h/24 et 7j/7.
 
