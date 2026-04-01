@@ -40,6 +40,9 @@ command_timeout_secs: 60
 # Optionnel : domaines autorisés pour web_fetch (nécessite la feature "web")
 # allowed_web_domains: []
 # Pour tout autoriser : allowed_web_domains: ["*"]  (sous réserve de blocked_web_domains)
+# Après web_search, les extraits seuls manquent souvent de détails (météo chiffrée, etc.). Sans
+# domaines autorisés ici, web_fetch refuse toutes les URLs — l'agent ne peut pas charger la page.
+# Exemple ciblé météo : ["meteofrance.com", "www.meteocity.com"] ou ["*"] selon votre politique.
 
 # Optionnel : domaines interdits pour web_fetch (prioritaire sur allowed_web_domains)
 # blocked_web_domains: []
@@ -102,17 +105,22 @@ command_timeout_secs: 60
 # blocked_device_interfaces: []
 
 # Optionnel : automation navigateur (spec 39). Une instance Playwright par tâche (navigate, snapshot).
+# Les portails météo sont souvent riches en JS : après web_search, browser navigate + browser snapshot
+# récupère le texte visible là où web_fetch (HTML brut) est insuffisant.
 # Nécessite : npx playwright install chromium dans scripts/playwright-runner (ou AKASHA_PLAYWRIGHT_RUNNER).
 # browser_enabled: false
-# browser_allowed_domains: []   # ex. ["*"] pour tout, ou ["example.com", "docs.example.com"]
+# browser_allowed_domains: []   # ex. ["*"] pour tout, ou ["meteofrance.com", "www.meteocity.com"]
 # browser_blocked_domains: []
 # browser_headless: true
 # browser_action_timeout_secs: 30
 # browser_session_timeout_secs: 300
 # Désactiver l'installation auto de Chromium au premier appel browser : variable d'environnement AKASHA_PLAYWRIGHT_AUTO_INSTALL=0
+# Installation manuelle explicite (après consentement dans le chat ou approbation UI) : outil install_playwright
+# (npm install + npx playwright install chromium dans le répertoire du runner). Ajouter install_playwright aux tool_profiles si default_profile est utilisé.
 
 # Optionnel : outils pour lesquels une confirmation utilisateur est requise avant exécution (human-in-the-loop).
 # Quand un outil est dans cette liste, le daemon affiche un résumé d'intention (ex. « Écrire dans le fichier X », « Exécuter la commande Y »)
 # et n'exécute qu'après approbation explicite (bouton Approuver / Refuser dans l'UI).
-# Pour demander confirmation avant d'ouvrir une URL dans le navigateur : ajouter browser à la liste.
-# require_approval: [write_file, run_command, run_in_container, apply_patch, edit_file, device_invoke]
+# Recommandé pour install_playwright (téléchargement lourd) : require_approval: [..., install_playwright]
+# Éviter d'ajouter « browser » ici : chaque navigate/snapshot demanderait une approbation.
+# require_approval: [write_file, run_command, run_in_container, apply_patch, edit_file, device_invoke, install_playwright]

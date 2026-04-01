@@ -967,6 +967,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
     ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
     ("browser", "browser navigate <url> — open URL in managed browser (http/https; domain allowed by tools_policy). browser snapshot — text + links of current page. Phase 2: click, fill, screenshot, wait (see spec 39)."),
+    ("install_playwright", "install_playwright — run npm install and npx playwright install chromium in the Playwright runner directory (scripts/playwright-runner or AKASHA_PLAYWRIGHT_RUNNER). Requires browser_enabled. Use after ask_user consent if you need explicit approval before download; optional require_approval in tools_policy."),
     ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
     ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
@@ -1606,6 +1607,19 @@ fn extract_x_profile_handle(message: &str) -> Option<String> {
     None
 }
 
+/// True when policy allows at least one follow-up path after web_search: HTTP fetch and/or Playwright browser.
+fn web_followup_tools_configured(policy: &akasha_tools::ToolsPolicy) -> bool {
+    let web_fetch_ok = policy.can_use_tool("web_fetch") && !policy.allowed_web_domains.is_empty();
+    let browser_ok = policy.can_use_tool("browser")
+        && policy.browser_enabled
+        && (policy
+            .browser_allowed_domains
+            .iter()
+            .any(|d| d.trim().eq_ignore_ascii_case("*"))
+            || !policy.browser_allowed_domains.is_empty());
+    web_fetch_ok || browser_ok
+}
+
 fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
     let m = message.to_lowercase();
     MessageIntentFlags {
@@ -2234,7 +2248,10 @@ async fn do_uninstall_skill(
 
 const WRITE_FILE_REMINDER: &str = "\n[Reminder: the user is asking to save a file. You MUST reply ONLY with the line TOOL: write_file <full_path> then the file content on the following lines. Never say you cannot write to disk.]\n\n";
 
-const WEB_SEARCH_REMINDER: &str = "\n[Reminder: the user is asking for external information (weather/météo, news, etc.). You MUST use TOOL: web_search <query> to search — do NOT use bankr or portfolio for weather. Then reply with the results. Do not suggest visiting a site without having used web_search first.]\n\n";
+const WEB_SEARCH_REMINDER: &str = "\n[Reminder: the user is asking for external information (weather/météo, news, etc.). You MUST use TOOL: web_search <query> first — do NOT use bankr or portfolio for weather. If search snippets do not contain the precise facts (temperatures, sky state, rain risk, figures, tables), you MUST follow up with TOOL: web_fetch <url> on a relevant result URL, or TOOL: browser navigate <url> then TOOL: browser snapshot for JS-heavy or dynamic pages (e.g. many weather portals). Do not end by telling the user to visit links yourself if web_fetch or browser snapshot is available in your tool list and policy allows those domains — fetch and summarize. Do not suggest visiting a site without having used web_search first.]\n\n";
+
+/// Injected only when web_search is available and policy allows web_fetch and/or configured browser follow-up.
+const WEB_SEARCH_FOLLOWUP_REMINDER: &str = "\n[Reminder — page fetch: Search snippets are often incomplete. After web_search, if you still lack concrete details, call web_fetch on a result URL and/or browser navigate + browser snapshot (then answer from that output). Do not reply with only URLs for the user to open when these tools work.]\n\n";
 
 /// Reminder injected when the user asks for external information (weather, news, etc.) but
 /// web_search is not available in the current tools policy. Prevents the model from ignoring
@@ -2284,9 +2301,10 @@ const APP_CONTEXT: &str = concat!(
     "Tests discipline: when tests fail, never modify the tests themselves unless the user explicitly asks you to. Assume the bug is in the code under test. If the same test or CI still fails after three consecutive attempts, stop and ask the user for guidance rather than iterating blindly. ",
     "Debugging: when debugging, address the root cause rather than the symptoms. Add descriptive logging statements to track variable state. If multiple approaches have failed, step back and think big-picture before making more changes. ",
     "Never invent data. If you do not have the information to answer, say so clearly (e.g. \"I did not find that information\"). ",
-    "For questions about information you do not have (weather, forecasts, news, schedules, etc.), you must use the web_search tool to search yourself then reply with the results. When you have just received tool results (e.g. web_search, web_fetch), you must answer immediately with the synthesized result — do not reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"); the task ends after your message, so give the actual answer. ",
-    "Do not suggest the user visit a site without having used web_search first if you have access to that tool. ",
+    "For questions about information you do not have (weather, forecasts, news, schedules, etc.), you must use the web_search tool first, then if snippets are insufficient use web_fetch and/or browser navigate plus browser snapshot to read the page itself and reply with the synthesized facts. When you have just received tool results (e.g. web_search, web_fetch, browser snapshot), you must answer immediately with the synthesized result — do not reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"); the task ends after your message, so give the actual answer. ",
+    "Do not suggest the user visit a site without having used web_search first if you have access to that tool; do not only list URLs for the user when web_fetch or browser snapshot can retrieve the content. ",
     "If web_search returns an error (e.g. not enabled), you can then suggest sites and explain how to enable web search (tools_policy.yaml, web_search_enabled, BRAVE_API_KEY). ",
+    "Playwright / managed browser: the daemon may auto-install Chromium on first browser use unless AKASHA_PLAYWRIGHT_AUTO_INSTALL=0. If browser fails for missing Chromium, the runner is missing, or the user must explicitly approve a large download, use TOOL: ask_user (e.g. choices agreeing to install), then TOOL: install_playwright. List install_playwright in tool_profiles when using a profile. tools_policy require_approval can include install_playwright for UI approval before the install runs. For other dependencies (npm, cargo, etc.), use run_command with allowed_commands after ask_user consent. ",
     "You have access to the write_file tool: you MUST use it whenever the user asks to save, store or write a file (e.g. \"save the code to …\", \"write to file\"). ",
     "Reply ONLY with one line TOOL: write_file <full_path> then the file content on the following lines. ",
     "Never say \"I cannot write to disk\" or \"copy-paste the code yourself\" — if the path is denied by policy, the tool will return an error and you then explain how to add the prefix in tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...) or Unix. When the user did not specify a path, prefer workspace:/<filename> (e.g. workspace:/script.py) so the file is saved in the task workspace without policy errors. ",
@@ -2304,12 +2322,12 @@ pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
     match agent_type {
         "conversation" => None,
         "code" => Some("You are the code generation agent. Produce correct, readable code. Prefer write_file and workspace:/ paths for new files. For Git inspection use git_status, git_diff, git_log, git_rev_parse on the repo path when available; use diff_unified or dir_compare to compare files or trees. Run builds and tests with run_command --cwd workspace:/ (or the project root). Use run_in_container when policy allows and you need an isolated toolchain. Do not invent APIs; use read_file when needed to match existing code. When the user asks to *perform* an action (take a photo, search the web, save a file), use the appropriate TOOL; do not generate a script for that. Use code only when the user explicitly asks to *write* or *generate* code or a script. Before editing any file, read it to understand its conventions, imports, and style; mimic existing patterns. Never assume a library is available — verify it is already declared in the project dependency file (Cargo.toml, package.json, etc.). When tests fail, never modify the tests themselves; fix the code under test. If the same test still fails after three attempts, stop and ask the user for guidance."),
-        "search" => Some("You are the search agent. Use web_search to find external information (weather, news, facts). Synthesize results and cite sources. Do not claim information you have not retrieved via web_search when it is available."),
+        "search" => Some("You are the search agent. Use web_search to find external information (weather, news, facts). When search snippets lack concrete details, use web_fetch on a result URL and/or browser navigate plus browser snapshot, then synthesize and cite sources. Do not claim information you have not retrieved via tools when they are available."),
         "financial" => Some("You are the financial specialist. Help with budgets, cost analysis, financial reports, numeric reasoning. Be precise with figures and units. Do not invent data; state what is missing if needed."),
         "documentalist" => Some("You are the documentalist. Transform a pile of files into exploitable data. Answer from the user's document base (RAG). Prioritize [User documents] and [Long-term memory]. Use memory_search when relevant. Quote or summarize from excerpts; if insufficient, say so and suggest adding documents. Produce structured summaries when asked."),
         "project_manager" => Some("You are the project manager. Help with project tracking, milestones, task breakdown, planning. Refer to schedules and recurring tasks when relevant. Propose clear next steps and deliverables."),
         "technical_writer" => Some("You are the technical writing agent. Produce clear technical documentation, procedures, tutorials. Use a structured style (headings, steps, code blocks when relevant). Prefer clarity and precision. Use write_file when the user asks to save documentation."),
-        "research" => Some("You are the research agent. Perform in-depth research using web_search, memory_search, and the document base. Synthesize multiple sources; cite or summarize clearly. Do not invent facts."),
+        "research" => Some("You are the research agent. Perform in-depth research using web_search, memory_search, and the document base. After web_search, use web_fetch and/or browser navigate plus browser snapshot when snippets or excerpts are insufficient to answer factually. Synthesize multiple sources; cite or summarize clearly. Do not invent facts."),
         "security_audit" => Some("You are the security audit agent. Review code, config, or practices for security. Be methodical; highlight risks and suggest mitigations. Do not claim certainty where you lack context; recommend human review for critical decisions."),
         "creative" => Some("You are the creative agent. You have a strong creative sense for text and images. Produce marketing copy, creative content, stories, and audience-adapted text. Match tone and format to the requested channel and goal. When the task is to get a photo from the user's webcam/camera, use TOOL: device_invoke local_media camera capture first; for AI-generated images use generate_image."),
         "analyst" => Some("You are the product / functional analyst. Formalize the need before any production. Output: reformulated need, scope, assumptions, acceptance criteria, initial backlog. Do not jump to implementation; clarify and structure the request first."),
@@ -2469,6 +2487,7 @@ const ORCH_INLINE_TOOL_FIRST_WORDS: &[&str] = &[
     "web_fetch",
     "run_command",
     "browser",
+    "install_playwright",
     "read_skill",
     "memory_store",
     "device_invoke",
@@ -3638,6 +3657,40 @@ async fn execute_tool_call(
                 (false, "[browser] usage: browser navigate <url> | browser snapshot | browser screenshot (Phase 2).".to_string(), None)
             }
         }
+        "install_playwright" => {
+            if !executor.policy.browser_enabled {
+                return (
+                    false,
+                    "[install_playwright] Browser automation is disabled. Set browser_enabled: true in tools_policy.yaml.".to_string(),
+                    None,
+                );
+            }
+            let Some(runner_path) = crate::browser::find_playwright_runner_path() else {
+                return (
+                    false,
+                    "[install_playwright] Playwright runner not found. Set AKASHA_PLAYWRIGHT_RUNNER or run from repo with scripts/playwright-runner.".to_string(),
+                    None,
+                );
+            };
+            let Some(runner_dir) = crate::browser::playwright_runner_dir(&runner_path) else {
+                return (
+                    false,
+                    "[install_playwright] Could not resolve runner directory.".to_string(),
+                    None,
+                );
+            };
+            match crate::browser::ensure_playwright_chromium(&runner_dir).await {
+                Ok(()) => (
+                    true,
+                    format!(
+                        "[install_playwright] npm install and playwright install chromium completed in {}.",
+                        runner_dir.display()
+                    ),
+                    None,
+                ),
+                Err(e) => (false, format!("[install_playwright] {}", e), None),
+            }
+        }
         "image" => {
             let path_or_url = args.get(0).map(String::as_str).unwrap_or("").trim();
             if path_or_url.is_empty() {
@@ -4579,6 +4632,8 @@ fn progress_message_for_tool(tool: &str, args: &[String]) -> String {
         "Capturing with camera…".to_string()
     } else if lower == "browser" && first_arg.eq_ignore_ascii_case("navigate") {
         "Opening in browser…".to_string()
+    } else if lower == "install_playwright" {
+        "Installing Playwright Chromium…".to_string()
     } else if lower.contains("run_command") {
         "Running the command…".to_string()
     } else if lower == "ask_user" {
@@ -5135,9 +5190,9 @@ pub(crate) async fn run_message_via_llm(
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
              CAMERA RULE (PRIORITAIRE sur WRITE): When the user asks for a webcam/camera photo (e.g. \"prends une photo\", \"take a photo\", \"photo depuis la webcam\", \"affiche-la dans le chat\", \"display it in the chat\"), you MUST reply ONLY with TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture. Do NOT mention tools_policy.yaml, allowed_write_paths, or file writing. After the tool returns, if the user asked to \"display in the chat\" / \"affiche-la dans le chat\" / \"show it in the chat\", reply with ONLY a short confirmation in the user's language (e.g. in French: \"Photo prise. Elle s'affiche ci-dessous.\"; in English: \"Photo captured. It is shown below.\"). Do NOT offer \"save to file\", \"get a description\", \"take another photo\", or \"What would you like to do next?\" — the image is appended automatically below your message. Use the same language as the user (French if they wrote in French).\n\
              WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
-             WEATHER/MÉTEO RULE (PRIORITY): When the user asks for weather, météo, or forecasts (e.g. \"quel temps\", \"météo demain\", \"weather in X\"), you MUST use TOOL: web_search <query> (and optionally web_fetch) to get the forecast. Do NOT use bankr, portfolio, or any other skill for weather — only web_search and web_fetch.\n\
+             WEATHER/MÉTEO RULE (PRIORITY): When the user asks for weather, météo, or forecasts (e.g. \"quel temps\", \"météo demain\", \"weather in X\"), you MUST use TOOL: web_search <query> first, then if snippets lack numeric detail use TOOL: web_fetch <url> on a trusted result URL and/or TOOL: browser navigate <url> then TOOL: browser snapshot (many météo sites are JS-heavy). Do NOT use bankr, portfolio, or any other skill for weather — use web_search plus web_fetch/browser as needed.\n\
              BROWSER RULE (PRIORITY): When the user explicitly asks to open the browser, go to a website, or show something on X/Twitter (e.g. \"ouvre le navigateur\", \"open the browser\", \"va sur X\", \"go to twitter\", \"cherche sur X\", \"ouvre le navigateur et cherche\"), you MUST use TOOL: browser navigate <url> first with the appropriate URL (e.g. https://x.com/akashabot for a profile, https://x.com for the home page). You may then add a short message. Do NOT use only web_search when the user asked to open the browser or go to X/Twitter.\n\
-             WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user. If web_search returns no useful results, or the content is inaccessible (e.g. X/Twitter pages, login-required sites), use TOOL: browser navigate <url> with the relevant URL so the user can open the page in their browser.\n\
+             WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first, then answer from fetched content — not only from snippets. If snippets are insufficient, use TOOL: web_fetch <url> on a relevant result URL, or TOOL: browser navigate <url> then TOOL: browser snapshot so YOU retrieve the page text inside Akasha (managed browser), then summarize for the user. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. Do NOT tell the user to open links in their own browser when web_fetch or browser snapshot is available and allowed — retrieve and answer yourself.\n\
              INSTALL CLI RULE: When the user asks to install a CLI or package globally (e.g. \"install bankr CLI\", \"npm install -g @bankr/cli\", \"install the bankr cli in global\"), you MUST reply ONLY with TOOL: run_command <cmd> <args> (e.g. TOOL: run_command npm install -g @bankr/cli). Do NOT generate a script or ask the user to run commands themselves; run the installation command via the tool.\n\
              VAULT ENV RULE: To use a vault secret in a command you MUST call TOOL: run_command with VAULT:<vault_key>=<ENV_VAR> as the FIRST argument(s), then the command. The system injects the secret value into ENV_VAR for that command only. Example: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo. FORBIDDEN: never tell the user to run GITHUB_TOKEN=VAULT:GITHUB_TOKEN or export GITHUB_TOKEN=... or VAULT:GITHUB_TOKEN=ghp_... — you must output the TOOL: line yourself so the system runs the command and injects the token. For GitHub with token in vault: use TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (or gh repo view owner/repo). The vault key may be GITHUB_TOKEN or github_token; the part after = is the env var name the command uses (e.g. $GITHUB_TOKEN). Do NOT say you cannot access the repo without having called run_command with VAULT:... first.\n\
              {}\
@@ -5337,6 +5392,17 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
+    let web_search_followup_reminder: &str = if intent_flags.external_info
+        && web_search_effectively_available
+        && tools_executor_snapshot
+            .as_ref()
+            .map(|e| web_followup_tools_configured(&e.policy))
+            .unwrap_or(false)
+    {
+        WEB_SEARCH_FOLLOWUP_REMINDER
+    } else {
+        ""
+    };
     let transport_reminder: &str = if intent_flags.transport {
         // Always inject a transport reminder so the model cannot mistake a travel question
         // for a file-creation or project task (e.g. "Quel est le chemin complet du fichier").
@@ -5429,10 +5495,11 @@ pub(crate) async fn run_message_via_llm(
     };
     let mut current_prompt = if user_prefix.trim().is_empty() {
         format!(
-            "{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
             guardrail_reminder_block,
             write_reminder,
             web_search_reminder,
+            web_search_followup_reminder,
             transport_reminder,
             geolocation_distance_reminder,
             plugin_routing_reminder,
@@ -5445,11 +5512,12 @@ pub(crate) async fn run_message_via_llm(
         )
     } else {
         format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
             user_prefix.trim_end(),
             guardrail_reminder_block,
             write_reminder,
             web_search_reminder,
+            web_search_followup_reminder,
             transport_reminder,
             geolocation_distance_reminder,
             plugin_routing_reminder,
