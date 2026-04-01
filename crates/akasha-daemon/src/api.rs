@@ -71,6 +71,38 @@ fn is_workspace_virtual_path(raw: &str) -> bool {
     normalize_tool_path_hint(raw).starts_with("workspace:/")
 }
 
+/// True if `s` is `WxH` dimensions (e.g. 1024x1024).
+fn looks_like_image_size_token(s: &str) -> bool {
+    let s = s.trim();
+    let mut parts = s.split('x');
+    let (Some(w), Some(h)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    w.parse::<u32>().is_ok() && h.parse::<u32>().is_ok()
+}
+
+/// The tool layer splits `TOOL:` lines on whitespace, so multi-word prompts become many args.
+/// Rejoin into a single prompt; treat a trailing `WxH` token as optional size.
+fn parse_generate_image_tool_args(args: &[String]) -> (String, Option<String>) {
+    if args.is_empty() {
+        return (String::new(), None);
+    }
+    if args.len() >= 2 {
+        if let Some(last) = args.last() {
+            if looks_like_image_size_token(last) {
+                return (
+                    args[..args.len() - 1].join(" "),
+                    Some(last.trim().to_string()),
+                );
+            }
+        }
+    }
+    (args.join(" "), None)
+}
+
 fn parse_write_file_request(args: &[String]) -> Option<(String, String)> {
     if args.is_empty() {
         return None;
@@ -937,7 +969,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
     ("device_discover", "device_discover [interface] — lister les appareils accessibles (optionnel: local_media, system, network, usb). Filtre par politique allowed_device_interfaces / blocked_device_interfaces."),
     ("device_invoke", "device_invoke <interface> <device_id> <action> [params] — exécuter une action sur un appareil. local_media: caméra (device_id camera, action capture), micro (device_id microphone, action record). Appelle directement ; une fenêtre d'autorisation s'affichera dans l'UI. Ne pas demander à l'utilisateur d'« ouvrir l'UI » — utiliser l'outil. synthetic_input: device_id keyboard|mouse, action shortcut|key|type|mouse_move|mouse_click|..."),
-    ("generate_image", "generate_image <prompt> [size] — générer une image par IA (ex. OpenAI DALL·E). Prompt en texte libre ; size optionnel (1024x1024, 512x512). Retourne l'image en data URL dans la réponse (spec 42)."),
+    ("generate_image", "generate_image <prompt> [size] — générer une image par IA (ex. OpenAI DALL·E). Prompt en texte libre (plusieurs mots après generate_image sont un seul prompt) ; size optionnel en dernier (1024x1024, 512x512). Retourne l'image en data URL dans la réponse (spec 42)."),
     ("speech_synthesize", "speech_synthesize <text> — TTS: synthétiser le texte en audio (Kyutai Unmute/Pocket TTS). Retourne une data URL audio (voice_router.yaml tts.base_url)."),
     ("speech_transcribe", "speech_transcribe <data_url_audio> — STT: transcrire l'audio en texte. Passer la data URL de l'audio (ex. après device_invoke local_media microphone record). La data URL est obligatoire (voice_router.yaml stt.base_url)."),
     ("write_todos", "write_todos <payload> — définir la liste d'étapes (todo). Remplace toute la liste (plan initial ou re-découpage complet). Pour ajouter sans effacer : merge_todos. Payload: JSON array ou lignes."),
@@ -1618,7 +1650,8 @@ fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
         image_generation: [
             "génère une image", "genere une image", "générer une image", "génère moi une image",
             "generate an image", "generate a picture", "draw", "dessine", "dessiner",
-            "crée une image", "cree une image", "créer une image", "create an image",
+            "crée une image", "cree une image", "creer une image", "creer moi une image",
+            "créer une image", "create an image",
             "image par ia", "ai image", "dall-e", "dalle",
         ]
         .iter()
@@ -4032,11 +4065,12 @@ async fn execute_tool_call(
             }
         }
         "generate_image" => {
-            let prompt = args.get(0).map(String::as_str).unwrap_or("").trim();
+            let (prompt, size_owned) = parse_generate_image_tool_args(args);
+            let prompt = prompt.trim();
             if prompt.is_empty() {
                 (false, "[generate_image] usage: generate_image <prompt> [size]".to_string(), None)
             } else {
-                let size = args.get(1).map(String::as_str).filter(|s| !s.is_empty());
+                let size = size_owned.as_deref();
                 let data_dir = store_path.and_then(|p| p.parent()).unwrap_or_else(|| Path::new("."));
                 match crate::image_generation::generate_image_impl(data_dir, prompt, size).await {
                     Ok((msg, data_url)) => (true, msg, Some(data_url)),
@@ -4630,6 +4664,7 @@ fn looks_like_off_topic_greeting(text: &str) -> bool {
 
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
 /// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
+/// preferred_task_type_override: when set (e.g. system selector task_type), overrides routing/reminders vs. assigned_agent alone.
 pub(crate) async fn run_message_via_llm(
     bus: EventBus,
     llm_router: Arc<akasha_llm::LLMRouter>,
@@ -4639,6 +4674,8 @@ pub(crate) async fn run_message_via_llm(
     message: String,
     session_id: String,
     image_data_urls: Option<Vec<String>>,
+    // When set (e.g. system selector task_type), overrides resolve_task_type_for_agent(assigned_agent) for LLM routing and image-gen reminders.
+    preferred_task_type_override: Option<String>,
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
     tools_executor: Option<std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>>,
@@ -4674,6 +4711,12 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .map(|t| t.assigned_agent.clone())
         .unwrap_or_else(|| "conversation".to_string());
+    let role_agent_for_system_prompt =
+        if preferred_task_type_override.as_deref() == Some("image_generation") {
+            "image_generation"
+        } else {
+            assigned_agent.as_str()
+        };
     let is_subagent = task_snapshot
         .as_ref()
         .and_then(|t| t.parent_task_id)
@@ -4919,7 +4962,7 @@ pub(crate) async fn run_message_via_llm(
     let mut system_prompt = String::with_capacity(8192);
     system_prompt.push_str(APP_CONTEXT);
     system_prompt.push_str(os_env_block);
-    if let Some(role_prompt) = agent_role_system_prompt(&assigned_agent) {
+    if let Some(role_prompt) = agent_role_system_prompt(role_agent_for_system_prompt) {
         system_prompt.push_str("[Role]\n");
         system_prompt.push_str(role_prompt);
         system_prompt.push_str("\n\n");
@@ -5141,7 +5184,9 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let image_generation_reminder = if intent_flags.image_generation {
+    let image_generation_reminder = if intent_flags.image_generation
+        || preferred_task_type_override.as_deref() == Some("image_generation")
+    {
         IMAGE_GENERATION_REMINDER
     } else {
         ""
@@ -5469,7 +5514,22 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
         }
-        let preferred_task_type = Some(llm_router.resolve_task_type_for_agent(&assigned_agent));
+        // `task_types.image_generation` in llm_router.yaml configures the *pixel backend* for the
+        // `generate_image` tool (see image_generation.rs). Routing chat completion to that task
+        // type sends image-only models (e.g. Ollama z-image) through the text completion path, which
+        // expects a `response` string — those models return images/empty text and trigger fallback warnings.
+        // Here we always use a normal text route for the LLM turn; the tool call still uses image_generation config.
+        let router_task_type_for_llm =
+            if preferred_task_type_override.as_deref() == Some("image_generation")
+                || assigned_agent == "image_generation"
+            {
+                llm_router.resolve_task_type_for_agent("conversation")
+            } else {
+                preferred_task_type_override
+                    .clone()
+                    .unwrap_or_else(|| llm_router.resolve_task_type_for_agent(&assigned_agent))
+            };
+        let preferred_task_type = Some(router_task_type_for_llm);
         let request = CompletionRequest {
             prompt: if strict_mode_active {
                 format!("{}{}", current_prompt, strict_tools_instruction)
@@ -5746,8 +5806,11 @@ pub(crate) async fn run_message_via_llm(
                 } else {
                     actual_tool.as_str()
                 };
+                let device_routing_bypass = intent_flags.camera_or_mic
+                    && (effective_tool_for_routing.eq_ignore_ascii_case("device_discover")
+                        || effective_tool_for_routing.eq_ignore_ascii_case("device_invoke"));
                 if let Some(enforcer) = &runtime_tool_routing_enforcer {
-                    if !enforcer.is_tool_allowed(effective_tool_for_routing, tool_args) {
+                    if !device_routing_bypass && !enforcer.is_tool_allowed(effective_tool_for_routing, tool_args) {
                         let blocked = format!(
                             "[tool_blocked_by_routing_rules] tool={} blocked by dynamic plugin routing rules",
                             effective_tool_for_routing
@@ -9845,7 +9908,7 @@ mod tests {
         ensure_no_open_code_block, extract_how_to_call_from_message, is_pausable, is_resumable,
         looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
         normalize_tool_path_hint, parse_content_length, parse_device_invoke_params,
-        parse_plugin_reputation_reset_body,
+        parse_generate_image_tool_args, parse_plugin_reputation_reset_body,
         parse_skill_install_url, parse_tool_calls, parse_write_file_request,
         PluginReputationResetBody,
         response_looks_off_topic_for_small_talk, rewrite_workspace_plan_key_to_lineage_root,
@@ -9906,6 +9969,30 @@ mod tests {
         let args = vec![s("synthetic_input"), s("keyboard"), s("type"), s("hello"), s("world")];
         let p = parse_device_invoke_params(&args);
         assert_eq!(p, serde_json::json!(["hello", "world"]));
+    }
+
+    // --- parse_generate_image_tool_args (whitespace-split TOOL: lines) ---
+
+    #[test]
+    fn generate_image_args_join_words_into_prompt() {
+        let args = vec![
+            s("A"),
+            s("cute"),
+            s("cat"),
+            s("playing"),
+            s("guitar"),
+        ];
+        let (prompt, size) = parse_generate_image_tool_args(&args);
+        assert_eq!(prompt, "A cute cat playing guitar");
+        assert!(size.is_none());
+    }
+
+    #[test]
+    fn generate_image_args_trailing_size_token() {
+        let args = vec![s("cat"), s("on"), s("sofa"), s("1024x1024")];
+        let (prompt, size) = parse_generate_image_tool_args(&args);
+        assert_eq!(prompt, "cat on sofa");
+        assert_eq!(size.as_deref(), Some("1024x1024"));
     }
 
     // --- message_suggests_tool_only_action ---

@@ -731,6 +731,7 @@ impl Daemon {
                             let message = task.message;
                             let session_id = task.session_id;
                             let image_data_urls = task.image_data_urls;
+                            let preferred_task_type_override = task.preferred_task_type.clone();
                             tokio::spawn(async move {
                                 run_message_via_llm(
                                     bus,
@@ -741,6 +742,7 @@ impl Daemon {
                                     message,
                                     session_id,
                                     image_data_urls,
+                                    preferred_task_type_override,
                                     Some(short_term),
                                     long_term_client,
                                     tools_executor,
@@ -791,6 +793,7 @@ impl Daemon {
                             let message = task.message;
                             let session_id = task.session_id;
                             let image_data_urls = task.image_data_urls;
+                            let preferred_task_type_override = task.preferred_task_type.clone();
                             tokio::spawn(async move {
                                 run_message_via_llm(
                                     bus,
@@ -801,6 +804,7 @@ impl Daemon {
                                     message,
                                     session_id,
                                     image_data_urls,
+                                    preferred_task_type_override,
                                     Some(short_term),
                                     long_term_client,
                                     tools_executor,

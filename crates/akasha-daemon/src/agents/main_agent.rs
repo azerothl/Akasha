@@ -625,7 +625,7 @@ User message:\n{}",
                         session_id: session_id.to_string(),
                         image_data_urls,
                         execution_mode: None,
-                        preferred_task_type: None,
+                        preferred_task_type: preferred_task_type.clone(),
                     };
                     if let Err(e) = tx.try_send(task_msg) {
                         match e {

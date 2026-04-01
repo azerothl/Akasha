@@ -12,6 +12,14 @@ describe("preprocessDataUrlImages", () => {
     expect(out).toContain('class="markdown-data-image"');
   });
 
+  it("converts plain-parens markdown data URL image (no angle brackets)", () => {
+    const input = "![Photo capturée](data:image/jpeg;base64,/9j/TEST)";
+    const out = preprocessDataUrlImages(input);
+    expect(out).toContain('<div class="markdown-data-image-wrap">');
+    expect(out).toContain('<img src="data:image/jpeg;base64,/9j/TEST"');
+    expect(out).toContain('alt="Photo capturée"');
+  });
+
   it("escapes alt in HTML attribute", () => {
     const input = '![A"b&c<](<data:image/png;base64,XYZ>)';
     const out = preprocessDataUrlImages(input);

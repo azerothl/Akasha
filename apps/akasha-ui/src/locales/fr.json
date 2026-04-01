@@ -393,5 +393,8 @@
   "sidebar.show_tasks": "Afficher le panneau Tâches",
   "sidebar.hide_tasks": "Masquer le panneau Tâches",
   "sidebar.refresh_tasks": "Rafraîchir",
-  "path_link.open_folder": "Ouvrir le dossier"
+  "path_link.open_folder": "Ouvrir le dossier",
+  "markdown_image.view_full": "Voir en grand",
+  "markdown_image.download": "Télécharger",
+  "markdown_image.close": "Fermer"
 }
