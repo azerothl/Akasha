@@ -20,6 +20,33 @@ const TASK_ORCHESTRATION_DEBUG_STORAGE_KEY = "akasha_task_orchestration_debug";
 const CHAT_TIPS_STORAGE_KEY = "akasha_ui_chat_tips";
 const CHAT_PROMPT_CHIPS_STORAGE_KEY = "akasha_ui_prompt_chips";
 const CHAT_BUDDY_STORAGE_KEY = "akasha_ui_buddy";
+const AKASHA_CHAT_THREADS_KEY = "akasha_chat_threads_v1";
+
+export type ChatThreadEntry = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  pendingTitle?: boolean;
+};
+
+function loadChatThreadsInitial(): ChatThreadEntry[] {
+  try {
+    const raw = localStorage.getItem(AKASHA_CHAT_THREADS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as ChatThreadEntry[];
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+    const legacy = localStorage.getItem(AKASHA_SESSION_ID_KEY)?.trim();
+    if (legacy) {
+      const now = new Date().toISOString();
+      return [{ id: legacy, title: "", createdAt: now, updatedAt: now }];
+    }
+  } catch {
+    /* ignore */
+  }
+  return [];
+}
 
 export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_latte";
 type UiMode = "simple" | "expert";
@@ -1577,6 +1604,12 @@ function App() {
   const handleSendRef = useRef<(overrideMessage?: string, fromVoice?: boolean) => Promise<void>>(() => Promise.resolve());
   /** Dernière tâche chat : seule elle met à jour la bulle assistant (stream + réponse finale). */
   const lastChatTaskIdRef = useRef<string | null>(null);
+  /** Active session id for filtering stream/poll updates when multiple chat threads exist. */
+  const sessionIdRef = useRef<string | null>(null);
+  /** task_id → session_id at send time (multi-thread). */
+  const taskIdToSessionIdRef = useRef<Record<string, string>>({});
+  /** After /newsession, next POST uses new_session: true. */
+  const pendingNewSessionAfterSlashRef = useRef(false);
   const chatMapByTaskIdRef = useRef<Record<string, ChatMapVisual>>({});
   const ackTextByTaskRef = useRef<Record<string, string>>({});
   const [humanInputFreeText, setHumanInputFreeText] = useState("");
@@ -1795,6 +1828,7 @@ function App() {
       return null;
     }
   });
+  const [chatThreads, setChatThreads] = useState<ChatThreadEntry[]>(() => loadChatThreadsInitial());
   const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string }>>([]);
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
@@ -2206,6 +2240,138 @@ function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(AKASHA_CHAT_THREADS_KEY, JSON.stringify(chatThreads));
+    } catch {
+      /* ignore */
+    }
+  }, [chatThreads]);
+
+  useEffect(() => {
+    const sid = sessionId?.trim();
+    if (!sid) return;
+    setChatThreads((prev) => {
+      if (prev.some((x) => x.id === sid)) return prev;
+      const now = new Date().toISOString();
+      return [{ id: sid, title: "", createdAt: now, updatedAt: now }, ...prev];
+    });
+  }, [sessionId]);
+
+  const hydrateChatMessagesForSession = useCallback(async (sid: string) => {
+    try {
+      const data = await invoke<{ session_id?: string; turns?: Array<{ role: string; content: string }> }>(
+        "get_memory_short_term",
+        { sessionId: sid, port: DAEMON_PORT }
+      );
+      const resolved = data?.session_id ?? sid;
+      const turns = data?.turns ?? [];
+      if (turns.length === 0) {
+        setMessages([]);
+        return;
+      }
+      const rows = turns.map((turn) => ({
+        role: (turn.role === "user" ? "user" : turn.role === "assistant" ? "assistant" : "system") as "user" | "assistant" | "system",
+        text: turn.content,
+      }));
+      setMessages(
+        rows.map((m) => {
+          if (m.role !== "assistant") return m;
+          const mapVisual =
+            extractChatMapVisualFromAssistantText(m.text) ?? tryLoadCachedChatMapVisual(resolved, m.text);
+          return mapVisual ? { ...m, mapVisual } : m;
+        }),
+      );
+    } catch {
+      setMessages([]);
+    }
+  }, []);
+
+  const chatThreadLabel = useCallback(
+    (th: ChatThreadEntry) => {
+      if (th.pendingTitle) return t("chat.thread_new");
+      if (th.title.trim()) return th.title;
+      return t("chat.thread_default");
+    },
+    [t],
+  );
+
+  const createChatThread = useCallback(() => {
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    setChatThreads((prev) => [{ id, title: "", createdAt: now, updatedAt: now, pendingTitle: true }, ...prev]);
+    setSessionId(id);
+    sessionIdRef.current = id;
+    try {
+      localStorage.setItem(AKASHA_SESSION_ID_KEY, id);
+    } catch {
+      /* ignore */
+    }
+    setMessages([]);
+    lastChatTaskIdRef.current = null;
+  }, []);
+
+  const selectChatThread = useCallback(
+    async (id: string) => {
+      if (id === sessionIdRef.current) return;
+      setSessionId(id);
+      sessionIdRef.current = id;
+      try {
+        localStorage.setItem(AKASHA_SESSION_ID_KEY, id);
+      } catch {
+        /* ignore */
+      }
+      await hydrateChatMessagesForSession(id);
+    },
+    [hydrateChatMessagesForSession],
+  );
+
+  const deleteChatThread = useCallback(
+    async (id: string) => {
+      if (!window.confirm(t("chat.thread_delete_confirm"))) return;
+      try {
+        await invoke("delete_memory_session", { sessionId: id, port: DAEMON_PORT });
+      } catch (e) {
+        console.error(e);
+      }
+      let nextList: ChatThreadEntry[] = [];
+      setChatThreads((prev) => {
+        nextList = prev.filter((x) => x.id !== id);
+        return nextList;
+      });
+      const active = sessionIdRef.current;
+      if (id !== active) return;
+      const fallback = nextList[0]?.id ?? null;
+      if (fallback) {
+        setSessionId(fallback);
+        sessionIdRef.current = fallback;
+        try {
+          localStorage.setItem(AKASHA_SESSION_ID_KEY, fallback);
+        } catch {
+          /* ignore */
+        }
+        await hydrateChatMessagesForSession(fallback);
+      } else {
+        const nid = crypto.randomUUID();
+        const now = new Date().toISOString();
+        setChatThreads([{ id: nid, title: "", createdAt: now, updatedAt: now, pendingTitle: true }]);
+        setSessionId(nid);
+        sessionIdRef.current = nid;
+        try {
+          localStorage.setItem(AKASHA_SESSION_ID_KEY, nid);
+        } catch {
+          /* ignore */
+        }
+        setMessages([]);
+      }
+    },
+    [t, hydrateChatMessagesForSession],
+  );
 
   // Apply theme to document (for CSS variables)
   useEffect(() => {
@@ -2926,7 +3092,9 @@ function App() {
   }, [tab, fetchTasksList]);
 
   const applyChatStreamProgress = useCallback((taskId: string, msg: string) => {
-    if (!taskId || taskId !== lastChatTaskIdRef.current) return;
+    if (!taskId) return;
+    const sidForTask = taskIdToSessionIdRef.current[taskId];
+    if (!sidForTask || sidForTask !== sessionIdRef.current) return;
     if (!msg.trim()) return;
     if (isChatStreamToolPhase(msg)) {
       setMessages((prev) => {
@@ -3611,7 +3779,7 @@ function App() {
         try {
           const ack = await invoke<{ message?: string; task_id?: string }>("send_message_ack", {
             message: msg,
-            sessionId: sessionId,
+            session_id: sessionId,
             port: DAEMON_PORT,
           });
           return (ack?.message ?? "Tâche créée.") + (ack?.task_id ? ` Task #${ack.task_id.slice(-8)}` : "");
@@ -4009,6 +4177,7 @@ function App() {
     if (userMessage.startsWith("/")) {
       const cmdLower = userMessage.replace(/^\//, "").trim().toLowerCase().split(/\s+/)[0] ?? "";
       if (cmdLower === "newsession" || cmdLower === "nouvelle" || (cmdLower === "session" && userMessage.toLowerCase().includes("nouvelle"))) {
+        pendingNewSessionAfterSlashRef.current = true;
         setSessionId(null);
       }
       setLoading(true);
@@ -4030,23 +4199,69 @@ function App() {
     setAttachments([]);
     setLoading(true);
     try {
+      const useNewSession = pendingNewSessionAfterSlashRef.current;
+      if (useNewSession) pendingNewSessionAfterSlashRef.current = false;
+      const sessionAtSend = sessionId;
       const ack = await invoke<{ task_id: string; session_id: string; message: string }>("send_message_ack", {
         message: userMessage,
         session_id: sessionId,
         attachments: attachmentsPayload,
+        new_session: useNewSession ? true : undefined,
         port: DAEMON_PORT,
       });
       setLoading(false);
       if (ack?.session_id) {
         setSessionId(ack.session_id);
+        sessionIdRef.current = ack.session_id;
         try {
           localStorage.setItem(AKASHA_SESSION_ID_KEY, ack.session_id);
         } catch {
           /* ignore */
         }
       }
+      if (useNewSession && ack?.session_id) {
+        const sid = ack.session_id;
+        setChatThreads((prev) => {
+          if (prev.some((x) => x.id === sid)) {
+            return prev.map((x) => (x.id === sid ? { ...x, pendingTitle: true } : x));
+          }
+          const now = new Date().toISOString();
+          return [{ id: sid, title: "", createdAt: now, updatedAt: now, pendingTitle: true }, ...prev];
+        });
+      }
+      if (ack?.session_id && ack.task_id) {
+        const sidT = ack.session_id;
+        setChatThreads((prev) => {
+          const now = new Date().toISOString();
+          const th = prev.find((x) => x.id === sidT);
+          if (th?.pendingTitle) {
+            void (async () => {
+              try {
+                const r = await invoke<{ title?: string }>("suggest_thread_title", {
+                  message: userMessage,
+                  port: DAEMON_PORT,
+                });
+                const title = (r?.title ?? "").trim();
+                if (!title) return;
+                setChatThreads((p) =>
+                  p.map((x) =>
+                    x.id === sidT ? { ...x, title, pendingTitle: false, updatedAt: new Date().toISOString() } : x,
+                  ),
+                );
+              } catch {
+                /* ignore */
+              }
+            })();
+          }
+          return prev.map((x) => (x.id === sidT ? { ...x, updatedAt: now } : x));
+        });
+      }
       const ackText = ack?.message ?? "Request received. You can follow progress in the Tasks tab.";
       if (ack?.task_id) {
+        const sidResolved = (ack.session_id || sessionAtSend || "").trim();
+        if (sidResolved) {
+          taskIdToSessionIdRef.current[ack.task_id] = sidResolved;
+        }
         lastChatTaskIdRef.current = ack.task_id;
         ackTextByTaskRef.current[ack.task_id] = ackText;
         setMessages((prev) => [...prev, { role: "assistant", text: ackText, taskId: ack.task_id }]);
@@ -4112,7 +4327,8 @@ function App() {
                 chatMapByTaskIdRef.current[taskId] = chatMapVis;
                 setChatMapByTaskId((prev) => (prev[taskId] === chatMapVis ? prev : { ...prev, [taskId]: chatMapVis }));
               }
-              if (chatMapVis && taskId === lastChatTaskIdRef.current) {
+              const taskForActiveChat = taskIdToSessionIdRef.current[taskId] === sessionIdRef.current;
+              if (chatMapVis && taskForActiveChat) {
                 setMessages((prev) => {
                   const idx = findLastChatAssistantIndex(prev, taskId);
                   if (idx < 0) return prev;
@@ -4155,7 +4371,7 @@ function App() {
                   chatMapByTaskIdRef.current[taskId] = doneMapVis;
                   setChatMapByTaskId((prev) => (prev[taskId] === doneMapVis ? prev : { ...prev, [taskId]: doneMapVis }));
                 }
-                if (taskId === lastChatTaskIdRef.current) {
+                if (taskForActiveChat) {
                   let storedMapVisual: ChatMapVisual | undefined;
                   setMessages((prev) => {
                     const idx = findLastChatAssistantIndex(prev, taskId);
@@ -4209,7 +4425,7 @@ function App() {
                 humanInputAutoOpenedRef.current.delete(taskId);
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 replyWithTtsRef.current = false;
-                if (taskId === lastChatTaskIdRef.current) {
+                if (taskForActiveChat) {
                   setMessages((prev) => {
                     const idx = findLastChatAssistantIndex(prev, taskId);
                     if (idx >= 0) {
@@ -4258,7 +4474,7 @@ function App() {
             delete next[taskId];
             return next;
           });
-          if (taskId === lastChatTaskIdRef.current) {
+          if (taskIdToSessionIdRef.current[taskId] === sessionIdRef.current) {
             setMessages((prev) => {
               const idx = findLastChatAssistantIndex(prev, taskId);
               if (idx >= 0) {
@@ -8034,19 +8250,73 @@ function App() {
         </div>
 
         {rightSidebarOpen && (
-          <aside className="sidebar-right" aria-label={t("sidebar.tasks_panel")}>
+          <aside className="sidebar-right" aria-label={tab === "chat" ? t("sidebar.threads_panel") : t("sidebar.tasks_panel")}>
             <div className="sidebar-right-header">
-              <h3 className="sidebar-right-title">{t("tabs.tasks")}</h3>
+              <h3 className="sidebar-right-title">{tab === "chat" ? t("chat.threads_title") : t("tabs.tasks")}</h3>
               <button
                 type="button"
                 className="sidebar-right-close"
                 onClick={() => setRightSidebarOpen(false)}
-                aria-label={t("sidebar.hide_tasks")}
+                aria-label={tab === "chat" ? t("sidebar.hide_tasks") : t("sidebar.hide_tasks")}
               >
                 ×
               </button>
             </div>
             <div className="sidebar-right-content">
+              {tab === "chat" ? (
+                <>
+                  <button type="button" className="refresh-btn sidebar-right-refresh" onClick={createChatThread}>
+                    {t("chat.new_thread")}
+                  </button>
+                  {[...chatThreads].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).length === 0 ? (
+                    <p className="empty-state">{t("chat.threads_empty")}</p>
+                  ) : (
+                    <ul className="sidebar-right-task-list" role="list">
+                      {[...chatThreads]
+                        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+                        .map((th) => {
+                          const active = sessionId === th.id;
+                          return (
+                            <li key={th.id} className={"sidebar-right-task-card" + (active ? " selected" : "")}>
+                              <div
+                                className="sidebar-right-task-card-inner"
+                                role="button"
+                                tabIndex={0}
+                                onClick={() => void selectChatThread(th.id)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault();
+                                    void selectChatThread(th.id);
+                                  }
+                                }}
+                              >
+                                <div className="sidebar-right-task-card-head">
+                                  <span className="sidebar-right-task-card-title" title={chatThreadLabel(th)}>
+                                    {chatThreadLabel(th)}
+                                  </span>
+                                </div>
+                                <div className="sidebar-right-task-meta">
+                                  <span className="sidebar-right-task-relative">{formatRelativeTimeLabel(th.updatedAt, locale)}</span>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                className="sidebar-right-task-view-btn"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void deleteChatThread(th.id);
+                                }}
+                              >
+                                {t("chat.delete_thread")}
+                              </button>
+                            </li>
+                          );
+                        })}
+                    </ul>
+                  )}
+                </>
+              ) : (
+                <>
               <button
                 type="button"
                 className="refresh-btn sidebar-right-refresh"
@@ -8221,6 +8491,8 @@ function App() {
                     );
                   })}
                 </ul>
+              )}
+                </>
               )}
             </div>
           </aside>
