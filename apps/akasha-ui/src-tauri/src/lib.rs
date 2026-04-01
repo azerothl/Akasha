@@ -83,6 +83,7 @@ async fn send_message_ack(
     message: String,
     session_id: Option<String>,
     attachments: Option<Vec<AttachmentPayload>>,
+    new_session: Option<bool>,
     port: Option<u16>,
 ) -> Result<SendMessageAckResult, String> {
     let port = port.unwrap_or(DAEMON_PORT);
@@ -94,9 +95,13 @@ async fn send_message_ack(
         Some(a) if !a.is_empty() && message.trim().is_empty() => "(Pièce(s) jointe(s))".to_string(),
         _ => message,
     };
-    let mut body = match session_id.as_deref() {
-        Some(s) if !s.is_empty() => serde_json::json!({ "message": message_for_body, "session_id": s }),
-        _ => serde_json::json!({ "message": message_for_body }),
+    let mut body = if new_session == Some(true) {
+        serde_json::json!({ "message": message_for_body, "new_session": true })
+    } else {
+        match session_id.as_deref() {
+            Some(s) if !s.is_empty() => serde_json::json!({ "message": message_for_body, "session_id": s }),
+            _ => serde_json::json!({ "message": message_for_body }),
+        }
     };
     if let Some(ref atts) = attachments {
         if !atts.is_empty() {
@@ -989,6 +994,47 @@ async fn get_memory_short_term(session_id: Option<String>, port: Option<u16>) ->
     Ok(json)
 }
 
+/// Delete short-term memory and session state for a session: DELETE /api/memory/session?session_id=...
+#[tauri::command]
+async fn delete_memory_session(session_id: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let sid = session_id.trim();
+    if sid.is_empty() {
+        return Err("missing session_id".to_string());
+    }
+    let url = format!(
+        "{}/api/memory/session?session_id={}",
+        daemon_base_url(port),
+        urlencoding::encode(sid)
+    );
+    let client = http_client();
+    let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Suggest a short chat thread title from the first user message: POST /api/chat/suggest-thread-title
+#[tauri::command]
+async fn suggest_thread_title(message: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/chat/suggest-thread-title", daemon_base_url(port));
+    let client = http_client();
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({ "message": message }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// Memory long-term: GET /api/memory/long-term?limit=200&offset=0 (paginated)
 #[tauri::command]
 async fn get_memory_long_term(limit: Option<u32>, offset: Option<u32>, port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -1453,6 +1499,8 @@ pub fn run() {
             get_calendar_events,
             get_task_runs,
             get_memory_short_term,
+            delete_memory_session,
+            suggest_thread_title,
             get_memory_long_term,
             get_memory_search,
             delete_memory_long_term,
