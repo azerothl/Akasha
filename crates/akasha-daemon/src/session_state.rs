@@ -61,6 +61,16 @@ pub fn save(data_dir: &Path, session_id: &str, state: &SessionState) -> anyhow::
     Ok(())
 }
 
+/// Delete persisted session state file for this session, if it exists.
+pub fn delete(data_dir: &Path, session_id: &str) -> std::io::Result<()> {
+    let p = state_path(data_dir, session_id);
+    match std::fs::remove_file(&p) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 pub fn merge(data_dir: &Path, session_id: &str, f: impl FnOnce(&mut SessionState)) -> anyhow::Result<SessionState> {
     let mut st = load(data_dir, session_id);
     // Retroactively purge facts that are known confusion/noise patterns (agent redirects, timeout

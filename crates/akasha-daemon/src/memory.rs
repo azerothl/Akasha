@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 
 /// Validate that `session_id` is safe to use as a filename component.
 /// Allows only alphanumeric characters, `-` and `_` to prevent path traversal.
-fn is_safe_session_id(session_id: &str) -> bool {
+pub fn is_safe_session_id(session_id: &str) -> bool {
     !session_id.is_empty()
         && session_id
             .chars()
@@ -232,5 +232,26 @@ impl ShortTermStore {
         let path = persistence_dir.join(format!("{}.json", session_id));
         let data = std::fs::read_to_string(&path).ok()?;
         serde_json::from_str(&data).ok()
+    }
+
+    /// Remove session from memory, compaction tracking, and delete persisted JSON if any.
+    /// Returns `false` if `session_id` is not safe for storage.
+    pub async fn delete_session(&self, session_id: &str) -> bool {
+        if !is_safe_session_id(session_id) {
+            return false;
+        }
+        {
+            let mut g = self.sessions.write().await;
+            g.remove(session_id);
+        }
+        {
+            let mut g = self.compaction_count.write().await;
+            g.remove(session_id);
+        }
+        if let Some(ref dir) = self.persistence_dir {
+            let path = dir.join(format!("{}.json", session_id));
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        true
     }
 }

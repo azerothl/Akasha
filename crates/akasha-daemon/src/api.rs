@@ -7885,6 +7885,39 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
+    // DELETE /api/memory/session?session_id=... — remove short-term turns and session_state for this session
+    if method == "DELETE" && path.starts_with("/api/memory/session") {
+        let session_id = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| {
+                q.split('&').find_map(|p| {
+                    if let Some(v) = p.strip_prefix("session_id=") {
+                        Some(
+                            urlencoding::decode(v)
+                                .map(|c| c.into_owned())
+                                .unwrap_or_else(|_| v.to_string()),
+                        )
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or_default();
+        if session_id.is_empty() || !crate::memory::is_safe_session_id(&session_id) {
+            return json_response("400 Bad Request", r#"{"error":"invalid or missing session_id"}"#);
+        }
+        if let Some(ref st) = short_term {
+            st.delete_session(&session_id).await;
+        } else {
+            let path = data_dir.join("short_term").join(format!("{}.json", session_id));
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        let _ = crate::session_state::delete(data_dir, &session_id);
+        let body_json = serde_json::json!({ "ok": true, "session_id": session_id });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
     // GET /api/memory/search?q=...&top_k=... — semantic search in long-term memory
     if method == "GET" && path.starts_with("/api/memory/search") {
         let (q, top_k) = path
