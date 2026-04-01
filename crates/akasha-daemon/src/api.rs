@@ -938,12 +938,18 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (création/remplacement complet). Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). TOUJOURS utiliser le chemin EXACT fourni par l'utilisateur. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace plutôt que de tout réécrire. Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel."),
     ("search_files", "search_files <dir> <pattern> [--no-ignore] — chercher des fichiers (glob) sous un répertoire ; par défaut respecte .gitignore et ignore node_modules/target/dist/… ; --no-ignore pour tout parcourir."),
     ("grep_content", "grep_content <dir> <pattern> [file_glob] [--regex|-r] [--no-ignore] — chercher dans les fichiers ; défaut = sous-chaîne insensible à la casse + .gitignore ; --regex = motif regex insensible à la casse ; --no-ignore = ignorer .gitignore."),
-    ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
-    ("run_terminal", "run_terminal <cmd> [args...] — exécuter une commande (même que run_command)"),
-    ("run_command_background", "run_command_background <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
+    ("run_command", "run_command [--cwd <path>] <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique). Optionnel : --cwd workspace:/ ou chemin disque (allowed_read_paths). Si tools_policy run_command_default_cwd_workspace: true, cwd par défaut = workspace de la tâche."),
+    ("run_terminal", "run_terminal [--cwd <path>] <cmd> [args...] — exécuter une commande (même que run_command)"),
+    ("run_command_background", "run_command_background [--cwd <path>] <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
     ("terminal_session", "terminal_session — session PTY interactive (prévue ultérieurement, spec 43). Pour l’instant utiliser run_command / run_terminal pour une commande, run_command_background + process pour suivi."),
     ("process", "process list | process poll <session_id> | process kill <session_id> — lister, consulter ou arrêter des commandes en arrière-plan"),
-    ("file_diff", "file_diff <path_a> <path_b> — diff texte entre deux fichiers"),
+    ("file_diff", "file_diff <path_a> <path_b> — diff texte entre deux fichiers (ligne à ligne)"),
+    ("diff_unified", "diff_unified <path_a> <path_b> [context_lines] — diff unifié style patch (défaut context_lines=3) ; chemins réels ou workspace:/"),
+    ("dir_compare", "dir_compare <dir_a> <dir_b> [max_depth] [max_files] — comparer deux arborescences (fichiers uniquement dans A/B, contenu différent) ; profondeur et nombre de fichiers bornés (défaut 8 et 100)"),
+    ("git_status", "git_status <repo> — git status --porcelain=v1 -b dans le dépôt (nécessite git dans allowed_commands)"),
+    ("git_diff", "git_diff <repo> [--staged] [pathspec...] — git diff ; pathspecs relatifs au dépôt, validés sous la racine"),
+    ("git_log", "git_log <repo> [n] — git log -n N --oneline (N entre 1 et 100, défaut 20)"),
+    ("git_rev_parse", "git_rev_parse <repo> — git rev-parse HEAD"),
     ("edit_file", "edit_file <path> <start_line> <end_line> <new_content> — remplacer les lignes start..end par new_content (lignes 1-based)"),
     ("apply_patch", "apply_patch <path> <patch_content> — appliquer un patch unifié (contenu du patch après le path)"),
     ("search_replace", "search_replace <path> <search> | <replace> — remplacer toutes les occurrences de search par replace dans le fichier (séparateur \" | \")"),
@@ -1662,6 +1668,8 @@ fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
             "generate code", "génère le code", "code python", "python script",
             "un programme qui", "a program that", "fonction qui", "function that",
             "snippet", "extrait de code", "piece of code", "exemple de code",
+            "analyse ce projet", "analyze this project", "analyse le projet", "analyze the project",
+            "review the codebase", "auditer le code", "code review", "dépôt git", "depot git",
         ]
         .iter()
         .any(|k| m.contains(k)),
@@ -2252,6 +2260,9 @@ const IMAGE_GENERATION_REMINDER: &str = "\n[Reminder: request to \"generate an i
 /// Reminder when the user asks for GitHub (private repo / API) and mentions the vault (e.g. GITHUB_TOKEN).
 const GITHUB_VAULT_REMINDER: &str = "\n[Reminder GitHub + vault: you MUST run the request yourself via TOOL: run_command. Exact format: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (or gh repo view owner/repo). FORBIDDEN: telling the user to do GITHUB_TOKEN=VAULT:... or export GITHUB_TOKEN=... or to put the token in plain text — you must emit the TOOL: line so the system injects the secret. Do not reply \"I did not find\" without having called run_command with VAULT:GITHUB_TOKEN=GITHUB_TOKEN.]\n\n";
 
+/// Injected when the message looks like code/script work: prefer workspace paths, git/diff tools, and explicit cwd for commands.
+const CODE_DEV_SANDBOX_REMINDER: &str = "\n[Reminder — code / project work: use workspace:/ paths for files in this task when no absolute path is given. For Git operations prefer TOOL: git_status, git_diff, git_log, git_rev_parse on the repo path (e.g. workspace:/ or an allowed folder) instead of raw git via run_command, unless you need a subcommand not covered. For file comparison use diff_unified or file_diff; for two trees use dir_compare. For build/test commands use TOOL: run_command --cwd workspace:/ cargo test (or npm test, etc.) so the command runs in the project root; or set run_command_default_cwd_workspace: true in tools_policy.yaml. For isolated execution with a toolchain image, use run_in_container when policy allows.]\n\n";
+
 /// Application context injected into the prompt: the agent knows it runs inside Akasha and can talk about it.
 const APP_CONTEXT: &str = concat!(
     "[Akasha context] You are the assistant embedded in Akasha. Akasha is the application you are currently running in. ",
@@ -2292,7 +2303,7 @@ const APP_CONTEXT: &str = concat!(
 pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
     match agent_type {
         "conversation" => None,
-        "code" => Some("You are the code generation agent. Produce correct, readable code. Prefer run_command or write_file when the user asks to create or run code. Do not invent APIs; use read_file when needed to match existing code. When the user asks to *perform* an action (take a photo, run a command, search the web, save a file), use the appropriate TOOL; do not generate a script. Use code only when the user explicitly asks to *write* or *generate* code or a script. Before editing any file, read it to understand its conventions, imports, and style; mimic existing patterns. Never assume a library is available — verify it is already declared in the project dependency file (Cargo.toml, package.json, etc.). When tests fail, never modify the tests themselves; fix the code under test. If the same test still fails after three attempts, stop and ask the user for guidance."),
+        "code" => Some("You are the code generation agent. Produce correct, readable code. Prefer write_file and workspace:/ paths for new files. For Git inspection use git_status, git_diff, git_log, git_rev_parse on the repo path when available; use diff_unified or dir_compare to compare files or trees. Run builds and tests with run_command --cwd workspace:/ (or the project root). Use run_in_container when policy allows and you need an isolated toolchain. Do not invent APIs; use read_file when needed to match existing code. When the user asks to *perform* an action (take a photo, search the web, save a file), use the appropriate TOOL; do not generate a script for that. Use code only when the user explicitly asks to *write* or *generate* code or a script. Before editing any file, read it to understand its conventions, imports, and style; mimic existing patterns. Never assume a library is available — verify it is already declared in the project dependency file (Cargo.toml, package.json, etc.). When tests fail, never modify the tests themselves; fix the code under test. If the same test still fails after three attempts, stop and ask the user for guidance."),
         "search" => Some("You are the search agent. Use web_search to find external information (weather, news, facts). Synthesize results and cite sources. Do not claim information you have not retrieved via web_search when it is available."),
         "financial" => Some("You are the financial specialist. Help with budgets, cost analysis, financial reports, numeric reasoning. Be precise with figures and units. Do not invent data; state what is missing if needed."),
         "documentalist" => Some("You are the documentalist. Transform a pile of files into exploitable data. Answer from the user's document base (RAG). Prioritize [User documents] and [Long-term memory]. Use memory_search when relevant. Quote or summarize from excerpts; if insufficient, say so and suggest adding documents. Produce structured summaries when asked."),
@@ -2673,11 +2684,12 @@ fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String>)> {
 }
 
 /// Parse run_command args: leading VAULT:vault_key=ENV_VAR entries are extracted;
-/// the first non-VAULT arg is the command, the rest are command arguments.
-/// Returns (vault_specs: (vault_key, env_var), command, cmd_args).
-fn parse_run_command_args(args: &[String]) -> (Vec<(String, String)>, String, Vec<String>) {
+/// optional `--cwd <path>` (after VAULT lines) sets the working directory;
+/// the next token is the command, the rest are command arguments.
+/// Returns (vault_specs, cwd_flag, command, cmd_args).
+fn parse_run_command_args(args: &[String]) -> (Vec<(String, String)>, Option<String>, String, Vec<String>) {
     let mut vault_specs = Vec::new();
-    let mut rest = Vec::new();
+    let mut rest: Vec<String> = Vec::new();
     for arg in args {
         if let Some(s) = arg.strip_prefix("VAULT:") {
             if let Some((vault_key, env_var)) = s.split_once('=') {
@@ -2687,11 +2699,54 @@ fn parse_run_command_args(args: &[String]) -> (Vec<(String, String)>, String, Ve
         }
         rest.push(arg.clone());
     }
+    let mut cwd_flag: Option<String> = None;
+    if rest.len() >= 2 && rest[0] == "--cwd" {
+        cwd_flag = Some(rest[1].clone());
+        rest.drain(..2);
+    }
     let (command, cmd_args) = rest
         .split_first()
         .map(|(c, a)| (c.clone(), a.to_vec()))
         .unwrap_or_else(|| (String::new(), Vec::new()));
-    (vault_specs, command, cmd_args)
+    (vault_specs, cwd_flag, command, cmd_args)
+}
+
+/// Resolve working directory for `run_command` / `run_terminal` / `run_command_background`.
+/// Returns `None` for legacy behavior (daemon process cwd). Returns `Some(path)` when `--cwd` was set
+/// or `run_command_default_cwd_workspace` applies.
+fn resolve_run_command_working_dir(
+    cwd_flag: Option<&str>,
+    workspace_root: Option<&std::path::Path>,
+    policy: &akasha_tools::ToolsPolicy,
+) -> Result<Option<std::path::PathBuf>, String> {
+    if let Some(raw) = cwd_flag {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err("--cwd requires a non-empty path".to_string());
+        }
+        let p = resolve_tool_disk_path(raw, workspace_root);
+        let p = strip_verbatim_prefix(p);
+        let meta = std::fs::metadata(&p).map_err(|e| format!("cwd {}: {}", p.display(), e))?;
+        if !meta.is_dir() {
+            return Err(format!("--cwd is not a directory: {}", p.display()));
+        }
+        if !policy.can_read(&p) {
+            return Err(format!(
+                "cwd not allowed by policy (allowed_read_paths): {}",
+                p.display()
+            ));
+        }
+        return Ok(Some(p));
+    }
+    if policy.run_command_default_cwd_workspace {
+        if let Some(root) = workspace_root {
+            let root_pb = strip_verbatim_prefix(root.to_path_buf());
+            if root_pb.is_dir() && policy.can_read(&root_pb) {
+                return Ok(Some(root_pb));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Open a URL in the system default browser. Only http and https URLs are allowed.
@@ -3020,7 +3075,12 @@ async fn execute_tool_call(
             }
         }
         "run_command" => {
-            let (vault_specs, cmd, cmd_args) = parse_run_command_args(args);
+            let (vault_specs, cwd_flag, cmd, cmd_args) = parse_run_command_args(args);
+            let cwd_resolved = match resolve_run_command_working_dir(cwd_flag.as_deref(), workspace_root, &executor.policy) {
+                Ok(c) => c,
+                Err(e) => return (false, format!("[run_command] {}", e), None),
+            };
+            let cwd_ref = cwd_resolved.as_deref();
             let extra_env = if vault_specs.is_empty() {
                 None
             } else {
@@ -3062,12 +3122,21 @@ async fn execute_tool_call(
                 }
             };
             let env_ref = extra_env.as_deref();
-            match executor.run_command(&cmd, &cmd_args, None, env_ref).await {
+            match executor.run_command(&cmd, &cmd_args, cwd_ref, env_ref).await {
                 Ok((out, res)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let stderr = String::from_utf8_lossy(&out.stderr);
+                    let cwd_note = cwd_ref
+                        .map(|p| format!(" cwd={}", p.display()))
+                        .unwrap_or_default();
                     let msg = if res.success {
-                        format!("[run_command {}] stdout: {} stderr: {}", cmd, stdout.trim(), stderr.trim())
+                        format!(
+                            "[run_command {}{}] stdout: {} stderr: {}",
+                            cmd,
+                            cwd_note,
+                            stdout.trim(),
+                            stderr.trim()
+                        )
                     } else {
                         format!("[run_command] {} stderr: {}", res.summary, stderr.trim())
                     };
@@ -3077,8 +3146,13 @@ async fn execute_tool_call(
             }
         }
         "run_terminal" => {
-            let (_vault_specs, cmd, cmd_args) = parse_run_command_args(args);
-            match executor.run_command(&cmd, &cmd_args, None, None).await {
+            let (_vault_specs, cwd_flag, cmd, cmd_args) = parse_run_command_args(args);
+            let cwd_resolved = match resolve_run_command_working_dir(cwd_flag.as_deref(), workspace_root, &executor.policy) {
+                Ok(c) => c,
+                Err(e) => return (false, format!("[run_terminal] {}", e), None),
+            };
+            let cwd_ref = cwd_resolved.as_deref();
+            match executor.run_command(&cmd, &cmd_args, cwd_ref, None).await {
                 Ok((out, res)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -3093,7 +3167,11 @@ async fn execute_tool_call(
             }
         }
         "run_command_background" => {
-            let (_vault_specs, cmd, cmd_args) = parse_run_command_args(args);
+            let (_vault_specs, cwd_flag, cmd, cmd_args) = parse_run_command_args(args);
+            let cwd_resolved = match resolve_run_command_working_dir(cwd_flag.as_deref(), workspace_root, &executor.policy) {
+                Ok(c) => c,
+                Err(e) => return (false, format!("[run_command_background] {}", e), None),
+            };
             let cmd_display = format!("{} {}", cmd, cmd_args.join(" "));
             match process_registry {
                 Some(reg) => {
@@ -3103,7 +3181,8 @@ async fn execute_tool_call(
                     let cell_clone = cell.clone();
                     let reg_clone = reg.clone();
                     let task = tokio::spawn(async move {
-                        let result = exec.run_command(&cmd, &cmd_args, None, None).await;
+                        let cwd_ref = cwd_resolved.as_deref();
+                        let result = exec.run_command(&cmd, &cmd_args, cwd_ref, None).await;
                         *cell_clone.write().await = Some(result);
                         // Auto-cleanup after a TTL to prevent leaking sessions the client never polls.
                         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
@@ -3842,6 +3921,139 @@ async fn execute_tool_call(
                     (res.success, msg, None)
                 }
                 Err(e) => (false, format!("[file_diff] error: {}", e), None),
+            }
+        }
+        "diff_unified" => {
+            let path_a_str = args.get(0).map(String::as_str).unwrap_or("");
+            let path_b_str = args.get(1).map(String::as_str).unwrap_or("");
+            if path_a_str.is_empty() || path_b_str.is_empty() {
+                return (false, "[diff_unified] usage: diff_unified <path_a> <path_b> [context_lines]".to_string(), None);
+            }
+            let ctx = args
+                .get(2)
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(3);
+            let disk_a = resolve_tool_disk_path(path_a_str, workspace_root);
+            let disk_b = resolve_tool_disk_path(path_b_str, workspace_root);
+            match executor.file_diff_unified(&disk_a, &disk_b, ctx).await {
+                Ok((diff, res)) => {
+                    let msg = if res.success {
+                        let preview = if diff.len() <= 800 {
+                            diff.as_str()
+                        } else {
+                            &diff[..diff.floor_char_boundary(800)]
+                        };
+                        format!("[diff_unified] {} — {}", res.summary, preview)
+                    } else {
+                        format!("[diff_unified] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[diff_unified] error: {}", e), None),
+            }
+        }
+        "dir_compare" => {
+            let dir_a_str = args.get(0).map(String::as_str).unwrap_or("");
+            let dir_b_str = args.get(1).map(String::as_str).unwrap_or("");
+            if dir_a_str.is_empty() || dir_b_str.is_empty() {
+                return (false, "[dir_compare] usage: dir_compare <dir_a> <dir_b> [max_depth] [max_files]".to_string(), None);
+            }
+            let max_depth = args
+                .get(2)
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(8);
+            let max_files = args
+                .get(3)
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(100);
+            let disk_a = resolve_tool_disk_path(dir_a_str, workspace_root);
+            let disk_b = resolve_tool_disk_path(dir_b_str, workspace_root);
+            match executor
+                .compare_dirs(&disk_a, &disk_b, max_depth, max_files)
+                .await
+            {
+                Ok((report, res)) => {
+                    let msg = if res.success {
+                        let preview = if report.len() <= 1200 {
+                            report.as_str()
+                        } else {
+                            &report[..report.floor_char_boundary(1200)]
+                        };
+                        format!("[dir_compare] {} — {}", res.summary, preview)
+                    } else {
+                        format!("[dir_compare] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[dir_compare] error: {}", e), None),
+            }
+        }
+        "git_status" => {
+            let repo_str = args.get(0).map(String::as_str).unwrap_or("");
+            if repo_str.is_empty() {
+                return (false, "[git_status] usage: git_status <repo>".to_string(), None);
+            }
+            let disk = resolve_tool_disk_path(repo_str, workspace_root);
+            match executor.git_status(&disk).await {
+                Ok((out, res)) => {
+                    let msg = if res.success {
+                        format!("[git_status] {} — {}", res.summary, out.trim())
+                    } else {
+                        format!("[git_status] {} — {}", res.summary, out.trim())
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[git_status] error: {}", e), None),
+            }
+        }
+        "git_diff" => {
+            let repo_str = args.get(0).map(String::as_str).unwrap_or("");
+            if repo_str.is_empty() {
+                return (false, "[git_diff] usage: git_diff <repo> [--staged] [pathspec...]".to_string(), None);
+            }
+            let disk = resolve_tool_disk_path(repo_str, workspace_root);
+            let mut staged = false;
+            let mut rest_start = 1usize;
+            if args.get(1).map(|s| s.as_str()) == Some("--staged") {
+                staged = true;
+                rest_start = 2;
+            }
+            let pathspecs: Vec<String> = args.get(rest_start..).map(|s| s.to_vec()).unwrap_or_default();
+            match executor.git_diff(&disk, staged, &pathspecs).await {
+                Ok((out, res)) => {
+                    let msg = format!("[git_diff] {} — {}", res.summary, out.trim());
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[git_diff] error: {}", e), None),
+            }
+        }
+        "git_log" => {
+            let repo_str = args.get(0).map(String::as_str).unwrap_or("");
+            if repo_str.is_empty() {
+                return (false, "[git_log] usage: git_log <repo> [n]".to_string(), None);
+            }
+            let n = args.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(20);
+            let disk = resolve_tool_disk_path(repo_str, workspace_root);
+            match executor.git_log(&disk, n).await {
+                Ok((out, res)) => {
+                    let msg = format!("[git_log] {} — {}", res.summary, out.trim());
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[git_log] error: {}", e), None),
+            }
+        }
+        "git_rev_parse" => {
+            let repo_str = args.get(0).map(String::as_str).unwrap_or("");
+            if repo_str.is_empty() {
+                return (false, "[git_rev_parse] usage: git_rev_parse <repo>".to_string(), None);
+            }
+            let disk = resolve_tool_disk_path(repo_str, workspace_root);
+            match executor.git_rev_parse_head(&disk).await {
+                Ok((out, res)) => {
+                    let msg = format!("[git_rev_parse] {} — {}", res.summary, out.trim());
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[git_rev_parse] error: {}", e), None),
             }
         }
         "web_fetch" => {
@@ -5201,6 +5413,11 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
+    let code_dev_sandbox_reminder = if intent_flags.code_generation {
+        CODE_DEV_SANDBOX_REMINDER
+    } else {
+        ""
+    };
     // When user clearly wants a photo from camera, prefix the message with an imperative so the model responds with device_invoke directly (no ask_user).
     let user_message = if !device_camera_reminder.is_empty() {
         format!(
@@ -5212,7 +5429,7 @@ pub(crate) async fn run_message_via_llm(
     };
     let mut current_prompt = if user_prefix.trim().is_empty() {
         format!(
-            "{}{}{}{}{}{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
             guardrail_reminder_block,
             write_reminder,
             web_search_reminder,
@@ -5223,11 +5440,12 @@ pub(crate) async fn run_message_via_llm(
             device_camera_reminder,
             image_generation_reminder,
             github_vault_reminder,
+            code_dev_sandbox_reminder,
             user_message
         )
     } else {
         format!(
-            "{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
             user_prefix.trim_end(),
             guardrail_reminder_block,
             write_reminder,
@@ -5239,6 +5457,7 @@ pub(crate) async fn run_message_via_llm(
             device_camera_reminder,
             image_generation_reminder,
             github_vault_reminder,
+            code_dev_sandbox_reminder,
             user_message
         )
     };
@@ -9909,7 +10128,8 @@ mod tests {
         looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
         normalize_tool_path_hint, parse_content_length, parse_device_invoke_params,
         parse_generate_image_tool_args, parse_plugin_reputation_reset_body,
-        parse_skill_install_url, parse_tool_calls, parse_write_file_request,
+        parse_run_command_args, parse_skill_install_url, parse_tool_calls, parse_write_file_request,
+        resolve_run_command_working_dir,
         PluginReputationResetBody,
         response_looks_off_topic_for_small_talk, rewrite_workspace_plan_key_to_lineage_root,
         rewrite_workspace_plan_path_str, small_talk_fast_lane, SessionRecallIntent,
@@ -10607,5 +10827,55 @@ mod tests {
             r.is_none(),
             "HTTP scheme must be rejected (only HTTPS is allowed)"
         );
+    }
+
+    // --- parse_run_command_args / resolve_run_command_working_dir ---
+
+    #[test]
+    fn parse_run_command_args_extracts_cwd_after_vault() {
+        let args = vec![
+            s("VAULT:foo=BAR"),
+            s("--cwd"),
+            s("workspace:/"),
+            s("git"),
+            s("status"),
+        ];
+        let (vault, cwd, cmd, a) = parse_run_command_args(&args);
+        assert_eq!(vault.len(), 1);
+        assert_eq!(cwd.as_deref(), Some("workspace:/"));
+        assert_eq!(cmd, "git");
+        assert_eq!(a, vec![s("status")]);
+    }
+
+    #[test]
+    fn parse_run_command_args_no_cwd() {
+        let args = vec![s("cargo"), s("build")];
+        let (_, cwd, cmd, a) = parse_run_command_args(&args);
+        assert!(cwd.is_none());
+        assert_eq!(cmd, "cargo");
+        assert_eq!(a, vec![s("build")]);
+    }
+
+    #[test]
+    fn resolve_run_command_working_dir_default_off_returns_none() {
+        let mut p = akasha_tools::ToolsPolicy::default();
+        p.run_command_default_cwd_workspace = false;
+        let tmp = tempfile::tempdir().unwrap();
+        p.allowed_read_paths = vec![tmp.path().to_string_lossy().to_string()];
+        let r = resolve_run_command_working_dir(None, Some(tmp.path()), &p).unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn resolve_run_command_working_dir_workspace_when_policy_on() {
+        let mut p = akasha_tools::ToolsPolicy::default();
+        p.run_command_default_cwd_workspace = true;
+        let tmp = tempfile::tempdir().unwrap();
+        p.allowed_read_paths = vec![tmp.path().to_string_lossy().to_string()];
+        let r = resolve_run_command_working_dir(None, Some(tmp.path()), &p).unwrap();
+        let got = r.expect("expected workspace cwd");
+        let exp = std::fs::canonicalize(tmp.path()).unwrap();
+        let got_c = std::fs::canonicalize(&got).unwrap();
+        assert_eq!(got_c, exp);
     }
 }

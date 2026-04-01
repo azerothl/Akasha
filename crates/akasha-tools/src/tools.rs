@@ -2,7 +2,7 @@
 
 use crate::policy::ToolsPolicy;
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Duration;
 
@@ -864,6 +864,403 @@ fn diff_lines(a: &str, b: &str) -> String {
         out.push_str("(no diff)");
     }
     out
+}
+
+const MAX_GIT_OUTPUT_BYTES: usize = 256 * 1024;
+const MAX_DIFF_UNIFIED_BYTES: usize = 256 * 1024;
+
+fn truncate_tool_output(mut s: String, max: usize) -> String {
+    if s.len() <= max {
+        return s;
+    }
+    let cut = s.floor_char_boundary(max.saturating_sub(80));
+    s.truncate(cut);
+    s.push_str("\n... [truncated] ...\n");
+    s
+}
+
+/// Unified diff (read-only, `diff -u` style). Both paths must be allowed for read.
+pub async fn file_diff_unified(
+    path_a: &Path,
+    path_b: &Path,
+    context_lines: usize,
+    policy: &ToolsPolicy,
+) -> Result<(String, ToolResult)> {
+    if !policy.can_read(path_a) || !policy.can_read(path_b) {
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: "diff_unified".to_string(),
+                success: false,
+                summary: "path(s) not allowed by policy".to_string(),
+                detail: Some(format!("{} vs {}", path_a.display(), path_b.display())),
+            },
+        ));
+    }
+    let a = tokio::fs::read_to_string(path_a)
+        .await
+        .with_context(|| path_a.display().to_string())?;
+    let b = tokio::fs::read_to_string(path_b)
+        .await
+        .with_context(|| path_b.display().to_string())?;
+    let ctx = context_lines.min(20);
+    let diff = similar::TextDiff::from_lines(&a, &b);
+    let unified = format!(
+        "{}",
+        diff.unified_diff()
+            .context_radius(ctx)
+            .header(
+                path_a.to_string_lossy().as_ref(),
+                path_b.to_string_lossy().as_ref(),
+            )
+    );
+    let out = truncate_tool_output(unified, MAX_DIFF_UNIFIED_BYTES);
+    let line_count = out.lines().count();
+    Ok((
+        out,
+        ToolResult {
+            tool: "diff_unified".to_string(),
+            success: true,
+            summary: format!(
+                "unified diff {} vs {} ({} lines)",
+                path_a.display(),
+                path_b.display(),
+                line_count
+            ),
+            detail: None,
+        },
+    ))
+}
+
+fn git_pathspecs_under_repo(repo: &Path, specs: &[String]) -> Result<Vec<String>, String> {
+    let repo_canon = std::fs::canonicalize(repo).map_err(|e| format!("repo: {}", e))?;
+    let mut out = Vec::new();
+    for s in specs {
+        let t = s.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t.contains("..") {
+            return Err("pathspec must not contain ..".into());
+        }
+        let joined = repo.join(t);
+        let can = std::fs::canonicalize(&joined).map_err(|e| format!("{}: {}", t, e))?;
+        if !can.starts_with(&repo_canon) {
+            return Err(format!("pathspec outside repo: {}", t));
+        }
+        out.push(t.to_string());
+    }
+    Ok(out)
+}
+
+async fn git_run(
+    repo: &Path,
+    args: Vec<String>,
+    tool_name: &str,
+    policy: &ToolsPolicy,
+) -> Result<(String, ToolResult)> {
+    if !policy.can_run_command("git") {
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: tool_name.to_string(),
+                success: false,
+                summary: "git not allowed by policy (add \"git\" to allowed_commands)".to_string(),
+                detail: None,
+            },
+        ));
+    }
+    if !policy.can_read(repo) {
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: tool_name.to_string(),
+                success: false,
+                summary: "repository path not allowed by policy".to_string(),
+                detail: Some(repo.display().to_string()),
+            },
+        ));
+    }
+    let meta = tokio::fs::metadata(repo).await.context("git repo metadata")?;
+    if !meta.is_dir() {
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: tool_name.to_string(),
+                success: false,
+                summary: "path is not a directory".to_string(),
+                detail: Some(repo.display().to_string()),
+            },
+        ));
+    }
+    let timeout_secs = policy.command_timeout_secs.max(1);
+    let timeout = Duration::from_secs(timeout_secs);
+    let detail_args = args.join(" ");
+    let repo = repo.to_path_buf();
+    let tool_l = tool_name.to_string();
+    let join_res = tokio::time::timeout(
+        timeout,
+        tokio::task::spawn_blocking(move || {
+            let mut cmd = std::process::Command::new("git");
+            cmd.args(&args)
+                .current_dir(&repo)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            cmd.output()
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("git: command timeout"))?;
+    let out = join_res
+        .map_err(|e| anyhow::anyhow!("git join: {}", e))?
+        .map_err(|e| anyhow::anyhow!("git: {}", e))?;
+    let code = out.status.code().unwrap_or(-1);
+    let stdout = out.stdout;
+    let stderr = out.stderr;
+    let mut text = String::new();
+    let so = String::from_utf8_lossy(&stdout);
+    let se = String::from_utf8_lossy(&stderr);
+    if !so.is_empty() {
+        text.push_str(&so);
+    }
+    if !se.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str("--- stderr ---\n");
+        text.push_str(&se);
+    }
+    let text = truncate_tool_output(text, MAX_GIT_OUTPUT_BYTES);
+    let byte_len = text.len();
+    let ok = code == 0;
+    Ok((
+        text,
+        ToolResult {
+            tool: tool_l,
+            success: ok,
+            summary: format!("git exit {} ({} bytes)", code, byte_len),
+            detail: Some(detail_args),
+        },
+    ))
+}
+
+/// `git status --porcelain=v1 -b` in `repo` (read-only). Requires `git` in allowed_commands.
+pub async fn git_status(repo: &Path, policy: &ToolsPolicy) -> Result<(String, ToolResult)> {
+    git_run(
+        repo,
+        vec![
+            "status".into(),
+            "--porcelain=v1".into(),
+            "-b".into(),
+        ],
+        "git_status",
+        policy,
+    )
+    .await
+}
+
+/// `git diff` or `git diff --staged` with optional pathspecs (must stay under repo).
+pub async fn git_diff(
+    repo: &Path,
+    staged: bool,
+    pathspecs: &[String],
+    policy: &ToolsPolicy,
+) -> Result<(String, ToolResult)> {
+    let specs = if pathspecs.is_empty() {
+        Vec::new()
+    } else {
+        git_pathspecs_under_repo(repo, pathspecs).map_err(|e| anyhow::anyhow!("{}", e))?
+    };
+    let mut args = vec!["diff".to_string()];
+    if staged {
+        args.push("--staged".into());
+    }
+    args.extend(specs);
+    git_run(repo, args, "git_diff", policy).await
+}
+
+/// `git log -n N --oneline --no-decorate` (N capped at 100).
+pub async fn git_log(repo: &Path, n: u32, policy: &ToolsPolicy) -> Result<(String, ToolResult)> {
+    let n = n.max(1).min(100);
+    git_run(
+        repo,
+        vec![
+            "log".into(),
+            "-n".into(),
+            n.to_string(),
+            "--oneline".into(),
+            "--no-decorate".into(),
+        ],
+        "git_log",
+        policy,
+    )
+    .await
+}
+
+/// `git rev-parse HEAD` (read-only).
+pub async fn git_rev_parse_head(repo: &Path, policy: &ToolsPolicy) -> Result<(String, ToolResult)> {
+    git_run(repo, vec!["rev-parse".into(), "HEAD".into()], "git_rev_parse", policy).await
+}
+
+fn walk_rel_files_bounded(
+    root: &Path,
+    max_depth: u32,
+    cap: usize,
+    policy: &ToolsPolicy,
+) -> Result<Vec<PathBuf>, String> {
+    fn walk(
+        root: &Path,
+        rel: PathBuf,
+        depth: u32,
+        max_depth: u32,
+        cap: usize,
+        out: &mut Vec<PathBuf>,
+        policy: &ToolsPolicy,
+    ) -> Result<(), String> {
+        if out.len() >= cap || depth > max_depth {
+            return Ok(());
+        }
+        let full = if rel.as_os_str().is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(&rel)
+        };
+        let read = std::fs::read_dir(&full).map_err(|e| e.to_string())?;
+        for ent in read {
+            let ent = ent.map_err(|e| e.to_string())?;
+            let name = ent.file_name();
+            let name_s = name.to_string_lossy();
+            let meta = ent.metadata().map_err(|e| e.to_string())?;
+            if meta.is_dir() {
+                if should_skip_dir_component(&name_s) {
+                    continue;
+                }
+                let next = if rel.as_os_str().is_empty() {
+                    PathBuf::from(name)
+                } else {
+                    rel.join(&name)
+                };
+                walk(root, next, depth + 1, max_depth, cap, out, policy)?;
+                if out.len() >= cap {
+                    return Ok(());
+                }
+            } else if meta.is_file() {
+                let path = ent.path();
+                if !policy.can_read(&path) {
+                    continue;
+                }
+                let rel_path = if rel.as_os_str().is_empty() {
+                    PathBuf::from(name)
+                } else {
+                    rel.join(&name)
+                };
+                out.push(rel_path);
+                if out.len() >= cap {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(root, PathBuf::new(), 0, max_depth, cap, &mut out, policy)?;
+    Ok(out)
+}
+
+/// Compare two directories (bounded): relative file paths only-in-A / only-in-B / content-differ.
+pub async fn compare_dirs(
+    dir_a: &Path,
+    dir_b: &Path,
+    max_depth: u32,
+    max_files: usize,
+    policy: &ToolsPolicy,
+) -> Result<(String, ToolResult)> {
+    if !policy.can_read(dir_a) || !policy.can_read(dir_b) {
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: "dir_compare".to_string(),
+                success: false,
+                summary: "directory not allowed by policy".to_string(),
+                detail: Some(format!("{} vs {}", dir_a.display(), dir_b.display())),
+            },
+        ));
+    }
+    let max_depth = max_depth.clamp(1, 32);
+    let cap = max_files.clamp(10, 500);
+    let da = dir_a.to_path_buf();
+    let db = dir_b.to_path_buf();
+    let pol = policy.clone();
+    let report = tokio::task::spawn_blocking(move || {
+        let files_a =
+            walk_rel_files_bounded(&da, max_depth, cap, &pol).map_err(|e: String| anyhow::anyhow!("{}", e))?;
+        let files_b =
+            walk_rel_files_bounded(&db, max_depth, cap, &pol).map_err(|e: String| anyhow::anyhow!("{}", e))?;
+        use std::collections::HashSet;
+        let set_a: HashSet<PathBuf> = files_a.iter().cloned().collect();
+        let set_b: HashSet<PathBuf> = files_b.iter().cloned().collect();
+        let only_a: Vec<_> = set_a.difference(&set_b).cloned().collect();
+        let only_b: Vec<_> = set_b.difference(&set_a).cloned().collect();
+        let mut differ: Vec<PathBuf> = Vec::new();
+        for p in set_a.intersection(&set_b) {
+            let pa = da.join(p);
+            let pb = db.join(p);
+            let ba = std::fs::read(&pa).unwrap_or_default();
+            let bb = std::fs::read(&pb).unwrap_or_default();
+            if ba != bb {
+                differ.push(p.clone());
+            }
+        }
+        let mut only_a = only_a;
+        let mut only_b = only_b;
+        only_a.sort();
+        only_b.sort();
+        differ.sort();
+        let mut s = String::new();
+        s.push_str(&format!(
+            "compare_dirs: max_depth={} cap={} (paths may be truncated if cap reached)\n",
+            max_depth, cap
+        ));
+        s.push_str(&format!("only_in_first ({}):\n", only_a.len()));
+        for p in only_a.iter().take(200) {
+            s.push_str(&format!("  {}\n", p.display()));
+        }
+        if only_a.len() > 200 {
+            s.push_str("  ...\n");
+        }
+        s.push_str(&format!("only_in_second ({}):\n", only_b.len()));
+        for p in only_b.iter().take(200) {
+            s.push_str(&format!("  {}\n", p.display()));
+        }
+        if only_b.len() > 200 {
+            s.push_str("  ...\n");
+        }
+        s.push_str(&format!("content_differ ({}):\n", differ.len()));
+        for p in differ.iter().take(200) {
+            s.push_str(&format!("  {}\n", p.display()));
+        }
+        if differ.len() > 200 {
+            s.push_str("  ...\n");
+        }
+        Ok::<String, anyhow::Error>(truncate_tool_output(s, MAX_DIFF_UNIFIED_BYTES))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("compare_dirs join: {}", e))??;
+    let nchars = report.len();
+    Ok((
+        report,
+        ToolResult {
+            tool: "dir_compare".to_string(),
+            success: true,
+            summary: format!(
+                "dir_compare {} vs {} ({} chars)",
+                dir_a.display(),
+                dir_b.display(),
+                nchars
+            ),
+            detail: None,
+        },
+    ))
 }
 
 /// Fetch a URL (GET). Host must be allowed by policy (allowed_web_domains). Feature "web".

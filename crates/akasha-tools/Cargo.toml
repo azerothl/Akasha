@@ -17,6 +17,7 @@ url = "2"
 encoding_rs = "0.8.35"
 ignore = "0.4"
 regex = "1"
+similar = "2"
 
 [dependencies.tempfile]
 version = "3"

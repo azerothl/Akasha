@@ -1,4 +1,9 @@
 //! Container runner for code agent: run generated code in Docker/podman with limits.
+//!
+//! **Network:** commands use `--network=none` so the container cannot reach the internet (no `npm install`
+//! / registry pulls without changing this). That is intentional for isolation. For a dev image that must
+//! download packages, you would need a separate mode (e.g. bridge network with egress rules), which is
+//! a trade-off between security and ergonomics — document any policy change when adding it.
 
 use anyhow::{Context, Result};
 use std::time::Duration;

@@ -76,6 +76,9 @@ pub struct ToolsPolicy {
     /// Optional: max session duration in seconds; after this the instance is closed. Default 300.
     #[serde(default = "default_browser_session_timeout_secs")]
     pub browser_session_timeout_secs: u64,
+    /// When true and no `--cwd` is passed to `run_command`, use `workspace_root` (task workspace) as the process working directory when available.
+    #[serde(default)]
+    pub run_command_default_cwd_workspace: bool,
 }
 
 fn default_browser_headless() -> bool {

@@ -33,6 +33,10 @@ allowed_commands:
 
 command_timeout_secs: 60
 
+# Optionnel : si true, run_command / run_terminal / run_command_background utilisent le répertoire
+# workspace de la tâche comme répertoire courant lorsqu'aucun --cwd n'est passé (voir AVAILABLE_TOOLS).
+# run_command_default_cwd_workspace: false
+
 # Optionnel : domaines autorisés pour web_fetch (nécessite la feature "web")
 # allowed_web_domains: []
 # Pour tout autoriser : allowed_web_domains: ["*"]  (sous réserve de blocked_web_domains)
@@ -54,8 +58,27 @@ command_timeout_secs: 60
 # Optionnel : profils d'outils (default_profile = nom du profil ; tool_profiles[profil] = liste d'outils)
 # default_profile: null
 # tool_profiles: {}
-# Exemple : default_profile: "coding"
-#          tool_profiles: { coding: [read_file, write_file, search_files, grep_content, run_command, edit_file, apply_patch] }
+# Exemple projet dev (création / analyse de code) — ajuster la liste selon vos besoins :
+# default_profile: "dev_sandbox"
+# tool_profiles:
+#   dev_sandbox:
+#     - read_file
+#     - write_file
+#     - search_files
+#     - grep_content
+#     - run_command
+#     - run_in_container
+#     - file_diff
+#     - diff_unified
+#     - dir_compare
+#     - git_status
+#     - git_diff
+#     - git_log
+#     - git_rev_parse
+#     - edit_file
+#     - apply_patch
+#     - search_replace
+# Avec ce profil, « git » doit rester dans allowed_commands pour les outils git_* internes.
 
 # Optionnel : hôtes autorisés pour install_skill (site web, GitLab, etc.). Par défaut : GitHub uniquement.
 # allowed_skill_install_hosts: []
