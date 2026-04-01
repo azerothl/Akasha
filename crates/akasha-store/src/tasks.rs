@@ -163,7 +163,7 @@ impl TaskStore {
     /// Return task ids with expired leases.
     pub fn expired_leases(&self, now: DateTime<Utc>, limit: usize) -> anyhow::Result<Vec<Uuid>> {
         let mut stmt = self.conn.prepare(
-            "SELECT task_id FROM task_leases WHERE expires_at <= ?1 ORDER BY expires_at ASC LIMIT ?2",
+            "SELECT task_id FROM task_leases WHERE datetime(expires_at) <= datetime(?1) ORDER BY expires_at ASC LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![now.to_rfc3339(), limit as i64], |row| {
             let id: String = row.get(0)?;

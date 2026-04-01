@@ -66,8 +66,9 @@ export function GeoMapView({ points, height = 260, className, ariaLabel = "Inter
       ref={containerRef}
       className={className ?? "geo-map-view"}
       style={{ minHeight: height, width: "100%", borderRadius: 10 }}
-      role="img"
+      role="region"
       aria-label={ariaLabel}
+      tabIndex={0}
     />
   );
 }
