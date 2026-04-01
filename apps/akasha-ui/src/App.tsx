@@ -1767,7 +1767,19 @@ function App() {
     return { nodes, lines, rootId };
   }
 
-  const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
+  const [scheduleReports, setScheduleReports] = useState<Array<{
+    schedule_name: string;
+    message: string;
+    ended_at?: string;
+    schedule_id?: string;
+    task_id?: string;
+    task_run_id?: string;
+    task_label?: string;
+    status?: string;
+    planned_for?: string;
+    started_at?: string;
+    run_ended_at?: string;
+  }>>([]);
   const [pluginReputationTarget, setPluginReputationTarget] = useState("maps");
   const [pluginReputationResetLoading, setPluginReputationResetLoading] = useState(false);
   const [pluginReputationResetMessage, setPluginReputationResetMessage] = useState<string | null>(null);
@@ -3142,8 +3154,72 @@ function App() {
 
   const fetchScheduleReports = useCallback(async () => {
     try {
-      const data = await invoke<{ reports?: Array<{ schedule_name?: string; message?: string; ended_at?: string }> }>("get_schedule_run_reports", { port: DAEMON_PORT });
-      setScheduleReports((data?.reports ?? []).map((r) => ({ schedule_name: r.schedule_name ?? "", message: r.message ?? "Exécuté.", ended_at: r.ended_at })));
+      const [reportsData, runsData] = await Promise.all([
+        invoke<{ reports?: Array<{ schedule_name?: string; message?: string; ended_at?: string; schedule_id?: string; task_id?: string; task_run_id?: string }> }>(
+          "get_schedule_run_reports",
+          { port: DAEMON_PORT }
+        ),
+        invoke<{ task_runs?: Array<{ id?: string; schedule_id?: string; task_id?: string; status?: string; planned_for?: string; started_at?: string; ended_at?: string; label?: string }> }>(
+          "get_task_runs",
+          { port: DAEMON_PORT }
+        ),
+      ]);
+      const runs = (runsData?.task_runs ?? []).map((r) => ({
+        id: r.id ?? "",
+        schedule_id: r.schedule_id,
+        task_id: r.task_id ?? "",
+        status: r.status ?? "?",
+        planned_for: r.planned_for ?? "",
+        started_at: r.started_at,
+        ended_at: r.ended_at,
+        label: r.label,
+      }));
+      const runsById = new Map(runs.map((run) => [run.id, run]));
+      const runsByTaskId = new Map<string, typeof runs>();
+      for (const run of runs) {
+        const key = run.task_id;
+        const prev = runsByTaskId.get(key);
+        if (prev) prev.push(run);
+        else runsByTaskId.set(key, [run]);
+      }
+      const isoDistance = (left?: string, right?: string) => {
+        if (!left || !right) return Number.POSITIVE_INFINITY;
+        const leftMs = Date.parse(left);
+        const rightMs = Date.parse(right);
+        if (Number.isNaN(leftMs) || Number.isNaN(rightMs)) return Number.POSITIVE_INFINITY;
+        return Math.abs(leftMs - rightMs);
+      };
+      setScheduleReports((reportsData?.reports ?? []).map((r) => {
+        const byId = r.task_run_id ? runsById.get(r.task_run_id) : undefined;
+        let matchedRun = byId;
+        if (!matchedRun && r.task_id) {
+          const candidates = (runsByTaskId.get(r.task_id) ?? []).filter((candidate) => !r.schedule_id || candidate.schedule_id === r.schedule_id);
+          if (candidates.length > 0) {
+            if (r.ended_at) {
+              matchedRun = candidates.reduce((best, candidate) => {
+                const bestAnchor = best.ended_at ?? best.started_at ?? best.planned_for;
+                const candidateAnchor = candidate.ended_at ?? candidate.started_at ?? candidate.planned_for;
+                return isoDistance(r.ended_at, candidateAnchor) < isoDistance(r.ended_at, bestAnchor) ? candidate : best;
+              });
+            } else {
+              matchedRun = candidates[0];
+            }
+          }
+        }
+        return {
+          schedule_name: r.schedule_name ?? "",
+          message: r.message ?? "Exécuté.",
+          ended_at: r.ended_at,
+          schedule_id: r.schedule_id,
+          task_id: r.task_id,
+          task_run_id: r.task_run_id,
+          task_label: matchedRun?.label,
+          status: matchedRun?.status,
+          planned_for: matchedRun?.planned_for,
+          started_at: matchedRun?.started_at,
+          run_ended_at: matchedRun?.ended_at,
+        };
+      }));
     } catch {
       setScheduleReports([]);
     }
@@ -5219,11 +5295,17 @@ function App() {
                 {scheduleReports.map((r, i) => (
                   <div key={`report-${i}`} className="message system report scheduled-report">
                     <span className="role" aria-hidden>{t("scheduled.role")}</span>
-                    {r.ended_at && (
-                      <time className="scheduled-report-time" dateTime={r.ended_at}>
-                        {new Date(r.ended_at).toLocaleString()}
+                    {(r.run_ended_at || r.ended_at) && (
+                      <time className="scheduled-report-time" dateTime={r.run_ended_at ?? r.ended_at}>
+                        {new Date(r.run_ended_at ?? r.ended_at ?? "").toLocaleString()}
                       </time>
                     )}
+                    <div className="scheduled-report-metadata">
+                      <span><strong>{t("scheduled.task")}:</strong> {r.task_label || r.task_id || t("scheduled.unknown")}</span>
+                      <span><strong>{t("scheduled.planned_for")}:</strong> {r.planned_for ? new Date(r.planned_for).toLocaleString() : t("scheduled.unknown")}</span>
+                      <span><strong>{t("scheduled.started_at")}:</strong> {r.started_at ? new Date(r.started_at).toLocaleString() : t("scheduled.unknown")}</span>
+                      <span><strong>{t("scheduled.ended_at")}:</strong> {(r.run_ended_at || r.ended_at) ? new Date(r.run_ended_at ?? r.ended_at ?? "").toLocaleString() : t("scheduled.unknown")}</span>
+                    </div>
                     <div className="text markdown-rendered">
                       <Suspense fallback={<span className="markdown-rendered">…</span>}>
                         <LazyMarkdownContent>

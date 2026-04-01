@@ -918,6 +918,14 @@ pre,
   padding-bottom: 1rem;
 }
 
+.scheduled-report-metadata {
+  display: grid;
+  gap: 0.2rem;
+  margin: 0.45rem 0 0.55rem;
+  color: var(--akasha-text-muted);
+  font-size: 0.8rem;
+}
+
 /* Chat */
 .chat-panel {
   padding: 0;
