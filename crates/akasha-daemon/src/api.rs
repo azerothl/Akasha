@@ -7918,6 +7918,80 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
+    // POST /api/chat/suggest-thread-title — short title from first user message (UI chat threads)
+    if method == "POST" && path == "/api/chat/suggest-thread-title" {
+        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let message = body_json
+            .as_ref()
+            .and_then(|v| v.get("message").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .trim();
+        if message.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing message"}"#);
+        }
+        fn fallback_title(msg: &str) -> String {
+            const MAX: usize = 48;
+            let t = msg.trim();
+            let n = t.chars().count();
+            if n <= MAX {
+                t.to_string()
+            } else {
+                format!("{}…", t.chars().take(MAX).collect::<String>())
+            }
+        }
+        let fallback = fallback_title(message);
+        let prompt = format!(
+            "Reply with ONLY a short conversation title (max 60 characters, no quotation marks, same language as the user message).\n\nUser message:\n{}",
+            message
+        );
+        let req = CompletionRequest {
+            prompt,
+            max_tokens: Some(80),
+            temperature: Some(0.3),
+            preferred_task_type: None,
+            system_prompt: Some(
+                "Output only the title text. No quotes. No leading 'Title:'.".to_string(),
+            ),
+            image_data_urls: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repeat_penalty: None,
+            num_ctx: None,
+            num_gpu: None,
+            thinking_level: None,
+        };
+        let title_timeout = std::time::Duration::from_secs(15);
+        let title = match tokio::time::timeout(title_timeout, llm_router.complete(&req)).await {
+            Ok(Ok(resp)) => {
+                let mut t = resp.text.trim().to_string();
+                if let Some(i) = t.find('\n') {
+                    t.truncate(i);
+                }
+                t = t.trim().trim_matches('"').trim_matches('\'').trim().to_string();
+                if t.starts_with("Title:") || t.starts_with("Titre:") {
+                    t = t
+                        .trim_start_matches("Title:")
+                        .trim_start_matches("Titre:")
+                        .trim()
+                        .to_string();
+                }
+                if t.chars().count() > 60 {
+                    t = t.chars().take(60).collect();
+                }
+                if t.is_empty() {
+                    fallback
+                } else {
+                    t
+                }
+            }
+            _ => fallback,
+        };
+        let body = serde_json::json!({ "title": title });
+        return json_response("200 OK", &body.to_string());
+    }
+
     // GET /api/memory/search?q=...&top_k=... — semantic search in long-term memory
     if method == "GET" && path.starts_with("/api/memory/search") {
         let (q, top_k) = path
