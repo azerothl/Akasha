@@ -648,7 +648,8 @@ function simpleTextHash(s: string): string {
 }
 
 function chatMapMessageCacheKey(sessionId: string, assistantText: string): string {
-  return `akasha_map_msg_${sessionId}_${simpleTextHash(assistantText.trim())}`;
+  const CACHE_VERSION = "v2";
+  return `akasha_map_msg_${CACHE_VERSION}_${sessionId}_${simpleTextHash(assistantText.trim())}`;
 }
 
 function isChatMapVisualLike(o: unknown): o is ChatMapVisual {
@@ -4094,7 +4095,7 @@ function App() {
                 setMessages((prev) => {
                   const idx = findLastChatAssistantIndex(prev, taskId);
                   if (idx < 0) return prev;
-                  if (prev[idx]?.mapVisual) return prev;
+                  if (prev[idx]?.mapVisual === chatMapVis) return prev;
                   const next = [...prev];
                   next[idx] = { ...next[idx]!, mapVisual: chatMapVis };
                   return next;
