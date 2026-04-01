@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary } from "./claudeStyleChat";
 import { invoke } from "@tauri-apps/api/core";
 import RelationGraph from "relation-graph/react";
 import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
@@ -16,6 +17,9 @@ const UI_MODE_STORAGE_KEY = "akasha_ui_mode";
 const AKASHA_SESSION_ID_KEY = "akasha_session_id";
 const TASK_TREE_COLLAPSE_STORAGE_KEY = "akasha_task_tree_collapsed";
 const TASK_ORCHESTRATION_DEBUG_STORAGE_KEY = "akasha_task_orchestration_debug";
+const CHAT_TIPS_STORAGE_KEY = "akasha_ui_chat_tips";
+const CHAT_PROMPT_CHIPS_STORAGE_KEY = "akasha_ui_prompt_chips";
+const CHAT_BUDDY_STORAGE_KEY = "akasha_ui_buddy";
 
 export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_latte";
 type UiMode = "simple" | "expert";
@@ -541,10 +545,15 @@ function salvageMapVisualFromPluginPrefix(raw: string): ChatMapVisual | null {
   const distanceM = numField("distance_m") ?? numField("distanceM");
   const durationS = numField("duration_s") ?? numField("durationS");
 
+  // Only scan the primary `geometry` + `steps` region. Including `"routes":[...]` would merge every
+  // alternate leg (corridor, train) into one bogus polyline (good start, wrong end).
+  const routesKey = body.search(/"routes"\s*:\s*\[/);
+  const coordSource = routesKey >= 0 ? body.slice(0, routesKey) : body;
+
   const coordRe = /\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]/g;
   const points: Array<{ x: number; y: number }> = [];
   let cm: RegExpExecArray | null;
-  while ((cm = coordRe.exec(body)) !== null) {
+  while ((cm = coordRe.exec(coordSource)) !== null) {
     const x = Number(cm[1]);
     const y = Number(cm[2]);
     if (Number.isFinite(x) && Number.isFinite(y)) points.push({ x, y });
@@ -629,6 +638,41 @@ function extractChatMapVisualFromAssistantText(text: string): ChatMapVisual | nu
   const vis = parsed ? extractAdvancedViewData(parsed) : null;
   if (vis?.kind === "map") return vis;
   return salvageMapVisualFromPluginPrefix(slice);
+}
+
+function simpleTextHash(s: string): string {
+  const slice = s.length > 4000 ? s.slice(0, 4000) : s;
+  let h = 0;
+  for (let i = 0; i < slice.length; i++) h = (Math.imul(31, h) + slice.charCodeAt(i)) | 0;
+  return String(h >>> 0);
+}
+
+function chatMapMessageCacheKey(sessionId: string, assistantText: string): string {
+  return `akasha_map_msg_${sessionId}_${simpleTextHash(assistantText.trim())}`;
+}
+
+function isChatMapVisualLike(o: unknown): o is ChatMapVisual {
+  const r = asRecord(o);
+  if (!r || r.kind !== "map" || !Array.isArray(r.points) || r.points.length < 2) return false;
+  return r.points.every((p) => {
+    const pr = asRecord(p);
+    const x = pr ? toFiniteNumber(pr.x) : null;
+    const y = pr ? toFiniteNumber(pr.y) : null;
+    return x != null && y != null;
+  });
+}
+
+/** Restore map UI after app reload when the assistant bubble text matches a cached snapshot (same session). */
+function tryLoadCachedChatMapVisual(sessionId: string, assistantText: string): ChatMapVisual | null {
+  if (!sessionId?.trim() || !assistantText?.trim()) return null;
+  try {
+    const raw = localStorage.getItem(chatMapMessageCacheKey(sessionId, assistantText));
+    if (!raw) return null;
+    const o = JSON.parse(raw) as unknown;
+    return isChatMapVisualLike(o) ? o : null;
+  } catch {
+    return null;
+  }
 }
 
 function formatDistanceLabel(meters?: number): string | null {
@@ -798,15 +842,21 @@ function MapPluginEventView({
   const safeIx = Math.min(routeIx, Math.max(0, routes.length - 1));
   const active = routes[safeIx] ?? routes[0]!;
   const points = active.points.length >= 2 ? active.points : visual.points;
+  const hasLeafletMap = points.length >= 2;
   const scaled = scalePoints(points, width, height);
   const polyline = scaled.map((p) => `${p.x},${p.y}`).join(" ");
   const distance = formatDistanceLabel(active.distanceM ?? visual.distanceM);
   const duration = formatDurationLabel(active.durationS ?? visual.durationS);
 
-  const synthesizedOsm =
-    !visual.osmEmbedUrl && variant === "chat" && points.length >= 2 ? osmUrlsFromLonLatPoints(points) : null;
+  const synthesizedOsm = !visual.osmEmbedUrl && hasLeafletMap ? osmUrlsFromLonLatPoints(points) : null;
   const effectiveOsmEmbed = visual.osmEmbedUrl ?? synthesizedOsm?.embed;
   const effectiveOsmBrowse = visual.osmBrowseUrl ?? synthesizedOsm?.browse;
+  const linkBrowseUrl =
+    typeof effectiveOsmBrowse === "string" && effectiveOsmBrowse.startsWith("http")
+      ? effectiveOsmBrowse
+      : hasLeafletMap
+        ? osmUrlsFromLonLatPoints(points)?.browse
+        : undefined;
 
   const lineAndPoints = (
     <>
@@ -886,7 +936,7 @@ function MapPluginEventView({
           )}
         </div>
       )}
-      {points.length >= 2 ? (
+      {hasLeafletMap ? (
         <div className="event-map-geo-leaflet">
           <div className="event-map-geo-leaflet-head">
             <span className="metadata-label">{t("tasks.map_interactive_layer")}</span>
@@ -899,49 +949,67 @@ function MapPluginEventView({
         </div>
       ) : null}
       {(() => {
-        const schematicBlock = interactive ? (
-          <div
-            className={`event-visual-interactive-surface ${interactive.dragging ? "is-dragging" : ""}`}
-            onWheel={interactive.onWheel}
-            onDoubleClick={interactive.onDoubleClick}
-            onPointerDown={interactive.onPointerDown}
-            onPointerMove={interactive.onPointerMove}
-            onPointerUp={interactive.onPointerUp}
-            onPointerCancel={interactive.onPointerCancel}
-            onPointerLeave={interactive.onPointerLeave}
-          >
-            <svg className="event-advanced-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label={t("tasks.plugin_map_title")}>
-              <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
-              <g transform={interactive.transform}>{lineAndPoints}</g>
-            </svg>
-          </div>
-        ) : (
-          <svg className="event-advanced-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label={t("tasks.plugin_map_title")}>
-            <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
-            {lineAndPoints}
-          </svg>
-        );
+        const schematicBlock = !hasLeafletMap
+          ? interactive
+            ? (
+                <div
+                  className={`event-visual-interactive-surface ${interactive.dragging ? "is-dragging" : ""}`}
+                  onWheel={interactive.onWheel}
+                  onDoubleClick={interactive.onDoubleClick}
+                  onPointerDown={interactive.onPointerDown}
+                  onPointerMove={interactive.onPointerMove}
+                  onPointerUp={interactive.onPointerUp}
+                  onPointerCancel={interactive.onPointerCancel}
+                  onPointerLeave={interactive.onPointerLeave}
+                >
+                  <svg className="event-advanced-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label={t("tasks.plugin_map_title")}>
+                    <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
+                    <g transform={interactive.transform}>{lineAndPoints}</g>
+                  </svg>
+                </div>
+              )
+            : (
+                <svg className="event-advanced-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label={t("tasks.plugin_map_title")}>
+                  <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
+                  {lineAndPoints}
+                </svg>
+              )
+          : null;
 
-        const osmBlock = effectiveOsmEmbed ? (
-          <div className="event-map-osm-block">
-            <div className="event-map-osm-head">
-              <span className="metadata-label">{t("tasks.map_openstreetmap")}</span>
-              {effectiveOsmBrowse ? (
-                <a className="event-map-osm-link" href={effectiveOsmBrowse} target="_blank" rel="noreferrer">
+        const osmIframeBlock =
+          effectiveOsmEmbed && !hasLeafletMap ? (
+            <div className="event-map-osm-block">
+              <div className="event-map-osm-head">
+                <span className="metadata-label">{t("tasks.map_openstreetmap")}</span>
+                {effectiveOsmBrowse && String(effectiveOsmBrowse).startsWith("http") ? (
+                  <a className="event-map-osm-link" href={effectiveOsmBrowse} target="_blank" rel="noreferrer">
+                    {t("tasks.map_open_in_browser")}
+                  </a>
+                ) : null}
+              </div>
+              <p className="event-map-osm-hint">{variant === "chat" ? t("tasks.map_osm_hint_chat") : t("tasks.map_osm_hint")}</p>
+              <iframe title={t("tasks.map_openstreetmap")} className="event-map-osm-iframe" src={effectiveOsmEmbed} loading="lazy" referrerPolicy="no-referrer-when-downgrade" />
+            </div>
+          ) : null;
+
+        const osmLinkOnlyBlock =
+          hasLeafletMap && linkBrowseUrl ? (
+            <div className="event-map-osm-block event-map-osm-link-only">
+              <div className="event-map-osm-head">
+                <span className="metadata-label">{t("tasks.map_openstreetmap")}</span>
+                <a className="event-map-osm-link" href={linkBrowseUrl} target="_blank" rel="noreferrer">
                   {t("tasks.map_open_in_browser")}
                 </a>
-              ) : null}
+              </div>
+              <p className="event-map-osm-hint">{t("tasks.map_osm_with_leaflet_hint")}</p>
             </div>
-            <p className="event-map-osm-hint">{variant === "chat" ? t("tasks.map_osm_hint_chat") : t("tasks.map_osm_hint")}</p>
-            <iframe title={t("tasks.map_openstreetmap")} className="event-map-osm-iframe" src={effectiveOsmEmbed} loading="lazy" referrerPolicy="no-referrer-when-downgrade" />
-          </div>
-        ) : null;
+          ) : null;
 
-        if (variant === "chat" && effectiveOsmEmbed) {
+        if (variant === "chat" && (Boolean(effectiveOsmEmbed) || hasLeafletMap)) {
           return (
             <>
-              {osmBlock}
-              {scaled.length >= 2 ? (
+              {hasLeafletMap ? osmLinkOnlyBlock : osmIframeBlock}
+              {!hasLeafletMap && scaled.length >= 2 ? (
                 <details className="event-map-schematic-details">
                   <summary className="event-map-schematic-details-summary">{t("tasks.map_schematic_details_summary")}</summary>
                   {schematicBlock}
@@ -954,7 +1022,8 @@ function MapPluginEventView({
         return (
           <>
             {schematicBlock}
-            {osmBlock}
+            {osmIframeBlock}
+            {osmLinkOnlyBlock}
           </>
         );
       })()}
@@ -1338,6 +1407,19 @@ function App() {
   const [health, setHealth] = useState<HealthState | null>(null);
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState<ChatMessageRow[]>([]);
+  const exportChatTranscript = useCallback(() => {
+    const body = exportChatPlainText(messages);
+    const base = defaultExportBasename(messages);
+    const blob = new Blob([body], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${base}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, [messages]);
   /** Map visuals keyed by chat task_id — fallback when message.mapVisual was overwritten during streaming. */
   const [chatMapByTaskId, setChatMapByTaskId] = useState<Record<string, ChatMapVisual>>({});
   const [loading, setLoading] = useState(false);
@@ -1452,6 +1534,24 @@ function App() {
   const [runningTaskChips, setRunningTaskChips] = useState<Record<string, { pct?: number; message?: string }>>({});
   /** Events (sub_agent_spawned, progress_update, etc.) per running task for collapsible sub-agent panel. Each event may have task_id (root or child). */
   const [runningTaskEvents, setRunningTaskEvents] = useState<Record<string, Array<{ event_type: string; payload?: unknown; at: string; task_id?: string }>>>({});
+  const chatToolBatchSummary = useMemo(() => {
+    const names: string[] = [];
+    for (const evs of Object.values(runningTaskEvents)) {
+      for (const ev of evs) {
+        const p = ev.payload;
+        if (!p || typeof p !== "object") continue;
+        if (ev.event_type === "tool_call_started" || ev.event_type === "tool_call_finished") {
+          const tool = (p as { tool?: string }).tool;
+          if (tool) names.push(tool);
+        } else if (ev.event_type === "tool_invoked") {
+          const pl = p as { tool_name?: string; tool?: string };
+          const tool = pl.tool_name ?? pl.tool;
+          if (tool) names.push(tool);
+        }
+      }
+    }
+    return heuristicToolBatchSummary(names);
+  }, [runningTaskEvents]);
   /** Human in the loop: when the agent asks for user input, we store question/context/choices per task_id. */
   const [pendingHumanInput, setPendingHumanInput] = useState<Record<string, { question: string; context: string; choices?: string[] }>>({});
   /** Task id for which the human-input modal is open (null = closed). */
@@ -1759,6 +1859,66 @@ function App() {
     release_notes_url?: string | null;
   } | null>(null);
 
+  const [chatTipsEnabled, setChatTipsEnabled] = useState(() => {
+    try {
+      return localStorage.getItem(CHAT_TIPS_STORAGE_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const [chatPromptChipsEnabled, setChatPromptChipsEnabled] = useState(() => {
+    try {
+      return localStorage.getItem(CHAT_PROMPT_CHIPS_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [buddyLineEnabled, setBuddyLineEnabled] = useState(() => {
+    try {
+      return localStorage.getItem(CHAT_BUDDY_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [tipBannerText, setTipBannerText] = useState<string | null>(null);
+  const [tipBannerDismissed, setTipBannerDismissed] = useState(false);
+
+  const setChatTipsEnabledAndSave = useCallback((next: boolean) => {
+    setChatTipsEnabled(next);
+    try {
+      localStorage.setItem(CHAT_TIPS_STORAGE_KEY, next ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  const setChatPromptChipsEnabledAndSave = useCallback((next: boolean) => {
+    setChatPromptChipsEnabled(next);
+    try {
+      localStorage.setItem(CHAT_PROMPT_CHIPS_STORAGE_KEY, next ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  const setBuddyLineEnabledAndSave = useCallback((next: boolean) => {
+    setBuddyLineEnabled(next);
+    try {
+      localStorage.setItem(CHAT_BUDDY_STORAGE_KEY, next ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const promptChipLabels = useMemo(
+    () => [t("chat.prompt_chip_1"), t("chat.prompt_chip_2"), t("chat.prompt_chip_3")],
+    [t, locale]
+  );
+  const buddyCaption = useMemo(() => {
+    if (!buddyLineEnabled) return null;
+    const lines = [t("chat.buddy_line_1"), t("chat.buddy_line_2"), t("chat.buddy_line_3")];
+    const day = Math.floor(Date.now() / 86400000);
+    return lines[day % lines.length];
+  }, [buddyLineEnabled, t, locale]);
+
   const checkHealth = useCallback(async () => {
     try {
       const result = await invoke<{ ok: boolean; port?: number }>("check_health", {
@@ -1775,6 +1935,37 @@ function App() {
     const id = setInterval(checkHealth, 10000);
     return () => clearInterval(id);
   }, [checkHealth]);
+
+  useEffect(() => {
+    if (!chatTipsEnabled || tab !== "chat" || tipBannerDismissed) {
+      if (!chatTipsEnabled || tab !== "chat") setTipBannerText(null);
+      return;
+    }
+    let cancelled = false;
+    fetch("/tips.json")
+      .then((r) => {
+        if (!r.ok) throw new Error("tips");
+        return r.json();
+      })
+      .then((arr: unknown) => {
+        if (cancelled || !Array.isArray(arr) || arr.length === 0) return;
+        const day = Math.floor(Date.now() / 86400000);
+        const ix = day % arr.length;
+        const tip = arr[ix] as { en?: string; fr?: string };
+        const text = (locale === "fr" ? tip.fr : tip.en) ?? tip.en ?? "";
+        if (text) setTipBannerText(text);
+      })
+      .catch(() => {
+        if (!cancelled) setTipBannerText(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [chatTipsEnabled, tab, locale, tipBannerDismissed]);
+
+  useEffect(() => {
+    setTipBannerDismissed(false);
+  }, [locale]);
 
   // Check for app update (daemon caches latest.json; compare with app version)
   useEffect(() => {
@@ -1902,11 +2093,18 @@ function App() {
         );
         if (cancelled) return;
         if (data?.session_id && (data.turns?.length ?? 0) > 0) {
+          const sid = data.session_id;
+          const rows = data.turns!.map((t) => ({
+            role: (t.role === "user" ? "user" : t.role === "assistant" ? "assistant" : "system") as "user" | "assistant" | "system",
+            text: t.content,
+          }));
           setMessages(
-            data.turns!.map((t) => ({
-              role: (t.role === "user" ? "user" : t.role === "assistant" ? "assistant" : "system") as "user" | "assistant" | "system",
-              text: t.content,
-            }))
+            rows.map((m) => {
+              if (m.role !== "assistant") return m;
+              const mapVisual =
+                extractChatMapVisualFromAssistantText(m.text) ?? tryLoadCachedChatMapVisual(sid, m.text);
+              return mapVisual ? { ...m, mapVisual } : m;
+            }),
           );
           setSessionId(data.session_id);
           try {
@@ -3860,16 +4058,35 @@ function App() {
                   setChatMapByTaskId((prev) => (prev[taskId] === doneMapVis ? prev : { ...prev, [taskId]: doneMapVis }));
                 }
                 if (taskId === lastChatTaskIdRef.current) {
+                  let storedMapVisual: ChatMapVisual | undefined;
                   setMessages((prev) => {
                     const idx = findLastChatAssistantIndex(prev, taskId);
                     if (idx >= 0) {
                       const next = [...prev];
                       const keepMap = next[idx]!.mapVisual ?? doneMapVis ?? chatMapByTaskIdRef.current[taskId] ?? undefined;
+                      storedMapVisual = keepMap;
                       next[idx] = { role: "assistant", text: finalMsg, taskId, mapVisual: keepMap };
                       return next;
                     }
+                    storedMapVisual = doneMapVis ?? undefined;
                     return [...prev, { role: "assistant", text: finalMsg, taskId, mapVisual: doneMapVis ?? undefined }];
                   });
+                  if (storedMapVisual && finalMsg.trim()) {
+                    try {
+                      const sid =
+                        (typeof sessionId === "string" && sessionId.trim()) ||
+                        localStorage.getItem(AKASHA_SESSION_ID_KEY) ||
+                        "";
+                      if (sid) {
+                        localStorage.setItem(
+                          chatMapMessageCacheKey(sid, finalMsg.trim()),
+                          JSON.stringify(storedMapVisual),
+                        );
+                      }
+                    } catch {
+                      /* ignore */
+                    }
+                  }
                   delete ackTextByTaskRef.current[taskId];
                 }
                 if (replyWithTtsRef.current && voiceStatus?.tts_configured && finalMsg?.trim()) {
@@ -4467,12 +4684,45 @@ function App() {
                 <h3 className="panel-hero-title">{t("chat.hero_title")}</h3>
                 <p className="panel-hero-text">{isSimpleMode ? t("chat.hero_simple") : t("chat.hero_expert")}</p>
               </div>
-              {Object.keys(runningTaskChips).length > 0 && (
-                <button type="button" className="panel-hero-action" onClick={() => setTab("tasks")}>
-                  {t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}
-                </button>
+              {(messages.length > 0 || Object.keys(runningTaskChips).length > 0) && (
+                <div className="panel-hero-aside">
+                  {messages.length > 0 && (
+                    <button type="button" className="panel-hero-action panel-hero-action-secondary" onClick={exportChatTranscript}>
+                      {t("chat.export_transcript")}
+                    </button>
+                  )}
+                  {Object.keys(runningTaskChips).length > 0 && (
+                    <button type="button" className="panel-hero-action" onClick={() => setTab("tasks")}>
+                      {t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}
+                    </button>
+                  )}
+                </div>
               )}
             </div>
+            {chatTipsEnabled && tipBannerText && !tipBannerDismissed && (
+              <div className="chat-tip-banner" role="status">
+                <span className="chat-tip-banner-icon" aria-hidden>
+                  💡
+                </span>
+                <span className="chat-tip-banner-text">{tipBannerText}</span>
+                <button
+                  type="button"
+                  className="chat-tip-dismiss"
+                  onClick={() => {
+                    setTipBannerDismissed(true);
+                    setTipBannerText(null);
+                  }}
+                  aria-label={t("chat.tip_dismiss")}
+                >
+                  ×
+                </button>
+              </div>
+            )}
+            {buddyLineEnabled && buddyCaption && (
+              <div className="chat-buddy-line" role="note">
+                <span aria-hidden>🦆</span> {buddyCaption}
+              </div>
+            )}
             <div className="chat-area">
               {messages.length === 0 ? (
                 <div className="chat-placeholder">
@@ -4612,6 +4862,11 @@ function App() {
                 <div className="chat-task-summary-bar">
                   <span>{t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}</span>
                   <button type="button" className="chat-task-summary-btn" onClick={() => setTab("tasks")}>{t("chat.open_tasks")}</button>
+                </div>
+              )}
+              {!isSimpleMode && Object.keys(runningTaskChips).length > 0 && chatToolBatchSummary && (
+                <div className="chat-tool-batch-summary" role="status">
+                  {chatToolBatchSummary}
                 </div>
               )}
               {!isSimpleMode && Object.keys(runningTaskChips).length > 0 && (
@@ -4865,6 +5120,23 @@ function App() {
                       ×
                     </button>
                   </span>
+                ))}
+              </div>
+            )}
+            {chatPromptChipsEnabled && (
+              <div className="chat-prompt-chips" role="group" aria-label={t("chat.prompt_chips_label")}>
+                {promptChipLabels.map((label, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    className="chat-prompt-chip"
+                    onClick={() => {
+                      setMessage((m) => (m.trim() ? `${m.trim()} ${label}` : label));
+                      chatInputRef.current?.focus();
+                    }}
+                  >
+                    {label}
+                  </button>
                 ))}
               </div>
             )}
@@ -7047,6 +7319,39 @@ function App() {
                     {userAvatar ? <button type="button" className="btn-secondary" onClick={() => { setUserAvatar(""); try { localStorage.removeItem("akasha_user_avatar"); } catch {} }}>{t("settings.user_avatar_remove")}</button> : null}
                   </div>
                 </div>
+              </dd>
+              <dt>{t("settings.chat_tips")}</dt>
+              <dd>
+                <label className="settings-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={chatTipsEnabled}
+                    onChange={(e) => setChatTipsEnabledAndSave(e.target.checked)}
+                  />
+                  <span>{t("settings.chat_tips_hint")}</span>
+                </label>
+              </dd>
+              <dt>{t("settings.chat_prompt_chips")}</dt>
+              <dd>
+                <label className="settings-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={chatPromptChipsEnabled}
+                    onChange={(e) => setChatPromptChipsEnabledAndSave(e.target.checked)}
+                  />
+                  <span>{t("settings.chat_prompt_chips_hint")}</span>
+                </label>
+              </dd>
+              <dt>{t("settings.chat_buddy")}</dt>
+              <dd>
+                <label className="settings-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={buddyLineEnabled}
+                    onChange={(e) => setBuddyLineEnabledAndSave(e.target.checked)}
+                  />
+                  <span>{t("settings.chat_buddy_hint")}</span>
+                </label>
               </dd>
             </dl>
               </div>

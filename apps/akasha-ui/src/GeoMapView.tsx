@@ -45,6 +45,14 @@ export function GeoMapView({ points, height = 260, className, ariaLabel = "Inter
     map.fitBounds(L.latLngBounds(latlngs), { padding: [18, 18] });
     mapRef.current = map;
 
+    const fixLayout = () => {
+      map.invalidateSize();
+    };
+    map.whenReady(() => {
+      requestAnimationFrame(fixLayout);
+      window.setTimeout(fixLayout, 120);
+    });
+
     return () => {
       map.remove();
       mapRef.current = null;
