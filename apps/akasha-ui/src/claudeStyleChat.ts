@@ -26,7 +26,7 @@ export function sanitizeFilenameFromFirstUser(messages: ExportableMessage[], max
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
   if (!s) return "";
-  return s.length > maxLen ? s.slice(0, maxLen - 1) + "…" : s;
+  return s.length > maxLen ? s.slice(0, maxLen - 1) + "-" : s;
 }
 
 export function defaultExportBasename(messages: ExportableMessage[]): string {
