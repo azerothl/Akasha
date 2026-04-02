@@ -68,6 +68,42 @@ function isChatStreamToolPhase(message: string): boolean {
   return /^\s*TOOL\s*:/im.test(s.trim()) || /\n\s*TOOL\s*:/i.test(s);
 }
 
+/** Avoid replacing React state when task list data is unchanged (prevents full App re-renders / scroll reset on every get_tasks poll). */
+function tasksListsEqual(
+  a: Array<{ id: string; status: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string }>,
+  b: typeof a,
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (
+      x.id !== y.id ||
+      x.status !== y.status ||
+      x.label !== y.label ||
+      x.created_at !== y.created_at ||
+      x.parent_task_id !== y.parent_task_id ||
+      x.assigned_agent !== y.assigned_agent
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function taskTodoRowsEqual(
+  a: Array<{ id?: string | null; title: string; status: string }>,
+  b: typeof a,
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (x.id !== y.id || x.title !== y.title || x.status !== y.status) return false;
+  }
+  return true;
+}
+
 /** Graph colors per theme (aligned with styles.css [data-theme]) so the memory graph respects dark/light. */
 const GRAPH_THEME_COLORS: Record<
   ThemeId,
@@ -1992,9 +2028,19 @@ function App() {
       const result = await invoke<{ ok: boolean; port?: number }>("check_health", {
         port: DAEMON_PORT,
       });
-      setHealth({ ok: result.ok, port: result.port ?? DAEMON_PORT });
+      setHealth((prev) => {
+        const next = { ok: result.ok, port: result.port ?? DAEMON_PORT };
+        const unchanged = prev != null && prev.ok === next.ok && prev.port === next.port;
+        if (unchanged) return prev;
+        return next;
+      });
     } catch {
-      setHealth({ ok: false, port: DAEMON_PORT });
+      setHealth((prev) => {
+        const next = { ok: false, port: DAEMON_PORT };
+        const unchanged = prev != null && prev.ok === next.ok && prev.port === next.port;
+        if (unchanged) return prev;
+        return next;
+      });
     }
   }, []);
 
@@ -2524,8 +2570,9 @@ function App() {
     fetchDocs();
   }, [tab, fetchDocs]);
 
-  const fetchTasksList = useCallback(async () => {
-    setTasksLoading(true);
+  const fetchTasksList = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = options?.silent === true;
+    if (!silent) setTasksLoading(true);
     try {
       const data = await invoke<{ tasks?: Array<{ id?: string; status?: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string }> }>("get_tasks", {
         port: DAEMON_PORT,
@@ -2541,13 +2588,13 @@ function App() {
           assigned_agent: t.assigned_agent,
         }))
         .filter((t) => t.id);
-      setTasksList(tasks);
+      setTasksList((prev) => (tasksListsEqual(prev, tasks) ? prev : tasks));
       setTasksSelected((prev) => (prev >= tasks.length && tasks.length > 0 ? tasks.length - 1 : prev));
       setCached("tasks", tasks);
     } catch {
       setTasksList([]);
     } finally {
-      setTasksLoading(false);
+      if (!silent) setTasksLoading(false);
     }
   }, []);
 
@@ -2997,7 +3044,9 @@ function App() {
         title: x.title ?? "",
         status: (x.status ?? "pending").toLowerCase(),
       }));
-      if (selectedTaskIdForTodosRef.current === taskId) setTaskStepsTodos(rows);
+      if (selectedTaskIdForTodosRef.current === taskId) {
+        setTaskStepsTodos((prev) => (taskTodoRowsEqual(prev, rows) ? prev : rows));
+      }
     } catch {
       if (selectedTaskIdForTodosRef.current === taskId) setTaskStepsTodos([]);
     }
@@ -3138,7 +3187,7 @@ function App() {
     try {
       es = new EventSource(url);
       es.onmessage = (msgEv) => {
-        fetchTasksList();
+        void fetchTasksList({ silent: true });
         fetchPendingHumanInput();
         try {
           const d = JSON.parse(msgEv.data) as {
@@ -4278,7 +4327,7 @@ function App() {
         setRunningTaskChips((prev) => ({ ...prev, [ack.task_id]: { pct: 0, message: "en cours…" } }));
         setRunningTaskEvents((prev) => ({ ...prev, [ack.task_id]: [] }));
         setSubAgentPanelCollapsed(false);
-        fetchTasksList();
+        void fetchTasksList({ silent: true });
         const taskId = ack.task_id;
         const pollUntilDone = async () => {
           const maxWait = 600;
@@ -4318,14 +4367,28 @@ function App() {
                 ticksWithoutChange = 0;
                 pollIntervalMs = MIN_INTERVAL;
               }
-              setRunningTaskChips((prev) => (prev[taskId] !== undefined ? { ...prev, [taskId]: { pct, message: msg } } : prev));
+              setRunningTaskChips((prev) => {
+                if (prev[taskId] === undefined) return prev;
+                const cur = prev[taskId]!;
+                if (cur.pct === pct && cur.message === msg) return prev;
+                return { ...prev, [taskId]: { pct, message: msg } };
+              });
               const events = (eventsData?.events ?? []).map((e) => ({
                 event_type: e.event_type ?? "?",
                 payload: e.payload,
                 at: e.at ?? "",
                 task_id: e.task_id,
               }));
-              setRunningTaskEvents((prev) => (prev[taskId] !== undefined ? { ...prev, [taskId]: events } : prev));
+              setRunningTaskEvents((prev) => {
+                if (prev[taskId] === undefined) return prev;
+                const oldE = prev[taskId]!;
+                try {
+                  if (JSON.stringify(oldE) === JSON.stringify(events)) return prev;
+                } catch {
+                  /* ignore */
+                }
+                return { ...prev, [taskId]: events };
+              });
               const chatMapVis =
                 extractChatMapVisualFromTaskEvents(events) ?? extractChatMapVisualFromAssistantText(msg);
               if (chatMapVis) {
@@ -6197,7 +6260,7 @@ function App() {
                                 if (!sel?.id) return;
                                 try {
                                   await invoke<{ cancelled?: boolean }>("cancel_task", { taskId: sel.id, port: DAEMON_PORT });
-                                  fetchTasksList();
+                                  void fetchTasksList({ silent: true });
                                 } catch (e) {
                                   console.error(e);
                                 }
