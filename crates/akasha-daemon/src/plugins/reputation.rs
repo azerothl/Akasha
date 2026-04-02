@@ -91,4 +91,30 @@ impl ReputationStore {
         let guard = self.data.read().unwrap();
         guard.plugins.values().cloned().collect()
     }
+
+    pub fn reset(&self, plugin_id: &str) -> std::io::Result<()> {
+        let mut guard = self.data.write().unwrap();
+        let entry = guard
+            .plugins
+            .entry(plugin_id.to_string())
+            .or_insert_with(|| PluginReputation {
+                plugin_id: plugin_id.to_string(),
+                score: DEFAULT_SCORE,
+                disabled: false,
+            });
+        entry.score = DEFAULT_SCORE;
+        entry.disabled = false;
+        drop(guard);
+        self.save()
+    }
+
+    pub fn reset_all(&self) -> std::io::Result<()> {
+        let mut guard = self.data.write().unwrap();
+        for entry in guard.plugins.values_mut() {
+            entry.score = DEFAULT_SCORE;
+            entry.disabled = false;
+        }
+        drop(guard);
+        self.save()
+    }
 }

@@ -62,12 +62,11 @@ pub fn parse_contract_from_response(response: &str) -> Option<AgentOutputContrac
             }
         }
     }
-    // Try last {...} in the last 2K chars
-    let tail = if trimmed.len() > 2000 {
-        &trimmed[trimmed.len() - 2000..]
-    } else {
-        trimmed
-    };
+    // Try last {...} in the last ~2K chars.
+    // IMPORTANT: never use `trimmed[..start]` to "fix" a bad boundary — if `start` is not a char
+    // boundary, that slice panics. Use `floor_char_boundary` (stable) instead.
+    let tail_start = trimmed.floor_char_boundary(trimmed.len().saturating_sub(2000));
+    let tail = &trimmed[tail_start..];
     let open = tail.rfind('{')?;
     // Find the matching closing brace for the last '{' by tracking nesting depth.
     let mut depth = 0i32;
@@ -111,11 +110,8 @@ fn strip_trailing_contract(response: &str) -> String {
         }
     }
     // Remove last {...} that parses as contract (search from end, try parsing)
-    let tail = if trimmed.len() > 2500 {
-        &trimmed[trimmed.len() - 2500..]
-    } else {
-        trimmed
-    };
+    let tail_start = trimmed.floor_char_boundary(trimmed.len().saturating_sub(2500));
+    let tail = &trimmed[tail_start..];
     if let Some(open_rel) = tail.rfind('{') {
         let json_candidate = &tail[open_rel..];
         if serde_json::from_str::<AgentOutputContract>(json_candidate).is_ok() {
@@ -149,18 +145,19 @@ pub fn user_facing_message(response: &str) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
+    let stripped = strip_trailing_contract(response);
     if let Some(contract) = parse_contract_from_response(trimmed) {
         if let Some(ref summary) = contract.summary {
             if !summary.trim().is_empty() {
-                // Only use the summary if the response is essentially raw JSON (starts with '{')
-                // When there is text before the JSON block, strip the block instead.
-                if trimmed.starts_with('{') {
+                // Use the summary when the response is effectively only contract data
+                // (raw JSON or fenced JSON without user-facing prose).
+                if trimmed.starts_with('{') || stripped.trim().is_empty() {
                     return format_summary_for_display(summary);
                 }
             }
         }
     }
-    strip_trailing_contract(response)
+    stripped
 }
 
 #[cfg(test)]
@@ -192,5 +189,23 @@ mod tests {
         let r = "Voici l'analyse.\n\n```json\n{\"status\": \"done\", \"summary\": \"Done.\"}\n```";
         let out = user_facing_message(r);
         assert_eq!(out, "Voici l'analyse.");
+    }
+
+    #[test]
+    fn user_facing_message_fenced_json_only_returns_summary() {
+        let r = "```json\n{\"status\": \"done\", \"summary\": \"Résumé lisible.\"}\n```";
+        let out = user_facing_message(r);
+        assert_eq!(out, "Résumé lisible.");
+    }
+
+    /// `len - 2000` can land inside a multi-byte UTF-8 char (e.g. `└`); slicing must not panic.
+    #[test]
+    fn parse_contract_tail_slice_does_not_panic_mid_utf8_char() {
+        // 1999 ASCII bytes + 3-byte '└' (at bytes 1999-2001) + 1966 ASCII filler + 32-byte
+        // JSON suffix → total 4000 bytes.  r.len() - 2000 = byte 2000 = inside '└'.
+        let filler = "a".repeat(1966);
+        let r = format!("{}└{} {{\"status\":\"done\",\"summary\":\"x\"}}", "a".repeat(1999), filler);
+        assert!(!r.is_char_boundary(r.len().saturating_sub(2000)));
+        let _ = parse_contract_from_response(&r);
     }
 }

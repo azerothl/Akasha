@@ -141,11 +141,15 @@ pub async fn recall_context(
         } else {
             None
         };
-        let results = client.search(
-            params.message.clone(),
-            params.semantic_top_k,
-            recall_filter,
-        );
+        let results = if params.semantic_top_k == 0 {
+            Vec::new()
+        } else {
+            client.search(
+                params.message.clone(),
+                params.semantic_top_k,
+                recall_filter,
+            )
+        };
         let result_ids: std::collections::HashSet<String> = results.iter().map(|(id, _)| id.clone()).collect();
         for (_, content) in &results {
             ctx.long_term_block.push_str("- ");
@@ -189,7 +193,7 @@ pub async fn recall_context(
         }
 
         // Project context when suggested
-        if params.suggest_project {
+        if params.suggest_project && params.semantic_top_k > 0 {
             let query = "projet état livrables objectif étapes fait reste à faire".to_string();
             let project_results = client.search(query, params.semantic_top_k, None);
             for (_, content) in &project_results {
@@ -205,21 +209,25 @@ pub async fn recall_context(
             .as_ref()
             .or(params.process_id.as_ref())
             .cloned();
-        if let Some(eid) = entity_for_facts {
+        if params.facts_limit > 0 {
+            if let Some(eid) = entity_for_facts {
             let facts = client.get_facts_by_entity(eid, params.facts_limit);
             for f in &facts {
                 ctx.facts_block.push_str(&format!("{} --{}--> {}\n", f.subject, f.predicate, f.object));
             }
+            }
         }
 
         // Episodic retriever: recent events for session
-        let ep_filter = EpisodicFilter {
-            session_id: Some(params.session_id.clone()),
-            ..Default::default()
-        };
-        let events = client.search_episodic(ep_filter, params.episodic_limit);
-        for e in &events {
-            ctx.episodic_block.push_str(&format!("{}: {}\n", e.event_type, e.payload.replace('\n', " ")));
+        if params.episodic_limit > 0 {
+            let ep_filter = EpisodicFilter {
+                session_id: Some(params.session_id.clone()),
+                ..Default::default()
+            };
+            let events = client.search_episodic(ep_filter, params.episodic_limit);
+            for e in &events {
+                ctx.episodic_block.push_str(&format!("{}: {}\n", e.event_type, e.payload.replace('\n', " ")));
+            }
         }
 
         // User identity: prefix from user_profile (how to call the user) then optional LT search

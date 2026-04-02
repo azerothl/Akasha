@@ -8,6 +8,14 @@
 
 import { chromium } from 'playwright';
 import { createInterface } from 'readline';
+import { Writable } from 'node:stream';
+
+/** Readline must not use process.stdout here — it would mix with JSON lines from send(). */
+const readlineSink = new Writable({
+  write(_chunk, _encoding, callback) {
+    callback();
+  },
+});
 
 const args = process.argv.slice(2);
 const headless = !args.includes('--headed');
@@ -138,7 +146,7 @@ async function dispatch(line) {
 }
 
 async function main() {
-  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+  const rl = createInterface({ input: process.stdin, output: readlineSink, terminal: false });
   for await (const line of rl) {
     const trimmed = line.trim();
     if (!trimmed) continue;

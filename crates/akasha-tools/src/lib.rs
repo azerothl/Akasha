@@ -2,12 +2,20 @@
 
 mod policy;
 mod tools;
+mod tool_contract;
 
 #[cfg(feature = "container")]
 mod container;
 
 pub use policy::ToolsPolicy;
-pub use tools::{apply_patch, edit_file, file_diff, grep_content, read_file, run_command, search_files, search_replace, write_file, ToolResult};
+pub use tool_contract::{
+    built_in_tool_capabilities, schedule_tool_calls, ToolCall, ToolCapabilities, ToolExecutionLane,
+    ToolInterruptBehavior,
+};
+pub use tools::{
+    apply_patch, compare_dirs, edit_file, file_diff, file_diff_unified, git_diff, git_log, git_rev_parse_head,
+    git_status, grep_content, read_file, run_command, search_files, search_replace, write_file, ToolResult,
+};
 #[cfg(feature = "web")]
 pub use tools::{web_fetch, web_search};
 
@@ -69,16 +77,28 @@ impl ToolExecutor {
         pattern: &str,
         file_glob: Option<&str>,
         max_results: usize,
+        use_regex: bool,
+        respect_gitignore: bool,
     ) -> anyhow::Result<(Vec<(std::path::PathBuf, u32, String)>, ToolResult)> {
-        grep_content(dir, pattern, file_glob, max_results, &self.policy).await
+        grep_content(
+            dir,
+            pattern,
+            file_glob,
+            max_results,
+            use_regex,
+            respect_gitignore,
+            &self.policy,
+        )
+        .await
     }
 
     pub async fn search_files(
         &self,
         dir: &Path,
         pattern: &str,
+        respect_gitignore: bool,
     ) -> anyhow::Result<(Vec<std::path::PathBuf>, ToolResult)> {
-        search_files(dir, pattern, &self.policy).await
+        search_files(dir, pattern, respect_gitignore, &self.policy).await
     }
 
     pub async fn run_command(
@@ -97,6 +117,46 @@ impl ToolExecutor {
         path_b: &Path,
     ) -> anyhow::Result<(String, ToolResult)> {
         file_diff(path_a, path_b, &self.policy).await
+    }
+
+    pub async fn file_diff_unified(
+        &self,
+        path_a: &Path,
+        path_b: &Path,
+        context_lines: usize,
+    ) -> anyhow::Result<(String, ToolResult)> {
+        file_diff_unified(path_a, path_b, context_lines, &self.policy).await
+    }
+
+    pub async fn git_status(&self, repo: &Path) -> anyhow::Result<(String, ToolResult)> {
+        git_status(repo, &self.policy).await
+    }
+
+    pub async fn git_diff(
+        &self,
+        repo: &Path,
+        staged: bool,
+        pathspecs: &[String],
+    ) -> anyhow::Result<(String, ToolResult)> {
+        git_diff(repo, staged, pathspecs, &self.policy).await
+    }
+
+    pub async fn git_log(&self, repo: &Path, n: u32) -> anyhow::Result<(String, ToolResult)> {
+        git_log(repo, n, &self.policy).await
+    }
+
+    pub async fn git_rev_parse_head(&self, repo: &Path) -> anyhow::Result<(String, ToolResult)> {
+        git_rev_parse_head(repo, &self.policy).await
+    }
+
+    pub async fn compare_dirs(
+        &self,
+        dir_a: &Path,
+        dir_b: &Path,
+        max_depth: u32,
+        max_files: usize,
+    ) -> anyhow::Result<(String, ToolResult)> {
+        compare_dirs(dir_a, dir_b, max_depth, max_files, &self.policy).await
     }
 
     #[cfg(feature = "web")]

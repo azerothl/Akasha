@@ -21,11 +21,12 @@ Ce document décrit **tous les fichiers de configuration** utilisés par Akasha 
 | `global.enable_fallback`                    | booléen      | Non         | Activer le fallback entre providers (défaut : true).                                                                                                                            |
 | `global.default_timeout_secs`               | entier (u64) | Non         | Timeout par requête LLM en secondes (défaut : 300).                                                                                                                             |
 | `global.default_max_retries`                | entier (u32) | Non         | Nombre max de tentatives (défaut : 2).                                                                                                                                          |
-| `providers`                                 | objet        | Non         | Config par provider (clé = nom : `ollama`, `openai`, `openrouter`, `bitnet`).                                                                                                    |
+| `providers`                                 | objet        | Non         | Config par provider (clé = nom : `ollama`, `openai`, `azure_openai`, `openrouter`, `bitnet`).                                                                                                    |
 | `providers.<nom>.base_url`                  | string       | Non         | URL de base (ex. `http://localhost:11434` pour Ollama).                                                                                                                         |
 | `providers.<nom>.api_key_ref`               | string       | Non         | Référence de la clé API : `vault://nom_cle` (résolution via vault en priorité), ou nom de clé sans préfixe (résolution via variable d'environnement, ex. `openrouter_api_key`). |
-| `providers.<nom>.organization`              | string       | Non         | Ex. OpenAI organization.                                                                                                                                                        |
+| `providers.<nom>.organization`              | string       | Non         | Ex. OpenAI organization (provider `openai`).                                                                                                                                                        |
 | `providers.<nom>.version`                   | string       | Non         | Ex. version API.                                                                                                                                                                |
+| `providers.azure_openai.base_url`           | string       | Non         | Endpoint Azure OpenAI (ex. `https://<resource>.openai.azure.com`). Requis en pratique avec `api_key_ref` pour que le provider soit disponible. |
 | `providers.<nom>.site_url`                  | string       | Non         | (OpenRouter) URL du site pour l’en-tête HTTP-Referer ; sinon env `OPENROUTER_SITE_URL`. Défaut : `https://Akasha.local`.                                                                                         |
 | `providers.<nom>.app_title`                 | string       | Non         | (OpenRouter) Nom de l’app pour l’en-tête X-Title ; défaut « Akasha ». Sinon env `OPENROUTER_APP_TITLE`.                                                              |
 | `model_options`                             | objet        | Non         | Métadonnées par modèle (remplies par `akasha config models fetch/add`).                                                                                                         |
@@ -42,7 +43,7 @@ Ce document décrit **tous les fichiers de configuration** utilisés par Akasha 
 | Clé                                | Type           | Obligatoire            | Description                                                                           |
 | ---------------------------------- | -------------- | ---------------------- | ------------------------------------------------------------------------------------- |
 | `primary`                          | objet          | Non                    | Route principale.                                                                     |
-| `primary.provider`                 | string         | Oui si primary présent | Nom du provider : `ollama`, `openai`, `openrouter`, `bitnet`, `akasha_embedded`, `akasha_core`. |
+| `primary.provider`                 | string         | Oui si primary présent | Nom du provider : `ollama`, `openai`, `azure_openai`, `openrouter`, `bitnet`, `akasha_embedded`, `akasha_core`. |
 | `primary.model`                    | string         | Oui si primary présent | Nom du modèle (ex. `default`, `llama3.2`, `gpt-4`).                                   |
 | `primary.config`                   | objet          | Non                    | Options libres (max_tokens, temperature, etc.).                                       |
 | `fallback`                         | liste d’objets | Non                    | Liste de `{ provider, model, config? }` en cas d’échec du primary.                    |
@@ -52,6 +53,10 @@ Ce document décrit **tous les fichiers de configuration** utilisés par Akasha 
 
 
 **Types de tâche reconnus** : `conversation`, `code_generation`, `creative_writing`, `scientific_analysis`, `data_analysis`, `system_diagnostic`, `system` (tâches internes : extraction mémoire, décomposition).
+
+**`orchestrator` (nouveauté 0.7.0)** : type de tâche optionnel dédié à la décomposition de requêtes complexes. Quand cette route est présente, l'orchestrateur l'utilise (`preferred_task_type: "orchestrator"`) à la place de `system` pour les appels LLM de décomposition. Sans cette route, l'orchestrateur reste compatible avec les configurations antérieures (fallback automatique sur `system`). Voir [llm_router.example.yaml](llm_router.example.yaml) pour un exemple.
+
+**Note sur les valeurs entières** : les champs `max_tokens`, `top_k`, `num_ctx`, `num_gpu` acceptent des valeurs `u64` dans le YAML mais sont transmis comme `u32` aux providers. Les valeurs supérieures à `u32::MAX` (4 294 967 295) sont automatiquement limitées à `u32::MAX` (pas de troncature silencieuse).
 
 ### Exemple complet
 
@@ -63,8 +68,9 @@ Voir [llm_router.example.yaml](llm_router.example.yaml).
 - **Utiliser Ollama** : ajouter `providers.ollama.base_url` et `akasha config models set conversation ollama llama3.2`.
 - **Utiliser BitNet** (serveur local type llama-server / BitNet) : ajouter `providers.bitnet.base_url: "http://127.0.0.1:8080"` (optionnel, défaut 8080) et définir la route avec `provider: bitnet`, `model: default` (voir [36_bitnet_integration_study.md](36_bitnet_integration_study.md)).
 - **Utiliser OpenAI** : `providers.openai.api_key_ref: "vault://openai_api_key"` puis définir la route pour une catégorie.
+- **Utiliser Azure OpenAI** : ajouter `providers.azure_openai.api_key_ref` et `providers.azure_openai.base_url`, puis définir la route d'une catégorie avec `provider: azure_openai` et le nom du deployment Azure dans `model`.
 - **Modèle système (mémoire, décomposition)** : la catégorie `system` doit exister ; par défaut elle pointe vers `akasha_embedded` (voir [06_memory_model.md](06_memory_model.md)).
-- **OpenRouter / OpenAI en primary** : le daemon enregistre le provider OpenRouter (resp. OpenAI) dès qu’une clé API est disponible : variable d’environnement `OPENROUTER_API_KEY` (resp. `OPENAI_API_KEY`) ou vault `vault://openrouter_api_key` (resp. `vault://openai_api_key`). Il n’est pas obligatoire d’avoir une section `providers.openrouter` (resp. `providers.openai`) dans `llm_router.yaml` ; définir la route (ex. `task_types.conversation.primary: { provider: openrouter, model: "..." }`) via la TUI ou le fichier suffit une fois la clé définie.
+- **OpenRouter / OpenAI en primary** : pour OpenRouter, une clé (`OPENROUTER_API_KEY` ou vault) permet l’enregistrement du provider même sans section explicite `providers.openrouter`; définir ensuite la route (ex. `task_types.conversation.primary: { provider: openrouter, model: "..." }`). Pour OpenAI, conserver une section `providers.openai` (avec `api_key_ref`) dans `llm_router.yaml` avant de définir la route.
 - **Identifier l’app auprès d’OpenRouter** : pour apparaître dans le dashboard OpenRouter, définir `providers.openrouter.site_url` (URL du site, en-tête HTTP-Referer) et `providers.openrouter.app_title` (nom de l’app, en-tête X-Title), ou les variables d’environnement `OPENROUTER_SITE_URL` et `OPENROUTER_APP_TITLE`.
 
 ---

@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary } from "./claudeStyleChat";
 import { invoke } from "@tauri-apps/api/core";
 import RelationGraph from "relation-graph/react";
 import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
@@ -6,24 +7,52 @@ import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
 import { preprocessMessagePaths } from "./preprocessMessagePaths";
 import { getCached, setCached } from "./useTabCache";
 import { useI18n } from "./useI18n";
+import { GeoMapView } from "./GeoMapView";
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
 const DAEMON_PORT = 3876;
 const THEME_STORAGE_KEY = "akasha_theme";
+const UI_MODE_STORAGE_KEY = "akasha_ui_mode";
 const AKASHA_SESSION_ID_KEY = "akasha_session_id";
+const TASK_TREE_COLLAPSE_STORAGE_KEY = "akasha_task_tree_collapsed";
+const TASK_ORCHESTRATION_DEBUG_STORAGE_KEY = "akasha_task_orchestration_debug";
+const CHAT_TIPS_STORAGE_KEY = "akasha_ui_chat_tips";
+const CHAT_PROMPT_CHIPS_STORAGE_KEY = "akasha_ui_prompt_chips";
+const CHAT_BUDDY_STORAGE_KEY = "akasha_ui_buddy";
+const AKASHA_CHAT_THREADS_KEY = "akasha_chat_threads_v1";
+
+export type ChatThreadEntry = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  pendingTitle?: boolean;
+};
+
+function loadChatThreadsInitial(): ChatThreadEntry[] {
+  try {
+    const raw = localStorage.getItem(AKASHA_CHAT_THREADS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as ChatThreadEntry[];
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+    const legacy = localStorage.getItem(AKASHA_SESSION_ID_KEY)?.trim();
+    if (legacy) {
+      const now = new Date().toISOString();
+      return [{ id: legacy, title: "", createdAt: now, updatedAt: now }];
+    }
+  } catch {
+    /* ignore */
+  }
+  return [];
+}
 
 export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_latte";
+type UiMode = "simple" | "expert";
+type TaskOrchestrationDebugLevel = "minimal" | "normal" | "full";
 
 const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "light_latte"];
-
-type ChatMessageRow = {
-  role: "user" | "assistant" | "system";
-  text: string;
-  error?: boolean;
-  streaming?: boolean;
-  taskId?: string;
-};
 
 function shouldChatStreamProgress(message: string): boolean {
   const m = message?.trim() ?? "";
@@ -37,6 +66,42 @@ function shouldChatStreamProgress(message: string): boolean {
 function isChatStreamToolPhase(message: string): boolean {
   const s = message ?? "";
   return /^\s*TOOL\s*:/im.test(s.trim()) || /\n\s*TOOL\s*:/i.test(s);
+}
+
+/** Avoid replacing React state when task list data is unchanged (prevents full App re-renders / scroll reset on every get_tasks poll). */
+function tasksListsEqual(
+  a: Array<{ id: string; status: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string }>,
+  b: typeof a,
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (
+      x.id !== y.id ||
+      x.status !== y.status ||
+      x.label !== y.label ||
+      x.created_at !== y.created_at ||
+      x.parent_task_id !== y.parent_task_id ||
+      x.assigned_agent !== y.assigned_agent
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function taskTodoRowsEqual(
+  a: Array<{ id?: string | null; title: string; status: string }>,
+  b: typeof a,
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (x.id !== y.id || x.title !== y.title || x.status !== y.status) return false;
+  }
+  return true;
 }
 
 /** Graph colors per theme (aligned with styles.css [data-theme]) so the memory graph respects dark/light. */
@@ -161,6 +226,946 @@ function loadSavedTheme(): ThemeId {
   return "dark_akasha";
 }
 
+function loadSavedUiMode(): UiMode {
+  try {
+    const s = localStorage.getItem(UI_MODE_STORAGE_KEY);
+    if (s === "simple" || s === "expert") return s;
+  } catch {
+    /* ignore */
+  }
+  return "simple";
+}
+
+function trimPreview(text: string, max = 140): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (compact.length <= max) return compact;
+  return `${compact.slice(0, Math.max(0, max - 1))}…`;
+}
+
+type EventChartSeries = {
+  name: string;
+  points: Array<{ x: number; y: number }>;
+};
+
+/** Parsed maps plugin route option (GeoJSON → schematic points). */
+type MapRouteLeg = {
+  id: string;
+  label: string;
+  mode?: string;
+  points: Array<{ x: number; y: number }>;
+  distanceM?: number;
+  durationS?: number;
+  steps?: Array<{ instruction: string; distance_m?: number }>;
+};
+
+type EventAdvancedView =
+  | {
+      kind: "map";
+      title?: string;
+      summary?: string;
+      /** `great_circle_estimate` | `road_network` (from routing engine in plugin output). */
+      geometryKind?: "great_circle_estimate" | "road_network";
+      points: Array<{ x: number; y: number }>;
+      distanceM?: number;
+      durationS?: number;
+      routes?: MapRouteLeg[];
+      osmEmbedUrl?: string;
+      osmBrowseUrl?: string;
+      mapAttribution?: string;
+    }
+  | {
+      kind: "graph" | "timeseries";
+      title?: string;
+      series: EventChartSeries[];
+    };
+
+type ChatMapVisual = Extract<EventAdvancedView, { kind: "map" }>;
+
+function asRecord(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
+}
+
+/** GET /api/tasks/:id/events → { task_id, events } — tolerate alternate key casings after IPC. */
+function normalizeTaskEventsInvokeResponse(data: unknown): Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> {
+  if (data == null || typeof data !== "object") return [];
+  const o = data as Record<string, unknown>;
+  const raw = o.events ?? o.Events;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((e) => {
+    if (e && typeof e === "object") {
+      const ev = e as Record<string, unknown>;
+      return {
+        event_type: (ev.event_type ?? ev.EventType ?? ev.eventType) as string | undefined,
+        payload: ev.payload ?? ev.Payload,
+        at: (ev.at ?? ev.created_at ?? ev.At) as string | undefined,
+        task_id: (ev.task_id ?? ev.taskId) as string | undefined,
+      };
+    }
+    return { event_type: "?" };
+  });
+}
+
+/** Milestone payload is usually an object; DB round-trips may yield a JSON string. */
+function timelineMilestonePayloadRecord(payload: unknown): Record<string, unknown> | null {
+  if (payload == null) return null;
+  if (typeof payload === "string") {
+    try {
+      return asRecord(JSON.parse(payload) as unknown);
+    } catch {
+      return null;
+    }
+  }
+  return asRecord(payload);
+}
+
+function toFiniteNumber(v: unknown): number | undefined {
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function toPoint(v: unknown): { x: number; y: number } | null {
+  if (Array.isArray(v) && v.length >= 2) {
+    const x = toFiniteNumber(v[0]);
+    const y = toFiniteNumber(v[1]);
+    if (x != null && y != null) return { x, y };
+  }
+  const r = asRecord(v);
+  if (!r) return null;
+  const x = toFiniteNumber(r.x ?? r.lon ?? r.lng ?? r.time ?? r.t);
+  const y = toFiniteNumber(r.y ?? r.lat ?? r.value ?? r.v);
+  if (x != null && y != null) return { x, y };
+  return null;
+}
+
+/** GeoJSON LineString / MultiLineString → schematic points (x=lon, y=lat). */
+function geojsonLineStringToPoints(geom: unknown): Array<{ x: number; y: number }> {
+  const o = asRecord(geom);
+  if (!o) return [];
+  const typ = typeof o.type === "string" ? o.type : "";
+  if (typ === "LineString") {
+    const coords = o.coordinates;
+    if (!Array.isArray(coords)) return [];
+    return coords.map((p) => toPoint(p)).filter((p): p is { x: number; y: number } => p != null);
+  }
+  if (typ === "MultiLineString") {
+    const coords = o.coordinates;
+    if (!Array.isArray(coords)) return [];
+    const out: Array<{ x: number; y: number }> = [];
+    for (const line of coords) {
+      if (!Array.isArray(line)) continue;
+      for (const p of line) {
+        const pt = toPoint(p);
+        if (pt) out.push(pt);
+      }
+    }
+    return out;
+  }
+  const coordsLoose = o.coordinates;
+  if (Array.isArray(coordsLoose) && coordsLoose.length > 0 && Array.isArray(coordsLoose[0])) {
+    return coordsLoose.map((p) => toPoint(p)).filter((p): p is { x: number; y: number } => p != null);
+  }
+  return [];
+}
+
+function pointsFromMapGeometryField(geometry: unknown): Array<{ x: number; y: number }> {
+  if (Array.isArray(geometry)) {
+    return geometry.map((p) => toPoint(p)).filter((p): p is { x: number; y: number } => p != null);
+  }
+  return geojsonLineStringToPoints(geometry);
+}
+
+function normalizeSeries(input: unknown): EventChartSeries[] {
+  const arr = Array.isArray(input) ? input : [];
+  const out: EventChartSeries[] = [];
+  arr.forEach((item, idx) => {
+    const r = asRecord(item);
+    if (!r) return;
+    const name = typeof r.name === "string" && r.name.trim() ? r.name.trim() : `series_${idx + 1}`;
+
+    const pointsFromPoints = Array.isArray(r.points)
+      ? r.points.map((p) => toPoint(p)).filter((p): p is { x: number; y: number } => p != null)
+      : [];
+    if (pointsFromPoints.length > 0) {
+      out.push({ name, points: pointsFromPoints });
+      return;
+    }
+
+    const yValues = Array.isArray(r.y) ? r.y.map((n) => toFiniteNumber(n)).filter((n): n is number => n != null) : [];
+    const xValues = Array.isArray(r.x) ? r.x.map((n) => toFiniteNumber(n)).filter((n): n is number => n != null) : [];
+    if (yValues.length > 0) {
+      const points = yValues.map((y, i) => ({ x: xValues[i] ?? i, y }));
+      out.push({ name, points });
+      return;
+    }
+
+    const dataPoints = Array.isArray(r.data)
+      ? r.data.map((p) => toPoint(p)).filter((p): p is { x: number; y: number } => p != null)
+      : [];
+    if (dataPoints.length > 0) {
+      out.push({ name, points: dataPoints });
+    }
+  });
+  return out;
+}
+
+function scalePoints(points: Array<{ x: number; y: number }>, width: number, height: number, pad = 12) {
+  if (points.length === 0) return [] as Array<{ x: number; y: number }>;
+  const xs = points.map((p) => p.x);
+  const ys = points.map((p) => p.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const spanX = Math.max(maxX - minX, 1e-9);
+  const spanY = Math.max(maxY - minY, 1e-9);
+  return points.map((p) => ({
+    x: pad + ((p.x - minX) / spanX) * (width - pad * 2),
+    y: height - pad - ((p.y - minY) / spanY) * (height - pad * 2),
+  }));
+}
+
+function extractAdvancedViewData(payload: unknown): EventAdvancedView | null {
+  const p0 = asRecord(payload);
+  const candidates = [
+    p0,
+    asRecord(p0?.result),
+    asRecord(p0?.output),
+    asRecord(p0?.data),
+  ].filter((c): c is Record<string, unknown> => c != null);
+
+  for (const c of candidates) {
+    const view = typeof c.view === "string" ? c.view.toLowerCase() : "";
+    if (!view) continue;
+    const title = typeof c.title === "string" ? c.title : undefined;
+
+    if (view === "map") {
+      const geoPoints = pointsFromMapGeometryField(c.geometry);
+      const routeObj = asRecord(c.route);
+      const fallbackGeo =
+        routeObj && routeObj.geometry != null ? pointsFromMapGeometryField(routeObj.geometry) : [];
+      const routesIn: MapRouteLeg[] = [];
+      if (Array.isArray(c.routes)) {
+        c.routes.forEach((raw, i) => {
+          const rr = asRecord(raw);
+          if (!rr) return;
+          const id = typeof rr.id === "string" && rr.id.trim() ? rr.id.trim() : `route_${i}`;
+          const label = typeof rr.label === "string" ? rr.label : `Option ${i + 1}`;
+          const mode = typeof rr.mode === "string" ? rr.mode : undefined;
+          const pts = pointsFromMapGeometryField(rr.geometry);
+          const distanceM = toFiniteNumber(rr.distance_m ?? rr.distanceM);
+          const durationS = toFiniteNumber(rr.duration_s ?? rr.durationS);
+          let steps: MapRouteLeg["steps"];
+          if (Array.isArray(rr.steps)) {
+            steps = rr.steps
+              .map((s) => {
+                const sr = asRecord(s);
+                if (!sr) return null;
+                const instruction = typeof sr.instruction === "string" ? sr.instruction : "";
+                if (!instruction.trim()) return null;
+                const distance_m = toFiniteNumber(sr.distance_m ?? sr.distanceM);
+                return distance_m != null ? { instruction, distance_m } : { instruction };
+              })
+              .filter((x): x is NonNullable<typeof x> => x != null);
+          }
+          if (pts.length >= 2 || distanceM != null) {
+            routesIn.push({ id, label, mode, points: pts, distanceM, durationS, steps: steps?.length ? steps : undefined });
+          }
+        });
+      }
+      const points =
+        routesIn.length > 0 && routesIn[0]!.points.length >= 2
+          ? routesIn[0]!.points
+          : geoPoints.length >= 2
+            ? geoPoints
+            : fallbackGeo;
+      const distanceM = toFiniteNumber(c.distance_m ?? c.distanceM) ?? routesIn[0]?.distanceM;
+      const durationS = toFiniteNumber(c.duration_s ?? c.durationS) ?? routesIn[0]?.durationS;
+      const summary = typeof c.summary === "string" && c.summary.trim() ? c.summary.trim() : undefined;
+      const gk = typeof c.geometry_kind === "string" ? c.geometry_kind.toLowerCase() : "";
+      const geometryKind: "great_circle_estimate" | "road_network" | undefined =
+        gk === "great_circle_estimate"
+          ? "great_circle_estimate"
+          : gk === "road_network"
+            ? "road_network"
+            : undefined;
+      const osmEmbedUrl =
+        typeof c.osm_embed_url === "string" && c.osm_embed_url.startsWith("http") ? c.osm_embed_url : undefined;
+      const osmBrowseUrl =
+        typeof c.osm_browse_url === "string" && c.osm_browse_url.startsWith("http") ? c.osm_browse_url : undefined;
+      const mapAttribution =
+        typeof c.map_attribution === "string" && c.map_attribution.trim() ? c.map_attribution.trim() : undefined;
+      if (points.length >= 2 || distanceM != null || durationS != null) {
+        return {
+          kind: "map",
+          title,
+          summary,
+          geometryKind,
+          points,
+          distanceM,
+          durationS,
+          routes: routesIn.length > 0 ? routesIn : undefined,
+          osmEmbedUrl,
+          osmBrowseUrl,
+          mapAttribution,
+        };
+      }
+    }
+
+    if (view === "graph" || view === "timeseries") {
+      const series = normalizeSeries(c.series)
+        .concat(normalizeSeries(asRecord(c.figure)?.data))
+        .filter((s) => s.points.length > 0);
+      if (series.length > 0) {
+        return { kind: view, title, series };
+      }
+    }
+  }
+
+  return null;
+}
+
+type ChatMessageRow = {
+  role: "user" | "assistant" | "system";
+  text: string;
+  error?: boolean;
+  streaming?: boolean;
+  taskId?: string;
+  mapVisual?: ChatMapVisual;
+};
+
+function findLastChatAssistantIndex(messages: ChatMessageRow[], taskId: string): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role === "assistant" && m.taskId === taskId) return i;
+  }
+  return -1;
+}
+
+function parsePluginToolResultBody(raw: string): unknown | null {
+  const s = raw.trim();
+  const m = s.match(/^\[plugin:[^\]]+\]\s*([\s\S]*)$/);
+  const jsonStr = ((m ? m[1] : s) ?? "").trim();
+  if (!jsonStr) return null;
+  try {
+    return JSON.parse(jsonStr) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/** Build OSM embed + browse URLs from route vertices (lon, lat in `x`/`y`). */
+function osmUrlsFromLonLatPoints(points: Array<{ x: number; y: number }>): { embed: string; browse: string } | undefined {
+  if (points.length < 2) return undefined;
+  const lons = points.map((p) => p.x);
+  const lats = points.map((p) => p.y);
+  let minLon = Math.min(...lons);
+  let maxLon = Math.max(...lons);
+  let minLat = Math.min(...lats);
+  let maxLat = Math.max(...lats);
+  let lonSpan = maxLon - minLon;
+  let latSpan = maxLat - minLat;
+  const minSpan = 1e-4;
+  if (lonSpan < minSpan) {
+    const half = minSpan / 2;
+    const mid = (minLon + maxLon) / 2;
+    minLon = mid - half;
+    maxLon = mid + half;
+    lonSpan = minSpan;
+  }
+  if (latSpan < minSpan) {
+    const half = minSpan / 2;
+    const mid = (minLat + maxLat) / 2;
+    minLat = mid - half;
+    maxLat = mid + half;
+    latSpan = minSpan;
+  }
+  const padX = lonSpan * 0.1;
+  const padY = latSpan * 0.1;
+  const west = minLon - padX;
+  const south = minLat - padY;
+  const east = maxLon + padX;
+  const north = maxLat + padY;
+  const embed = `https://www.openstreetmap.org/export/embed.html?bbox=${west},${south},${east},${north}&layer=mapnik`;
+  const browse = `https://www.openstreetmap.org/?minlat=${south}&minlon=${west}&maxlat=${north}&maxlon=${east}`;
+  return { embed, browse };
+}
+
+/** When `result_full` is truncated (invalid JSON) or IPC clips the string, recover map metrics + polyline from the readable prefix. */
+function salvageMapVisualFromPluginPrefix(raw: string): ChatMapVisual | null {
+  const s = raw.trim();
+  const plug = s.match(/^\[plugin:[^\]]+\]\s*/);
+  const body = plug ? s.slice(plug[0].length) : s;
+  if (!body.startsWith("{")) return null;
+  if (!/"view"\s*:\s*"map"/i.test(body)) return null;
+
+  const numField = (key: string): number | undefined => {
+    const re = new RegExp(`"${key}"\\s*:\\s*([0-9.+-eE]+)`);
+    const mm = body.match(re);
+    if (!mm) return undefined;
+    const n = Number(mm[1]);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const distanceM = numField("distance_m") ?? numField("distanceM");
+  const durationS = numField("duration_s") ?? numField("durationS");
+
+  // Only scan the primary `geometry` + `steps` region. Including `"routes":[...]` would merge every
+  // alternate leg (corridor, train) into one bogus polyline (good start, wrong end).
+  const routesKey = body.search(/"routes"\s*:\s*\[/);
+  const coordSource = routesKey >= 0 ? body.slice(0, routesKey) : body;
+
+  const coordRe = /\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]/g;
+  const points: Array<{ x: number; y: number }> = [];
+  let cm: RegExpExecArray | null;
+  while ((cm = coordRe.exec(coordSource)) !== null) {
+    const x = Number(cm[1]);
+    const y = Number(cm[2]);
+    if (Number.isFinite(x) && Number.isFinite(y)) points.push({ x, y });
+  }
+
+  let summary: string | undefined;
+  const sm = body.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (sm?.[1]) {
+    summary = sm[1].replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\").trim();
+  }
+
+  let geometryKind: "great_circle_estimate" | "road_network" | undefined;
+  if (/"geometry_kind"\s*:\s*"road_network"/.test(body)) {
+    geometryKind = "road_network";
+  } else if (/"geometry_kind"\s*:\s*"great_circle_estimate"/.test(body)) {
+    geometryKind = "great_circle_estimate";
+  }
+
+  const osmEmbedM = body.match(/"osm_embed_url"\s*:\s*"([^"]+)"/);
+  const osmBrowseM = body.match(/"osm_browse_url"\s*:\s*"([^"]+)"/);
+  let osmEmbedUrl =
+    osmEmbedM?.[1]?.startsWith("http") ? osmEmbedM[1] : undefined;
+  let osmBrowseUrl =
+    osmBrowseM?.[1]?.startsWith("http") ? osmBrowseM[1] : undefined;
+  if (!osmEmbedUrl && points.length >= 2) {
+    const syn = osmUrlsFromLonLatPoints(points);
+    if (syn) {
+      osmEmbedUrl = syn.embed;
+      osmBrowseUrl = osmBrowseUrl ?? syn.browse;
+    }
+  }
+
+  if (points.length >= 2 || distanceM != null || durationS != null) {
+    return {
+      kind: "map",
+      summary: summary || undefined,
+      geometryKind,
+      points,
+      distanceM,
+      durationS,
+      osmEmbedUrl,
+      osmBrowseUrl,
+    };
+  }
+  return null;
+}
+
+function extractChatMapVisualFromTaskEvents(
+  events: Array<{ event_type?: string; payload?: unknown }>,
+): ChatMapVisual | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    const et = e.event_type ?? "";
+    if (et !== "timeline_milestone" && et !== "deterministic_preferred_tool_result") continue;
+    const p = timelineMilestonePayloadRecord(e.payload);
+    if (!p || p.name !== "deterministic_preferred_tool_result") continue;
+    if (p.success === false || p.success === 0 || p.success === "false") continue;
+    const tool = typeof p.tool === "string" ? p.tool : "";
+    if (!tool.startsWith("maps_")) continue;
+    const full =
+      typeof p.result_full === "string"
+        ? p.result_full
+        : typeof p.result_preview === "string"
+          ? p.result_preview
+          : null;
+    if (!full) continue;
+    const parsed = parsePluginToolResultBody(full);
+    const vis = parsed ? extractAdvancedViewData(parsed) : null;
+    if (vis?.kind === "map") return vis;
+    const salvaged = salvageMapVisualFromPluginPrefix(full);
+    if (salvaged) return salvaged;
+  }
+  return null;
+}
+
+/** When the model pastes raw plugin JSON in the reply, still show the map (no milestone / truncated preview). */
+function extractChatMapVisualFromAssistantText(text: string): ChatMapVisual | null {
+  const idx = text.indexOf("[plugin:");
+  if (idx < 0) return null;
+  const slice = text.slice(idx);
+  const parsed = parsePluginToolResultBody(slice);
+  const vis = parsed ? extractAdvancedViewData(parsed) : null;
+  if (vis?.kind === "map") return vis;
+  return salvageMapVisualFromPluginPrefix(slice);
+}
+
+function simpleTextHash(s: string): string {
+  const slice = s.length > 4000 ? s.slice(0, 4000) : s;
+  let h = 0;
+  for (let i = 0; i < slice.length; i++) h = (Math.imul(31, h) + slice.charCodeAt(i)) | 0;
+  return String(h >>> 0);
+}
+
+function chatMapMessageCacheKey(sessionId: string, assistantText: string): string {
+  const CACHE_VERSION = "v2";
+  return `akasha_map_msg_${CACHE_VERSION}_${sessionId}_${simpleTextHash(assistantText.trim())}`;
+}
+
+function isChatMapVisualLike(o: unknown): o is ChatMapVisual {
+  const r = asRecord(o);
+  if (!r || r.kind !== "map" || !Array.isArray(r.points) || r.points.length < 2) return false;
+  return r.points.every((p) => {
+    const pr = asRecord(p);
+    const x = pr ? toFiniteNumber(pr.x) : null;
+    const y = pr ? toFiniteNumber(pr.y) : null;
+    return x != null && y != null;
+  });
+}
+
+/** Restore map UI after app reload when the assistant bubble text matches a cached snapshot (same session). */
+function tryLoadCachedChatMapVisual(sessionId: string, assistantText: string): ChatMapVisual | null {
+  if (!sessionId?.trim() || !assistantText?.trim()) return null;
+  try {
+    const raw = localStorage.getItem(chatMapMessageCacheKey(sessionId, assistantText));
+    if (!raw) return null;
+    const o = JSON.parse(raw) as unknown;
+    return isChatMapVisualLike(o) ? o : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatDistanceLabel(meters?: number): string | null {
+  if (meters == null || !Number.isFinite(meters)) return null;
+  if (meters < 1000) return `${Math.round(meters)} m`;
+  return `${(meters / 1000).toFixed(2)} km`;
+}
+
+function formatDurationLabel(seconds?: number): string | null {
+  if (seconds == null || !Number.isFinite(seconds)) return null;
+  if (seconds < 60) return `${Math.round(seconds)} s`;
+  const min = Math.floor(seconds / 60);
+  const sec = Math.round(seconds % 60);
+  return sec > 0 ? `${min} min ${sec} s` : `${min} min`;
+}
+
+function advancedViewToCsv(visual: EventAdvancedView): string {
+  if (visual.kind === "map") {
+    if (visual.routes && visual.routes.length > 0) {
+      const header = "route_id,route_label,index,lon,lat";
+      const rows: string[] = [];
+      visual.routes.forEach((rt) => {
+        const safeLabel = rt.label.replace(/"/g, '""');
+        rt.points.forEach((p, idx) => {
+          rows.push(`${rt.id},"${safeLabel}",${idx},${p.x},${p.y}`);
+        });
+      });
+      return [header, ...rows].join("\n");
+    }
+    const header = "index,lon,lat";
+    const rows = visual.points.map((p, idx) => `${idx},${p.x},${p.y}`);
+    return [header, ...rows].join("\n");
+  }
+  const header = "series,index,x,y";
+  const rows: string[] = [];
+  visual.series.forEach((series) => {
+    series.points.forEach((point, idx) => {
+      rows.push(`"${series.name.replace(/"/g, '""')}",${idx},${point.x},${point.y}`);
+    });
+  });
+  return [header, ...rows].join("\n");
+}
+
+function renderAdvancedViewToCanvas(visual: EventAdvancedView, width: number, height: number): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return canvas;
+
+  ctx.fillStyle = "#0b0f17";
+  ctx.fillRect(0, 0, width, height);
+
+  if (visual.kind === "map") {
+    const scaled = scalePoints(visual.points, width, height);
+    if (scaled.length >= 2) {
+      ctx.strokeStyle = "#0ea5e9";
+      ctx.lineWidth = 2.4;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(scaled[0]!.x, scaled[0]!.y);
+      for (let i = 1; i < scaled.length; i++) {
+        ctx.lineTo(scaled[i]!.x, scaled[i]!.y);
+      }
+      ctx.stroke();
+    }
+    for (let i = 0; i < scaled.length; i++) {
+      const p = scaled[i]!;
+      const r = i === 0 || i === scaled.length - 1 ? 4 : 3;
+      ctx.beginPath();
+      ctx.fillStyle = "#38bdf8";
+      ctx.strokeStyle = "#0ea5e9";
+      ctx.lineWidth = 1;
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    return canvas;
+  }
+
+  const palette = ["#7c8cff", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
+  visual.series.forEach((s, idx) => {
+    const scaled = scalePoints(s.points, width, height);
+    if (scaled.length < 2) return;
+    ctx.strokeStyle = palette[idx % palette.length]!;
+    ctx.lineWidth = 2.2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(scaled[0]!.x, scaled[0]!.y);
+    for (let i = 1; i < scaled.length; i++) {
+      ctx.lineTo(scaled[i]!.x, scaled[i]!.y);
+    }
+    ctx.stroke();
+  });
+  return canvas;
+}
+
+type MapVisual = Extract<EventAdvancedView, { kind: "map" }>;
+
+type MapPluginEventViewProps = {
+  visual: MapVisual;
+  t: (key: string) => string;
+  width: number;
+  height: number;
+  toolbar: "inline" | "hidden";
+  /** Adds full-screen panel spacing class (modal body). */
+  layout?: "default" | "fullscreen";
+  /** Chat: OSM iframe first and taller; SVG schematic in a collapsible block. */
+  variant?: "default" | "chat";
+  /** When false, hide title (modal already has a heading). */
+  showPanelHeading?: boolean;
+  onFullscreen?: () => void;
+  onExportCsv?: () => void;
+  endPointR?: number;
+  midPointR?: number;
+  interactive?: {
+    dragging: boolean;
+    transform: string;
+    onWheel: (e: ReactWheelEvent<HTMLDivElement>) => void;
+    onDoubleClick: () => void;
+    onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => void;
+    onPointerMove: (e: ReactPointerEvent<HTMLDivElement>) => void;
+    onPointerUp: (e: ReactPointerEvent<HTMLDivElement>) => void;
+    onPointerCancel: (e: ReactPointerEvent<HTMLDivElement>) => void;
+    onPointerLeave: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  };
+};
+
+function MapPluginEventView({
+  visual,
+  t,
+  width,
+  height,
+  toolbar,
+  layout = "default",
+  variant = "default",
+  showPanelHeading = true,
+  onFullscreen,
+  onExportCsv,
+  endPointR = 3.5,
+  midPointR = 2.5,
+  interactive,
+}: MapPluginEventViewProps) {
+  const routes = useMemo(() => {
+    if (visual.routes && visual.routes.length > 0) {
+      return visual.routes;
+    }
+    return [
+      {
+        id: "default",
+        label: t("tasks.map_route_primary"),
+        points: visual.points,
+        distanceM: visual.distanceM,
+        durationS: visual.durationS,
+        steps: [],
+      },
+    ];
+  }, [visual, t]);
+
+  const [routeIx, setRouteIx] = useState(0);
+  useEffect(() => {
+    setRouteIx(0);
+  }, [visual]);
+
+  const safeIx = Math.min(routeIx, Math.max(0, routes.length - 1));
+  const active = routes[safeIx] ?? routes[0]!;
+  const points = active.points.length >= 2 ? active.points : visual.points;
+  const hasLeafletMap = points.length >= 2;
+  const scaled = scalePoints(points, width, height);
+  const polyline = scaled.map((p) => `${p.x},${p.y}`).join(" ");
+  const distance = formatDistanceLabel(active.distanceM ?? visual.distanceM);
+  const duration = formatDurationLabel(active.durationS ?? visual.durationS);
+
+  const synthesizedOsm = !visual.osmEmbedUrl && hasLeafletMap ? osmUrlsFromLonLatPoints(points) : null;
+  const effectiveOsmEmbed = visual.osmEmbedUrl ?? synthesizedOsm?.embed;
+  const effectiveOsmBrowse = visual.osmBrowseUrl ?? synthesizedOsm?.browse;
+  const linkBrowseUrl =
+    typeof effectiveOsmBrowse === "string" && effectiveOsmBrowse.startsWith("http")
+      ? effectiveOsmBrowse
+      : hasLeafletMap
+        ? osmUrlsFromLonLatPoints(points)?.browse
+        : undefined;
+
+  const lineAndPoints = (
+    <>
+      {scaled.length >= 2 && <polyline points={polyline} className="event-advanced-map-line" />}
+      {scaled.map((p, idx) => (
+        <circle
+          key={`mapv-pt-${idx}`}
+          cx={p.x}
+          cy={p.y}
+          r={idx === 0 || idx === scaled.length - 1 ? endPointR : midPointR}
+          className="event-advanced-map-point"
+        />
+      ))}
+    </>
+  );
+
+  return (
+    <div
+      className={`event-advanced-view event-advanced-view-map${interactive ? " event-advanced-view-map--fullscreen" : ""}${
+        layout === "fullscreen" ? " event-advanced-view-fullscreen" : ""
+      }`}
+    >
+      {showPanelHeading && <strong className="metadata-label">{visual.title ?? t("tasks.plugin_map_title")}</strong>}
+      {visual.summary && <p className="event-map-summary">{visual.summary}</p>}
+      {visual.geometryKind === "great_circle_estimate" ? (
+        <p className="event-map-geometry-note">{t("tasks.map_geometry_great_circle_note")}</p>
+      ) : null}
+      {visual.geometryKind === "road_network" ? (
+        <p className="event-map-geometry-note">{t("tasks.map_geometry_road_network_note")}</p>
+      ) : null}
+      {toolbar === "inline" && (onFullscreen || onExportCsv) && (
+        <div className="event-advanced-toolbar">
+          {onFullscreen && (
+            <button type="button" className="event-advanced-action-btn" onClick={onFullscreen}>
+              {t("tasks.open_fullscreen")}
+            </button>
+          )}
+          {onExportCsv && (
+            <button type="button" className="event-advanced-action-btn" onClick={onExportCsv}>
+              {t("tasks.export_csv")}
+            </button>
+          )}
+        </div>
+      )}
+      {routes.length > 1 && (
+        <div className="event-map-route-tabs" role="tablist" aria-label={t("tasks.map_route_options")}>
+          {routes.map((r, i) => (
+            <button
+              key={r.id}
+              type="button"
+              role="tab"
+              aria-selected={i === safeIx}
+              className={i === safeIx ? "event-map-route-tab is-active" : "event-map-route-tab"}
+              onClick={() => setRouteIx(i)}
+            >
+              {r.label || `${t("tasks.map_route_primary")} ${i + 1}`}
+            </button>
+          ))}
+        </div>
+      )}
+      {(distance || duration) && (
+        <div className="event-advanced-metrics-inline" role="list">
+          {distance && (
+            <span className="event-advanced-chip" role="listitem">
+              {t("tasks.distance_label")}: {distance}
+            </span>
+          )}
+          {duration && (
+            <span className="event-advanced-chip" role="listitem">
+              {t("tasks.duration_label")}: {duration}
+            </span>
+          )}
+          {active.mode && (
+            <span className="event-advanced-chip" role="listitem">
+              {t("tasks.map_mode_label")}: {active.mode}
+            </span>
+          )}
+        </div>
+      )}
+      {hasLeafletMap ? (
+        <div className="event-map-geo-leaflet">
+          <div className="event-map-geo-leaflet-head">
+            <span className="metadata-label">{t("tasks.map_interactive_layer")}</span>
+          </div>
+          <GeoMapView
+            points={points}
+            height={variant === "chat" ? 260 : layout === "fullscreen" ? 360 : 300}
+            ariaLabel={t("tasks.map_interactive_layer")}
+          />
+        </div>
+      ) : null}
+      {(() => {
+        const schematicBlock = !hasLeafletMap
+          ? interactive
+            ? (
+                <div
+                  className={`event-visual-interactive-surface ${interactive.dragging ? "is-dragging" : ""}`}
+                  onWheel={interactive.onWheel}
+                  onDoubleClick={interactive.onDoubleClick}
+                  onPointerDown={interactive.onPointerDown}
+                  onPointerMove={interactive.onPointerMove}
+                  onPointerUp={interactive.onPointerUp}
+                  onPointerCancel={interactive.onPointerCancel}
+                  onPointerLeave={interactive.onPointerLeave}
+                >
+                  <svg className="event-advanced-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label={t("tasks.plugin_map_title")}>
+                    <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
+                    <g transform={interactive.transform}>{lineAndPoints}</g>
+                  </svg>
+                </div>
+              )
+            : (
+                <svg className="event-advanced-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label={t("tasks.plugin_map_title")}>
+                  <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
+                  {lineAndPoints}
+                </svg>
+              )
+          : null;
+
+        const osmIframeBlock =
+          effectiveOsmEmbed && !hasLeafletMap ? (
+            <div className="event-map-osm-block">
+              <div className="event-map-osm-head">
+                <span className="metadata-label">{t("tasks.map_openstreetmap")}</span>
+                {effectiveOsmBrowse && String(effectiveOsmBrowse).startsWith("http") ? (
+                  <a className="event-map-osm-link" href={effectiveOsmBrowse} target="_blank" rel="noreferrer">
+                    {t("tasks.map_open_in_browser")}
+                  </a>
+                ) : null}
+              </div>
+              <p className="event-map-osm-hint">{variant === "chat" ? t("tasks.map_osm_hint_chat") : t("tasks.map_osm_hint")}</p>
+              <iframe title={t("tasks.map_openstreetmap")} className="event-map-osm-iframe" src={effectiveOsmEmbed} loading="lazy" referrerPolicy="no-referrer-when-downgrade" />
+            </div>
+          ) : null;
+
+        const osmLinkOnlyBlock =
+          hasLeafletMap && linkBrowseUrl ? (
+            <div className="event-map-osm-block event-map-osm-link-only">
+              <div className="event-map-osm-head">
+                <span className="metadata-label">{t("tasks.map_openstreetmap")}</span>
+                <a className="event-map-osm-link" href={linkBrowseUrl} target="_blank" rel="noreferrer">
+                  {t("tasks.map_open_in_browser")}
+                </a>
+              </div>
+              <p className="event-map-osm-hint">{t("tasks.map_osm_with_leaflet_hint")}</p>
+            </div>
+          ) : null;
+
+        if (variant === "chat" && (Boolean(effectiveOsmEmbed) || hasLeafletMap)) {
+          return (
+            <>
+              {hasLeafletMap ? osmLinkOnlyBlock : osmIframeBlock}
+              {!hasLeafletMap && scaled.length >= 2 ? (
+                <details className="event-map-schematic-details">
+                  <summary className="event-map-schematic-details-summary">{t("tasks.map_schematic_details_summary")}</summary>
+                  {schematicBlock}
+                </details>
+              ) : null}
+            </>
+          );
+        }
+
+        return (
+          <>
+            {schematicBlock}
+            {osmIframeBlock}
+            {osmLinkOnlyBlock}
+          </>
+        );
+      })()}
+      {active.steps && active.steps.length > 0 && (
+        <div className="event-map-steps-wrap">
+          <strong className="metadata-label">{t("tasks.map_itinerary_steps")}</strong>
+          <ol className="event-map-steps">
+            {active.steps.map((s, si) => (
+              <li key={`st-${si}`}>
+                {s.instruction}
+                {s.distance_m != null && Number.isFinite(s.distance_m) ? (
+                  <span className="event-map-step-dist"> · {formatDistanceLabel(s.distance_m)}</span>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+      {visual.mapAttribution && <p className="event-map-attribution">{visual.mapAttribution}</p>}
+    </div>
+  );
+}
+
+function formatRelativeTimeLabel(value?: string, locale: "fr" | "en" = "fr"): string | null {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  const deltaMs = Date.now() - d.getTime();
+  const future = deltaMs < 0;
+  const deltaSec = Math.round(Math.abs(deltaMs) / 1000);
+  if (deltaSec < 60) return locale === "fr" ? (future ? "dans quelques sec." : "à l'instant") : (future ? "in a few sec" : "just now");
+  const deltaMin = Math.round(deltaSec / 60);
+  if (deltaMin < 60) return locale === "fr" ? (future ? `dans ${deltaMin} min` : `il y a ${deltaMin} min`) : (future ? `in ${deltaMin} min` : `${deltaMin} min ago`);
+  const deltaHours = Math.round(deltaMin / 60);
+  if (deltaHours < 24) return locale === "fr" ? (future ? `dans ${deltaHours} h` : `il y a ${deltaHours} h`) : (future ? `in ${deltaHours} h` : `${deltaHours} h ago`);
+  const deltaDays = Math.round(deltaHours / 24);
+  return locale === "fr" ? (future ? `dans ${deltaDays} j` : `il y a ${deltaDays} j`) : (future ? `in ${deltaDays} d` : `${deltaDays} d ago`);
+}
+
+function classifyAgentKind(agent?: string | null): string {
+  const value = (agent ?? "").trim().toLowerCase();
+  if (!value) return "generic";
+  if (/(orchestr|planner|plan|router|main_agent|coordinator|supervisor)/.test(value)) return "orchestrator";
+  if (/(code|coding|dev|developer|refactor|review|test|debug|fix)/.test(value)) return "code";
+  if (/(conversation|chat|dialog|assistant|support)/.test(value)) return "conversation";
+  if (/(memory|rag|search|retriev|knowledge|research|docs?)/.test(value)) return "knowledge";
+  if (/(tool|exec|shell|terminal|operator|command)/.test(value)) return "tooling";
+  if (/(vision|image|ocr|screen)/.test(value)) return "vision";
+  if (/(voice|audio|speech|stt|tts)/.test(value)) return "voice";
+  if (/(schedule|calendar|time|cron)/.test(value)) return "scheduler";
+  return "generic";
+}
+
+function classifyEventKind(eventType?: string | null): string {
+  const value = (eventType ?? "").trim().toLowerCase();
+  if (!value) return "neutral";
+  if (/(received|created|queued|accepted|started)$/.test(value) || value === "task_received") return "received";
+  if (value === "progress_update" || value === "todo_list_updated") return "progress";
+  if (value === "deterministic_preferred_tool_attempt" || value === "deterministic_preferred_tool_result") return "tool";
+  if (value === "deterministic_preferred_tool_no_success") return "failure";
+  if (value === "tool_call_started" || value === "tool_call_finished" || value === "tool_invoked") return "tool";
+  if (value === "sub_agent_spawned" || value === "task_decomposed" || value === "plan_proposed" || value === "plan_committed" || value === "timeline_milestone" || value === "subagent_startup_started") return "orchestration";
+  if (value === "task_completed") return "success";
+  if (value === "task_failed") return "failure";
+  if (/(ask_user|human_input|approval|confirmation)/.test(value)) return "question";
+  if (value === "subagent_startup_pending") return "progress";
+  return "neutral";
+}
+
+function isDeterministicAutoToolEvent(eventType?: string | null): boolean {
+  const value = (eventType ?? "").trim().toLowerCase();
+  return (
+    value === "deterministic_preferred_tool_attempt" ||
+    value === "deterministic_preferred_tool_result" ||
+    value === "deterministic_preferred_tool_no_success"
+  );
+}
+
 type Tab = "chat" | "scheduled" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
 
 type SettingsSection = "display" | "system" | "agent" | "user" | "data";
@@ -271,6 +1276,16 @@ interface ModelMetricsEntry {
 
 type RouterMetrics = Record<string, ModelMetricsEntry>;
 
+type PluginStatusEntry = {
+  id?: string;
+  name?: string;
+  version?: string;
+  kind?: string;
+  enabled?: boolean;
+  score?: number;
+  disabled_reason?: string | null;
+};
+
 function App() {
   const { t, locale, setLocale } = useI18n();
   const themes = useMemo(
@@ -284,6 +1299,7 @@ function App() {
   const [tab, setTab] = useState<Tab>("chat");
   const [rightSidebarOpen, setRightSidebarOpen] = useState(false);
   const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
+  const [uiMode, setUiMode] = useState<UiMode>(loadSavedUiMode);
   const [showOnboarding, setShowOnboarding] = useState(() => {
     try {
       return localStorage.getItem("akasha_onboarding_dismissed") !== "1";
@@ -299,9 +1315,177 @@ function App() {
     },
     [t]
   );
+  const summarizeTaskEvent = useCallback(
+    (event: { event_type: string; payload?: unknown }) => {
+      const payload = event.payload;
+      if (event.event_type === "progress_update" && payload && typeof payload === "object" && "message" in payload && typeof (payload as { message?: unknown }).message === "string") {
+        return trimPreview(String((payload as { message: string }).message), 160);
+      }
+      if ((event.event_type === "tool_call_started" || event.event_type === "tool_call_finished") && payload && typeof payload === "object" && "tool" in payload && (payload as { tool?: string }).tool) {
+        return `${t("tasks.tool_summary_prefix")}: ${String((payload as { tool: string }).tool)}`;
+      }
+      if (event.event_type === "tool_invoked" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const tool = typeof p.tool === "string" ? p.tool : "?";
+        const success = typeof p.success === "boolean" ? p.success : null;
+        const suffix = success !== null ? ` · ${success ? t("common.yes") : t("common.no")}` : "";
+        return `${t("tasks.tool_summary_prefix")}: ${tool}${suffix}`;
+      }
+      if (event.event_type === "sub_agent_spawned" && payload && typeof payload === "object" && "agent" in payload && (payload as { agent?: string }).agent) {
+        return `${t("tasks.agent_summary_prefix")}: ${String((payload as { agent: string }).agent)}`;
+      }
+      if ((event.event_type === "plan_proposed" || event.event_type === "plan_committed") && payload && typeof payload === "object" && Array.isArray((payload as { steps?: unknown[] }).steps)) {
+        return t("tasks.plan_summary").replace("{{count}}", String((payload as { steps: unknown[] }).steps.length));
+      }
+      if ((event.event_type === "task_completed" || event.event_type === "task_failed") && payload && typeof payload === "object" && "model_used" in payload && (payload as { model_used?: string | null }).model_used) {
+        return `${t("tasks.model_used")}: ${String((payload as { model_used: string }).model_used)}`;
+      }
+      if (event.event_type === "deterministic_preferred_tool_attempt" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const tool = typeof p.tool === "string" ? p.tool : "?";
+        const round = typeof p.round === "number" ? p.round : undefined;
+        return round != null
+          ? `${t("tasks.deterministic_tool_attempt_summary")} ${tool} · ${t("tasks.attempt_label")} #${round}`
+          : `${t("tasks.deterministic_tool_attempt_summary")} ${tool}`;
+      }
+      if (event.event_type === "deterministic_preferred_tool_result" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const tool = typeof p.tool === "string" ? p.tool : "?";
+        const success = typeof p.success === "boolean" ? p.success : false;
+        return `${t("tasks.deterministic_tool_result_summary")} ${tool} · ${success ? t("common.yes") : t("common.no")}`;
+      }
+      if (event.event_type === "deterministic_preferred_tool_no_success" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const tools = Array.isArray(p.attempted_tools)
+          ? (p.attempted_tools as unknown[]).map((x) => String(x)).filter(Boolean)
+          : [];
+        return tools.length > 0
+          ? `${t("tasks.deterministic_tool_no_success_summary")} ${tools.join(", ")}`
+          : t("tasks.deterministic_tool_no_success_summary");
+      }
+      return "";
+    },
+    [t]
+  );
+  const extractTaskDiscussionHighlights = useCallback(
+    (event: { event_type: string; payload?: unknown }) => {
+      const payload = event.payload;
+      if (!payload || typeof payload !== "object") return [] as string[];
+      const p = payload as Record<string, unknown>;
+      const out: string[] = [];
+      const pushLabeled = (label: string, value: unknown) => {
+        if (typeof value === "string" && value.trim()) {
+          out.push(`${label}: ${trimPreview(value.trim(), 180)}`);
+        }
+      };
+
+      if (event.event_type === "task_decomposed") {
+        pushLabeled(t("tasks.task_type_label"), p.decompose_model_task_type);
+        pushLabeled(t("tasks.reason_label"), p.decompose_reason);
+        pushLabeled(t("tasks.attempt_label"), p.decompose_attempt);
+      }
+      if (event.event_type === "sub_agent_spawned") {
+        pushLabeled(t("tasks.reason_label"), p.delegation_reason);
+      }
+
+      pushLabeled(t("tasks.reason_label"), p.reason);
+      pushLabeled(t("tasks.reason_label"), p.selector_reason);
+
+      if (event.event_type === "progress_update" && typeof p.message === "string" && p.message.trim()) {
+        const msg = p.message.trim();
+        if (/(analy|analyse|orchestr|routing|routage|decompos|décompos|plan|thinking|réflex|reflex|recovery|best-effort|startup|démarrage)/i.test(msg)) {
+          out.push(`${t("tasks.phase_label")}: ${trimPreview(msg, 180)}`);
+        }
+      }
+      if (event.event_type === "timeline_milestone") {
+        pushLabeled(t("tasks.phase_label"), p.milestone);
+      }
+
+      if (event.event_type === "deterministic_preferred_tool_attempt") {
+        pushLabeled(t("tasks.tool_summary_prefix"), p.tool);
+        pushLabeled(t("tasks.attempt_label"), p.round);
+      }
+
+      if (event.event_type === "deterministic_preferred_tool_result") {
+        pushLabeled(t("tasks.tool_summary_prefix"), p.tool);
+        if (typeof p.success === "boolean") {
+          out.push(`${t("tasks.result_label")}: ${p.success ? t("common.yes") : t("common.no")}`);
+        }
+        pushLabeled(t("tasks.reason_label"), p.reason);
+      }
+
+      if (event.event_type === "deterministic_preferred_tool_no_success") {
+        if (Array.isArray(p.attempted_tools) && p.attempted_tools.length > 0) {
+          out.push(`${t("tasks.tool_summary_prefix")}: ${(p.attempted_tools as unknown[]).map((x) => String(x)).join(", ")}`);
+        }
+      }
+
+      if (event.event_type === "tool_invoked") {
+        pushLabeled(t("tasks.tool_summary_prefix"), p.tool);
+        if (typeof p.success === "boolean") {
+          out.push(`${t("tasks.result_label")}: ${p.success ? t("common.yes") : t("common.no")}`);
+        }
+        if (typeof p.result_preview === "string" && p.result_preview.trim()) {
+          out.push(`${t("tasks.result_preview_label")}: ${trimPreview(p.result_preview.trim(), 200)}`);
+        }
+      }
+
+      return Array.from(new Set(out));
+    },
+    [t]
+  );
+  const extractModelMetadata = useCallback(
+    (event: { event_type: string; payload?: unknown }) => {
+      const payload = event.payload;
+      if (!payload || typeof payload !== "object") return null;
+      const p = payload as Record<string, unknown>;
+
+      const thinking = typeof p.thinking === "string" ? p.thinking.trim() : null;
+      const response = typeof p.response === "string" ? p.response.trim() : null;
+      const model = typeof p.model === "string" ? p.model.trim() : null;
+      const evalCount = typeof p.eval_count === "number" ? p.eval_count : null;
+      const promptEvalCount = typeof p.prompt_eval_count === "number" ? p.prompt_eval_count : null;
+      const evalDuration = typeof p.eval_duration === "number" ? p.eval_duration : null;
+      const promptEvalDuration = typeof p.prompt_eval_duration === "number" ? p.prompt_eval_duration : null;
+      const loadDuration = typeof p.load_duration === "number" ? p.load_duration : null;
+      const totalDuration = typeof p.total_duration === "number" ? p.total_duration : null;
+      const doneReason = typeof p.done_reason === "string" ? p.done_reason.trim() : null;
+
+      if (!thinking && !response && !model && !evalCount) return null;
+
+      return {
+        thinking,
+        response,
+        model,
+        evalCount,
+        promptEvalCount,
+        evalDuration,
+        promptEvalDuration,
+        loadDuration,
+        totalDuration,
+        doneReason,
+      };
+    },
+    []
+  );
   const [health, setHealth] = useState<HealthState | null>(null);
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState<ChatMessageRow[]>([]);
+  const exportChatTranscript = useCallback(() => {
+    const body = exportChatPlainText(messages);
+    const base = defaultExportBasename(messages);
+    const blob = new Blob([body], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${base}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, [messages]);
+  /** Map visuals keyed by chat task_id — fallback when message.mapVisual was overwritten during streaming. */
+  const [chatMapByTaskId, setChatMapByTaskId] = useState<Record<string, ChatMapVisual>>({});
   const [loading, setLoading] = useState(false);
   const [routerMetrics, setRouterMetrics] = useState<RouterMetrics | null>(null);
   const [routerLoading, setRouterLoading] = useState(false);
@@ -314,8 +1498,19 @@ function App() {
   const [taskListFilter, setTaskListFilter] = useState<"active" | "completed">("active");
   const [taskSearchQuery, setTaskSearchQuery] = useState("");
   const [tasksSelected, setTasksSelected] = useState(0);
-  const [tasksEvents, setTasksEvents] = useState<Array<{ event_type: string; payload?: unknown; at: string }>>([]);
+  const [tasksEvents, setTasksEvents] = useState<Array<{ event_type: string; payload?: unknown; at: string; task_id?: string }>>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
+  const isSimpleMode = uiMode === "simple";
+  const [collapsedTaskBranches, setCollapsedTaskBranches] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = localStorage.getItem(TASK_TREE_COLLAPSE_STORAGE_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw) as Record<string, boolean>;
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  });
   /** Tâches : sections pliables (liste / étapes / événements), mémorisées localement. */
   const [taskPanelSections, setTaskPanelSections] = useState(() => {
     try {
@@ -333,6 +1528,18 @@ function App() {
     }
     return { list: true, steps: true, events: true };
   });
+  const [taskOrchestrationDebugLevel, setTaskOrchestrationDebugLevel] = useState<TaskOrchestrationDebugLevel>(() => {
+    try {
+      const raw = localStorage.getItem(TASK_ORCHESTRATION_DEBUG_STORAGE_KEY);
+      if (raw === "minimal" || raw === "normal" || raw === "full") return raw;
+      // Backward compatibility with previous boolean persistence.
+      if (raw === "1") return "normal";
+      if (raw === "0") return "minimal";
+    } catch {
+      /* ignore */
+    }
+    return loadSavedUiMode() === "expert" ? "normal" : "minimal";
+  });
   const toggleTaskPanelSection = useCallback((key: "list" | "steps" | "events") => {
     setTaskPanelSections((prev) => {
       const next = { ...prev, [key]: !prev[key] };
@@ -344,12 +1551,71 @@ function App() {
       return next;
     });
   }, []);
+  const setTaskOrchestrationDebugLevelAndSave = useCallback((next: TaskOrchestrationDebugLevel) => {
+    setTaskOrchestrationDebugLevel(next);
+    try {
+      localStorage.setItem(TASK_ORCHESTRATION_DEBUG_STORAGE_KEY, next);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  const [eventVisualFullscreen, setEventVisualFullscreen] = useState<{
+    visual: EventAdvancedView;
+    sourceEventType: string;
+  } | null>(null);
+  const [eventVisualHelpOpen, setEventVisualHelpOpen] = useState(false);
+  const [eventVisualTransform, setEventVisualTransform] = useState<{ scale: number; tx: number; ty: number }>({
+    scale: 1,
+    tx: 0,
+    ty: 0,
+  });
+  const [eventVisualDragging, setEventVisualDragging] = useState<{
+    startX: number;
+    startY: number;
+    baseTx: number;
+    baseTy: number;
+  } | null>(null);
+  const eventVisualPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const eventVisualPinchBaseDistanceRef = useRef<number | null>(null);
+  const eventVisualPinchBaseTransformRef = useRef<{ scale: number; tx: number; ty: number } | null>(null);
+  const persistCollapsedTaskBranches = useCallback((next: Record<string, boolean>) => {
+    try {
+      localStorage.setItem(TASK_TREE_COLLAPSE_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  const toggleTaskBranch = useCallback((taskId: string) => {
+    setCollapsedTaskBranches((prev) => {
+      const next = { ...prev, [taskId]: !prev[taskId] };
+      persistCollapsedTaskBranches(next);
+      return next;
+    });
+  }, [persistCollapsedTaskBranches]);
   const [taskStepsTodos, setTaskStepsTodos] = useState<Array<{ id?: string | null; title: string; status: string }>>([]);
   const selectedTaskIdForTodosRef = useRef<string | null>(null);
   const fetchTaskStepsRef = useRef<(taskId: string) => Promise<void>>(async () => {});
   const [runningTaskChips, setRunningTaskChips] = useState<Record<string, { pct?: number; message?: string }>>({});
   /** Events (sub_agent_spawned, progress_update, etc.) per running task for collapsible sub-agent panel. Each event may have task_id (root or child). */
   const [runningTaskEvents, setRunningTaskEvents] = useState<Record<string, Array<{ event_type: string; payload?: unknown; at: string; task_id?: string }>>>({});
+  const chatToolBatchSummary = useMemo(() => {
+    const names: string[] = [];
+    for (const evs of Object.values(runningTaskEvents)) {
+      for (const ev of evs) {
+        const p = ev.payload;
+        if (!p || typeof p !== "object") continue;
+        if (ev.event_type === "tool_call_started" || ev.event_type === "tool_call_finished") {
+          const tool = (p as { tool?: string }).tool;
+          if (tool) names.push(tool);
+        } else if (ev.event_type === "tool_invoked") {
+          const pl = p as { tool_name?: string; tool?: string };
+          const tool = pl.tool_name ?? pl.tool;
+          if (tool) names.push(tool);
+        }
+      }
+    }
+    return heuristicToolBatchSummary(names);
+  }, [runningTaskEvents]);
   /** Human in the loop: when the agent asks for user input, we store question/context/choices per task_id. */
   const [pendingHumanInput, setPendingHumanInput] = useState<Record<string, { question: string; context: string; choices?: string[] }>>({});
   /** Task id for which the human-input modal is open (null = closed). */
@@ -374,6 +1640,13 @@ function App() {
   const handleSendRef = useRef<(overrideMessage?: string, fromVoice?: boolean) => Promise<void>>(() => Promise.resolve());
   /** Dernière tâche chat : seule elle met à jour la bulle assistant (stream + réponse finale). */
   const lastChatTaskIdRef = useRef<string | null>(null);
+  /** Active session id for filtering stream/poll updates when multiple chat threads exist. */
+  const sessionIdRef = useRef<string | null>(null);
+  /** task_id → session_id at send time (multi-thread). */
+  const taskIdToSessionIdRef = useRef<Record<string, string>>({});
+  /** After /newsession, next POST uses new_session: true. */
+  const pendingNewSessionAfterSlashRef = useRef(false);
+  const chatMapByTaskIdRef = useRef<Record<string, ChatMapVisual>>({});
   const ackTextByTaskRef = useRef<Record<string, string>>({});
   const [humanInputFreeText, setHumanInputFreeText] = useState("");
   /** Reply text for the inline ask_user form in the chat (when modal is not used). */
@@ -564,7 +1837,26 @@ function App() {
     return { nodes, lines, rootId };
   }
 
-  const [scheduleReports, setScheduleReports] = useState<Array<{ schedule_name: string; message: string; ended_at?: string }>>([]);
+  const [scheduleReports, setScheduleReports] = useState<Array<{
+    schedule_name: string;
+    message: string;
+    ended_at?: string;
+    schedule_id?: string;
+    task_id?: string;
+    task_run_id?: string;
+    task_label?: string;
+    status?: string;
+    planned_for?: string;
+    started_at?: string;
+    run_ended_at?: string;
+  }>>([]);
+  const [pluginReputationTarget, setPluginReputationTarget] = useState("maps");
+  const [pluginReputationResetLoading, setPluginReputationResetLoading] = useState(false);
+  const [pluginReputationResetMessage, setPluginReputationResetMessage] = useState<string | null>(null);
+  const [pluginReputationResetError, setPluginReputationResetError] = useState<string | null>(null);
+  const [pluginStatusList, setPluginStatusList] = useState<PluginStatusEntry[]>([]);
+  const [pluginStatusLoading, setPluginStatusLoading] = useState(false);
+  const [pluginStatusError, setPluginStatusError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(() => {
     try {
       return localStorage.getItem(AKASHA_SESSION_ID_KEY);
@@ -572,6 +1864,7 @@ function App() {
       return null;
     }
   });
+  const [chatThreads, setChatThreads] = useState<ChatThreadEntry[]>(() => loadChatThreadsInitial());
   const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string }>>([]);
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
@@ -635,8 +1928,6 @@ function App() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatInlineReplyRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
-  /** True when we loaded with existing messages (reconnect during the day); send once then clear. */
-  const firstMessageSinceLoadRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Tasks for which we already auto-opened the human-input modal (avoid re-opening every poll). */
   const humanInputAutoOpenedRef = useRef<Set<string>>(new Set());
@@ -651,14 +1942,105 @@ function App() {
     release_notes_url?: string | null;
   } | null>(null);
 
+  const [chatTipsEnabled, setChatTipsEnabled] = useState(() => {
+    try {
+      return localStorage.getItem(CHAT_TIPS_STORAGE_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const [chatPromptChipsEnabled, setChatPromptChipsEnabled] = useState(() => {
+    try {
+      return localStorage.getItem(CHAT_PROMPT_CHIPS_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [buddyLineEnabled, setBuddyLineEnabled] = useState(() => {
+    try {
+      return localStorage.getItem(CHAT_BUDDY_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [tipBannerText, setTipBannerText] = useState<string | null>(null);
+  const [tipBannerDismissed, setTipBannerDismissed] = useState(false);
+
+  const setChatTipsEnabledAndSave = useCallback((next: boolean) => {
+    setChatTipsEnabled(next);
+    try {
+      localStorage.setItem(CHAT_TIPS_STORAGE_KEY, next ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  const setChatPromptChipsEnabledAndSave = useCallback((next: boolean) => {
+    setChatPromptChipsEnabled(next);
+    try {
+      localStorage.setItem(CHAT_PROMPT_CHIPS_STORAGE_KEY, next ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  const setBuddyLineEnabledAndSave = useCallback((next: boolean) => {
+    setBuddyLineEnabled(next);
+    try {
+      localStorage.setItem(CHAT_BUDDY_STORAGE_KEY, next ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const promptChipLabels = useMemo(
+    () => [t("chat.prompt_chip_1"), t("chat.prompt_chip_2"), t("chat.prompt_chip_3")],
+    [t, locale]
+  );
+  const buddyCaption = useMemo(() => {
+    if (!buddyLineEnabled) return null;
+    const lines = [t("chat.buddy_line_1"), t("chat.buddy_line_2"), t("chat.buddy_line_3")];
+    const day = Math.floor(Date.now() / 86400000);
+    return lines[day % lines.length];
+  }, [buddyLineEnabled, t, locale]);
+  const companionBubbleText = useMemo(() => {
+    if (!buddyLineEnabled) return null;
+    if (Object.keys(pendingHumanInput).length > 0) return t("chat.companion_action_required");
+    if (loading) return t("chat.companion_thinking");
+    if (message.trim().length > 0) return t("chat.companion_draft");
+    const runningCount = Object.keys(runningTaskChips).length;
+    if (runningCount > 0) return t("chat.active_tasks").replace("{{count}}", String(runningCount));
+    if (chatTipsEnabled && tipBannerText && !tipBannerDismissed) return tipBannerText;
+    return buddyCaption ?? t("chat.companion_idle");
+  }, [
+    buddyLineEnabled,
+    pendingHumanInput,
+    loading,
+    message,
+    runningTaskChips,
+    chatTipsEnabled,
+    tipBannerText,
+    tipBannerDismissed,
+    buddyCaption,
+    t,
+  ]);
+
   const checkHealth = useCallback(async () => {
     try {
       const result = await invoke<{ ok: boolean; port?: number }>("check_health", {
         port: DAEMON_PORT,
       });
-      setHealth({ ok: result.ok, port: result.port ?? DAEMON_PORT });
+      setHealth((prev) => {
+        const next = { ok: result.ok, port: result.port ?? DAEMON_PORT };
+        const unchanged = prev != null && prev.ok === next.ok && prev.port === next.port;
+        if (unchanged) return prev;
+        return next;
+      });
     } catch {
-      setHealth({ ok: false, port: DAEMON_PORT });
+      setHealth((prev) => {
+        const next = { ok: false, port: DAEMON_PORT };
+        const unchanged = prev != null && prev.ok === next.ok && prev.port === next.port;
+        if (unchanged) return prev;
+        return next;
+      });
     }
   }, []);
 
@@ -667,6 +2049,37 @@ function App() {
     const id = setInterval(checkHealth, 10000);
     return () => clearInterval(id);
   }, [checkHealth]);
+
+  useEffect(() => {
+    if (!chatTipsEnabled || tab !== "chat" || tipBannerDismissed) {
+      if (!chatTipsEnabled || tab !== "chat") setTipBannerText(null);
+      return;
+    }
+    let cancelled = false;
+    fetch("/tips.json")
+      .then((r) => {
+        if (!r.ok) throw new Error("tips");
+        return r.json();
+      })
+      .then((arr: unknown) => {
+        if (cancelled || !Array.isArray(arr) || arr.length === 0) return;
+        const day = Math.floor(Date.now() / 86400000);
+        const ix = day % arr.length;
+        const tip = arr[ix] as { en?: string; fr?: string };
+        const text = (locale === "fr" ? tip.fr : tip.en) ?? tip.en ?? "";
+        if (text) setTipBannerText(text);
+      })
+      .catch(() => {
+        if (!cancelled) setTipBannerText(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [chatTipsEnabled, tab, locale, tipBannerDismissed]);
+
+  useEffect(() => {
+    setTipBannerDismissed(false);
+  }, [locale]);
 
   // Check for app update (daemon caches latest.json; compare with app version)
   useEffect(() => {
@@ -794,14 +2207,20 @@ function App() {
         );
         if (cancelled) return;
         if (data?.session_id && (data.turns?.length ?? 0) > 0) {
+          const sid = data.session_id;
+          const rows = data.turns!.map((t) => ({
+            role: (t.role === "user" ? "user" : t.role === "assistant" ? "assistant" : "system") as "user" | "assistant" | "system",
+            text: t.content,
+          }));
           setMessages(
-            data.turns!.map((t) => ({
-              role: (t.role === "user" ? "user" : t.role === "assistant" ? "assistant" : "system") as "user" | "assistant" | "system",
-              text: t.content,
-            }))
+            rows.map((m) => {
+              if (m.role !== "assistant") return m;
+              const mapVisual =
+                extractChatMapVisualFromAssistantText(m.text) ?? tryLoadCachedChatMapVisual(sid, m.text);
+              return mapVisual ? { ...m, mapVisual } : m;
+            }),
           );
           setSessionId(data.session_id);
-          firstMessageSinceLoadRef.current = true;
           try {
             localStorage.setItem(AKASHA_SESSION_ID_KEY, data.session_id);
           } catch {
@@ -868,15 +2287,157 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(AKASHA_CHAT_THREADS_KEY, JSON.stringify(chatThreads));
+    } catch {
+      /* ignore */
+    }
+  }, [chatThreads]);
+
+  useEffect(() => {
+    const sid = sessionId?.trim();
+    if (!sid) return;
+    setChatThreads((prev) => {
+      if (prev.some((x) => x.id === sid)) return prev;
+      const now = new Date().toISOString();
+      return [{ id: sid, title: "", createdAt: now, updatedAt: now }, ...prev];
+    });
+  }, [sessionId]);
+
+  const hydrateChatMessagesForSession = useCallback(async (sid: string) => {
+    try {
+      const data = await invoke<{ session_id?: string; turns?: Array<{ role: string; content: string }> }>(
+        "get_memory_short_term",
+        { sessionId: sid, port: DAEMON_PORT }
+      );
+      const resolved = data?.session_id ?? sid;
+      const turns = data?.turns ?? [];
+      if (turns.length === 0) {
+        setMessages([]);
+        return;
+      }
+      const rows = turns.map((turn) => ({
+        role: (turn.role === "user" ? "user" : turn.role === "assistant" ? "assistant" : "system") as "user" | "assistant" | "system",
+        text: turn.content,
+      }));
+      setMessages(
+        rows.map((m) => {
+          if (m.role !== "assistant") return m;
+          const mapVisual =
+            extractChatMapVisualFromAssistantText(m.text) ?? tryLoadCachedChatMapVisual(resolved, m.text);
+          return mapVisual ? { ...m, mapVisual } : m;
+        }),
+      );
+    } catch {
+      setMessages([]);
+    }
+  }, []);
+
+  const chatThreadLabel = useCallback(
+    (th: ChatThreadEntry) => {
+      if (th.pendingTitle) return t("chat.thread_new");
+      if (th.title.trim()) return th.title;
+      return t("chat.thread_default");
+    },
+    [t],
+  );
+
+  const createChatThread = useCallback(() => {
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    setChatThreads((prev) => [{ id, title: "", createdAt: now, updatedAt: now, pendingTitle: true }, ...prev]);
+    setSessionId(id);
+    sessionIdRef.current = id;
+    try {
+      localStorage.setItem(AKASHA_SESSION_ID_KEY, id);
+    } catch {
+      /* ignore */
+    }
+    setMessages([]);
+    lastChatTaskIdRef.current = null;
+  }, []);
+
+  const selectChatThread = useCallback(
+    async (id: string) => {
+      if (id === sessionIdRef.current) return;
+      setSessionId(id);
+      sessionIdRef.current = id;
+      try {
+        localStorage.setItem(AKASHA_SESSION_ID_KEY, id);
+      } catch {
+        /* ignore */
+      }
+      await hydrateChatMessagesForSession(id);
+    },
+    [hydrateChatMessagesForSession],
+  );
+
+  const deleteChatThread = useCallback(
+    async (id: string) => {
+      if (!window.confirm(t("chat.thread_delete_confirm"))) return;
+      try {
+        await invoke("delete_memory_session", { sessionId: id, port: DAEMON_PORT });
+      } catch (e) {
+        console.error(e);
+      }
+      let nextList: ChatThreadEntry[] = [];
+      setChatThreads((prev) => {
+        nextList = prev.filter((x) => x.id !== id);
+        return nextList;
+      });
+      const active = sessionIdRef.current;
+      if (id !== active) return;
+      const fallback = nextList[0]?.id ?? null;
+      if (fallback) {
+        setSessionId(fallback);
+        sessionIdRef.current = fallback;
+        try {
+          localStorage.setItem(AKASHA_SESSION_ID_KEY, fallback);
+        } catch {
+          /* ignore */
+        }
+        await hydrateChatMessagesForSession(fallback);
+      } else {
+        const nid = crypto.randomUUID();
+        const now = new Date().toISOString();
+        setChatThreads([{ id: nid, title: "", createdAt: now, updatedAt: now, pendingTitle: true }]);
+        setSessionId(nid);
+        sessionIdRef.current = nid;
+        try {
+          localStorage.setItem(AKASHA_SESSION_ID_KEY, nid);
+        } catch {
+          /* ignore */
+        }
+        setMessages([]);
+      }
+    },
+    [t, hydrateChatMessagesForSession],
+  );
+
   // Apply theme to document (for CSS variables)
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
-  }, [theme]);
+    document.documentElement.setAttribute("data-ui-mode", uiMode);
+  }, [theme, uiMode]);
 
   const setThemeAndSave = useCallback((next: ThemeId) => {
     setTheme(next);
     try {
       localStorage.setItem(THEME_STORAGE_KEY, next);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const setUiModeAndSave = useCallback((next: UiMode) => {
+    setUiMode(next);
+    try {
+      localStorage.setItem(UI_MODE_STORAGE_KEY, next);
     } catch {
       /* ignore */
     }
@@ -899,6 +2460,11 @@ function App() {
       });
     }
   }, [tab, humanInputModalTaskId, pendingHumanInputKeys.length]);
+  useEffect(() => {
+    if (humanInputModalTaskId != null) {
+      setHumanInputFreeText("");
+    }
+  }, [humanInputModalTaskId]);
   useEffect(() => {
     if (tab === "chat") chatInputRef.current?.focus();
   }, [tab]);
@@ -1004,8 +2570,9 @@ function App() {
     fetchDocs();
   }, [tab, fetchDocs]);
 
-  const fetchTasksList = useCallback(async () => {
-    setTasksLoading(true);
+  const fetchTasksList = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = options?.silent === true;
+    if (!silent) setTasksLoading(true);
     try {
       const data = await invoke<{ tasks?: Array<{ id?: string; status?: string; label?: string; created_at?: string; parent_task_id?: string; assigned_agent?: string }> }>("get_tasks", {
         port: DAEMON_PORT,
@@ -1021,13 +2588,13 @@ function App() {
           assigned_agent: t.assigned_agent,
         }))
         .filter((t) => t.id);
-      setTasksList(tasks);
+      setTasksList((prev) => (tasksListsEqual(prev, tasks) ? prev : tasks));
       setTasksSelected((prev) => (prev >= tasks.length && tasks.length > 0 ? tasks.length - 1 : prev));
       setCached("tasks", tasks);
     } catch {
       setTasksList([]);
     } finally {
-      setTasksLoading(false);
+      if (!silent) setTasksLoading(false);
     }
   }, []);
 
@@ -1049,20 +2616,416 @@ function App() {
     return list;
   }, [tasksList, taskListFilter, taskSearchQuery]);
 
+  const taskTreeData = useMemo(() => {
+    const byId = new Map(tasksList.map((task) => [task.id, task]));
+    const visibleIds = new Set<string>();
+    const childrenByParent = new Map<string | null, TaskListItem[]>();
+
+    for (const task of tasksList) {
+      const parentId = task.parent_task_id && byId.has(task.parent_task_id) ? task.parent_task_id : null;
+      const bucket = childrenByParent.get(parentId) ?? [];
+      bucket.push(task);
+      childrenByParent.set(parentId, bucket);
+    }
+
+    for (const task of filteredTasksList) {
+      let current: TaskListItem | undefined = task;
+      while (current) {
+        if (visibleIds.has(current.id)) break;
+        visibleIds.add(current.id);
+        current = current.parent_task_id ? byId.get(current.parent_task_id) : undefined;
+      }
+    }
+
+    const branchIds = new Set<string>();
+    for (const [parentId, children] of childrenByParent.entries()) {
+      if (!parentId || !visibleIds.has(parentId)) continue;
+      if (children.some((child) => visibleIds.has(child.id))) {
+        branchIds.add(parentId);
+      }
+    }
+
+    const roots = tasksList.filter((task) => {
+      if (!visibleIds.has(task.id)) return false;
+      if (!task.parent_task_id) return true;
+      return !byId.has(task.parent_task_id);
+    });
+
+    return { byId, visibleIds, childrenByParent, branchIds, roots };
+  }, [tasksList, filteredTasksList]);
+
+  const selectedTask = tasksList[tasksSelected] ?? null;
+
+  useEffect(() => {
+    setCollapsedTaskBranches((prev) => {
+      let changed = false;
+      const next: Record<string, boolean> = {};
+
+      for (const [taskId, isCollapsed] of Object.entries(prev)) {
+        if (taskTreeData.branchIds.has(taskId)) {
+          next[taskId] = isCollapsed;
+        } else {
+          changed = true;
+        }
+      }
+
+      let current: TaskListItem | undefined | null = selectedTask;
+      while (current?.parent_task_id) {
+        const parentId = current.parent_task_id;
+        if (taskTreeData.branchIds.has(parentId) && next[parentId]) {
+          next[parentId] = false;
+          changed = true;
+        }
+        current = taskTreeData.byId.get(parentId);
+      }
+
+      if (!changed) return prev;
+      persistCollapsedTaskBranches(next);
+      return next;
+    });
+  }, [selectedTask, taskTreeData, persistCollapsedTaskBranches]);
+
+  const taskTreeRows = useMemo(() => {
+    const rows: Array<{
+      task: TaskListItem;
+      depth: number;
+      hasChildren: boolean;
+      visibleChildCount: number;
+      rootId: string;
+      isCollapsed: boolean;
+    }> = [];
+
+    const visit = (task: TaskListItem, depth: number, rootId: string) => {
+      if (!taskTreeData.visibleIds.has(task.id)) return;
+      const allChildren = taskTreeData.childrenByParent.get(task.id) ?? [];
+      const visibleChildren = allChildren.filter((child) => taskTreeData.visibleIds.has(child.id));
+      const isCollapsed = visibleChildren.length > 0 ? !!collapsedTaskBranches[task.id] : false;
+      rows.push({
+        task,
+        depth,
+        hasChildren: visibleChildren.length > 0,
+        visibleChildCount: visibleChildren.length,
+        rootId,
+        isCollapsed,
+      });
+      if (isCollapsed) return;
+      for (const child of visibleChildren) {
+        visit(child, depth + 1, rootId);
+      }
+    };
+
+    for (const root of taskTreeData.roots) {
+      visit(root, 0, root.id);
+    }
+
+    return rows;
+  }, [taskTreeData, collapsedTaskBranches]);
+
+  const visibleTaskEvents = useMemo(() => {
+    if (!isSimpleMode) return tasksEvents;
+    return [...tasksEvents].slice(-8).reverse();
+  }, [isSimpleMode, tasksEvents]);
+
+  const selectedTaskHierarchy = useMemo(() => {
+    if (!selectedTask) return [] as TaskListItem[];
+    const lineage: TaskListItem[] = [];
+    let current: TaskListItem | undefined = selectedTask;
+    while (current) {
+      lineage.unshift(current);
+      current = current.parent_task_id ? taskTreeData.byId.get(current.parent_task_id) : undefined;
+    }
+    return lineage;
+  }, [selectedTask, taskTreeData]);
+
+  const selectedTaskRootId = selectedTaskHierarchy[0]?.id ?? null;
+
+  const selectedTaskAncestorIds = useMemo(() => {
+    return new Set(selectedTaskHierarchy.slice(0, -1).map((task) => task.id));
+  }, [selectedTaskHierarchy]);
+
+  const setAllTaskBranchesCollapsed = useCallback((collapsed: boolean) => {
+    const next: Record<string, boolean> = {};
+    for (const branchId of taskTreeData.branchIds) {
+      next[branchId] = collapsed;
+    }
+    if (collapsed && selectedTaskHierarchy.length > 1) {
+      for (const task of selectedTaskHierarchy.slice(0, -1)) {
+        if (taskTreeData.branchIds.has(task.id)) next[task.id] = false;
+      }
+    }
+    persistCollapsedTaskBranches(next);
+    setCollapsedTaskBranches(next);
+  }, [taskTreeData, selectedTaskHierarchy, persistCollapsedTaskBranches]);
+
+  const taskStatusCounts = useMemo(() => {
+    return tasksList.reduce(
+      (acc, task) => {
+        const status = (task.status ?? "").toLowerCase();
+        if (status === "running") acc.running += 1;
+        else if (status === "pending") acc.pending += 1;
+        else if (status === "completed") acc.completed += 1;
+        else if (status === "failed") acc.failed += 1;
+        return acc;
+      },
+      { running: 0, pending: 0, completed: 0, failed: 0 }
+    );
+  }, [tasksList]);
+
+  const taskStepsSummary = useMemo(() => {
+    const total = taskStepsTodos.length;
+    const done = taskStepsTodos.filter((step) => step.status === "done").length;
+    const cancelled = taskStepsTodos.filter((step) => step.status === "cancelled").length;
+    const pending = Math.max(0, total - done - cancelled);
+    const progressPct = total > 0 ? Math.round((done / total) * 100) : 0;
+    return { total, done, cancelled, pending, progressPct };
+  }, [taskStepsTodos]);
+
+  const selectedTaskSummary = useMemo(() => {
+    if (!selectedTask) return null;
+    const runningChip = selectedTask.status === "running" ? runningTaskChips[selectedTask.id] : undefined;
+    const latestEvent = tasksEvents.length > 0 ? tasksEvents[tasksEvents.length - 1] : null;
+    return {
+      runningChip,
+      latestEvent,
+      latestSummary: latestEvent ? summarizeTaskEvent(latestEvent) : "",
+    };
+  }, [selectedTask, runningTaskChips, tasksEvents, summarizeTaskEvent]);
+
+  const taskDiscussionHighlights = useMemo(() => {
+    const minimalSignalTypes = new Set([
+      "task_decomposed",
+      "sub_agent_spawned",
+      "plan_proposed",
+      "plan_committed",
+      "timeline_milestone",
+      "contract_violation",
+      "deterministic_preferred_tool_no_success",
+    ]);
+
+    const normalSignalTypes = new Set([
+      "task_decomposed",
+      "sub_agent_spawned",
+      "plan_proposed",
+      "plan_committed",
+      "timeline_milestone",
+      "subagent_startup_started",
+      "subagent_startup_pending",
+      "progress_update",
+      "contract_violation",
+      "subtask_started",
+      "subtask_completed",
+      "deterministic_preferred_tool_attempt",
+      "deterministic_preferred_tool_result",
+      "deterministic_preferred_tool_no_success",
+      "tool_invoked",
+    ]);
+
+    const signalTypes = taskOrchestrationDebugLevel === "minimal" ? minimalSignalTypes : normalSignalTypes;
+
+    const rows = tasksEvents.map((event) => ({
+        event,
+        highlights: extractTaskDiscussionHighlights(event),
+      }));
+
+    const filteredRows = taskOrchestrationDebugLevel === "full"
+      ? rows
+      : rows.filter(({ event, highlights }) => signalTypes.has(event.event_type) || highlights.length > 0);
+
+    const maxRows = isSimpleMode
+      ? (taskOrchestrationDebugLevel === "full" ? 16 : 8)
+      : (taskOrchestrationDebugLevel === "full" ? 48 : 24);
+
+    if (isSimpleMode) return [...filteredRows].slice(-maxRows).reverse();
+    return filteredRows.slice(-maxRows);
+  }, [tasksEvents, extractTaskDiscussionHighlights, isSimpleMode, taskOrchestrationDebugLevel]);
+
   const taskDisplayLabel = (task: TaskListItem) => (task.label && task.label.trim() ? task.label.trim() : t("tasks.task_unnamed") + task.id.slice(-8));
+
+  const exportAdvancedViewCsv = useCallback((visual: EventAdvancedView) => {
+    try {
+      const csv = advancedViewToCsv(visual);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const ts = new Date().toISOString().replace(/[:.]/g, "-");
+      const filename = `akasha_${visual.kind}_${ts}.csv`;
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (err) {
+      console.error("Failed to export visualization CSV", err);
+    }
+  }, []);
+
+  const exportAdvancedViewPng = useCallback((visual: EventAdvancedView) => {
+    try {
+      const width = visual.kind === "map" ? 1200 : 1400;
+      const height = visual.kind === "map" ? 520 : 560;
+      const canvas = renderAdvancedViewToCanvas(visual, width, height);
+      const ts = new Date().toISOString().replace(/[:.]/g, "-");
+      const filename = `akasha_${visual.kind}_${ts}.png`;
+      const saveBlob = (blob: Blob) => {
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+      };
+      canvas.toBlob((blob) => {
+        if (blob) {
+          saveBlob(blob);
+          return;
+        }
+        const dataUrl = canvas.toDataURL("image/png");
+        const anchor = document.createElement("a");
+        anchor.href = dataUrl;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+      }, "image/png");
+    } catch (err) {
+      console.error("Failed to export visualization PNG", err);
+    }
+  }, []);
+
+  const clampEventVisualScale = useCallback((v: number) => Math.max(0.5, Math.min(8, v)), []);
+
+  const clearEventVisualGestures = useCallback(() => {
+    eventVisualPointersRef.current.clear();
+    eventVisualPinchBaseDistanceRef.current = null;
+    eventVisualPinchBaseTransformRef.current = null;
+    setEventVisualDragging(null);
+  }, []);
+
+  const resetEventVisualViewport = useCallback(() => {
+    setEventVisualTransform({ scale: 1, tx: 0, ty: 0 });
+    clearEventVisualGestures();
+  }, [clearEventVisualGestures]);
+
+  const eventVisualZoomPercent = Math.round(eventVisualTransform.scale * 100);
+
+  const zoomEventVisualAt = useCallback((cx: number, cy: number, factor: number) => {
+    setEventVisualTransform((prev) => {
+      const nextScale = clampEventVisualScale(prev.scale * factor);
+      const nextTx = cx - ((cx - prev.tx) / prev.scale) * nextScale;
+      const nextTy = cy - ((cy - prev.ty) / prev.scale) * nextScale;
+      return { scale: nextScale, tx: nextTx, ty: nextTy };
+    });
+  }, [clampEventVisualScale]);
+
+  const handleEventVisualWheel = useCallback((ev: ReactWheelEvent<HTMLDivElement>) => {
+    ev.preventDefault();
+    const rect = ev.currentTarget.getBoundingClientRect();
+    const cx = ev.clientX - rect.left;
+    const cy = ev.clientY - rect.top;
+    const factor = ev.deltaY < 0 ? 1.12 : 1 / 1.12;
+    zoomEventVisualAt(cx, cy, factor);
+  }, [zoomEventVisualAt]);
+
+  const handleEventVisualPointerDown = useCallback((ev: ReactPointerEvent<HTMLDivElement>) => {
+    if (ev.pointerType === "mouse" && ev.button !== 0) return;
+    ev.currentTarget.setPointerCapture(ev.pointerId);
+    eventVisualPointersRef.current.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+
+    const points = Array.from(eventVisualPointersRef.current.values());
+    if (points.length >= 2) {
+      const [a, b] = points;
+      if (!a || !b) return;
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      eventVisualPinchBaseDistanceRef.current = Math.max(dist, 1e-6);
+      eventVisualPinchBaseTransformRef.current = { ...eventVisualTransform };
+      setEventVisualDragging(null);
+      return;
+    }
+
+    setEventVisualDragging({
+      startX: ev.clientX,
+      startY: ev.clientY,
+      baseTx: eventVisualTransform.tx,
+      baseTy: eventVisualTransform.ty,
+    });
+  }, [eventVisualTransform]);
+
+  const handleEventVisualPointerMove = useCallback((ev: ReactPointerEvent<HTMLDivElement>) => {
+    if (!eventVisualPointersRef.current.has(ev.pointerId)) return;
+    eventVisualPointersRef.current.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    const points = Array.from(eventVisualPointersRef.current.values());
+
+    if (points.length >= 2 && eventVisualPinchBaseDistanceRef.current != null && eventVisualPinchBaseTransformRef.current != null) {
+      const [a, b] = points;
+      if (!a || !b) return;
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      const factor = dist / eventVisualPinchBaseDistanceRef.current;
+      const centerX = (a.x + b.x) * 0.5;
+      const centerY = (a.y + b.y) * 0.5;
+      const base = eventVisualPinchBaseTransformRef.current;
+      const nextScale = clampEventVisualScale(base.scale * factor);
+      const nextTx = centerX - ((centerX - base.tx) / base.scale) * nextScale;
+      const nextTy = centerY - ((centerY - base.ty) / base.scale) * nextScale;
+      setEventVisualTransform({ scale: nextScale, tx: nextTx, ty: nextTy });
+      return;
+    }
+
+    if (!eventVisualDragging) return;
+    const dx = ev.clientX - eventVisualDragging.startX;
+    const dy = ev.clientY - eventVisualDragging.startY;
+    setEventVisualTransform((prev) => ({
+      ...prev,
+      tx: eventVisualDragging.baseTx + dx,
+      ty: eventVisualDragging.baseTy + dy,
+    }));
+  }, [eventVisualDragging, clampEventVisualScale]);
+
+  const handleEventVisualPointerEnd = useCallback((ev: ReactPointerEvent<HTMLDivElement>) => {
+    try {
+      ev.currentTarget.releasePointerCapture(ev.pointerId);
+    } catch {
+      /* ignore */
+    }
+    eventVisualPointersRef.current.delete(ev.pointerId);
+    const points = Array.from(eventVisualPointersRef.current.values());
+    if (points.length >= 2) {
+      const [a, b] = points;
+      if (a && b) {
+        const dist = Math.hypot(b.x - a.x, b.y - a.y);
+        eventVisualPinchBaseDistanceRef.current = Math.max(dist, 1e-6);
+      }
+      return;
+    }
+    eventVisualPinchBaseDistanceRef.current = null;
+    eventVisualPinchBaseTransformRef.current = null;
+    if (points.length === 1) {
+      const p = points[0];
+      if (p) {
+        setEventVisualDragging(() => ({
+          startX: p.x,
+          startY: p.y,
+          baseTx: eventVisualTransform.tx,
+          baseTy: eventVisualTransform.ty,
+        }));
+        return;
+      }
+    }
+    setEventVisualDragging(null);
+  }, [eventVisualTransform.tx, eventVisualTransform.ty]);
 
   const fetchTasksEvents = useCallback(async (taskId: string) => {
     try {
-      const data = await invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string }> }>(
-        "get_task_events",
-        { taskId, port: DAEMON_PORT }
-      );
-      const list = data?.events ?? [];
+      const data = await invoke<unknown>("get_task_events", { taskId, port: DAEMON_PORT });
+      const list = normalizeTaskEventsInvokeResponse(data);
       setTasksEvents(
         list.map((e) => ({
           event_type: e.event_type ?? "?",
           payload: e.payload,
           at: e.at ?? "",
+          task_id: e.task_id,
         }))
       );
     } catch {
@@ -1081,7 +3044,9 @@ function App() {
         title: x.title ?? "",
         status: (x.status ?? "pending").toLowerCase(),
       }));
-      if (selectedTaskIdForTodosRef.current === taskId) setTaskStepsTodos(rows);
+      if (selectedTaskIdForTodosRef.current === taskId) {
+        setTaskStepsTodos((prev) => (taskTodoRowsEqual(prev, rows) ? prev : rows));
+      }
     } catch {
       if (selectedTaskIdForTodosRef.current === taskId) setTaskStepsTodos([]);
     }
@@ -1181,18 +3146,22 @@ function App() {
   }, [tab, fetchTasksList]);
 
   const applyChatStreamProgress = useCallback((taskId: string, msg: string) => {
-    if (!taskId || taskId !== lastChatTaskIdRef.current) return;
+    if (!taskId) return;
+    const sidForTask = taskIdToSessionIdRef.current[taskId];
+    if (!sidForTask || sidForTask !== sessionIdRef.current) return;
     if (!msg.trim()) return;
     if (isChatStreamToolPhase(msg)) {
       setMessages((prev) => {
-        const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+        const idx = findLastChatAssistantIndex(prev, taskId);
         if (idx < 0) return prev;
         const next = [...prev];
+        const cachedMap = next[idx].mapVisual ?? chatMapByTaskIdRef.current[taskId];
         next[idx] = {
           role: "assistant",
           text: ackTextByTaskRef.current[taskId] ?? next[idx].text,
           taskId,
           streaming: false,
+          mapVisual: cachedMap,
         };
         return next;
       });
@@ -1200,10 +3169,11 @@ function App() {
     }
     if (shouldChatStreamProgress(msg)) {
       setMessages((prev) => {
-        const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+        const idx = findLastChatAssistantIndex(prev, taskId);
         if (idx < 0) return prev;
         const next = [...prev];
-        next[idx] = { role: "assistant", text: msg, taskId, streaming: true };
+        const cachedMap = next[idx].mapVisual ?? chatMapByTaskIdRef.current[taskId];
+        next[idx] = { role: "assistant", text: msg, taskId, streaming: true, mapVisual: cachedMap };
         return next;
       });
     }
@@ -1217,7 +3187,7 @@ function App() {
     try {
       es = new EventSource(url);
       es.onmessage = (msgEv) => {
-        fetchTasksList();
+        void fetchTasksList({ silent: true });
         fetchPendingHumanInput();
         try {
           const d = JSON.parse(msgEv.data) as {
@@ -1428,16 +3398,129 @@ function App() {
 
   const fetchScheduleReports = useCallback(async () => {
     try {
-      const data = await invoke<{ reports?: Array<{ schedule_name?: string; message?: string; ended_at?: string }> }>("get_schedule_run_reports", { port: DAEMON_PORT });
-      setScheduleReports((data?.reports ?? []).map((r) => ({ schedule_name: r.schedule_name ?? "", message: r.message ?? "Exécuté.", ended_at: r.ended_at })));
+      const [reportsData, runsData] = await Promise.all([
+        invoke<{ reports?: Array<{ schedule_name?: string; message?: string; ended_at?: string; schedule_id?: string; task_id?: string; task_run_id?: string }> }>(
+          "get_schedule_run_reports",
+          { port: DAEMON_PORT }
+        ),
+        invoke<{ task_runs?: Array<{ id?: string; schedule_id?: string; task_id?: string; status?: string; planned_for?: string; started_at?: string; ended_at?: string; label?: string }> }>(
+          "get_task_runs",
+          { port: DAEMON_PORT }
+        ),
+      ]);
+      const runs = (runsData?.task_runs ?? []).map((r) => ({
+        id: r.id ?? "",
+        schedule_id: r.schedule_id,
+        task_id: r.task_id ?? "",
+        status: r.status ?? "?",
+        planned_for: r.planned_for ?? "",
+        started_at: r.started_at,
+        ended_at: r.ended_at,
+        label: r.label,
+      }));
+      const runsById = new Map(runs.map((run) => [run.id, run]));
+      const runsByTaskId = new Map<string, typeof runs>();
+      for (const run of runs) {
+        const key = run.task_id;
+        const prev = runsByTaskId.get(key);
+        if (prev) prev.push(run);
+        else runsByTaskId.set(key, [run]);
+      }
+      const isoDistance = (left?: string, right?: string) => {
+        if (!left || !right) return Number.POSITIVE_INFINITY;
+        const leftMs = Date.parse(left);
+        const rightMs = Date.parse(right);
+        if (Number.isNaN(leftMs) || Number.isNaN(rightMs)) return Number.POSITIVE_INFINITY;
+        return Math.abs(leftMs - rightMs);
+      };
+      setScheduleReports((reportsData?.reports ?? []).map((r) => {
+        const byId = r.task_run_id ? runsById.get(r.task_run_id) : undefined;
+        let matchedRun = byId;
+        if (!matchedRun && r.task_id) {
+          const candidates = (runsByTaskId.get(r.task_id) ?? []).filter((candidate) => !r.schedule_id || candidate.schedule_id === r.schedule_id);
+          if (candidates.length > 0) {
+            if (r.ended_at) {
+              matchedRun = candidates.reduce((best, candidate) => {
+                const bestAnchor = best.ended_at ?? best.started_at ?? best.planned_for;
+                const candidateAnchor = candidate.ended_at ?? candidate.started_at ?? candidate.planned_for;
+                return isoDistance(r.ended_at, candidateAnchor) < isoDistance(r.ended_at, bestAnchor) ? candidate : best;
+              });
+            } else {
+              matchedRun = candidates[0];
+            }
+          }
+        }
+        return {
+          schedule_name: r.schedule_name ?? "",
+          message: r.message ?? "Exécuté.",
+          ended_at: r.ended_at,
+          schedule_id: r.schedule_id,
+          task_id: r.task_id,
+          task_run_id: r.task_run_id,
+          task_label: matchedRun?.label,
+          status: matchedRun?.status,
+          planned_for: matchedRun?.planned_for,
+          started_at: matchedRun?.started_at,
+          run_ended_at: matchedRun?.ended_at,
+        };
+      }));
     } catch {
       setScheduleReports([]);
+    }
+  }, []);
+
+  const fetchPluginStatus = useCallback(async () => {
+    setPluginStatusLoading(true);
+    setPluginStatusError(null);
+    try {
+      const list = await invoke<PluginStatusEntry[]>("get_plugins", { port: DAEMON_PORT });
+      setPluginStatusList(Array.isArray(list) ? list : []);
+    } catch (e) {
+      setPluginStatusError(String(e));
+      setPluginStatusList([]);
+    } finally {
+      setPluginStatusLoading(false);
     }
   }, []);
 
   useEffect(() => {
     if (tab === "scheduled") fetchScheduleReports();
   }, [tab, fetchScheduleReports]);
+
+  const resetPluginReputation = useCallback(async (pluginId?: string) => {
+    setPluginReputationResetLoading(true);
+    setPluginReputationResetError(null);
+    setPluginReputationResetMessage(null);
+    try {
+      const trimmed = (pluginId ?? "").trim();
+      const res = await fetch(`http://127.0.0.1:${DAEMON_PORT}/api/plugins/reputation/reset`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: trimmed ? JSON.stringify({ plugin_id: trimmed }) : JSON.stringify({}),
+      });
+
+      const text = await res.text();
+      let payload: { message?: string } | null = null;
+      try {
+        payload = text ? (JSON.parse(text) as { message?: string }) : null;
+      } catch {
+        payload = null;
+      }
+
+      if (!res.ok) {
+        throw new Error(payload?.message || text || `HTTP ${res.status}`);
+      }
+
+      setPluginReputationResetMessage(
+        payload?.message || (trimmed ? t("settings.plugin_reputation_reset_ok") : t("settings.plugin_reputation_reset_all_ok"))
+      );
+      await fetchPluginStatus();
+    } catch (e) {
+      setPluginReputationResetError(String(e));
+    } finally {
+      setPluginReputationResetLoading(false);
+    }
+  }, [t, fetchPluginStatus]);
 
   const fetchUserRagDocuments = useCallback(async () => {
     setUserRagLoading(true);
@@ -1547,6 +3630,12 @@ function App() {
   }, [tab, settingsSection, fetchUserProfile]);
 
   useEffect(() => {
+    if (tab === "settings" && settingsSection === "system") {
+      fetchPluginStatus();
+    }
+  }, [tab, settingsSection, fetchPluginStatus]);
+
+  useEffect(() => {
     if (!calendarSelectedTaskId) {
       setCalendarTaskDetail(null);
       setCalendarTaskDetailError(null);
@@ -1593,6 +3682,61 @@ function App() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [calendarCellDetail]);
+
+  useEffect(() => {
+    if (!eventVisualFullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest("input, textarea, [contenteditable='true']")) return;
+
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setEventVisualFullscreen(null);
+        return;
+      }
+
+      const isZoomIn = e.key === "+" || e.key === "=" || e.key === "Add";
+      const isZoomOut = e.key === "-" || e.key === "Subtract";
+      const isReset = e.key === "0" || e.key === "Numpad0";
+      const isHelpToggle = e.key === "?" || (e.key === "/" && e.shiftKey);
+
+      if (isZoomIn) {
+        e.preventDefault();
+        setEventVisualTransform((prev) => ({ ...prev, scale: Math.max(0.5, Math.min(8, prev.scale * 1.15)) }));
+        return;
+      }
+
+      if (isZoomOut) {
+        e.preventDefault();
+        setEventVisualTransform((prev) => ({ ...prev, scale: Math.max(0.5, Math.min(8, prev.scale / 1.15)) }));
+        return;
+      }
+
+      if (isReset) {
+        e.preventDefault();
+        resetEventVisualViewport();
+        return;
+      }
+
+      if (isHelpToggle) {
+        e.preventDefault();
+        setEventVisualHelpOpen((prev) => !prev);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [eventVisualFullscreen, resetEventVisualViewport]);
+
+  useEffect(() => {
+    if (!eventVisualFullscreen) return;
+    resetEventVisualViewport();
+  }, [eventVisualFullscreen, resetEventVisualViewport]);
+
+  useEffect(() => {
+    if (!eventVisualFullscreen) {
+      setEventVisualHelpOpen(false);
+    }
+  }, [eventVisualFullscreen]);
 
   useEffect(() => {
     if (!calendarSelectedScheduleId) {
@@ -1675,6 +3819,7 @@ function App() {
 /reload           — recharger les plugins
 /skills            — liste des skills installés
 /skills list       — idem
+/skills install <url> — installer un skill depuis une URL (GitHub ou hôte autorisé)
 /skills reload     — recharger les skills (data_dir/skills, spec/skills)
 /skills uninstall <nom> — désinstaller un skill (ex. /skills uninstall bankr)
 /restart          — redémarrer le daemon (superviseur)
@@ -1734,7 +3879,7 @@ function App() {
       const taskId = parts[1]?.trim();
       if (!taskId) return "Usage: /stop TASK_ID ou /cancel TASK_ID (ex: /stop 412e7256-f808-4e83-b371-b7dd9b6fc4f8)";
       try {
-        await invoke<{ cancelled?: boolean }>("cancel_task", { task_id: taskId, port: DAEMON_PORT });
+        await invoke<{ cancelled?: boolean }>("cancel_task", { taskId, port: DAEMON_PORT });
         return `Tâche ${taskId.slice(-8)} annulée.`;
       } catch (err) {
         return `Erreur: ${String(err)}`;
@@ -1783,9 +3928,21 @@ function App() {
       }
     }
     if (cmd === "plugins") {
-      const list = await invoke<Array<{ id?: string; name?: string; version?: string }>>("get_plugins", { port });
+      const list = await invoke<Array<{ id?: string; name?: string; version?: string; enabled?: boolean; disabled_reason?: string | null; score?: number }>>("get_plugins", { port });
       if (!list?.length) return "Aucun plugin installé.";
-      return list.map((p) => `${p.id ?? "?"} — ${p.name ?? "?"} (${p.version ?? "?"})`).join("\n");
+      return list
+        .map((p) => {
+          const enabled = p.enabled !== false;
+          const disabledReason = typeof p.disabled_reason === "string" ? p.disabled_reason : null;
+          const status = enabled
+            ? "enabled"
+            : disabledReason === "reputation"
+              ? "disabled (reputation)"
+              : "disabled";
+          const score = typeof p.score === "number" ? ` score=${p.score}` : "";
+          return `${p.id ?? "?"} — ${p.name ?? "?"} (${p.version ?? "?"}) [${status}${score}]`;
+        })
+        .join("\n");
     }
     if (cmd === "reload") {
       await invoke("reload_plugins", { port });
@@ -1813,6 +3970,19 @@ function App() {
           return "Impossible de recharger les skills (daemon déconnecté ou erreur).";
         }
       }
+      if (sub === "install") {
+        const skillUrl = parts[2]?.trim();
+        if (!skillUrl) return "Usage: /skills install <url> (ex. /skills install https://github.com/BankrBot/skills/tree/main/bankr)";
+        try {
+          const json = await invoke<{ installed?: boolean; message?: string }>("install_skill", {
+            url: skillUrl,
+            port,
+          });
+          return json?.installed ? (json?.message ?? `Skill installé depuis ${skillUrl}.`) : (json?.message ?? `Échec de l'installation du skill depuis ${skillUrl}.`);
+        } catch (err) {
+          return `Impossible d'installer le skill : ${String(err)}`;
+        }
+      }
       if (sub === "uninstall") {
         const skillName = parts[2]?.trim();
         if (!skillName) return "Usage: /skills uninstall <nom> (ex. /skills uninstall bankr)";
@@ -1826,7 +3996,7 @@ function App() {
           return `Impossible de désinstaller le skill : ${String(err)}`;
         }
       }
-      return "Usage: /skills [list] — lister les skills ; /skills reload — recharger ; /skills uninstall <nom> — désinstaller.";
+      return "Usage: /skills [list] — lister les skills ; /skills install <url> — installer ; /skills reload — recharger ; /skills uninstall <nom> — désinstaller.";
     }
     if (cmd === "metrics") {
       const data = await invoke<Record<string, ModelMetricsEntry>>("get_router_metrics", { port });
@@ -2061,6 +4231,7 @@ function App() {
     if (userMessage.startsWith("/")) {
       const cmdLower = userMessage.replace(/^\//, "").trim().toLowerCase().split(/\s+/)[0] ?? "";
       if (cmdLower === "newsession" || cmdLower === "nouvelle" || (cmdLower === "session" && userMessage.toLowerCase().includes("nouvelle"))) {
+        pendingNewSessionAfterSlashRef.current = true;
         setSessionId(null);
       }
       setLoading(true);
@@ -2082,26 +4253,69 @@ function App() {
     setAttachments([]);
     setLoading(true);
     try {
-      const reconnect = firstMessageSinceLoadRef.current;
-      firstMessageSinceLoadRef.current = false;
+      const useNewSession = pendingNewSessionAfterSlashRef.current;
+      if (useNewSession) pendingNewSessionAfterSlashRef.current = false;
+      const sessionAtSend = sessionId;
       const ack = await invoke<{ task_id: string; session_id: string; message: string }>("send_message_ack", {
         message: userMessage,
-        session_id: sessionId,
+        sessionId: sessionId,
         attachments: attachmentsPayload,
+        newSession: useNewSession ? true : undefined,
         port: DAEMON_PORT,
-        reconnect: reconnect || undefined,
       });
       setLoading(false);
       if (ack?.session_id) {
         setSessionId(ack.session_id);
+        sessionIdRef.current = ack.session_id;
         try {
           localStorage.setItem(AKASHA_SESSION_ID_KEY, ack.session_id);
         } catch {
           /* ignore */
         }
       }
+      if (useNewSession && ack?.session_id) {
+        const sid = ack.session_id;
+        setChatThreads((prev) => {
+          if (prev.some((x) => x.id === sid)) {
+            return prev.map((x) => (x.id === sid ? { ...x, pendingTitle: true } : x));
+          }
+          const now = new Date().toISOString();
+          return [{ id: sid, title: "", createdAt: now, updatedAt: now, pendingTitle: true }, ...prev];
+        });
+      }
+      if (ack?.session_id && ack.task_id) {
+        const sidT = ack.session_id;
+        setChatThreads((prev) => {
+          const now = new Date().toISOString();
+          const th = prev.find((x) => x.id === sidT);
+          if (th?.pendingTitle) {
+            void (async () => {
+              try {
+                const r = await invoke<{ title?: string }>("suggest_thread_title", {
+                  message: userMessage,
+                  port: DAEMON_PORT,
+                });
+                const title = (r?.title ?? "").trim();
+                if (!title) return;
+                setChatThreads((p) =>
+                  p.map((x) =>
+                    x.id === sidT ? { ...x, title, pendingTitle: false, updatedAt: new Date().toISOString() } : x,
+                  ),
+                );
+              } catch {
+                /* ignore */
+              }
+            })();
+          }
+          return prev.map((x) => (x.id === sidT ? { ...x, updatedAt: now } : x));
+        });
+      }
       const ackText = ack?.message ?? "Request received. You can follow progress in the Tasks tab.";
       if (ack?.task_id) {
+        const sidResolved = (ack.session_id || sessionAtSend || "").trim();
+        if (sidResolved) {
+          taskIdToSessionIdRef.current[ack.task_id] = sidResolved;
+        }
         lastChatTaskIdRef.current = ack.task_id;
         ackTextByTaskRef.current[ack.task_id] = ackText;
         setMessages((prev) => [...prev, { role: "assistant", text: ackText, taskId: ack.task_id }]);
@@ -2113,7 +4327,7 @@ function App() {
         setRunningTaskChips((prev) => ({ ...prev, [ack.task_id]: { pct: 0, message: "en cours…" } }));
         setRunningTaskEvents((prev) => ({ ...prev, [ack.task_id]: [] }));
         setSubAgentPanelCollapsed(false);
-        fetchTasksList();
+        void fetchTasksList({ silent: true });
         const taskId = ack.task_id;
         const pollUntilDone = async () => {
           const maxWait = 600;
@@ -2126,12 +4340,18 @@ function App() {
           for (let i = 0; i < maxWait; i++) {
             await new Promise((r) => setTimeout(r, pollIntervalMs));
             try {
-              const [raw, eventsData, humanInputData] = await Promise.all([
+              const [raw, eventsPayloadRaw, humanInputData] = await Promise.all([
                 invoke<string>("get_task_status", { taskId, port: DAEMON_PORT }),
-                invoke<{ events?: Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> }>("get_task_events", { taskId, port: DAEMON_PORT }).catch(() => ({ events: [] })),
+                invoke<unknown>("get_task_events", { taskId, port: DAEMON_PORT }).catch(() => null),
                 invoke<{ question?: string; context?: string; choices?: string[] }>("get_task_human_input", { taskId, port: DAEMON_PORT }).catch(() => null),
               ]);
-              const status = JSON.parse(raw) as { status?: string; progress?: Array<{ progress_pct?: number; message?: string }> };
+              const eventsData = { events: normalizeTaskEventsInvokeResponse(eventsPayloadRaw ?? {}) };
+              const status = JSON.parse(raw) as {
+                status?: string;
+                progress?: Array<{ progress_pct?: number; message?: string }>;
+                tokens_used?: number;
+                cost_usd?: number;
+              };
               const pct = status?.progress?.slice(-1)[0]?.progress_pct ?? 0;
               const msg = status?.progress?.slice(-1)[0]?.message ?? "";
               const currentStatus = status?.status ?? "";
@@ -2147,14 +4367,45 @@ function App() {
                 ticksWithoutChange = 0;
                 pollIntervalMs = MIN_INTERVAL;
               }
-              setRunningTaskChips((prev) => (prev[taskId] !== undefined ? { ...prev, [taskId]: { pct, message: msg } } : prev));
+              setRunningTaskChips((prev) => {
+                if (prev[taskId] === undefined) return prev;
+                const cur = prev[taskId]!;
+                if (cur.pct === pct && cur.message === msg) return prev;
+                return { ...prev, [taskId]: { pct, message: msg } };
+              });
               const events = (eventsData?.events ?? []).map((e) => ({
                 event_type: e.event_type ?? "?",
                 payload: e.payload,
                 at: e.at ?? "",
                 task_id: e.task_id,
               }));
-              setRunningTaskEvents((prev) => (prev[taskId] !== undefined ? { ...prev, [taskId]: events } : prev));
+              setRunningTaskEvents((prev) => {
+                if (prev[taskId] === undefined) return prev;
+                const oldE = prev[taskId]!;
+                try {
+                  if (JSON.stringify(oldE) === JSON.stringify(events)) return prev;
+                } catch {
+                  /* ignore */
+                }
+                return { ...prev, [taskId]: events };
+              });
+              const chatMapVis =
+                extractChatMapVisualFromTaskEvents(events) ?? extractChatMapVisualFromAssistantText(msg);
+              if (chatMapVis) {
+                chatMapByTaskIdRef.current[taskId] = chatMapVis;
+                setChatMapByTaskId((prev) => (prev[taskId] === chatMapVis ? prev : { ...prev, [taskId]: chatMapVis }));
+              }
+              const taskForActiveChat = taskIdToSessionIdRef.current[taskId] === sessionIdRef.current;
+              if (chatMapVis && taskForActiveChat) {
+                setMessages((prev) => {
+                  const idx = findLastChatAssistantIndex(prev, taskId);
+                  if (idx < 0) return prev;
+                  if (prev[idx]?.mapVisual === chatMapVis) return prev;
+                  const next = [...prev];
+                  next[idx] = { ...next[idx]!, mapVisual: chatMapVis };
+                  return next;
+                });
+              }
               if (humanInputData?.question) {
                 setPendingHumanInput((prev) => ({ ...prev, [taskId]: { question: humanInputData.question ?? "", context: humanInputData.context ?? "", choices: humanInputData.choices } }));
                 if (!humanInputAutoOpenedRef.current.has(taskId)) {
@@ -2179,16 +4430,45 @@ function App() {
                 humanInputAutoOpenedRef.current.delete(taskId);
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 const finalMsg = status?.progress?.slice(-1)[0]?.message ?? "Terminé.";
-                if (taskId === lastChatTaskIdRef.current) {
+                const doneMapVis =
+                  extractChatMapVisualFromTaskEvents(events) ??
+                  extractChatMapVisualFromAssistantText(finalMsg) ??
+                  chatMapByTaskIdRef.current[taskId] ??
+                  null;
+                if (doneMapVis) {
+                  chatMapByTaskIdRef.current[taskId] = doneMapVis;
+                  setChatMapByTaskId((prev) => (prev[taskId] === doneMapVis ? prev : { ...prev, [taskId]: doneMapVis }));
+                }
+                if (taskForActiveChat) {
+                  let storedMapVisual: ChatMapVisual | undefined;
                   setMessages((prev) => {
-                    const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+                    const idx = findLastChatAssistantIndex(prev, taskId);
                     if (idx >= 0) {
                       const next = [...prev];
-                      next[idx] = { role: "assistant", text: finalMsg };
+                      const keepMap = next[idx]!.mapVisual ?? doneMapVis ?? chatMapByTaskIdRef.current[taskId] ?? undefined;
+                      storedMapVisual = keepMap;
+                      next[idx] = { role: "assistant", text: finalMsg, taskId, mapVisual: keepMap };
                       return next;
                     }
-                    return [...prev, { role: "assistant", text: finalMsg }];
+                    storedMapVisual = doneMapVis ?? undefined;
+                    return [...prev, { role: "assistant", text: finalMsg, taskId, mapVisual: doneMapVis ?? undefined }];
                   });
+                  if (storedMapVisual && finalMsg.trim()) {
+                    try {
+                      const sid =
+                        (typeof sessionId === "string" && sessionId.trim()) ||
+                        localStorage.getItem(AKASHA_SESSION_ID_KEY) ||
+                        "";
+                      if (sid) {
+                        localStorage.setItem(
+                          chatMapMessageCacheKey(sid, finalMsg.trim()),
+                          JSON.stringify(storedMapVisual),
+                        );
+                      }
+                    } catch {
+                      /* ignore */
+                    }
+                  }
                   delete ackTextByTaskRef.current[taskId];
                 }
                 if (replyWithTtsRef.current && voiceStatus?.tts_configured && finalMsg?.trim()) {
@@ -2213,15 +4493,35 @@ function App() {
                 humanInputAutoOpenedRef.current.delete(taskId);
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 replyWithTtsRef.current = false;
-                if (taskId === lastChatTaskIdRef.current) {
+                if (taskForActiveChat) {
                   setMessages((prev) => {
-                    const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+                    const idx = findLastChatAssistantIndex(prev, taskId);
                     if (idx >= 0) {
                       const next = [...prev];
-                      next[idx] = { role: "assistant", text: "Tâche en échec.", error: true };
+                      const MAX_FAILURE_CHAT_CHARS = 2500;
+                      const baseMsg = msg?.trim() ? msg.trim() : "Tâche en échec.";
+                      const tokensUsed = status?.tokens_used;
+                      const costUsd = status?.cost_usd;
+                      const suffixParts: string[] = [];
+                      if (typeof tokensUsed === "number") suffixParts.push(`Tokens: ${tokensUsed}`);
+                      if (typeof costUsd === "number" && Number.isFinite(costUsd) && Math.abs(costUsd) > 0) suffixParts.push(`Coût: ${costUsd.toFixed(4)} USD`);
+                      const suffix = suffixParts.length > 0 ? `\n\n${suffixParts.join(" · ")}` : "";
+                      const composed = `${baseMsg}${suffix}`;
+                      const finalMsg = composed.length > MAX_FAILURE_CHAT_CHARS ? composed.slice(0, MAX_FAILURE_CHAT_CHARS).trimEnd() + "…" : composed;
+                      next[idx] = { role: "assistant", text: finalMsg, error: true };
                       return next;
                     }
-                    return [...prev, { role: "assistant", text: "Tâche en échec.", error: true }];
+                    const MAX_FAILURE_CHAT_CHARS = 2500;
+                    const baseMsg = msg?.trim() ? msg.trim() : "Tâche en échec.";
+                    const tokensUsed = status?.tokens_used;
+                    const costUsd = status?.cost_usd;
+                    const suffixParts: string[] = [];
+                    if (typeof tokensUsed === "number") suffixParts.push(`Tokens: ${tokensUsed}`);
+                    if (typeof costUsd === "number" && Number.isFinite(costUsd) && Math.abs(costUsd) > 0) suffixParts.push(`Coût: ${costUsd.toFixed(4)} USD`);
+                    const suffix = suffixParts.length > 0 ? `\n\n${suffixParts.join(" · ")}` : "";
+                    const composed = `${baseMsg}${suffix}`;
+                    const finalMsg = composed.length > MAX_FAILURE_CHAT_CHARS ? composed.slice(0, MAX_FAILURE_CHAT_CHARS).trimEnd() + "…" : composed;
+                    return [...prev, { role: "assistant", text: finalMsg, error: true }];
                   });
                   delete ackTextByTaskRef.current[taskId];
                 }
@@ -2242,15 +4542,15 @@ function App() {
             delete next[taskId];
             return next;
           });
-          if (taskId === lastChatTaskIdRef.current) {
+          if (taskIdToSessionIdRef.current[taskId] === sessionIdRef.current) {
             setMessages((prev) => {
-              const idx = prev.findIndex((m) => m.role === "assistant" && m.taskId === taskId);
+              const idx = findLastChatAssistantIndex(prev, taskId);
               if (idx >= 0) {
                 const next = [...prev];
-                next[idx] = { role: "assistant", text: "Délai dépassé. Consultez Tâches." };
+                next[idx] = { role: "assistant", text: "Délai dépassé. Consultez Tâches.", taskId };
                 return next;
               }
-              return [...prev, { role: "assistant", text: "Délai dépassé. Consultez Tâches." }];
+              return [...prev, { role: "assistant", text: "Délai dépassé. Consultez Tâches.", taskId }];
             });
             delete ackTextByTaskRef.current[taskId];
           }
@@ -2267,7 +4567,7 @@ function App() {
   handleSendRef.current = handleSend;
 
   return (
-    <div className="app">
+    <div className={`app ui-mode-${uiMode}`}>
       <a href="#main-content" className="skip-link">Aller au contenu principal</a>
       {updateBannerInfo && (
         <div className="update-banner" role="region" aria-label={t("update.banner_label")}>
@@ -2454,25 +4754,31 @@ function App() {
         <div className="container-main">
           <div className="container-main-inner">
             <header className="view-header">
-              <h2 className="view-title">{t("tabs." + tab)}</h2>
-              <span
-                className={`daemon-status ${health?.ok ? "daemon-status-ok" : "daemon-status-off"}`}
-                role="status"
-                aria-live="polite"
-                title={health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
-              >
-                {health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
-              </span>
-              <button
-                type="button"
-                className="sidebar-right-toggle"
-                onClick={() => setRightSidebarOpen((o) => !o)}
-                aria-expanded={rightSidebarOpen}
-                aria-label={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
-                title={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
-              >
-                {rightSidebarOpen ? "▐" : "▌"}
-              </button>
+              <div className="view-header-main">
+                <h2 className="view-title">{t("tabs." + tab)}</h2>
+                <p className="view-subtitle">{isSimpleMode ? t("settings.ui_mode_hint") : t("chat.follow_tasks")}</p>
+              </div>
+              <div className="view-header-actions">
+                <span className="view-mode-badge">{uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}</span>
+                <span
+                  className={`daemon-status ${health?.ok ? "daemon-status-ok" : "daemon-status-off"}`}
+                  role="status"
+                  aria-live="polite"
+                  title={health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
+                >
+                  {health?.ok ? t("status.daemon_ok") : t("status.daemon_off")}
+                </span>
+                <button
+                  type="button"
+                  className="sidebar-right-toggle"
+                  onClick={() => setRightSidebarOpen((o) => !o)}
+                  aria-expanded={rightSidebarOpen}
+                  aria-label={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
+                  title={rightSidebarOpen ? t("sidebar.hide_tasks") : t("sidebar.show_tasks")}
+                >
+                  {rightSidebarOpen ? "▐" : "▌"}
+                </button>
+              </div>
             </header>
       <main className="main" id="main-content" tabIndex={-1}>
         {/* Onboarding: first steps modal (dismissible, "Ne plus afficher" stored in localStorage) */}
@@ -2530,6 +4836,7 @@ function App() {
                           await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: choice, port: DAEMON_PORT });
                           setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
                           setHumanInputModalTaskId(null);
+                          setHumanInputFreeText("");
                         } catch (e) {
                           console.error(e);
                         }
@@ -2539,35 +4846,37 @@ function App() {
                     </button>
                   ))}
                 </div>
-              ) : (
-                <div className="human-input-free">
-                  <input
-                    type="text"
-                    value={humanInputFreeText}
-                    onChange={(e) => setHumanInputFreeText(e.target.value)}
-                    placeholder={t("human_input.placeholder")}
-                    onKeyDown={(e) => e.key === "Enter" && document.getElementById("human-input-submit-btn")?.click()}
-                  />
-                  <button
-                    id="human-input-submit-btn"
-                    type="button"
-                    onClick={async () => {
-                      const text = humanInputFreeText.trim();
-                      if (!text) return;
-                      try {
-                        await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: text, port: DAEMON_PORT });
-                        setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
-                        setHumanInputModalTaskId(null);
-                        setHumanInputFreeText("");
-                      } catch (e) {
-                        console.error(e);
-                      }
-                    }}
-                  >
-                    {t("human_input.submit")}
-                  </button>
-                </div>
-              )}
+              ) : null}
+              <div className="human-input-free">
+                {pendingHumanInput[humanInputModalTaskId].choices?.length ? (
+                  <label htmlFor="human-input-free-textarea">{t("human_input.or_custom")}</label>
+                ) : null}
+                <textarea
+                  id="human-input-free-textarea"
+                  rows={3}
+                  value={humanInputFreeText}
+                  onChange={(e) => setHumanInputFreeText(e.target.value)}
+                  placeholder={t("human_input.placeholder")}
+                />
+                <button
+                  id="human-input-submit-btn"
+                  type="button"
+                  onClick={async () => {
+                    const text = humanInputFreeText.trim();
+                    if (!text) return;
+                    try {
+                      await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: text, port: DAEMON_PORT });
+                      setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
+                      setHumanInputModalTaskId(null);
+                      setHumanInputFreeText("");
+                    } catch (e) {
+                      console.error(e);
+                    }
+                  }}
+                >
+                  {t("human_input.submit")}
+                </button>
+              </div>
               <button type="button" className="human-input-close" onClick={() => setHumanInputModalTaskId(null)} aria-label={t("common.close")}>
                 ×
               </button>
@@ -2755,6 +5064,26 @@ function App() {
             aria-labelledby="tab-chat"
             className="panel chat-panel"
           >
+            <div className="panel-hero chat-panel-hero">
+              <div>
+                <h3 className="panel-hero-title">{t("chat.hero_title")}</h3>
+                <p className="panel-hero-text">{isSimpleMode ? t("chat.hero_simple") : t("chat.hero_expert")}</p>
+              </div>
+              {(messages.length > 0 || Object.keys(runningTaskChips).length > 0) && (
+                <div className="panel-hero-aside">
+                  {messages.length > 0 && (
+                    <button type="button" className="panel-hero-action panel-hero-action-secondary" onClick={exportChatTranscript}>
+                      {t("chat.export_transcript")}
+                    </button>
+                  )}
+                  {Object.keys(runningTaskChips).length > 0 && (
+                    <button type="button" className="panel-hero-action" onClick={() => setTab("tasks")}>
+                      {t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="chat-area">
               {messages.length === 0 ? (
                 <div className="chat-placeholder">
@@ -2770,6 +5099,8 @@ function App() {
                 <>
                   {messages.map((m, i) => {
                     const askUserData = m.role === "assistant" ? parseAskUserMessage(m.text) : null;
+                    const assistantMapVisual =
+                      m.role === "assistant" ? (m.mapVisual ?? (m.taskId ? chatMapByTaskId[m.taskId] : undefined)) : undefined;
                     return (
                       <div
                         key={i}
@@ -2832,6 +5163,21 @@ function App() {
                             {m.streaming ? <span className="message-streaming-caret" aria-hidden /> : null}
                           </div>
                         )}
+                        {assistantMapVisual ? (
+                          <div className="chat-message-map-embed">
+                            <MapPluginEventView
+                              visual={assistantMapVisual}
+                              t={t}
+                              width={460}
+                              height={160}
+                              toolbar="inline"
+                              variant="chat"
+                              showPanelHeading={false}
+                              onFullscreen={() => setEventVisualFullscreen({ visual: assistantMapVisual, sourceEventType: "chat_map" })}
+                              onExportCsv={() => exportAdvancedViewCsv(assistantMapVisual)}
+                            />
+                          </div>
+                        ) : null}
                       </div>
                     );
                   })}
@@ -2851,7 +5197,7 @@ function App() {
                         const chipAskUser = parseAskUserMessage(message ?? "");
                         const chipLabel = chipAskUser
                           ? "Question en attente — répondez ci‑dessous"
-                          : (message ?? "en cours");
+                          : trimPreview(message ?? "en cours", isSimpleMode ? 72 : 140);
                         return (
                         <span key={tid} className="task-chip">
                           <span className="task-chip-spinner" aria-hidden />
@@ -2873,7 +5219,18 @@ function App() {
                   )}
                 </div>
               )}
-              {Object.keys(runningTaskChips).length > 0 && (
+              {isSimpleMode && Object.keys(runningTaskChips).length > 0 && (
+                <div className="chat-task-summary-bar">
+                  <span>{t("chat.active_tasks").replace("{{count}}", String(Object.keys(runningTaskChips).length))}</span>
+                  <button type="button" className="chat-task-summary-btn" onClick={() => setTab("tasks")}>{t("chat.open_tasks")}</button>
+                </div>
+              )}
+              {!isSimpleMode && Object.keys(runningTaskChips).length > 0 && chatToolBatchSummary && (
+                <div className="chat-tool-batch-summary" role="status">
+                  {chatToolBatchSummary}
+                </div>
+              )}
+              {!isSimpleMode && Object.keys(runningTaskChips).length > 0 && (
                 <div className="chat-subagents-panel">
                   <button
                     type="button"
@@ -2924,36 +5281,116 @@ function App() {
                               {!isCollapsed && (
                                 <div id={`subagents-discussion-${rootTaskId}`} className="chat-subagents-discussion-body">
                                   {(() => {
+                                    const planEv = events.find((e) => (e.event_type === "plan_proposed" || e.event_type === "plan_committed") && e.payload && typeof e.payload === "object" && "steps" in e.payload);
+                                    let steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> = planEv?.payload && typeof planEv.payload === "object" && Array.isArray((planEv.payload as { steps?: unknown }).steps)
+                                      ? (planEv.payload as { steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> }).steps
+                                      : [];
+                                    if (steps.length === 0) {
+                                      const decomposed = events.find((e) => e.event_type === "task_decomposed" && e.payload && typeof e.payload === "object" && "agents" in e.payload);
+                                      const agents = decomposed?.payload && typeof decomposed.payload === "object" && Array.isArray((decomposed.payload as { agents?: unknown }).agents)
+                                        ? (decomposed.payload as { agents: string[] }).agents
+                                        : [];
+                                      steps = agents.map((agent_type, i) => ({ step_id: `s${i}`, agent_type, intent_preview: "" }));
+                                    }
                                     const byTask: Record<string, typeof events> = {};
                                     for (const ev of events) {
                                       const tid = ev.task_id ?? rootTaskId;
                                       if (!byTask[tid]) byTask[tid] = [];
                                       byTask[tid].push(ev);
                                     }
-                                    return Object.entries(byTask).map(([tid, evs]) => (
+                                    return (
+                                      <>
+                                        {steps.length > 0 && (
+                                          <div className="chat-subagents-plan" role="region" aria-label={t("events.plan_proposed")}>
+                                            <h4 className="chat-subagents-plan-title">{t("events.plan_proposed")}</h4>
+                                            <ol className="chat-subagents-plan-steps">
+                                              {steps.map((s, i) => (
+                                                <li key={s.step_id ?? i} className="chat-subagents-plan-step">
+                                                  {s.agent_type && <span className="chat-subagents-plan-agent agent-kind-pill" data-agent-kind={classifyAgentKind(s.agent_type)}>{s.agent_type}</span>}
+                                                  {s.step_id != null && s.step_id !== "" && (
+                                                    <span className="chat-subagents-plan-step-id">{s.step_id}</span>
+                                                  )}
+                                                  <span className="chat-subagents-plan-intent">{s.intent_preview || s.intent || ""}</span>
+                                                  {s.acceptance_criteria_preview != null && s.acceptance_criteria_preview.trim() !== "" && (
+                                                    <div className="chat-subagents-plan-meta">{s.acceptance_criteria_preview}</div>
+                                                  )}
+                                                  {Array.isArray(s.deliverables) && s.deliverables.length > 0 && (
+                                                    <ul className="chat-subagents-plan-deliverables">
+                                                      {s.deliverables.map((d, j) => (
+                                                        <li key={j}>{d}</li>
+                                                      ))}
+                                                    </ul>
+                                                  )}
+                                                </li>
+                                              ))}
+                                            </ol>
+                                          </div>
+                                        )}
+                                        {Object.entries(byTask).map(([tid, evs]) => (
                                       <div key={`${rootTaskId}-${tid}`} className="chat-subagents-task">
                                         <div className="chat-subagents-task-id">
                                           {tid === rootTaskId ? `${t("chat.root_task")}${tid.slice(-8)}` : `${t("chat.sub_task")}${tid.slice(-8)}`}
                                         </div>
                                         <ul className="chat-subagents-events">
                                           {evs.map((ev, idx) => (
-                                            <li key={`${tid}-${idx}`} className="chat-subagents-event" data-type={ev.event_type}>
-                                              <span className="chat-subagents-event-type">{eventLabel(ev.event_type)}</span>
-                                              {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload ? (
-                                                <span className="chat-subagents-event-agent"> → {String((ev.payload as { agent?: string }).agent ?? "")}</span>
-                                              ) : null}
-                                              {ev.payload && typeof ev.payload === "object" && (ev.event_type === "tool_call_started" || ev.event_type === "tool_call_finished") && "tool" in ev.payload ? (
-                                                <span className="chat-subagents-event-agent"> — {String((ev.payload as { tool?: string }).tool ?? "")}</span>
-                                              ) : null}
-                                              {ev.payload && typeof ev.payload === "object" && (ev.event_type === "task_completed" || ev.event_type === "task_failed") && "model_used" in ev.payload && (ev.payload as { model_used?: string | null }).model_used ? (
-                                                <span className="chat-subagents-event-model"> — {t("tasks.model_used")}: {(ev.payload as { model_used: string }).model_used}</span>
-                                              ) : null}
-                                              {ev.at && <span className="chat-subagents-event-at"> {ev.at.slice(0, 19)}</span>}
+                                            <li key={`${tid}-${idx}`} className="chat-subagents-event" data-type={ev.event_type} data-event-kind={classifyEventKind(ev.event_type)}>
+                                              <span className="chat-subagents-event-dot" aria-hidden />
+                                              <div className="chat-subagents-event-body">
+                                                <div className="chat-subagents-event-topline">
+                                                  <span className="chat-subagents-event-type event-kind-pill" data-event-kind={classifyEventKind(ev.event_type)}>{eventLabel(ev.event_type)}</span>
+                                                  {isDeterministicAutoToolEvent(ev.event_type) && (
+                                                    <span className="event-auto-tool-badge">{t("tasks.auto_tool_badge")}</span>
+                                                  )}
+                                                  {ev.at && <span className="chat-subagents-event-at">{ev.at.slice(0, 19)}</span>}
+                                                </div>
+                                                <div className="chat-subagents-event-meta">
+                                                  {ev.payload && typeof ev.payload === "object" && "agent" in ev.payload ? (
+                                                    <span className="chat-subagents-event-agent">→ <span className="agent-kind-pill" data-agent-kind={classifyAgentKind(String((ev.payload as { agent?: string }).agent ?? ""))}>{String((ev.payload as { agent?: string }).agent ?? "")}</span></span>
+                                                  ) : null}
+                                                  {ev.payload && typeof ev.payload === "object" && (ev.event_type === "tool_call_started" || ev.event_type === "tool_call_finished") && "tool" in ev.payload ? (
+                                                    <span className="chat-subagents-event-agent">— {String((ev.payload as { tool?: string }).tool ?? "")}</span>
+                                                  ) : null}
+                                                  {ev.payload && typeof ev.payload === "object" && ev.event_type === "tool_invoked" ? (() => {
+                                                    const p = ev.payload as Record<string, unknown>;
+                                                    const tool = typeof p.tool === "string" ? p.tool : null;
+                                                    const success = typeof p.success === "boolean" ? p.success : null;
+                                                    const preview = typeof p.result_preview === "string" && p.result_preview.trim() ? p.result_preview.trim() : null;
+                                                    return (
+                                                      <>
+                                                        {tool && <span className="chat-subagents-event-agent">— {tool}{success !== null && <span className={`event-tool-result-badge ${success ? "event-tool-result-ok" : "event-tool-result-err"}`}>{success ? "✓" : "✗"}</span>}</span>}
+                                                        {preview && <span className="chat-subagents-event-result-preview" title={p.result_preview as string}>{trimPreview(preview, 120)}</span>}
+                                                      </>
+                                                    );
+                                                  })() : null}
+                                                  {ev.payload && typeof ev.payload === "object" && (ev.event_type === "task_completed" || ev.event_type === "task_failed") && "model_used" in ev.payload && (ev.payload as { model_used?: string | null }).model_used ? (
+                                                    <span className="chat-subagents-event-model">— {t("tasks.model_used")}: {(ev.payload as { model_used: string }).model_used}</span>
+                                                  ) : null}
+                                                  {ev.payload && typeof ev.payload === "object" && ev.event_type === "task_decomposed" ? (
+                                                    (() => {
+                                                      const p = ev.payload as {
+                                                        decompose_model_task_type?: string;
+                                                        decompose_reason?: string;
+                                                        decompose_attempt?: string;
+                                                      };
+                                                      const parts = [
+                                                        p.decompose_model_task_type ? `task_type=${p.decompose_model_task_type}` : null,
+                                                        p.decompose_attempt ? `attempt=${p.decompose_attempt}` : null,
+                                                        p.decompose_reason ? `reason=${p.decompose_reason}` : null,
+                                                      ].filter(Boolean);
+                                                      return parts.length > 0 ? (
+                                                        <span className="chat-subagents-event-agent">— {parts.join(" · ")}</span>
+                                                      ) : null;
+                                                    })()
+                                                  ) : null}
+                                                </div>
+                                              </div>
                                             </li>
                                           ))}
                                         </ul>
                                       </div>
-                                    ));
+                                    ))}
+                                      </>
+                                    );
                                   })()}
                                 </div>
                               )}
@@ -2988,6 +5425,7 @@ function App() {
                               await invoke("post_task_human_reply", { taskId: pendingTaskId, response: choice, port: DAEMON_PORT });
                               setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskId]; return next; });
                               setHumanInputModalTaskId((c) => (c === pendingTaskId ? null : c));
+                              setInlineHumanReplyText("");
                             } catch (e) {
                               console.error(e);
                             }
@@ -2997,16 +5435,24 @@ function App() {
                         </button>
                       ))}
                     </div>
-                  ) : (
-                    <div className="chat-inline-human-reply-free">
-                      <label htmlFor="inline-human-reply-input" className="sr-only">Votre réponse</label>
-                      <input
-                        id="inline-human-reply-input"
-                        type="text"
+                  ) : null}
+                  <div className="chat-inline-human-reply-free">
+                    {pending.choices?.length ? (
+                      <label htmlFor="inline-human-reply-textarea" className="chat-inline-human-reply-custom-label">
+                        {t("human_input.or_custom")}
+                      </label>
+                    ) : (
+                      <label htmlFor="inline-human-reply-textarea" className="sr-only">
+                        {t("human_input.placeholder")}
+                      </label>
+                    )}
+                    <div className="chat-inline-human-reply-free-row">
+                      <textarea
+                        id="inline-human-reply-textarea"
+                        rows={3}
                         value={inlineHumanReplyText}
                         onChange={(e) => setInlineHumanReplyText(e.target.value)}
-                        placeholder="Saisissez votre réponse…"
-                        onKeyDown={(e) => e.key === "Enter" && document.getElementById("inline-human-reply-submit")?.click()}
+                        placeholder={t("human_input.placeholder")}
                       />
                       <button
                         id="inline-human-reply-submit"
@@ -3024,10 +5470,10 @@ function App() {
                           }
                         }}
                       >
-                        Envoyer la réponse
+                        {t("human_input.submit")}
                       </button>
                     </div>
-                  )}
+                  </div>
                 </div>
               );
             })()}
@@ -3045,6 +5491,47 @@ function App() {
                     </button>
                   </span>
                 ))}
+              </div>
+            )}
+            {chatPromptChipsEnabled && (
+              <div className="chat-prompt-chips" role="group" aria-label={t("chat.prompt_chips_label")}>
+                {promptChipLabels.map((label, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    className="chat-prompt-chip"
+                    onClick={() => {
+                      setMessage((m) => (m.trim() ? `${m.trim()} ${label}` : label));
+                      chatInputRef.current?.focus();
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+            {companionBubbleText && (
+              <div className="chat-companion-row" role="status" aria-live="polite">
+                <span className="chat-companion-avatar" aria-hidden>
+                  🦆
+                </span>
+                <div className="chat-companion-bubble">
+                  <span className="chat-companion-label">{t("chat.companion_label")}</span>
+                  <span className="chat-companion-text">{companionBubbleText}</span>
+                </div>
+                {chatTipsEnabled && tipBannerText && !tipBannerDismissed && (
+                  <button
+                    type="button"
+                    className="chat-companion-dismiss"
+                    onClick={() => {
+                      setTipBannerDismissed(true);
+                      setTipBannerText(null);
+                    }}
+                    aria-label={t("chat.tip_dismiss")}
+                  >
+                    ×
+                  </button>
+                )}
               </div>
             )}
             <div className="input-area">
@@ -3126,11 +5613,17 @@ function App() {
                 {scheduleReports.map((r, i) => (
                   <div key={`report-${i}`} className="message system report scheduled-report">
                     <span className="role" aria-hidden>{t("scheduled.role")}</span>
-                    {r.ended_at && (
-                      <time className="scheduled-report-time" dateTime={r.ended_at}>
-                        {new Date(r.ended_at).toLocaleString()}
+                    {(r.run_ended_at || r.ended_at) && (
+                      <time className="scheduled-report-time" dateTime={r.run_ended_at ?? r.ended_at}>
+                        {new Date(r.run_ended_at ?? r.ended_at ?? "").toLocaleString()}
                       </time>
                     )}
+                    <div className="scheduled-report-metadata">
+                      <span><strong>{t("scheduled.task")}:</strong> {r.task_label || r.task_id || t("scheduled.unknown")}</span>
+                      <span><strong>{t("scheduled.planned_for")}:</strong> {r.planned_for ? new Date(r.planned_for).toLocaleString() : t("scheduled.unknown")}</span>
+                      <span><strong>{t("scheduled.started_at")}:</strong> {r.started_at ? new Date(r.started_at).toLocaleString() : t("scheduled.unknown")}</span>
+                      <span><strong>{t("scheduled.ended_at")}:</strong> {(r.run_ended_at || r.ended_at) ? new Date(r.run_ended_at ?? r.ended_at ?? "").toLocaleString() : t("scheduled.unknown")}</span>
+                    </div>
                     <div className="text markdown-rendered">
                       <Suspense fallback={<span className="markdown-rendered">…</span>}>
                         <LazyMarkdownContent>
@@ -3296,6 +5789,48 @@ function App() {
             >
               Rafraîchir
             </button>
+            {!tasksLoading && tasksList.length > 0 && (
+              <div className="task-center-summary">
+                <div className="task-center-summary-chips">
+                  <span className="task-center-chip task-center-chip-running">{t("tasks.filter_active")}: {taskStatusCounts.running + taskStatusCounts.pending}</span>
+                  <span className="task-center-chip task-center-chip-completed">{t("tasks.filter_completed")}: {taskStatusCounts.completed}</span>
+                  {taskStatusCounts.failed > 0 && <span className="task-center-chip task-center-chip-failed">{t("common.error")}: {taskStatusCounts.failed}</span>}
+                </div>
+                {selectedTask && (
+                  <div className="task-center-selected-summary">
+                    <div className="task-center-selected-main">
+                      <p className="task-center-selected-label">{t("tasks.selected_task_label")}</p>
+                      <h3 className="task-center-selected-title">{taskDisplayLabel(selectedTask)}</h3>
+                      <div className="task-center-selected-badges">
+                        <span className={"task-tree-kind-badge " + (selectedTask.parent_task_id ? "task-tree-kind-badge-child" : "task-tree-kind-badge-root")}>
+                          {selectedTask.parent_task_id ? t("tasks.subtask_badge") : t("tasks.root_badge")}
+                        </span>
+                        {selectedTaskHierarchy.length > 1 && (
+                          <span className="task-tree-path-summary">
+                            {selectedTaskHierarchy.map((task, index) => (
+                              <span key={task.id} className="task-tree-path-segment">
+                                {index > 0 && <span className="task-tree-path-separator" aria-hidden>›</span>}
+                                <span>{taskDisplayLabel(task)}</span>
+                              </span>
+                            ))}
+                          </span>
+                        )}
+                      </div>
+                      <div className="task-center-selected-meta">
+                        <span className={"activity-task-status-pill status-" + selectedTask.status}>{selectedTask.status}</span>
+                        {selectedTask.assigned_agent && <span className="agent-kind-pill" data-agent-kind={classifyAgentKind(selectedTask.assigned_agent)}>{selectedTask.assigned_agent}</span>}
+                        {selectedTask.created_at && <span>{formatRelativeTimeLabel(selectedTask.created_at, locale)}</span>}
+                      </div>
+                    </div>
+                    {selectedTaskSummary?.latestSummary ? (
+                      <p className="task-center-selected-text">{selectedTaskSummary.latestSummary}</p>
+                    ) : selectedTaskSummary?.runningChip?.message ? (
+                      <p className="task-center-selected-text">{trimPreview(selectedTaskSummary.runningChip.message, 180)}</p>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            )}
             {tasksLoading && (
               <p className="panel-loading" aria-busy="true">
                 <span className="panel-loading-spinner" aria-hidden />
@@ -3370,17 +5905,41 @@ function App() {
                               aria-label={t("tasks.search_placeholder")}
                             />
                           </div>
+                          {taskTreeData.branchIds.size > 0 && (
+                            <div className="task-tree-toolbar" role="group" aria-label={t("tasks.tree_actions")}>
+                              <button
+                                type="button"
+                                className="task-tree-toolbar-btn"
+                                onClick={() => setAllTaskBranchesCollapsed(false)}
+                              >
+                                {t("tasks.expand_all")}
+                              </button>
+                              <button
+                                type="button"
+                                className="task-tree-toolbar-btn"
+                                onClick={() => setAllTaskBranchesCollapsed(true)}
+                              >
+                                {t("tasks.collapse_all")}
+                              </button>
+                            </div>
+                          )}
                         </>
                       )}
                       {tasksList.length === 0 ? (
                         <p className="empty-state">{t("tasks.empty")}</p>
-                      ) : filteredTasksList.length === 0 ? (
+                      ) : taskTreeRows.length === 0 ? (
                         <p className="empty-state">{t("tasks.no_match_filter")}</p>
                       ) : (
                         <ul className="activity-task-cards" role="list">
-                          {filteredTasksList.map((task) => {
+                          {taskTreeRows.map((row) => {
+                            const task = row.task;
                             const isSelected = tasksList[tasksSelected]?.id === task.id;
+                            const isAncestor = !isSelected && selectedTaskAncestorIds.has(task.id);
+                            const isActiveRoot = selectedTaskRootId === task.id;
                             const runningChip = task.status === "running" ? runningTaskChips[task.id] : undefined;
+                            const snippet = runningChip?.message ? trimPreview(runningChip.message, isSimpleMode ? 90 : 140) : trimPreview(taskDisplayLabel(task), 100);
+                            const hierarchyLabel = row.depth > 0 ? t("tasks.subtask_badge") : t("tasks.root_badge");
+                            const childCountLabel = t("tasks.children_count").replace("{{count}}", String(row.visibleChildCount));
                             const createdLabel = task.created_at ? (() => {
                               try {
                                 const d = new Date(task.created_at);
@@ -3390,9 +5949,9 @@ function App() {
                               }
                             })() : null;
                             return (
-                              <li key={task.id} className={"activity-task-card" + (isSelected ? " selected" : "")}>
+                              <li key={task.id} className={"activity-task-card" + (isSelected ? " selected" : "") + (isAncestor ? " activity-task-card-ancestor" : "") + (isActiveRoot ? " activity-task-card-active-root" : "") + (row.depth > 0 ? " activity-task-card-child" : " activity-task-card-root") }>
                                 <div
-                                  className="activity-task-card-inner"
+                                  className={"activity-task-card-inner task-tree-row" + (row.depth > 0 ? " task-tree-row-child" : " task-tree-row-root")}
                                   role="button"
                                   tabIndex={0}
                                   onClick={() => setTasksSelected(tasksList.findIndex((x) => x.id === task.id))}
@@ -3401,25 +5960,63 @@ function App() {
                                       e.preventDefault();
                                       setTasksSelected(tasksList.findIndex((x) => x.id === task.id));
                                     }
-                                    const idx = filteredTasksList.findIndex((x) => x.id === task.id);
-                                    if (e.key === "ArrowDown" && idx < filteredTasksList.length - 1) {
-                                      const next = filteredTasksList[idx + 1];
+                                    if (e.key === "ArrowRight" && row.hasChildren && row.isCollapsed) {
+                                      e.preventDefault();
+                                      toggleTaskBranch(task.id);
+                                    }
+                                    if (e.key === "ArrowLeft" && row.hasChildren && !row.isCollapsed) {
+                                      e.preventDefault();
+                                      toggleTaskBranch(task.id);
+                                    }
+                                    const idx = taskTreeRows.findIndex((x) => x.task.id === task.id);
+                                    if (e.key === "ArrowDown" && idx < taskTreeRows.length - 1) {
+                                      const next = taskTreeRows[idx + 1].task;
                                       setTasksSelected(tasksList.findIndex((x) => x.id === next.id));
                                     }
                                     if (e.key === "ArrowUp" && idx > 0) {
-                                      const prev = filteredTasksList[idx - 1];
+                                      const prev = taskTreeRows[idx - 1].task;
                                       setTasksSelected(tasksList.findIndex((x) => x.id === prev.id));
                                     }
                                   }}
+                                  style={{ marginLeft: `${row.depth * 1.25}rem` }}
                                 >
                                   <div className="activity-task-card-head">
-                                    <span className="activity-task-card-title" title={taskDisplayLabel(task)}>
-                                      {taskDisplayLabel(task)}
-                                    </span>
+                                    <div className="activity-task-card-heading">
+                                      <div className="task-tree-title-row">
+                                        {row.hasChildren ? (
+                                          <button
+                                            type="button"
+                                            className="task-tree-toggle"
+                                            aria-label={(row.isCollapsed ? t("tasks.expand_branch") : t("tasks.collapse_branch")) + ": " + taskDisplayLabel(task)}
+                                            aria-expanded={!row.isCollapsed}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              toggleTaskBranch(task.id);
+                                            }}
+                                          >
+                                            <span aria-hidden>{row.isCollapsed ? "▶" : "▼"}</span>
+                                          </button>
+                                        ) : (
+                                          <span className="task-tree-toggle-spacer" aria-hidden>
+                                            {row.depth > 0 ? "•" : ""}
+                                          </span>
+                                        )}
+                                        <span className="activity-task-card-title" title={taskDisplayLabel(task)}>
+                                          {taskDisplayLabel(task)}
+                                        </span>
+                                      </div>
+                                      <div className="task-tree-meta-row">
+                                        <span className={"task-tree-kind-badge " + (row.depth > 0 ? "task-tree-kind-badge-child" : "task-tree-kind-badge-root")}>
+                                          {hierarchyLabel}
+                                        </span>
+                                        {row.hasChildren && <span className="task-tree-child-count">{childCountLabel}</span>}
+                                      </div>
+                                    </div>
                                     <span className={"activity-task-status-pill status-" + task.status}>
                                       {task.status}
                                     </span>
                                   </div>
+                                  <p className="activity-task-card-snippet">{snippet}</p>
                                   {task.status === "running" && runningChip != null && (
                                     <div className="activity-task-progress">
                                       <div className="activity-task-progress-bar" style={{ width: `${runningChip.pct ?? 0}%` }} />
@@ -3429,7 +6026,8 @@ function App() {
                                   <div className="activity-task-meta">
                                     <span className="activity-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>
                                     {createdLabel && <span className="activity-task-created">{createdLabel}</span>}
-                                    {task.assigned_agent && <span className="activity-task-agent">{task.assigned_agent}</span>}
+                                    {task.created_at && <span className="activity-task-relative">{formatRelativeTimeLabel(task.created_at, locale)}</span>}
+                                    {task.assigned_agent && <span className="activity-task-agent agent-kind-pill" data-agent-kind={classifyAgentKind(task.assigned_agent)}>{task.assigned_agent}</span>}
                                   </div>
                                   <button
                                     type="button"
@@ -3481,6 +6079,56 @@ function App() {
                       aria-labelledby="task-panel-heading-steps"
                       className="task-panel-section-body"
                     >
+                      {taskStepsSummary.total > 0 && (
+                        <div className="task-steps-summary">
+                          <div className="task-steps-summary-topline">
+                            <span>{t("tasks.step_done")}: {taskStepsSummary.done}/{taskStepsSummary.total}</span>
+                            <span>{taskStepsSummary.progressPct}%</span>
+                          </div>
+                          <div className="task-steps-summary-bar">
+                            <div className="task-steps-summary-bar-fill" style={{ width: `${taskStepsSummary.progressPct}%` }} />
+                          </div>
+                        </div>
+                      )}
+                      {(() => {
+                        const planEv = tasksEvents.find((e) => (e.event_type === "plan_proposed" || e.event_type === "plan_committed") && e.payload && typeof e.payload === "object" && "steps" in e.payload);
+                        let steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> = planEv?.payload && typeof planEv.payload === "object" && Array.isArray((planEv.payload as { steps?: unknown }).steps)
+                          ? (planEv.payload as { steps: Array<{ step_id?: string; agent_type?: string; intent_preview?: string; intent?: string; acceptance_criteria_preview?: string | null; deliverables?: string[] | null }> }).steps
+                          : [];
+                        if (steps.length === 0) {
+                          const decomposed = tasksEvents.find((e) => e.event_type === "task_decomposed" && e.payload && typeof e.payload === "object" && "agents" in e.payload);
+                          const agents = decomposed?.payload && typeof decomposed.payload === "object" && Array.isArray((decomposed.payload as { agents?: unknown }).agents)
+                            ? (decomposed.payload as { agents: string[] }).agents
+                            : [];
+                          steps = agents.map((agent_type, i) => ({ step_id: `s${i}`, agent_type, intent_preview: "" }));
+                        }
+                        return steps.length > 0 ? (
+                          <div className="chat-subagents-plan task-panel-plan" role="region" aria-label={t("events.plan_proposed")}>
+                            <h4 className="chat-subagents-plan-title">{t("events.plan_proposed")}</h4>
+                            <ol className="chat-subagents-plan-steps">
+                              {steps.map((s, i) => (
+                                <li key={s.step_id ?? i} className="chat-subagents-plan-step">
+                                  {s.agent_type && <span className="chat-subagents-plan-agent agent-kind-pill" data-agent-kind={classifyAgentKind(s.agent_type)}>{s.agent_type}</span>}
+                                  {s.step_id != null && s.step_id !== "" && (
+                                    <span className="chat-subagents-plan-step-id">{s.step_id}</span>
+                                  )}
+                                  <span className="chat-subagents-plan-intent">{s.intent_preview || s.intent || ""}</span>
+                                  {s.acceptance_criteria_preview != null && s.acceptance_criteria_preview.trim() !== "" && (
+                                    <div className="chat-subagents-plan-meta">{s.acceptance_criteria_preview}</div>
+                                  )}
+                                  {Array.isArray(s.deliverables) && s.deliverables.length > 0 && (
+                                    <ul className="chat-subagents-plan-deliverables">
+                                      {s.deliverables.map((d, j) => (
+                                        <li key={j}>{d}</li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </li>
+                              ))}
+                            </ol>
+                          </div>
+                        ) : null;
+                      })()}
                       {taskStepsTodos.length === 0 ? (
                         <p className="empty-state task-steps-empty">{t("tasks.steps_empty")}</p>
                       ) : (
@@ -3539,63 +6187,276 @@ function App() {
                       aria-labelledby="task-panel-heading-events"
                       className="task-panel-section-body task-panel-events-body"
                     >
-                  {tasksList.length > 0 && tasksList[tasksSelected] && (() => {
-                    const sel = tasksList[tasksSelected];
-                    const canCancel = sel.status === "pending" || sel.status === "running";
-                    const canRetry = sel.status === "failed";
-                    return (canCancel || canRetry) ? (
-                      <div className="task-actions-row" role="group" aria-label="Actions sur la tâche">
-                        {canCancel && (
-                          <button
-                            type="button"
-                            className="task-action-btn task-action-cancel"
-                            onClick={async () => {
-                              if (!sel?.id) return;
-                              try {
-                                await invoke<{ cancelled?: boolean }>("cancel_task", { task_id: sel.id, port: DAEMON_PORT });
-                                fetchTasksList();
-                              } catch (e) {
-                                console.error(e);
-                              }
-                            }}
-                          >
-                            Annuler
-                          </button>
-                        )}
-                        {canRetry && (
-                          <button
-                            type="button"
-                            className="task-action-btn task-action-retry"
-                            onClick={() => {
-                              setTab("chat");
-                              setMessage(sel?.label ?? "Relance la tâche.");
-                            }}
-                          >
-                            Relancer
-                          </button>
-                        )}
+                  <div className="task-events-controls">
+                    <label className="task-events-debug-level-control" htmlFor="task-debug-level-select">
+                      <span className="task-events-debug-level-label">{t("tasks.debug_orchestration_level_label")}</span>
+                      <select
+                        id="task-debug-level-select"
+                        className="task-events-debug-level-select"
+                        value={taskOrchestrationDebugLevel}
+                        onChange={(e) => setTaskOrchestrationDebugLevelAndSave(e.target.value as TaskOrchestrationDebugLevel)}
+                        aria-label={t("tasks.debug_orchestration_level_label")}
+                      >
+                        <option value="minimal">{t("tasks.debug_level_minimal")}</option>
+                        <option value="normal">{t("tasks.debug_level_normal")}</option>
+                        <option value="full">{t("tasks.debug_level_full")}</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="task-panel-events-scroll">
+                    {taskDiscussionHighlights.length > 0 && (
+                      <div className="task-discussion-highlight" role="region" aria-label={t("tasks.agent_discussions_title")}>
+                        <h4 className="chat-subagents-plan-title">{t("tasks.agent_discussions_title")}</h4>
+                        <p className="task-events-hint">
+                          {taskOrchestrationDebugLevel === "minimal"
+                            ? t("tasks.agent_discussions_hint_minimal")
+                            : taskOrchestrationDebugLevel === "normal"
+                              ? t("tasks.agent_discussions_hint_normal")
+                              : t("tasks.agent_discussions_hint_full")}
+                        </p>
+                        <ul className="activity-events-list" role="list">
+                          {taskDiscussionHighlights.map(({ event, highlights }, i) => (
+                            <li key={`discussion-${event.event_type}-${event.at}-${i}`} className="activity-event-card" data-event-kind={classifyEventKind(event.event_type)}>
+                              <span className="activity-event-dot" aria-hidden />
+                              <div className="activity-event-body">
+                                <div className="activity-event-topline">
+                                  <strong className="event-kind-pill" data-event-kind={classifyEventKind(event.event_type)}>{eventLabel(event.event_type)}</strong>
+                                  {isDeterministicAutoToolEvent(event.event_type) && (
+                                    <span className="event-auto-tool-badge">{t("tasks.auto_tool_badge")}</span>
+                                  )}
+                                  <span className="activity-event-at">{event.at}</span>
+                                  {event.task_id && selectedTask && event.task_id !== selectedTask.id && (
+                                    <span className="activity-event-subtask">{t("chat.sub_task")}{event.task_id.slice(-8)}</span>
+                                  )}
+                                </div>
+                                {summarizeTaskEvent(event) && <p className="activity-event-summary">{summarizeTaskEvent(event)}</p>}
+                                {highlights.length > 0 && (
+                                  <ul className="task-steps-list" role="list" aria-label={t("tasks.agent_discussions_title")}>
+                                    {highlights.map((line, j) => (
+                                      <li key={`discussion-line-${i}-${j}`} className="task-step task-step--pending">
+                                        <span className="task-step-check" aria-hidden>•</span>
+                                        <span className="task-step-title">{line}</span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
                       </div>
-                    ) : null;
-                  })()}
-                  {tasksEvents.length === 0 ? (
-                    <p className="empty-state">
-                      {tasksList.length > 0 ? t("tasks.no_events") : t("tasks.select_task")}
-                    </p>
-                  ) : (
-                    <ul className="activity-events-list" role="list">
-                      {tasksEvents.map((e, i) => (
-                        <li key={i}>
-                          <strong>{eventLabel(e.event_type)}</strong> @ {e.at}
-                          {e.payload != null && typeof e.payload === "object" && (e.event_type === "task_completed" || e.event_type === "task_failed") && "model_used" in e.payload && (e.payload as { model_used?: string | null }).model_used && (
-                            <p className="event-model-used">{t("tasks.model_used")}: {(e.payload as { model_used: string }).model_used}</p>
+                    )}
+                    {tasksList.length > 0 && tasksList[tasksSelected] && (() => {
+                      const sel = tasksList[tasksSelected];
+                      const canCancel = sel.status === "pending" || sel.status === "running";
+                      const canRetry = sel.status === "failed";
+                      return (canCancel || canRetry) ? (
+                        <div className="task-actions-row" role="group" aria-label="Actions sur la tâche">
+                          {canCancel && (
+                            <button
+                              type="button"
+                              className="task-action-btn task-action-cancel"
+                              onClick={async () => {
+                                if (!sel?.id) return;
+                                try {
+                                  await invoke<{ cancelled?: boolean }>("cancel_task", { taskId: sel.id, port: DAEMON_PORT });
+                                  void fetchTasksList({ silent: true });
+                                } catch (e) {
+                                  console.error(e);
+                                }
+                              }}
+                            >
+                              Annuler
+                            </button>
                           )}
-                          {e.payload != null && (
-                            <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
+                          {canRetry && (
+                            <button
+                              type="button"
+                              className="task-action-btn task-action-retry"
+                              onClick={() => {
+                                setTab("chat");
+                                setMessage(sel?.label ?? "Relance la tâche.");
+                              }}
+                            >
+                              Relancer
+                            </button>
                           )}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+                        </div>
+                      ) : null;
+                    })()}
+                    {visibleTaskEvents.length === 0 ? (
+                      <p className="empty-state">
+                        {tasksList.length > 0 ? t("tasks.no_events") : t("tasks.select_task")}
+                      </p>
+                    ) : (
+                      <>
+                      {isSimpleMode && <p className="task-events-hint">{t("tasks.event_summary_hint")}</p>}
+                      <ul className="activity-events-list" role="list">
+                        {visibleTaskEvents.map((e, i) => (
+                          <li key={`${e.event_type}-${e.at}-${i}`} className="activity-event-card" data-event-kind={classifyEventKind(e.event_type)}>
+                            <span className="activity-event-dot" aria-hidden />
+                            <div className="activity-event-body">
+                              <div className="activity-event-topline">
+                                <strong className="event-kind-pill" data-event-kind={classifyEventKind(e.event_type)}>{eventLabel(e.event_type)}</strong>
+                                {isDeterministicAutoToolEvent(e.event_type) && (
+                                  <span className="event-auto-tool-badge">{t("tasks.auto_tool_badge")}</span>
+                                )}
+                                <span className="activity-event-at">{e.at}</span>
+                                {e.task_id && selectedTask && e.task_id !== selectedTask.id && (
+                                  <span className="activity-event-subtask">{t("chat.sub_task")}{e.task_id.slice(-8)}</span>
+                                )}
+                              </div>
+                              {summarizeTaskEvent(e) && <p className="activity-event-summary">{summarizeTaskEvent(e)}</p>}
+                              {(() => {
+                                const metadata = extractModelMetadata(e);
+                                if (metadata) {
+                                  return (
+                                    <div className="event-model-metadata">
+                                      {metadata.thinking && (
+                                        <div className="event-model-thinking">
+                                          <strong className="metadata-label">{t("tasks.model_thinking_label")}</strong>
+                                          <div className="thinking-content">{trimPreview(metadata.thinking, 500)}</div>
+                                        </div>
+                                      )}
+                                      {metadata.response && (
+                                        <div className="event-model-response">
+                                          <strong className="metadata-label">{t("tasks.model_response_label")}</strong>
+                                          <div className="response-content">{trimPreview(metadata.response, 500)}</div>
+                                        </div>
+                                      )}
+                                      {(metadata.model || metadata.evalCount || metadata.totalDuration) && (
+                                        <div className="event-model-metrics">
+                                          <strong className="metadata-label">{t("tasks.model_metrics_label")}</strong>
+                                          <dl className="metrics-list">
+                                            {metadata.model && (
+                                              <>
+                                                <dt>{t("tasks.model_label")}</dt>
+                                                <dd>{metadata.model}</dd>
+                                              </>
+                                            )}
+                                            {metadata.doneReason && (
+                                              <>
+                                                <dt>{t("tasks.done_reason_label")}</dt>
+                                                <dd>{metadata.doneReason}</dd>
+                                              </>
+                                            )}
+                                            {metadata.evalCount && (
+                                              <>
+                                                <dt>{t("tasks.eval_count_label")}</dt>
+                                                <dd>{metadata.evalCount}</dd>
+                                              </>
+                                            )}
+                                            {metadata.promptEvalCount && (
+                                              <>
+                                                <dt>{t("tasks.prompt_eval_count_label")}</dt>
+                                                <dd>{metadata.promptEvalCount}</dd>
+                                              </>
+                                            )}
+                                            {metadata.totalDuration && (
+                                              <>
+                                                <dt>{t("tasks.total_duration_label")}</dt>
+                                                <dd>{(metadata.totalDuration / 1000000000).toFixed(2)}s</dd>
+                                              </>
+                                            )}
+                                            {metadata.loadDuration && (
+                                              <>
+                                                <dt>{t("tasks.load_duration_label")}</dt>
+                                                <dd>{(metadata.loadDuration / 1000000).toFixed(2)}ms</dd>
+                                              </>
+                                            )}
+                                            {metadata.promptEvalDuration && (
+                                              <>
+                                                <dt>{t("tasks.prompt_eval_duration_label")}</dt>
+                                                <dd>{(metadata.promptEvalDuration / 1000000).toFixed(2)}ms</dd>
+                                              </>
+                                            )}
+                                            {metadata.evalDuration && (
+                                              <>
+                                                <dt>{t("tasks.eval_duration_label")}</dt>
+                                                <dd>{(metadata.evalDuration / 1000000).toFixed(2)}ms</dd>
+                                              </>
+                                            )}
+                                          </dl>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                }
+                                return null;
+                              })()}
+                              {(() => {
+                                const visual = extractAdvancedViewData(e.payload);
+                                if (!visual) return null;
+
+                                if (visual.kind === "map") {
+                                  return (
+                                    <MapPluginEventView
+                                      key={`map-ev-${e.at}-${i}`}
+                                      visual={visual}
+                                      t={t}
+                                      width={460}
+                                      height={180}
+                                      toolbar="inline"
+                                      onFullscreen={() => setEventVisualFullscreen({ visual, sourceEventType: e.event_type })}
+                                      onExportCsv={() => exportAdvancedViewCsv(visual)}
+                                    />
+                                  );
+                                }
+
+                                const width = 460;
+                                const height = 190;
+                                const palette = ["#7c8cff", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
+                                const totalPoints = visual.series.reduce((acc, s) => acc + s.points.length, 0);
+                                return (
+                                  <div className="event-advanced-view event-advanced-view-chart">
+                                    <strong className="metadata-label">
+                                      {visual.title ?? (visual.kind === "graph" ? t("tasks.plugin_graph_title") : t("tasks.plugin_timeseries_title"))}
+                                    </strong>
+                                    <div className="event-advanced-toolbar">
+                                      <button type="button" className="event-advanced-action-btn" onClick={() => setEventVisualFullscreen({ visual, sourceEventType: e.event_type })}>
+                                        {t("tasks.open_fullscreen")}
+                                      </button>
+                                      <button type="button" className="event-advanced-action-btn" onClick={() => exportAdvancedViewCsv(visual)}>
+                                        {t("tasks.export_csv")}
+                                      </button>
+                                    </div>
+                                    <div className="event-advanced-metrics-inline" role="list">
+                                      <span className="event-advanced-chip" role="listitem">{t("tasks.series_count_label")}: {visual.series.length}</span>
+                                      <span className="event-advanced-chip" role="listitem">{t("tasks.points_count_label")}: {totalPoints}</span>
+                                    </div>
+                                    <svg
+                                      className="event-advanced-chart"
+                                      viewBox={`0 0 ${width} ${height}`}
+                                      preserveAspectRatio="none"
+                                      aria-label={visual.kind === "graph" ? t("tasks.plugin_graph_title") : t("tasks.plugin_timeseries_title")}
+                                    >
+                                      <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
+                                      {visual.series.map((s, idx) => {
+                                        const scaled = scalePoints(s.points, width, height);
+                                        const pts = scaled.map((p) => `${p.x},${p.y}`).join(" ");
+                                        return scaled.length >= 2 ? (
+                                          <polyline key={`series-${idx}`} points={pts} className="event-advanced-series-line" style={{ stroke: palette[idx % palette.length] }} />
+                                        ) : null;
+                                      })}
+                                    </svg>
+                                  </div>
+                                );
+                              })()}
+                              {e.payload != null && (isSimpleMode ? (
+                                <details className="event-payload-details">
+                                  <summary>{t("tasks.event_details")}</summary>
+                                  <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
+                                </details>
+                              ) : (
+                                <pre className="event-payload">{JSON.stringify(e.payload, null, 2)}</pre>
+                              ))}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                      </>
+                    )}
+                  </div>
                     </div>
                   )}
                 </div>
@@ -4609,6 +7470,163 @@ function App() {
           </div>
         )}
 
+        {eventVisualFullscreen && (
+          <div className="event-visual-overlay" role="dialog" aria-modal="true" aria-labelledby="event-visual-title" onClick={() => setEventVisualFullscreen(null)}>
+            <div className="event-visual-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="event-visual-modal-header">
+                <h2 id="event-visual-title" className="event-visual-modal-title">
+                  {eventVisualFullscreen.visual.title
+                    ?? (eventVisualFullscreen.visual.kind === "map"
+                      ? t("tasks.plugin_map_title")
+                      : eventVisualFullscreen.visual.kind === "graph"
+                        ? t("tasks.plugin_graph_title")
+                        : t("tasks.plugin_timeseries_title"))}
+                </h2>
+                <div className="event-visual-modal-actions">
+                  <span className="event-visual-zoom-badge" title={t("tasks.zoom_level")}>{t("tasks.zoom_level")}: {eventVisualZoomPercent}%</span>
+                  <button
+                    type="button"
+                    className="btn-secondary event-visual-help-btn"
+                    aria-label={t("tasks.visual_help_toggle")}
+                    title={t("tasks.visual_help_toggle")}
+                    aria-pressed={eventVisualHelpOpen}
+                    onClick={() => setEventVisualHelpOpen((prev) => !prev)}
+                  >
+                    ?
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary event-visual-zoom-btn"
+                    onClick={() => setEventVisualTransform((prev) => ({ ...prev, scale: Math.max(0.5, Math.min(8, prev.scale / 1.15)) }))}
+                    aria-label={t("tasks.zoom_out")}
+                    title={t("tasks.zoom_out")}
+                  >
+                    −
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary event-visual-zoom-btn"
+                    onClick={resetEventVisualViewport}
+                    aria-label={t("tasks.reset_view")}
+                    title={t("tasks.reset_view")}
+                  >
+                    {t("tasks.reset_view")}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={resetEventVisualViewport}
+                    aria-label={t("tasks.fit_to_screen")}
+                    title={t("tasks.fit_to_screen")}
+                  >
+                    {t("tasks.fit_to_screen")}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary event-visual-zoom-btn"
+                    onClick={() => setEventVisualTransform((prev) => ({ ...prev, scale: Math.max(0.5, Math.min(8, prev.scale * 1.15)) }))}
+                    aria-label={t("tasks.zoom_in")}
+                    title={t("tasks.zoom_in")}
+                  >
+                    +
+                  </button>
+                  <button type="button" className="btn-secondary" onClick={() => exportAdvancedViewPng(eventVisualFullscreen.visual)}>
+                    {t("tasks.export_png")}
+                  </button>
+                  <button type="button" className="btn-secondary" onClick={() => exportAdvancedViewCsv(eventVisualFullscreen.visual)}>
+                    {t("tasks.export_csv")}
+                  </button>
+                  <button type="button" className="calendar-detail-modal-close" aria-label={t("common.close")} onClick={() => setEventVisualFullscreen(null)}>
+                    ×
+                  </button>
+                </div>
+              </div>
+              <div className="event-visual-modal-body">
+                <p className="event-visual-hint">{t("tasks.pan_zoom_hint")}</p>
+                <p className="event-visual-hint event-visual-shortcuts-hint">{t("tasks.zoom_shortcuts_hint")}</p>
+                {eventVisualHelpOpen && (
+                  <div className="event-visual-help-panel" role="note" aria-label={t("tasks.visual_help_title")}>
+                    <strong className="event-visual-help-title">{t("tasks.visual_help_title")}</strong>
+                    <ul className="event-visual-help-list">
+                      <li>{t("tasks.visual_help_mouse")}</li>
+                      <li>{t("tasks.visual_help_touch")}</li>
+                      <li>{t("tasks.visual_help_keyboard")}</li>
+                    </ul>
+                  </div>
+                )}
+                {eventVisualFullscreen.visual.kind === "map" ? (
+                  <MapPluginEventView
+                    visual={eventVisualFullscreen.visual}
+                    t={t}
+                    width={1200}
+                    height={520}
+                    toolbar="hidden"
+                    layout="fullscreen"
+                    showPanelHeading={false}
+                    endPointR={4.2}
+                    midPointR={3}
+                    interactive={{
+                      dragging: eventVisualDragging != null,
+                      transform: `translate(${eventVisualTransform.tx} ${eventVisualTransform.ty}) scale(${eventVisualTransform.scale})`,
+                      onWheel: handleEventVisualWheel,
+                      onDoubleClick: resetEventVisualViewport,
+                      onPointerDown: handleEventVisualPointerDown,
+                      onPointerMove: handleEventVisualPointerMove,
+                      onPointerUp: handleEventVisualPointerEnd,
+                      onPointerCancel: handleEventVisualPointerEnd,
+                      onPointerLeave: handleEventVisualPointerEnd,
+                    }}
+                  />
+                ) : (
+                  (() => {
+                    const width = 1200;
+                    const height = 560;
+                    const palette = ["#7c8cff", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
+                    const totalPoints = eventVisualFullscreen.visual.series.reduce((acc, s) => acc + s.points.length, 0);
+                    return (
+                      <div className="event-advanced-view event-advanced-view-chart event-advanced-view-fullscreen">
+                        <div className="event-advanced-metrics-inline" role="list">
+                          <span className="event-advanced-chip" role="listitem">{t("tasks.series_count_label")}: {eventVisualFullscreen.visual.series.length}</span>
+                          <span className="event-advanced-chip" role="listitem">{t("tasks.points_count_label")}: {totalPoints}</span>
+                          <span className="event-advanced-chip" role="listitem">event: {eventVisualFullscreen.sourceEventType}</span>
+                        </div>
+                        <div
+                          className={`event-visual-interactive-surface ${eventVisualDragging ? "is-dragging" : ""}`}
+                          onWheel={handleEventVisualWheel}
+                          onDoubleClick={resetEventVisualViewport}
+                          onPointerDown={handleEventVisualPointerDown}
+                          onPointerMove={handleEventVisualPointerMove}
+                          onPointerUp={handleEventVisualPointerEnd}
+                          onPointerCancel={handleEventVisualPointerEnd}
+                          onPointerLeave={handleEventVisualPointerEnd}
+                        >
+                        <svg
+                          className="event-advanced-chart"
+                          viewBox={`0 0 ${width} ${height}`}
+                          preserveAspectRatio="none"
+                          aria-label={eventVisualFullscreen.visual.kind === "graph" ? t("tasks.plugin_graph_title") : t("tasks.plugin_timeseries_title")}
+                        >
+                          <rect x="0" y="0" width={width} height={height} rx="10" ry="10" className="event-advanced-chart-bg" />
+                          <g transform={`translate(${eventVisualTransform.tx} ${eventVisualTransform.ty}) scale(${eventVisualTransform.scale})`}>
+                            {eventVisualFullscreen.visual.series.map((s, idx) => {
+                              const scaled = scalePoints(s.points, width, height);
+                              const pts = scaled.map((p) => `${p.x},${p.y}`).join(" ");
+                              return scaled.length >= 2 ? (
+                                <polyline key={`series-modal-${idx}`} points={pts} className="event-advanced-series-line" style={{ stroke: palette[idx % palette.length] }} />
+                              ) : null;
+                            })}
+                          </g>
+                        </svg>
+                        </div>
+                      </div>
+                    );
+                  })()
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
         {tab === "settings" && (
           <section
             id="panel-settings"
@@ -4644,6 +7662,19 @@ function App() {
                   ))}
                 </select>
                 <span className="settings-theme-hint">{t("settings.theme_saved")}</span>
+              </dd>
+              <dt>{t("settings.ui_mode")}</dt>
+              <dd>
+                <select
+                  aria-label={t("settings.ui_mode")}
+                  className="settings-theme-select"
+                  value={uiMode}
+                  onChange={(e) => setUiModeAndSave(e.target.value as UiMode)}
+                >
+                  <option value="simple">{t("settings.ui_mode_simple")}</option>
+                  <option value="expert">{t("settings.ui_mode_expert")}</option>
+                </select>
+                <span className="settings-theme-hint">{t("settings.ui_mode_hint")}</span>
               </dd>
               <dt>{t("settings.language")}</dt>
               <dd>
@@ -4689,6 +7720,39 @@ function App() {
                   </div>
                 </div>
               </dd>
+              <dt>{t("settings.chat_tips")}</dt>
+              <dd>
+                <label className="settings-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={chatTipsEnabled}
+                    onChange={(e) => setChatTipsEnabledAndSave(e.target.checked)}
+                  />
+                  <span>{t("settings.chat_tips_hint")}</span>
+                </label>
+              </dd>
+              <dt>{t("settings.chat_prompt_chips")}</dt>
+              <dd>
+                <label className="settings-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={chatPromptChipsEnabled}
+                    onChange={(e) => setChatPromptChipsEnabledAndSave(e.target.checked)}
+                  />
+                  <span>{t("settings.chat_prompt_chips_hint")}</span>
+                </label>
+              </dd>
+              <dt>{t("settings.chat_buddy")}</dt>
+              <dd>
+                <label className="settings-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={buddyLineEnabled}
+                    onChange={(e) => setBuddyLineEnabledAndSave(e.target.checked)}
+                  />
+                  <span>{t("settings.chat_buddy_hint")}</span>
+                </label>
+              </dd>
             </dl>
               </div>
             )}
@@ -4707,6 +7771,103 @@ function App() {
                     <span className="settings-doc muted"> — {t("settings.doc_from_daemon")}</span>
                   </dd>
                 </dl>
+
+                <h3 className="settings-subtitle">{t("settings.plugin_reputation_title")}</h3>
+                <p className="settings-doc muted">{t("settings.plugin_reputation_desc")}</p>
+                <div className="settings-plugin-reputation-controls">
+                  <div className="settings-plugin-status-row">
+                    <div className="settings-plugin-status-header">
+                      <h4 className="settings-plugin-status-title">{t("settings.plugins_status_title")}</h4>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={pluginStatusLoading}
+                        onClick={fetchPluginStatus}
+                      >
+                        {pluginStatusLoading ? t("common.loading") : t("sidebar.refresh_tasks")}
+                      </button>
+                    </div>
+                    {pluginStatusError && (
+                      <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err" role="alert">
+                        {pluginStatusError}
+                      </p>
+                    )}
+                    {!pluginStatusError && pluginStatusList.length === 0 && !pluginStatusLoading && (
+                      <p className="settings-doc muted">{t("doctor.no_plugins")}</p>
+                    )}
+                    {pluginStatusList.length > 0 && (
+                      <ul className="settings-plugin-status-list" role="list">
+                        {pluginStatusList.map((p) => {
+                          const id = p.id ?? "?";
+                          const enabled = p.enabled !== false;
+                          const disabledByReputation = !enabled && p.disabled_reason === "reputation";
+                          return (
+                            <li key={id} className="settings-plugin-status-item">
+                              <div className="settings-plugin-status-main">
+                                <span className="settings-plugin-status-id">{id}</span>
+                                <span className="settings-plugin-status-meta">{p.name ?? "?"} · {p.version ?? "?"}</span>
+                              </div>
+                              <div className="settings-plugin-status-badges">
+                                <span className={`settings-plugin-status-pill ${enabled ? "settings-plugin-status-pill-ok" : "settings-plugin-status-pill-off"}`}>
+                                  {enabled ? t("settings.plugins_status_enabled") : t("settings.plugins_status_disabled")}
+                                </span>
+                                {disabledByReputation && (
+                                  <span className="settings-plugin-status-pill settings-plugin-status-pill-reputation">
+                                    {t("settings.plugins_status_disabled_reputation")}
+                                  </span>
+                                )}
+                                {typeof p.score === "number" && (
+                                  <span className="settings-plugin-status-score">score: {p.score}</span>
+                                )}
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </div>
+                  <div className="settings-plugin-reputation-row">
+                    <label htmlFor="plugin-reputation-target" className="settings-label">
+                      {t("settings.plugin_reputation_plugin_id")}
+                    </label>
+                    <input
+                      id="plugin-reputation-target"
+                      type="text"
+                      className="settings-input"
+                      value={pluginReputationTarget}
+                      onChange={(e) => setPluginReputationTarget(e.target.value)}
+                      placeholder="maps"
+                    />
+                    <button
+                      type="button"
+                      className="settings-link-btn"
+                      disabled={pluginReputationResetLoading || !pluginReputationTarget.trim()}
+                      onClick={() => resetPluginReputation(pluginReputationTarget)}
+                    >
+                      {pluginReputationResetLoading ? t("common.loading") : t("settings.plugin_reputation_reset_one")}
+                    </button>
+                  </div>
+                  <div className="settings-plugin-reputation-row">
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={pluginReputationResetLoading}
+                      onClick={() => resetPluginReputation()}
+                    >
+                      {t("settings.plugin_reputation_reset_all")}
+                    </button>
+                  </div>
+                  {pluginReputationResetMessage && (
+                    <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-ok" role="status">
+                      {pluginReputationResetMessage}
+                    </p>
+                  )}
+                  {pluginReputationResetError && (
+                    <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err" role="alert">
+                      {pluginReputationResetError}
+                    </p>
+                  )}
+                </div>
               </div>
             )}
             {settingsSection === "agent" && (
@@ -5111,8 +8272,8 @@ function App() {
                   const { content_base64, mime_type } = await readFileAsBase64(file);
                   await invoke("add_user_rag_document", {
                     name: file.name,
-                    content_base64,
-                    mime_type,
+                    content_base64: content_base64,
+                    mime_type: mime_type,
                     port: DAEMON_PORT,
                   });
                   fetchUserRagDocuments();
@@ -5169,19 +8330,73 @@ function App() {
         </div>
 
         {rightSidebarOpen && (
-          <aside className="sidebar-right" aria-label={t("sidebar.tasks_panel")}>
+          <aside className="sidebar-right" aria-label={tab === "chat" ? t("sidebar.threads_panel") : t("sidebar.tasks_panel")}>
             <div className="sidebar-right-header">
-              <h3 className="sidebar-right-title">{t("tabs.tasks")}</h3>
+              <h3 className="sidebar-right-title">{tab === "chat" ? t("chat.threads_title") : t("tabs.tasks")}</h3>
               <button
                 type="button"
                 className="sidebar-right-close"
                 onClick={() => setRightSidebarOpen(false)}
-                aria-label={t("sidebar.hide_tasks")}
+                aria-label={tab === "chat" ? t("sidebar.hide_tasks") : t("sidebar.hide_tasks")}
               >
                 ×
               </button>
             </div>
             <div className="sidebar-right-content">
+              {tab === "chat" ? (
+                <>
+                  <button type="button" className="refresh-btn sidebar-right-refresh" onClick={createChatThread}>
+                    {t("chat.new_thread")}
+                  </button>
+                  {[...chatThreads].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).length === 0 ? (
+                    <p className="empty-state">{t("chat.threads_empty")}</p>
+                  ) : (
+                    <ul className="sidebar-right-task-list" role="list">
+                      {[...chatThreads]
+                        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+                        .map((th) => {
+                          const active = sessionId === th.id;
+                          return (
+                            <li key={th.id} className={"sidebar-right-task-card" + (active ? " selected" : "")}>
+                              <div
+                                className="sidebar-right-task-card-inner"
+                                role="button"
+                                tabIndex={0}
+                                onClick={() => void selectChatThread(th.id)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault();
+                                    void selectChatThread(th.id);
+                                  }
+                                }}
+                              >
+                                <div className="sidebar-right-task-card-head">
+                                  <span className="sidebar-right-task-card-title" title={chatThreadLabel(th)}>
+                                    {chatThreadLabel(th)}
+                                  </span>
+                                </div>
+                                <div className="sidebar-right-task-meta">
+                                  <span className="sidebar-right-task-relative">{formatRelativeTimeLabel(th.updatedAt, locale)}</span>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                className="sidebar-right-task-view-btn"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void deleteChatThread(th.id);
+                                }}
+                              >
+                                {t("chat.delete_thread")}
+                              </button>
+                            </li>
+                          );
+                        })}
+                    </ul>
+                  )}
+                </>
+              ) : (
+                <>
               <button
                 type="button"
                 className="refresh-btn sidebar-right-refresh"
@@ -5222,6 +8437,24 @@ function App() {
                       aria-label={t("tasks.search_placeholder")}
                     />
                   </div>
+                  {taskTreeData.branchIds.size > 0 && (
+                    <div className="task-tree-toolbar task-tree-toolbar-sidebar" role="group" aria-label={t("tasks.tree_actions")}>
+                      <button
+                        type="button"
+                        className="task-tree-toolbar-btn"
+                        onClick={() => setAllTaskBranchesCollapsed(false)}
+                      >
+                        {t("tasks.expand_all")}
+                      </button>
+                      <button
+                        type="button"
+                        className="task-tree-toolbar-btn"
+                        onClick={() => setAllTaskBranchesCollapsed(true)}
+                      >
+                        {t("tasks.collapse_all")}
+                      </button>
+                    </div>
+                  )}
                 </>
               )}
               {tasksLoading && (
@@ -5230,14 +8463,19 @@ function App() {
               {!tasksLoading && tasksList.length === 0 && (
                 <p className="empty-state">{t("tasks.empty")}</p>
               )}
-              {!tasksLoading && tasksList.length > 0 && filteredTasksList.length === 0 && (
+              {!tasksLoading && tasksList.length > 0 && taskTreeRows.length === 0 && (
                 <p className="empty-state">{t("tasks.no_match_filter")}</p>
               )}
-              {!tasksLoading && filteredTasksList.length > 0 && (
+              {!tasksLoading && taskTreeRows.length > 0 && (
                 <ul className="sidebar-right-task-list" role="list">
-                  {filteredTasksList.map((task) => {
+                  {taskTreeRows.map((row) => {
+                    const task = row.task;
                     const isSelected = tasksList[tasksSelected]?.id === task.id;
+                    const isAncestor = !isSelected && selectedTaskAncestorIds.has(task.id);
+                    const isActiveRoot = selectedTaskRootId === task.id;
                     const runningChip = task.status === "running" ? runningTaskChips[task.id] : undefined;
+                    const hierarchyLabel = row.depth > 0 ? t("tasks.subtask_badge") : t("tasks.root_badge");
+                    const childCountLabel = t("tasks.children_count").replace("{{count}}", String(row.visibleChildCount));
                     const createdLabel = task.created_at ? (() => {
                       try {
                         const d = new Date(task.created_at);
@@ -5247,9 +8485,9 @@ function App() {
                       }
                     })() : null;
                     return (
-                      <li key={task.id} className={"sidebar-right-task-card" + (isSelected ? " selected" : "")}>
+                      <li key={task.id} className={"sidebar-right-task-card" + (isSelected ? " selected" : "") + (isAncestor ? " sidebar-right-task-card-ancestor" : "") + (isActiveRoot ? " sidebar-right-task-card-active-root" : "") + (row.depth > 0 ? " sidebar-right-task-card-child" : " sidebar-right-task-card-root") }>
                         <div
-                          className="sidebar-right-task-card-inner"
+                          className={"sidebar-right-task-card-inner task-tree-row" + (row.depth > 0 ? " task-tree-row-child" : " task-tree-row-root")}
                           role="button"
                           tabIndex={0}
                           onClick={() => { setTasksSelected(tasksList.findIndex((x) => x.id === task.id)); setTab("tasks"); }}
@@ -5259,12 +8497,49 @@ function App() {
                               setTasksSelected(tasksList.findIndex((x) => x.id === task.id));
                               setTab("tasks");
                             }
+                            if (e.key === "ArrowRight" && row.hasChildren && row.isCollapsed) {
+                              e.preventDefault();
+                              toggleTaskBranch(task.id);
+                            }
+                            if (e.key === "ArrowLeft" && row.hasChildren && !row.isCollapsed) {
+                              e.preventDefault();
+                              toggleTaskBranch(task.id);
+                            }
                           }}
+                          style={{ marginLeft: `${row.depth * 1.1}rem` }}
                         >
                           <div className="sidebar-right-task-card-head">
-                            <span className="sidebar-right-task-card-title" title={taskDisplayLabel(task)}>
-                              {taskDisplayLabel(task)}
-                            </span>
+                            <div className="sidebar-right-task-card-heading">
+                              <div className="task-tree-title-row">
+                                {row.hasChildren ? (
+                                  <button
+                                    type="button"
+                                    className="task-tree-toggle"
+                                    aria-label={(row.isCollapsed ? t("tasks.expand_branch") : t("tasks.collapse_branch")) + ": " + taskDisplayLabel(task)}
+                                    aria-expanded={!row.isCollapsed}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      toggleTaskBranch(task.id);
+                                    }}
+                                  >
+                                    <span aria-hidden>{row.isCollapsed ? "▶" : "▼"}</span>
+                                  </button>
+                                ) : (
+                                  <span className="task-tree-toggle-spacer" aria-hidden>
+                                    {row.depth > 0 ? "•" : ""}
+                                  </span>
+                                )}
+                                <span className="sidebar-right-task-card-title" title={taskDisplayLabel(task)}>
+                                  {taskDisplayLabel(task)}
+                                </span>
+                              </div>
+                              <div className="task-tree-meta-row">
+                                <span className={"task-tree-kind-badge " + (row.depth > 0 ? "task-tree-kind-badge-child" : "task-tree-kind-badge-root")}>
+                                  {hierarchyLabel}
+                                </span>
+                                {row.hasChildren && <span className="task-tree-child-count">{childCountLabel}</span>}
+                              </div>
+                            </div>
                             <span className={"sidebar-right-task-status-pill status-" + task.status}>
                               {task.status}
                             </span>
@@ -5275,23 +8550,29 @@ function App() {
                               <span className="sidebar-right-task-progress-pct">{runningChip.pct ?? 0}%</span>
                             </div>
                           )}
+                          {isSimpleMode && runningChip?.message && (
+                            <p className="sidebar-right-task-snippet">{trimPreview(runningChip.message, 96)}</p>
+                          )}
                           <div className="sidebar-right-task-meta">
-                            <span className="sidebar-right-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>
+                            {!isSimpleMode && <span className="sidebar-right-task-id">{t("tasks.task_id_prefix")}{task.id.slice(-8)}</span>}
                             {createdLabel && <span className="sidebar-right-task-created">{createdLabel}</span>}
-                            {task.assigned_agent && <span className="sidebar-right-task-agent">{task.assigned_agent}</span>}
+                            {task.created_at && <span className="sidebar-right-task-relative">{formatRelativeTimeLabel(task.created_at, locale)}</span>}
+                            {task.assigned_agent && <span className="sidebar-right-task-agent agent-kind-pill" data-agent-kind={classifyAgentKind(task.assigned_agent)}>{task.assigned_agent}</span>}
                           </div>
                           <button
                             type="button"
                             className="sidebar-right-task-view-btn"
                             onClick={(e) => { e.stopPropagation(); setTasksSelected(tasksList.findIndex((x) => x.id === task.id)); setTab("tasks"); }}
                           >
-                            {t("tasks.view_task")}
+                            {isSimpleMode ? t("tasks.open") : t("tasks.view_task")}
                           </button>
                         </div>
                       </li>
                     );
                   })}
                 </ul>
+              )}
+                </>
               )}
             </div>
           </aside>

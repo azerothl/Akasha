@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 fn path_normalize(p: &Path) -> PathBuf {
     let s = p.to_string_lossy().replace('\\', "/").to_lowercase();
@@ -34,6 +34,10 @@ pub struct ToolsPolicy {
     /// Brave Search API key (set by daemon from vault "brave_api_key"; not in YAML). Takes precedence over BRAVE_API_KEY env.
     #[serde(skip)]
     pub brave_api_key: Option<String>,
+    /// Project root for resolving workspace:/ paths and "." in allowed_read_paths/allowed_write_paths.
+    /// Set by the daemon from its data_dir (see daemon.rs).
+    #[serde(skip)]
+    pub workspace_root: Option<PathBuf>,
     /// Optional: tool profiles (profile_name -> list of tool names). If default_profile is set, only tools in that profile are allowed.
     #[serde(default)]
     pub tool_profiles: HashMap<String, Vec<String>>,
@@ -72,6 +76,9 @@ pub struct ToolsPolicy {
     /// Optional: max session duration in seconds; after this the instance is closed. Default 300.
     #[serde(default = "default_browser_session_timeout_secs")]
     pub browser_session_timeout_secs: u64,
+    /// When true and no `--cwd` is passed to `run_command`, use `workspace_root` (task workspace) as the process working directory when available.
+    #[serde(default)]
+    pub run_command_default_cwd_workspace: bool,
 }
 
 fn default_browser_headless() -> bool {
@@ -139,19 +146,79 @@ impl ToolsPolicy {
     }
 
     /// Check if a path is allowed for read (path must be under one of allowed_read_paths).
+    /// When prefix is "." or "", any relative path (not absolute) is allowed (current directory).
     pub fn can_read(&self, path: &Path) -> bool {
         let path_n = path_normalize(path);
+        // Reject any path that contains ".." components (path traversal) before checking prefixes
+        if path_n.components().any(|c| c == Component::ParentDir) {
+            return false;
+        }
+        let path_str = path_n.to_string_lossy();
         self.allowed_read_paths.iter().any(|prefix| {
             let p = path_normalize(Path::new(prefix));
+            let p_str = p.to_string_lossy();
+            if p_str.is_empty() || p_str == "." || p_str == "./" {
+                // "." or "" means current dir: allow relative path or absolute path under current_dir()
+                if path_str.is_empty() {
+                    return false;
+                }
+                // Relative path: no ".." (ParentDir) components (already checked above), not absolute
+                if !path_str.starts_with('/') && (path_str.len() < 2 || path_str.chars().nth(1) != Some(':')) {
+                    return true;
+                }
+                // Absolute path: allow if under process current_dir or under policy.workspace_root
+                if let Ok(cwd) = std::env::current_dir() {
+                    let cwd_n = path_normalize(&cwd);
+                    if path_n.starts_with(&cwd_n) {
+                        return true;
+                    }
+                }
+                if let Some(ref root) = self.workspace_root {
+                    let root_n = path_normalize(root);
+                    if path_n.starts_with(&root_n) {
+                        return true;
+                    }
+                }
+                return false;
+            }
             path_n.starts_with(&p) || path_n == p
         })
     }
 
     /// Check if a path is allowed for write.
+    /// When prefix is "." or "", any relative path is allowed (same as can_read).
     pub fn can_write(&self, path: &Path) -> bool {
         let path_n = path_normalize(path);
+        // Reject any path that contains ".." components (path traversal) before checking prefixes
+        if path_n.components().any(|c| c == Component::ParentDir) {
+            return false;
+        }
+        let path_str = path_n.to_string_lossy();
         self.allowed_write_paths.iter().any(|prefix| {
             let p = path_normalize(Path::new(prefix));
+            let p_str = p.to_string_lossy();
+            if p_str.is_empty() || p_str == "." || p_str == "./" {
+                if path_str.is_empty() {
+                    return false;
+                }
+                // Relative path: no ".." (ParentDir) components (already checked above), not absolute
+                if !path_str.starts_with('/') && (path_str.len() < 2 || path_str.chars().nth(1) != Some(':')) {
+                    return true;
+                }
+                if let Ok(cwd) = std::env::current_dir() {
+                    let cwd_n = path_normalize(&cwd);
+                    if path_n.starts_with(&cwd_n) {
+                        return true;
+                    }
+                }
+                if let Some(ref root) = self.workspace_root {
+                    let root_n = path_normalize(root);
+                    if path_n.starts_with(&root_n) {
+                        return true;
+                    }
+                }
+                return false;
+            }
             path_n.starts_with(&p) || path_n == p
         })
     }
@@ -457,5 +524,102 @@ mod tests {
         };
         assert!(!p.can_use_tool("device_discover"));
         assert!(!p.can_use_tool("device_invoke"));
+    }
+
+    // --- path traversal guard ---
+
+    fn dot_policy() -> ToolsPolicy {
+        ToolsPolicy {
+            allowed_read_paths: vec![".".to_string()],
+            allowed_write_paths: vec![".".to_string()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn path_traversal_relative_dotdot_prefix_blocked() {
+        // ".." at start must be blocked
+        let p = dot_policy();
+        assert!(!p.can_read(Path::new("../secret")));
+        assert!(!p.can_write(Path::new("../secret")));
+    }
+
+    #[test]
+    fn path_traversal_embedded_dotdot_blocked() {
+        // "a/.." escapes the directory without starting with ".." or containing "/../"
+        let p = dot_policy();
+        assert!(!p.can_read(Path::new("a/..")));
+        assert!(!p.can_write(Path::new("a/..")));
+    }
+
+    #[test]
+    fn path_traversal_embedded_dotdot_mid_blocked() {
+        // "a/../b" must also be blocked
+        let p = dot_policy();
+        assert!(!p.can_read(Path::new("a/../b")));
+        assert!(!p.can_write(Path::new("a/../b")));
+    }
+
+    #[test]
+    fn path_traversal_normal_relative_allowed() {
+        // Normal relative paths without ".." must be allowed
+        let p = dot_policy();
+        assert!(p.can_read(Path::new("src/main.rs")));
+        assert!(p.can_write(Path::new("output/result.txt")));
+    }
+
+    // --- prefix-confusion: Path::starts_with vs string prefix ---
+
+    fn policy_with_abs_read(path: &str) -> ToolsPolicy {
+        ToolsPolicy {
+            allowed_read_paths: vec![path.to_string()],
+            allowed_write_paths: vec![path.to_string()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn path_prefix_confusion_sibling_dir_not_allowed() {
+        // String prefix matching would allow /home/app/database/secret when
+        // /home/app/data is in the allow list.  Path::starts_with must reject this.
+        let p = policy_with_abs_read("/home/app/data");
+        assert!(!p.can_read(Path::new("/home/app/database/secret.txt")),
+            "sibling directory with a shared string prefix must NOT be allowed");
+        assert!(!p.can_write(Path::new("/home/app/database/secret.txt")),
+            "sibling directory with a shared string prefix must NOT be allowed for write");
+    }
+
+    #[test]
+    fn path_prefix_allowed_dir_is_allowed() {
+        // A path strictly inside the allowed directory must be allowed.
+        let p = policy_with_abs_read("/home/app/data");
+        assert!(p.can_read(Path::new("/home/app/data/report.md")),
+            "path inside allowed directory must be allowed");
+        assert!(p.can_write(Path::new("/home/app/data/output.txt")),
+            "path inside allowed directory must be allowed for write");
+    }
+
+    #[test]
+    fn workspace_root_path_containment_uses_path_starts_with() {
+        // workspace_root = /home/app/workspace
+        // /home/app/workspace2/secret must be rejected (string "starts_with" would pass it
+        // since "/home/app/workspace2".starts_with("/home/app/workspace") is true).
+        let root = PathBuf::from("/home/app/workspace");
+        let p = ToolsPolicy {
+            allowed_read_paths: vec![".".to_string()],
+            allowed_write_paths: vec![".".to_string()],
+            workspace_root: Some(root),
+            ..Default::default()
+        };
+        // Absolute path under workspace2 must be rejected.
+        assert!(!p.can_read(Path::new("/home/app/workspace2/secret.txt")),
+            "path in a sibling workspace2 dir must not match workspace_root via Path::starts_with");
+        assert!(!p.can_write(Path::new("/home/app/workspace2/output.txt")),
+            "write to sibling workspace2 dir must not match workspace_root");
+        // Path inside workspace must be allowed.
+        assert!(p.can_read(Path::new("/home/app/workspace/notes.md")),
+            "path inside workspace_root must be allowed");
+        assert!(p.can_write(Path::new("/home/app/workspace/out.txt")),
+            "write inside workspace_root must be allowed");
     }
 }

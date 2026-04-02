@@ -14,10 +14,10 @@ use tracing::{error, info, warn, Instrument};
 
 use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask};
 use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, new_task_workspace_store, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
-use crate::debug_log;
 use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
+use crate::latency::env_usize;
 
 const HEALTHCHECK_INTERVAL_SECS: u64 = 5;
 const DEFAULT_PORT: u16 = 3876;
@@ -132,13 +132,31 @@ impl Daemon {
             ("data_dir", self.data_dir.join("llm_router.yaml")),
             ("project_root", project_root.unwrap_or_else(|| self.data_dir.join("_"))),
         ];
+        
+        // Debug: log all candidate paths
+        for (name, path) in &llm_config_candidates {
+            info!(source = name, path = %path.display(), exists = path.exists(), "LLM router candidate path");
+        }
+        
         let (router_config, loaded_from) = llm_config_candidates
             .iter()
             .find(|(_, p)| p.exists())
             .and_then(|(name, p)| {
-                akasha_llm::RoutingConfig::load_from_path(p).ok().map(|c| (c, (*name, p.display().to_string())))
+                match akasha_llm::RoutingConfig::load_from_path(p) {
+                    Ok(c) => {
+                        info!(source = name, path = %p.display(), "LLM router YAML parsed successfully");
+                        Some((c, (*name, p.display().to_string())))
+                    }
+                    Err(e) => {
+                        warn!(source = name, path = %p.display(), error = %e, "LLM router YAML parsing failed");
+                        None
+                    }
+                }
             })
-            .unwrap_or_else(|| (akasha_llm::RoutingConfig::default_config(), ("default", String::new())));
+            .unwrap_or_else(|| {
+                info!("LLM router config not found — using hardcoded defaults (timeout=300s, retries=2)");
+                (akasha_llm::RoutingConfig::default_config(), ("default", String::new()))
+            });
         if loaded_from.0 != "default" {
             info!(source = loaded_from.0, path = %loaded_from.1, "LLM router config loaded");
         }
@@ -181,6 +199,34 @@ impl Daemon {
         llm_router.register_provider(Arc::new(akasha_llm::OllamaProvider::new(ollama_url)));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaCoreProvider::new()));
         llm_router.register_provider(Arc::new(akasha_llm::AkashaEmbeddedProvider::new()));
+        
+        // Log global LLM configuration with sources
+        let global_cfg = llm_router.global_config();
+        let timeout_secs = llm_router.default_timeout_secs();
+        let timeout_source = if std::env::var("AKASHA_LLM_TIMEOUT_SECS").is_ok() {
+            "env (AKASHA_LLM_TIMEOUT_SECS)"
+        } else if loaded_from.0 != "default" && global_cfg.default_timeout_secs.is_some() {
+            "llm_router.yaml"
+        } else {
+            "default hardcoded"
+        };
+        let max_retries = global_cfg.default_max_retries.unwrap_or(2);
+        let retries_source = if loaded_from.0 != "default" && global_cfg.default_max_retries.is_some() {
+            "llm_router.yaml"
+        } else {
+            "default hardcoded"
+        };
+        
+        info!(
+            enable_metrics = global_cfg.enable_metrics.unwrap_or(true),
+            enable_fallback = global_cfg.enable_fallback.unwrap_or(true),
+            timeout_secs = timeout_secs,
+            timeout_source = timeout_source,
+            max_retries = max_retries,
+            max_retries_source = retries_source,
+            "LLM Router global config loaded"
+        );
+
         // All API keys / secrets: vault first, then env. (vault://key_name or key_name in vault, else env var.)
         let resolve_api_key = |api_key_ref: Option<&String>, default_env: &str| -> Option<String> {
             let ref_str = api_key_ref
@@ -274,8 +320,11 @@ impl Daemon {
         }
         let llm_router = Arc::new(llm_router);
 
-        // Preload embedded model in background so first user request is fast (avoids 5–15 min load on first use)
-        if llm_router.embedded_available() {
+        // Preload embedded model only when explicitly opted in via AKASHA_EMBEDDED_PRELOAD=1.
+        // Default is OFF: loading the model at startup (~1-2 GB) wastes RAM when an external
+        // LLM provider (Ollama, OpenAI, etc.) is configured. The model still loads lazily on
+        // first use if needed. Set AKASHA_EMBEDDED_PRELOAD=1 in degraded/offline deployments.
+        if llm_router.embedded_available() && std::env::var("AKASHA_EMBEDDED_PRELOAD").as_deref() == Ok("1") {
             let router_preload = llm_router.clone();
             tokio::task::spawn_blocking(move || {
                 if let Err(e) = router_preload.embedded_preload() {
@@ -284,6 +333,8 @@ impl Daemon {
                     info!("Embedded model preloaded and ready");
                 }
             });
+        } else if llm_router.embedded_available() {
+            info!("Embedded model available but not preloaded (set AKASHA_EMBEDDED_PRELOAD=1 to preload)");
         }
 
         // Phase 8: RAG pack (spec + runbooks) for diagnostic advice
@@ -416,6 +467,7 @@ impl Daemon {
                         if let Ok(v) = &vault {
                             policy.brave_api_key = v.get("brave_api_key").ok();
                         }
+                        policy.workspace_root = Some(self.data_dir.clone());
                         Some(Arc::new(tokio::sync::RwLock::new(Arc::new(
                             akasha_tools::ToolExecutor::new(policy),
                         ))))
@@ -459,6 +511,12 @@ impl Daemon {
             let task_usage_store = std::sync::Arc::new(crate::api::TaskUsageStore::new());
             let user_rag_store = crate::user_rag::UserRagStore::new_shared(&data_dir);
             let (progress_persistence_tx, progress_persistence_rx) = std::sync::mpsc::channel::<(uuid::Uuid, u8, String)>();
+            let (event_persistence_tx, event_persistence_rx) = std::sync::mpsc::channel::<(
+                uuid::Uuid,
+                String,
+                Option<serde_json::Value>,
+                String,
+            )>();
             {
                 let store_path = db_path.clone();
                 std::thread::spawn(move || {
@@ -472,6 +530,23 @@ impl Daemon {
                     while let Ok((task_id, progress_pct, message)) = progress_persistence_rx.recv() {
                         if store.insert_progress(task_id, progress_pct, &message).is_err() {
                             tracing::warn!(task_id = %task_id, "Progress persistence: insert failed");
+                        }
+                    }
+                });
+            }
+            {
+                let store_path = db_path.clone();
+                std::thread::spawn(move || {
+                    let store = match akasha_store::TaskStore::open(&store_path) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!(error = %e, "Event persistence thread: failed to open TaskStore");
+                            return;
+                        }
+                    };
+                    while let Ok((task_id, event_type, payload, at)) = event_persistence_rx.recv() {
+                        if store.insert_event(task_id, &event_type, payload.as_ref(), &at).is_err() {
+                            tracing::warn!(task_id = %task_id, event_type = %event_type, "Event persistence: insert failed");
                         }
                     }
                 });
@@ -545,7 +620,8 @@ impl Daemon {
                 }
             });
             let orchestrator_sender = crate::agents::OrchestratorSender::new(high_tx, normal_tx.clone());
-            let main_agent = MainAgent::new(bus.clone(), orchestrator_sender).with_direct_conversation_tx(conv_tx.clone());
+            let main_agent = MainAgent::new(bus.clone(), orchestrator_sender, llm_router.clone())
+                .with_direct_conversation_tx(conv_tx.clone());
             let orchestrator = Arc::new(Orchestrator::new(
                 bus.clone(),
                 db_path.clone(),
@@ -567,12 +643,10 @@ impl Daemon {
             let spec_dir = self.spec_dir.clone();
             let tools_policy_path = tools_policy_path.clone();
             let device_bridge_for_worker = device_bridge.clone();
-            let max_parallel_subtasks = std::env::var("AKASHA_MAX_PARALLEL_SUBTASKS")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(4)
-                .max(1);
+            let max_parallel_subtasks = env_usize("AKASHA_MAX_PARALLEL_SUBTASKS", 4).max(1);
+            let max_parallel_root_tasks = env_usize("AKASHA_MAX_PARALLEL_ROOT_TASKS", 2).max(1);
             let subtask_llm_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_parallel_subtasks));
+            let root_llm_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_parallel_root_tasks));
             tokio::spawn({
                 let bus = bus.clone();
                 let llm_router = llm_router.clone();
@@ -581,6 +655,7 @@ impl Daemon {
                 let tools_executor = tools_executor.clone();
                 let tools_policy_path = tools_policy_path.clone();
                 let skill_registry = skill_registry.clone();
+                let plugin_registry = plugin_registry.clone();
                 let process_registry = process_registry.clone();
                 let conv_tx = conv_tx.clone();
                 let short_term = short_term.clone();
@@ -592,6 +667,7 @@ impl Daemon {
                 let agent_profile_cache = agent_profile_cache.clone();
                 let task_usage_store = task_usage_store.clone();
                 let device_bridge = device_bridge_for_worker.clone();
+                let root_llm_sem = root_llm_sem.clone();
                 let subtask_llm_sem = subtask_llm_sem.clone();
                 let delegation_tx = delegation_tx.clone();
                 async move {
@@ -640,6 +716,7 @@ impl Daemon {
                             let tools_executor = tools_executor.clone();
                             let tools_policy_path = tools_policy_path.clone();
                             let skill_registry = skill_registry.clone();
+                            let plugin_registry = plugin_registry.clone();
                             let process_registry = process_registry.clone();
                             let conv_tx = conv_tx.clone();
                             let human_input_store = human_input_store.clone();
@@ -654,6 +731,7 @@ impl Daemon {
                             let message = task.message;
                             let session_id = task.session_id;
                             let image_data_urls = task.image_data_urls;
+                            let preferred_task_type_override = task.preferred_task_type.clone();
                             tokio::spawn(async move {
                                 run_message_via_llm(
                                     bus,
@@ -664,11 +742,13 @@ impl Daemon {
                                     message,
                                     session_id,
                                     image_data_urls,
+                                    preferred_task_type_override,
                                     Some(short_term),
                                     long_term_client,
                                     tools_executor,
                                     Some(tools_policy_path),
                                     Some(skill_registry),
+                                    Some(plugin_registry),
                                     Some(process_registry),
                                     Some(conv_tx),
                                     Some(human_input_store),
@@ -685,33 +765,67 @@ impl Daemon {
                                 drop(permit);
                             });
                         } else {
-                            run_message_via_llm(
-                                bus.clone(),
-                                llm_router.clone(),
-                                store_path.clone(),
-                                spec_dir.clone(),
-                                task.task_id,
-                                task.message,
-                                task.session_id,
-                                task.image_data_urls,
-                                Some(short_term.clone()),
-                                long_term_client.clone(),
-                                tools_executor.clone(),
-                                Some(tools_policy_path.clone()),
-                                Some(skill_registry.clone()),
-                                Some(process_registry.clone()),
-                                Some(conv_tx.clone()),
-                                Some(human_input_store.clone()),
-                                Some(delegation_tx.clone()),
-                                Some(task_completion.clone()),
-                                Some(agent_profile_cache.clone()),
-                                Some(task_usage_store.clone()),
-                                Some(device_bridge.clone()),
-                                Some(workspace_store.clone()),
-                                Some(browser_registry.clone()),
-                            )
-                            .instrument(span)
-                            .await;
+                            let permit = match root_llm_sem.clone().acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => continue,
+                            };
+                            let bus = bus.clone();
+                            let llm_router = llm_router.clone();
+                            let store_path = store_path.clone();
+                            let spec_dir = spec_dir.clone();
+                            let short_term = short_term.clone();
+                            let long_term_client = long_term_client.clone();
+                            let tools_executor = tools_executor.clone();
+                            let tools_policy_path = tools_policy_path.clone();
+                            let skill_registry = skill_registry.clone();
+                            let plugin_registry = plugin_registry.clone();
+                            let process_registry = process_registry.clone();
+                            let conv_tx = conv_tx.clone();
+                            let human_input_store = human_input_store.clone();
+                            let task_completion = task_completion.clone();
+                            let agent_profile_cache = agent_profile_cache.clone();
+                            let task_usage_store = task_usage_store.clone();
+                            let device_bridge = device_bridge.clone();
+                            let workspace_store = workspace_store.clone();
+                            let browser_registry = browser_registry.clone();
+                            let delegation_tx = delegation_tx.clone();
+                            let task_id = task.task_id;
+                            let message = task.message;
+                            let session_id = task.session_id;
+                            let image_data_urls = task.image_data_urls;
+                            let preferred_task_type_override = task.preferred_task_type.clone();
+                            tokio::spawn(async move {
+                                run_message_via_llm(
+                                    bus,
+                                    llm_router,
+                                    store_path,
+                                    spec_dir,
+                                    task_id,
+                                    message,
+                                    session_id,
+                                    image_data_urls,
+                                    preferred_task_type_override,
+                                    Some(short_term),
+                                    long_term_client,
+                                    tools_executor,
+                                    Some(tools_policy_path),
+                                    Some(skill_registry),
+                                    Some(plugin_registry),
+                                    Some(process_registry),
+                                    Some(conv_tx),
+                                    Some(human_input_store),
+                                    Some(delegation_tx),
+                                    Some(task_completion),
+                                    Some(agent_profile_cache),
+                                    Some(task_usage_store),
+                                    Some(device_bridge),
+                                    Some(workspace_store),
+                                    Some(browser_registry),
+                                )
+                                .instrument(span)
+                                .await;
+                                drop(permit);
+                            });
                         }
                     }
                 }
@@ -727,8 +841,46 @@ impl Daemon {
             tokio::spawn({
                 let bus = bus.clone();
                 let events = events.clone();
+                let persistence_tx = Some(event_persistence_tx);
                 async move {
-                    crate::agents::run_events_subscriber(bus, events).await;
+                    crate::agents::run_events_subscriber(bus, events, persistence_tx).await;
+                }
+            });
+
+            // Background cache eviction: purge ProgressCache and EventsCache entries for
+            // finished tasks every 5 minutes to prevent unbounded HashMap growth.
+            tokio::spawn({
+                let progress = progress.clone();
+                let events = events.clone();
+                let store_path = db_path.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+                    loop {
+                        interval.tick().await;
+                        let task_ids: Vec<uuid::Uuid> = progress.read().await.keys().copied().collect();
+                        if task_ids.is_empty() {
+                            continue;
+                        }
+                        let store = match akasha_store::TaskStore::open(store_path.as_path()) {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        };
+                        let mut p = progress.write().await;
+                        let mut e = events.write().await;
+                        for id in task_ids {
+                            if let Ok(Some(task)) = store.get(id) {
+                                if matches!(
+                                    task.status,
+                                    akasha_store::TaskStatus::Completed
+                                    | akasha_store::TaskStatus::Failed
+                                    | akasha_store::TaskStatus::Cancelled
+                                ) {
+                                    p.remove(&id);
+                                    e.remove(&id);
+                                }
+                            }
+                        }
+                    }
                 }
             });
 
@@ -900,22 +1052,6 @@ impl Daemon {
                                     let full_buf: Vec<u8> = match parse_content_length(&buf) {
                                         Some((header_end, content_length)) if content_length <= MAX_BODY => {
                                             let total_needed = header_end.saturating_add(4).saturating_add(content_length);
-                                            // #region agent log
-                                            if std::env::var("AKASHA_AGENT_DEBUG").map(|v| v == "1").unwrap_or(false) {
-                                                debug_log::log(
-                                                    "daemon.rs:body_read",
-                                                    "content_length branch",
-                                                    &serde_json::json!({
-                                                        "header_end": header_end,
-                                                        "content_length": content_length,
-                                                        "total_needed": total_needed,
-                                                        "buf_len": buf.len(),
-                                                        "max_body": MAX_BODY
-                                                    }),
-                                                    "A",
-                                                );
-                                            }
-                                            // #endregion
                                             if buf.len() >= total_needed {
                                                 buf
                                             } else {
@@ -931,39 +1067,8 @@ impl Daemon {
                                                 buf
                                             }
                                         }
-                                        _ => {
-                                            // #region agent log
-                                            let pc = parse_content_length(&buf);
-                                            if std::env::var("AKASHA_AGENT_DEBUG").map(|v| v == "1").unwrap_or(false) {
-                                                debug_log::log(
-                                                    "daemon.rs:body_skip",
-                                                    "skip branch (content_length > MAX_BODY or no Content-Length)",
-                                                    &serde_json::json!({
-                                                        "parse_result": pc.map(|(he, cl)| serde_json::json!({
-                                                            "header_end": he,
-                                                            "content_length": cl
-                                                        })),
-                                                        "buf_len": buf.len()
-                                                    }),
-                                                    "A",
-                                                );
-                                            }
-                                            // #endregion
-                                            buf
-                                        }
+                                        _ => buf,
                                     };
-                                    // #region agent log
-                                    if std::env::var("AKASHA_AGENT_DEBUG").map(|v| v == "1").unwrap_or(false) {
-                                        debug_log::log(
-                                            "daemon.rs:before_parse_request",
-                                            "before parse_request",
-                                            &serde_json::json!({
-                                                "full_buf_len": full_buf.len()
-                                            }),
-                                            "B",
-                                        );
-                                    }
-                                    // #endregion
                                     let (method, path, body, headers) = parse_request(&full_buf);
                                     if method == "GET" && path == "/api/events" {
                                         let _ = crate::api::stream_sse_events(&bus_clone, &mut stream).await;

@@ -253,6 +253,101 @@ struct App {
     pending_human_input_list: Vec<(String, String, String, Option<Vec<String>>)>,
 }
 
+fn trim_tui(s: &str, max: usize) -> String {
+    let compact = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max {
+        compact
+    } else {
+        let mut out = String::new();
+        for (i, ch) in compact.chars().enumerate() {
+            if i >= max.saturating_sub(1) {
+                out.push('…');
+                break;
+            }
+            out.push(ch);
+        }
+        out
+    }
+}
+
+fn payload_as_f64(v: &serde_json::Value) -> Option<f64> {
+    v.as_f64().or_else(|| v.as_i64().map(|n| n as f64)).or_else(|| v.as_u64().map(|n| n as f64))
+}
+
+fn summarize_task_event_payload_tui(payload: &serde_json::Value) -> String {
+    let obj = match payload.as_object() {
+        Some(o) => o,
+        None => return trim_tui(&serde_json::to_string(payload).unwrap_or_default(), 180),
+    };
+
+    if let Some(view) = obj.get("view").and_then(|v| v.as_str()) {
+        let view_l = view.to_lowercase();
+        if view_l == "map" {
+            let distance = obj
+                .get("distance_m")
+                .and_then(payload_as_f64)
+                .map(|m| if m < 1000.0 { format!("{} m", m.round() as i64) } else { format!("{:.2} km", m / 1000.0) });
+            let duration = obj
+                .get("duration_s")
+                .and_then(payload_as_f64)
+                .map(|s| {
+                    if s < 60.0 {
+                        format!("{} s", s.round() as i64)
+                    } else {
+                        let min = (s / 60.0).floor() as i64;
+                        let sec = (s % 60.0).round() as i64;
+                        if sec > 0 { format!("{} min {} s", min, sec) } else { format!("{} min", min) }
+                    }
+                });
+            let mut parts = vec!["view=map".to_string()];
+            if let Some(d) = distance { parts.push(format!("distance={}", d)); }
+            if let Some(d) = duration { parts.push(format!("duration={}", d)); }
+            return parts.join(" | ");
+        }
+        if view_l == "graph" || view_l == "timeseries" {
+            let series_count = obj
+                .get("series")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .or_else(|| {
+                    obj.get("figure")
+                        .and_then(|f| f.get("data"))
+                        .and_then(|d| d.as_array())
+                        .map(|a| a.len())
+                })
+                .unwrap_or(0);
+            return format!("view={} | series={}", view_l, series_count);
+        }
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(model) = obj.get("model").and_then(|v| v.as_str()) {
+        parts.push(format!("model={}", model));
+    }
+    if let Some(reason) = obj.get("done_reason").and_then(|v| v.as_str()) {
+        parts.push(format!("done_reason={}", reason));
+    }
+    if let Some(eval_count) = obj.get("eval_count").and_then(|v| v.as_u64()) {
+        parts.push(format!("eval_count={}", eval_count));
+    }
+    if let Some(resp) = obj.get("response").and_then(|v| v.as_str()) {
+        if !resp.trim().is_empty() {
+            parts.push(format!("response=\"{}\"", trim_tui(resp, 120)));
+        }
+    }
+    if let Some(thinking) = obj.get("thinking").and_then(|v| v.as_str()) {
+        if !thinking.trim().is_empty() {
+            parts.push(format!("thinking=\"{}\"", trim_tui(thinking, 120)));
+        }
+    }
+
+    if parts.is_empty() {
+        trim_tui(&serde_json::to_string(payload).unwrap_or_default(), 180)
+    } else {
+        parts.join(" | ")
+    }
+}
+
 impl App {
     fn new(port: u16, tx: mpsc::Sender<Result<(String, String, Option<String>), String>>, progress_tx: Option<mpsc::Sender<(String, u8)>>) -> Self {
         Self {
@@ -619,7 +714,7 @@ impl App {
                             let at = e.get("at").and_then(|v| v.as_str()).unwrap_or("");
                             let payload = e.get("payload").cloned();
                             let line = if let Some(p) = payload {
-                                format!("{} @ {} — {}", label, at, serde_json::to_string(&p).unwrap_or_default())
+                                format!("{} @ {} — {}", label, at, summarize_task_event_payload_tui(&p))
                             } else {
                                 format!("{} @ {}", label, at)
                             };
@@ -1301,6 +1396,7 @@ impl App {
   /reload           — recharger les plugins
   /skills            — liste des skills installés
   /skills list       — idem
+  /skills install <url> — installer un skill depuis une URL (GitHub ou hôte autorisé)
   /skills reload     — recharger les skills (data_dir/skills, spec/skills)
   /skills uninstall <nom> — désinstaller un skill (ex. /skills uninstall bankr)
   /restart          — redémarrer le daemon (superviseur)
@@ -1572,6 +1668,29 @@ impl App {
                         Err(e) => return format!("Erreur: {}", e),
                     }
                 }
+                if sub == "install" {
+                    let skill_url = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                    if skill_url.is_empty() {
+                        return "Usage: /skills install <url> (ex. /skills install https://github.com/BankrBot/skills/tree/main/bankr)".to_string();
+                    }
+                    let url = format!("{}/api/skills/install", base);
+                    let body = serde_json::json!({ "url": skill_url });
+                    match client.post(&url).json(&body).send() {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(json) = r.json::<serde_json::Value>() {
+                                let msg = json.get("message").and_then(|v| v.as_str()).unwrap_or("Skill installé.");
+                                return msg.to_string();
+                            }
+                            return "Skill installé.".to_string();
+                        }
+                        Ok(r) => {
+                            let status = r.status();
+                            let err_body = r.text().unwrap_or_default();
+                            return format!("Erreur: {} — {}", status, err_body);
+                        }
+                        Err(e) => return format!("Erreur: {}", e),
+                    }
+                }
                 if sub == "uninstall" {
                     let name = parts.get(2).map(|s| s.trim()).unwrap_or("");
                     if name.is_empty() {
@@ -1595,7 +1714,7 @@ impl App {
                         Err(e) => return format!("Erreur: {}", e),
                     }
                 }
-                return "Usage: /skills [list] — lister les skills ; /skills reload — recharger ; /skills uninstall <nom> — désinstaller.".to_string();
+                return "Usage: /skills [list] — lister les skills ; /skills install <url> — installer ; /skills reload — recharger ; /skills uninstall <nom> — désinstaller.".to_string();
             }
             "metrics" => {
                 let url = format!("{}/api/router/metrics", base);

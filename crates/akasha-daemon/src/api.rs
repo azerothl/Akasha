@@ -13,8 +13,240 @@ use crate::user_profile::UserProfile;
 use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
+use crate::protocol_adapter::unknown_external_message_count;
+use crate::latency::{clear_task_milestones, emit_timeline_once_for_task, env_duration_ms, log_latency_metric, resolve_root_task_id};
 use std::path::{Path, PathBuf};
 use std::cmp::Ordering;
+
+/// On Windows, paths with verbatim prefix `\\?\` can cause "file not found" with some APIs. Return a path without it.
+#[cfg(windows)]
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    if s.starts_with(r"\\?\") {
+        PathBuf::from(s.replace(r"\\?\", ""))
+    } else {
+        p
+    }
+}
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    p
+}
+
+/// Normalize common Unicode apostrophes in filenames (e.g. ’ -> ').
+/// LLM tool calls may use typographic quotes, while files on disk typically use ASCII quotes.
+fn normalize_apostrophes(s: &str) -> String {
+    s.replace('’', "'").replace('‘', "'")
+}
+
+fn normalize_tool_path_hint(raw: &str) -> String {
+    let mut s = raw
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string();
+    s = normalize_apostrophes(&s);
+    if s.starts_with("workspace:/") {
+        return format!(
+            "workspace:/{}",
+            s.trim_start_matches("workspace:/")
+                .trim_start_matches(['/', '\\'])
+        );
+    }
+    if let Some(rest) = s.strip_prefix("workspace:") {
+        return format!("workspace:/{}", rest.trim_start_matches(['/', '\\']));
+    }
+    if let Some(rest) = s.strip_prefix("workspace/") {
+        return format!("workspace:/{}", rest.trim_start_matches(['/', '\\']));
+    }
+    if let Some(rest) = s.strip_prefix("workspace\\") {
+        return format!("workspace:/{}", rest.trim_start_matches(['/', '\\']));
+    }
+    s
+}
+
+fn is_workspace_virtual_path(raw: &str) -> bool {
+    normalize_tool_path_hint(raw).starts_with("workspace:/")
+}
+
+/// True if `s` is `WxH` dimensions (e.g. 1024x1024).
+fn looks_like_image_size_token(s: &str) -> bool {
+    let s = s.trim();
+    let mut parts = s.split('x');
+    let (Some(w), Some(h)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    w.parse::<u32>().is_ok() && h.parse::<u32>().is_ok()
+}
+
+/// The tool layer splits `TOOL:` lines on whitespace, so multi-word prompts become many args.
+/// Rejoin into a single prompt; treat a trailing `WxH` token as optional size.
+fn parse_generate_image_tool_args(args: &[String]) -> (String, Option<String>) {
+    if args.is_empty() {
+        return (String::new(), None);
+    }
+    if args.len() >= 2 {
+        if let Some(last) = args.last() {
+            if looks_like_image_size_token(last) {
+                return (
+                    args[..args.len() - 1].join(" "),
+                    Some(last.trim().to_string()),
+                );
+            }
+        }
+    }
+    (args.join(" "), None)
+}
+
+fn parse_write_file_request(args: &[String]) -> Option<(String, String)> {
+    if args.is_empty() {
+        return None;
+    }
+
+    let joined = args.join("\n");
+    let trimmed = joined.trim();
+    if trimmed.starts_with('{') {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let path = value
+                .get("path")
+                .or_else(|| value.get("filePath"))
+                .or_else(|| value.get("file"))
+                .and_then(|v| v.as_str())
+                .map(normalize_tool_path_hint);
+            let content = value
+                .get("content")
+                .or_else(|| value.get("text"))
+                .or_else(|| value.get("body"))
+                .or_else(|| value.get("data"))
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Array(items) => items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+                });
+            if let Some(path) = path {
+                return Some((path, content.unwrap_or_default()));
+            }
+        }
+    }
+
+    let path = normalize_tool_path_hint(args.first()?.as_str());
+    let content = args.get(1..).map(|a| a.join("\n")).unwrap_or_default();
+    Some((path, content))
+}
+
+enum PluginReputationResetBody {
+    Empty,
+    Parsed(serde_json::Value),
+    Invalid(String),
+}
+
+fn parse_plugin_reputation_reset_body(body: Option<&[u8]>) -> PluginReputationResetBody {
+    match body {
+        Some(raw) if !raw.is_empty() => match serde_json::from_slice::<serde_json::Value>(raw) {
+            Ok(v) => PluginReputationResetBody::Parsed(v),
+            Err(e) => PluginReputationResetBody::Invalid(e.to_string()),
+        },
+        _ => PluginReputationResetBody::Empty,
+    }
+}
+
+fn canonicalize_tool_name(tool_name: &str) -> String {
+    match tool_name.to_lowercase().as_str() {
+        "create_todos" => "write_todos".to_string(),
+        "append_todos" => "merge_todos".to_string(),
+        _ => tool_name.to_string(),
+    }
+}
+
+/// Strips `--no-ignore`, `--no-gitignore`, `--regex`, `-r` from tool args (any position).
+/// Returns filtered args, `respect_gitignore` (default true), `use_regex` (default false; grep only).
+fn strip_file_search_flags(args: &[String]) -> (Vec<String>, bool, bool) {
+    let mut respect_gitignore = true;
+    let mut use_regex = false;
+    let mut out = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "--no-ignore" | "--no-gitignore" => respect_gitignore = false,
+            "--regex" | "-r" => use_regex = true,
+            _ => out.push(a.clone()),
+        }
+    }
+    (out, respect_gitignore, use_regex)
+}
+
+/// Banner injected by `compose_orchestrated_child_message(..., deliverables_required: true)` for subtasks and remediation.
+const ORCH_DISK_DELIVERABLES_MARKER: &str = "[Orchestrated — disk deliverables REQUIRED]";
+
+/// Resolve `workspace:/rel` or a normal filesystem path to a concrete disk path for tools that only call `read_dir` / globs on real paths.
+/// True if path should be read as PDF (text extraction), not as UTF-8/plain text.
+fn path_extension_is_pdf(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+}
+
+/// Read bytes from disk and return the same user-visible message shape as `pdf` tool.
+async fn pdf_extract_message_from_disk(disk_path: &Path, via_tool: &str) -> (bool, String, Option<String>) {
+    match tokio::fs::read(disk_path).await {
+        Ok(bytes) => match pdf_extract::extract_text_from_mem(&bytes) {
+            Ok(text) => {
+                let preview =
+                    if text.len() > 2000 { format!("{}…", text.chars().take(2000).collect::<String>()) } else { text.clone() };
+                (
+                    true,
+                    format!(
+                        "[{}; PDF→text {}] extracted {} chars:\n{}",
+                        via_tool,
+                        disk_path.display(),
+                        text.len(),
+                        preview
+                    ),
+                    None,
+                )
+            }
+            Err(e) => (
+                false,
+                format!("[{}] PDF extraction failed for {}: {}", via_tool, disk_path.display(), e),
+                None,
+            ),
+        },
+        Err(e) => (
+            false,
+            format!("[{}] read failed for {}: {}", via_tool, disk_path.display(), e),
+            None,
+        ),
+    }
+}
+
+fn resolve_tool_disk_path(raw: &str, workspace_root: Option<&Path>) -> PathBuf {
+    let raw = normalize_tool_path_hint(raw);
+    let raw = raw.trim();
+    if raw.starts_with("workspace:/") || raw.starts_with("workspace:") {
+        let key = raw
+            .trim_start_matches("workspace:/")
+            .trim_start_matches("workspace:")
+            .trim_start_matches('/');
+        let key = normalize_apostrophes(key);
+        strip_verbatim_prefix(
+            workspace_root
+                .map(|root| root.join(&key))
+                .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                .unwrap_or_else(|| Path::new(&key).to_path_buf()),
+        )
+    } else {
+        strip_verbatim_prefix(Path::new(raw).to_path_buf())
+    }
+}
+
 use std::collections::{VecDeque, BinaryHeap};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -183,15 +415,29 @@ async fn get_task_list(store_path: &Path, status_filter: Option<String>) -> Stri
     json_response("200 OK", &body.to_string())
 }
 
-async fn get_task_events(events: &EventsCache, id: Uuid) -> String {
+async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> String {
     let mut list: Vec<TaskEventEntry> = {
+        let mut root_events = Vec::new();
+        match TaskStore::open(store_path) {
+            Ok(store) => {
+                if let Ok(persisted) = store.get_events(id) {
+                    root_events.extend(persisted.into_iter().map(|e| TaskEventEntry {
+                        event_type: e.event_type,
+                        payload: e.payload,
+                        at: e.at,
+                        task_id: Some(id.to_string()),
+                    }));
+                }
+            }
+            Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+        }
         let g = events.read().await;
-        g.get(&id)
-            .map(|q| q.iter().cloned().collect())
-            .unwrap_or_default()
+        if let Some(q) = g.get(&id) {
+            root_events.extend(q.iter().cloned());
+        }
+        root_events
     };
-    // Derive child task IDs from SubAgentSpawned events already in the in-memory cache —
-    // avoids reopening SQLite (TaskStore) on every poll cycle (the endpoint is polled ~1.5s).
+
     let child_ids: Vec<Uuid> = list
         .iter()
         .filter(|e| e.event_type == "sub_agent_spawned")
@@ -202,17 +448,58 @@ async fn get_task_events(events: &EventsCache, id: Uuid) -> String {
                 .and_then(|v| v.as_str())
                 .and_then(|s| Uuid::parse_str(s).ok())
         })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .collect();
     if !child_ids.is_empty() {
         let g = events.read().await;
         for child_id in child_ids {
             if let Some(q) = g.get(&child_id) {
-                for e in q.iter().cloned() {
-                    list.push(e);
+                list.extend(q.iter().cloned());
+            }
+        }
+        drop(g);
+        if let Ok(store) = TaskStore::open(store_path) {
+            for child_id in list
+                .iter()
+                .filter(|e| e.event_type == "sub_agent_spawned")
+                .filter_map(|e| {
+                    e.payload
+                        .as_ref()
+                        .and_then(|p| p.get("task_id"))
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| Uuid::parse_str(s).ok())
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+            {
+                if let Ok(persisted) = store.get_events(child_id) {
+                    list.extend(persisted.into_iter().map(|e| TaskEventEntry {
+                        event_type: e.event_type,
+                        payload: e.payload,
+                        at: e.at,
+                        task_id: Some(child_id.to_string()),
+                    }));
                 }
             }
         }
     }
+
+    let mut seen = std::collections::HashSet::new();
+    list.retain(|entry| {
+        let payload_key = entry
+            .payload
+            .as_ref()
+            .map(|p| serde_json::to_string(p).unwrap_or_default())
+            .unwrap_or_default();
+        let key = format!(
+            "{}|{}|{}|{}",
+            entry.task_id.as_deref().unwrap_or_default(),
+            entry.event_type,
+            entry.at,
+            payload_key
+        );
+        seen.insert(key)
+    });
     list.sort_by(|a, b| a.at.cmp(&b.at));
     let body = serde_json::json!({ "task_id": id.to_string(), "events": list });
     json_response("200 OK", &body.to_string())
@@ -388,6 +675,45 @@ pub async fn run_delegation_handler(
                 }
             }
         }
+        // Build a delegation message that always includes the root user request context,
+        // so child agents don't lose intent when the delegating LLM emits a terse/ambiguous subtask.
+        let root_user_request = {
+            let mut current = requesting.clone();
+            let mut depth = 0usize;
+            let mut root = current.initial_message.clone().unwrap_or_default();
+            while let Some(pid) = current.parent_task_id {
+                if depth >= 8 {
+                    break;
+                }
+                match store.get(pid) {
+                    Ok(Some(parent)) => {
+                        if let Some(msg) = parent.initial_message.clone() {
+                            if !msg.trim().is_empty() {
+                                root = msg;
+                            }
+                        }
+                        current = parent;
+                        depth += 1;
+                    }
+                    _ => break,
+                }
+            }
+            root
+        };
+        let delegated_message = if req.message.trim_start().starts_with("[Task]\n") {
+            req.message.clone()
+        } else {
+            let root_trim = root_user_request.trim();
+            if root_trim.is_empty() {
+                req.message.clone()
+            } else {
+                format!(
+                    "[Parent user request]\n{}\n\n[Delegated subtask]\n{}",
+                    root_trim,
+                    req.message.trim()
+                )
+            }
+        };
         let child_id = Uuid::new_v4();
         const WORKER_AGENT_TYPES: &[&str] = &[
             "search", "code", "conversation", "financial", "documentalist", "project_manager",
@@ -399,12 +725,12 @@ pub async fn run_delegation_handler(
             "conversation".to_string()
         };
         const MAX_INITIAL_MSG: usize = 500;
-        let initial_message = if req.message.chars().count() > MAX_INITIAL_MSG {
-            Some(req.message.chars().take(MAX_INITIAL_MSG).chain(std::iter::once('…')).collect::<String>())
-        } else if req.message.is_empty() {
+        let initial_message = if delegated_message.chars().count() > MAX_INITIAL_MSG {
+            Some(delegated_message.chars().take(MAX_INITIAL_MSG).chain(std::iter::once('…')).collect::<String>())
+        } else if delegated_message.is_empty() {
             None
         } else {
-            Some(req.message.clone())
+            Some(delegated_message.clone())
         };
         let child_task = Task {
             id: child_id,
@@ -432,10 +758,11 @@ pub async fn run_delegation_handler(
         if conv_tx
             .send(OrchestratorTask {
                 task_id: child_id,
-                message: req.message.clone(),
+                message: delegated_message,
                 session_id: String::new(),
                 image_data_urls: None,
                 execution_mode: None,
+                preferred_task_type: None,
             })
             .await
             .is_err()
@@ -457,9 +784,19 @@ pub async fn run_delegation_handler(
                 child_task_id = %child_id_span,
                 assigned_agent = %agent_type_span
             );
-            const DELEGATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+            let first_activity_timeout = env_duration_ms("AKASHA_DELEGATION_FIRST_ACTIVITY_TIMEOUT_MS", 15_000);
+            let completion_timeout = env_duration_ms("AKASHA_DELEGATION_COMPLETION_TIMEOUT_MS", 300_000);
+            let had_first_activity = wait_for_task_activity(&progress, child_id_span, first_activity_timeout).await;
+            if !had_first_activity {
+                task_completion.write().await.remove(&child_id_span);
+                let _ = reply_tx.send(Err(format!(
+                    "delegation startup timeout ({} ms without visible activity)",
+                    first_activity_timeout.as_millis()
+                )));
+                return;
+            }
             let timed_out = tokio::time::timeout(
-                DELEGATION_TIMEOUT,
+                completion_timeout,
                 notify.notified().instrument(span),
             )
             .await
@@ -467,7 +804,10 @@ pub async fn run_delegation_handler(
             // Ensure the registry entry is removed regardless of outcome.
             task_completion.write().await.remove(&child_id_span);
             if timed_out {
-                let _ = reply_tx.send(Err("delegation timeout (5 min)".to_string()));
+                let _ = reply_tx.send(Err(format!(
+                    "delegation completion timeout ({} ms)",
+                    completion_timeout.as_millis()
+                )));
                 return;
             }
             // Single store read to retrieve the final task status and result message.
@@ -594,16 +934,22 @@ pub fn json_response(status: &str, body: &str) -> String {
 /// Format: une ligne par outil "nom — usage".
 /// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
-    ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
-    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier. Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel. À UTILISER dès que l'utilisateur demande d'enregistrer, sauvegarder ou écrire un fichier ; ne jamais refuser ni proposer de copier-coller."),
-    ("search_files", "search_files <dir> <pattern> — chercher des fichiers (glob) sous un répertoire"),
-    ("grep_content", "grep_content <dir> <pattern> [file_glob] — chercher le motif dans le contenu des fichiers (ex. grep_content . \"fn \" \"*.rs\")"),
-    ("run_command", "run_command <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique)"),
-    ("run_terminal", "run_terminal <cmd> [args...] — exécuter une commande (même que run_command)"),
-    ("run_command_background", "run_command_background <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
+    ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Pour les fichiers .pdf, le texte est extrait automatiquement (équivalent à pdf <path>) ; ne vous attendez pas au binaire PDF. Pour les gros fichiers, lire d'abord le fichier puis cibler seulement les sections utiles avec grep_content/search_files avant d'éditer. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
+    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (création/remplacement complet). Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). TOUJOURS utiliser le chemin EXACT fourni par l'utilisateur. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace plutôt que de tout réécrire. Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel."),
+    ("search_files", "search_files <dir> <pattern> [--no-ignore] — chercher des fichiers (glob) sous un répertoire ; par défaut respecte .gitignore et ignore node_modules/target/dist/… ; --no-ignore pour tout parcourir."),
+    ("grep_content", "grep_content <dir> <pattern> [file_glob] [--regex|-r] [--no-ignore] — chercher dans les fichiers ; défaut = sous-chaîne insensible à la casse + .gitignore ; --regex = motif regex insensible à la casse ; --no-ignore = ignorer .gitignore."),
+    ("run_command", "run_command [--cwd <path>] <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique). Optionnel : --cwd workspace:/ ou chemin disque (allowed_read_paths). Si tools_policy run_command_default_cwd_workspace: true, cwd par défaut = workspace de la tâche."),
+    ("run_terminal", "run_terminal [--cwd <path>] <cmd> [args...] — exécuter une commande (même que run_command)"),
+    ("run_command_background", "run_command_background [--cwd <path>] <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
     ("terminal_session", "terminal_session — session PTY interactive (prévue ultérieurement, spec 43). Pour l’instant utiliser run_command / run_terminal pour une commande, run_command_background + process pour suivi."),
     ("process", "process list | process poll <session_id> | process kill <session_id> — lister, consulter ou arrêter des commandes en arrière-plan"),
-    ("file_diff", "file_diff <path_a> <path_b> — diff texte entre deux fichiers"),
+    ("file_diff", "file_diff <path_a> <path_b> — diff texte entre deux fichiers (ligne à ligne)"),
+    ("diff_unified", "diff_unified <path_a> <path_b> [context_lines] — diff unifié style patch (défaut context_lines=3) ; chemins réels ou workspace:/"),
+    ("dir_compare", "dir_compare <dir_a> <dir_b> [max_depth] [max_files] — comparer deux arborescences (fichiers uniquement dans A/B, contenu différent) ; profondeur et nombre de fichiers bornés (défaut 8 et 100)"),
+    ("git_status", "git_status <repo> — git status --porcelain=v1 -b dans le dépôt (nécessite git dans allowed_commands)"),
+    ("git_diff", "git_diff <repo> [--staged] [pathspec...] — git diff ; pathspecs relatifs au dépôt, validés sous la racine"),
+    ("git_log", "git_log <repo> [n] — git log -n N --oneline (N entre 1 et 100, défaut 20)"),
+    ("git_rev_parse", "git_rev_parse <repo> — git rev-parse HEAD"),
     ("edit_file", "edit_file <path> <start_line> <end_line> <new_content> — remplacer les lignes start..end par new_content (lignes 1-based)"),
     ("apply_patch", "apply_patch <path> <patch_content> — appliquer un patch unifié (contenu du patch après le path)"),
     ("search_replace", "search_replace <path> <search> | <replace> — remplacer toutes les occurrences de search par replace dans le fichier (séparateur \" | \")"),
@@ -621,15 +967,16 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
     ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
     ("browser", "browser navigate <url> — open URL in managed browser (http/https; domain allowed by tools_policy). browser snapshot — text + links of current page. Phase 2: click, fill, screenshot, wait (see spec 39)."),
+    ("install_playwright", "install_playwright — run npm install and npx playwright install chromium in the Playwright runner directory (scripts/playwright-runner or AKASHA_PLAYWRIGHT_RUNNER). Requires browser_enabled. Use after ask_user consent if you need explicit approval before download; optional require_approval in tools_policy."),
     ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
     ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
-    ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
+    ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Pour une réponse ouverte (chemin, texte libre, secret), omettre choices ou laisser un tableau vide. Si choices est fourni, l'UI propose quand même une saisie libre en plus des boutons. Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
     ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent. agent_type: search | code | conversation | financial | documentalist | project_manager | technical_writer | research | security_audit | creative | analyst | architect | frontend | backend | database | integration | qa | system | image_generation. Un seul niveau de délégation autorisé."),
     ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
     ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
     ("device_discover", "device_discover [interface] — lister les appareils accessibles (optionnel: local_media, system, network, usb). Filtre par politique allowed_device_interfaces / blocked_device_interfaces."),
     ("device_invoke", "device_invoke <interface> <device_id> <action> [params] — exécuter une action sur un appareil. local_media: caméra (device_id camera, action capture), micro (device_id microphone, action record). Appelle directement ; une fenêtre d'autorisation s'affichera dans l'UI. Ne pas demander à l'utilisateur d'« ouvrir l'UI » — utiliser l'outil. synthetic_input: device_id keyboard|mouse, action shortcut|key|type|mouse_move|mouse_click|..."),
-    ("generate_image", "generate_image <prompt> [size] — générer une image par IA (ex. OpenAI DALL·E). Prompt en texte libre ; size optionnel (1024x1024, 512x512). Retourne l'image en data URL dans la réponse (spec 42)."),
+    ("generate_image", "generate_image <prompt> [size] — générer une image par IA (ex. OpenAI DALL·E). Prompt en texte libre (plusieurs mots après generate_image sont un seul prompt) ; size optionnel en dernier (1024x1024, 512x512). Retourne l'image en data URL dans la réponse (spec 42)."),
     ("speech_synthesize", "speech_synthesize <text> — TTS: synthétiser le texte en audio (Kyutai Unmute/Pocket TTS). Retourne une data URL audio (voice_router.yaml tts.base_url)."),
     ("speech_transcribe", "speech_transcribe <data_url_audio> — STT: transcrire l'audio en texte. Passer la data URL de l'audio (ex. après device_invoke local_media microphone record). La data URL est obligatoire (voice_router.yaml stt.base_url)."),
     ("write_todos", "write_todos <payload> — définir la liste d'étapes (todo). Remplace toute la liste (plan initial ou re-découpage complet). Pour ajouter sans effacer : merge_todos. Payload: JSON array ou lignes."),
@@ -638,6 +985,13 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("update_todo", "update_todo <index> <status> — marquer l'étape à l'index (1-based) comme status (done, cancelled)."),
     ("list_skills", "list_skills — retourne la liste des skills installés (nom et description). Utiliser avant read_skill pour charger le détail d'un skill."),
     ("read_skill", "read_skill <name> — charge le contenu (instructions, usage) du skill. À utiliser quand tu as besoin du détail d'un skill avant de l'invoquer par son nom."),
+    ("plugin.call", "plugin.call <plugin_id> <json_or_args...> — exécuter un plugin de type tool chargé dans le daemon. Exemple: TOOL: plugin.call maps {\"action\":\"distance\",\"from\":{\"lat\":45.698,\"lon\":0.328},\"to\":{\"lat\":49.009,\"lon\":2.547},\"mode\":\"car\"}"),
+    ("maps_distance", "maps_distance <from_lat> <from_lon> <to_lat> <to_lon> [mode] — via plugin maps, calcule distance et durée estimée."),
+    ("maps_route", "maps_route <from_lat> <from_lon> <to_lat> <to_lon> [mode] — via plugin maps, retourne un itinéraire simplifié avec geometry map-ready."),
+    ("graph_plot", "graph_plot <chart> <y1> <y2> ... | plugin.call graph <json> — via plugin graph, génère une figure Plotly (line/bar/scatter/histogram)."),
+    ("graph_stats", "graph_stats <json_or_args...> — via plugin graph, calcule min/max/moyenne/compte par série et retourne une vue table."),
+    ("sim_run", "sim_run <initial> <growth_rate> <noise> <horizon> | plugin.call simulation <json> — via plugin simulation, exécute une simulation déterministe et retourne une vue timeseries + métriques."),
+    ("sim_compare", "sim_compare <initial> <growth_rate> <noise> <horizon> | plugin.call simulation <json> — via plugin simulation, compare scénario de base et alternatif, retourne delta + tableau de résultats."),
 ];
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
@@ -646,7 +1000,17 @@ fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
             AVAILABLE_TOOLS
                 .iter()
                 .filter(move |(name, _)| {
-                    *name == "ask_user" || *name == "install_skill" || *name == "uninstall_skill" || *name == "write_todos" || *name == "merge_todos" || *name == "read_todos" || *name == "update_todo" || *name == "list_skills" || *name == "read_skill" || allowed.iter().any(|a| a == *name)
+                    let always_misc = *name == "ask_user"
+                        || *name == "install_skill"
+                        || *name == "uninstall_skill"
+                        || *name == "write_todos"
+                        || *name == "merge_todos"
+                        || *name == "read_todos"
+                        || *name == "update_todo"
+                        || *name == "list_skills"
+                        || *name == "read_skill";
+                    let in_profile = allowed.iter().any(|a| a == *name);
+                    always_misc || in_profile
                 }),
         )
     } else {
@@ -668,6 +1032,562 @@ struct MessageIntentFlags {
     code_generation: bool,
     /// User asks for GitHub repo/API info and mentions vault or GITHUB_TOKEN.
     github_with_vault: bool,
+    /// User asks about transport schedules, routes, or travel info (train, bus, flight, etc.)
+    transport: bool,
+    /// User asks for a geographic distance/route between two places.
+    geolocation_distance: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RuntimeToolRoutingEnforcer {
+    preferred_tools: std::collections::HashSet<String>,
+    forbidden_tools: std::collections::HashSet<String>,
+}
+
+impl RuntimeToolRoutingEnforcer {
+    fn from_rules(rules: &[crate::plugins::registry::MatchedRoutingRule]) -> Option<Self> {
+        if rules.is_empty() {
+            return None;
+        }
+        let mut preferred_tools = std::collections::HashSet::new();
+        let mut forbidden_tools = std::collections::HashSet::new();
+        for rule in rules {
+            for tool in &rule.preferred_tools {
+                let t = tool.trim().to_lowercase();
+                if !t.is_empty() {
+                    preferred_tools.insert(t);
+                }
+            }
+            for tool in &rule.forbidden_tools {
+                let t = tool.trim().to_lowercase();
+                if !t.is_empty() {
+                    forbidden_tools.insert(t);
+                }
+            }
+        }
+        Some(Self {
+            preferred_tools,
+            forbidden_tools,
+        })
+    }
+
+    fn is_tool_allowed(&self, tool_name: &str, args: &[String]) -> bool {
+        let tool = canonicalize_tool_name(tool_name).to_lowercase();
+
+        if self.is_forbidden(&tool, args) {
+            return false;
+        }
+
+        // If no preferred list is declared, only forbidden list is enforced.
+        if self.preferred_tools.is_empty() {
+            return true;
+        }
+
+        // Always allow ask_user to unblock missing parameters.
+        if tool == "ask_user" {
+            return true;
+        }
+
+        if self.preferred_tools.contains(&tool) {
+            return true;
+        }
+
+        // Allow plugin.call / plugin.<id> when it targets a preferred plugin/tool family.
+        if tool == "plugin.call" || tool == "plugin_call" {
+            if let Some(plugin_id) = args.first().map(|s| s.trim().to_lowercase()) {
+                if self.preferred_tools.contains(&plugin_id)
+                    || self
+                        .preferred_tools
+                        .iter()
+                        .any(|p| p.starts_with(&(plugin_id.clone() + "_")))
+                {
+                    return true;
+                }
+            }
+        }
+
+        if let Some(plugin_id) = tool.strip_prefix("plugin.") {
+            let plugin_id = plugin_id.trim().to_lowercase();
+            if self.preferred_tools.contains(&plugin_id)
+                || self
+                    .preferred_tools
+                    .iter()
+                    .any(|p| p.starts_with(&(plugin_id.clone() + "_")))
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn is_forbidden(&self, tool_name: &str, args: &[String]) -> bool {
+        if self.forbidden_tools.is_empty() {
+            return false;
+        }
+        if self.forbidden_tools.contains(tool_name) {
+            return true;
+        }
+        if (tool_name == "plugin.call" || tool_name == "plugin_call")
+            && args
+                .first()
+                .map(|s| self.forbidden_tools.contains(&s.trim().to_lowercase()))
+                .unwrap_or(false)
+        {
+            return true;
+        }
+        false
+    }
+}
+
+fn active_intents_from_flags(flags: &MessageIntentFlags) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if flags.save_file {
+        out.push("save_file");
+    }
+    if flags.external_info {
+        out.push("external_info");
+    }
+    if flags.social_feed_fetch {
+        out.push("social_feed_fetch");
+    }
+    if flags.camera_or_mic {
+        out.push("camera_or_mic");
+    }
+    if flags.image_generation {
+        out.push("image_generation");
+    }
+    if flags.code_generation {
+        out.push("code_generation");
+    }
+    if flags.github_with_vault {
+        out.push("github_with_vault");
+    }
+    if flags.transport {
+        out.push("transport");
+    }
+    if flags.geolocation_distance {
+        out.push("geolocation_distance");
+    }
+    out
+}
+
+fn build_plugin_routing_reminders(
+    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
+    message: &str,
+    flags: &MessageIntentFlags,
+    tools_executor_snapshot: Option<&std::sync::Arc<akasha_tools::ToolExecutor>>,
+) -> (String, bool) {
+    let Some(registry) = plugin_registry else {
+        return (String::new(), false);
+    };
+    let intents = active_intents_from_flags(flags);
+    if intents.is_empty() {
+        return (String::new(), false);
+    }
+
+    let rules = registry.match_routing_rules(message, &intents, |tool_name| {
+        tools_executor_snapshot
+            .as_ref()
+            .map(|e| e.policy.can_use_tool(tool_name))
+            .unwrap_or(false)
+    });
+    if rules.is_empty() {
+        return (String::new(), false);
+    }
+
+    let matched_plugins: Vec<String> = rules.iter().map(|r| r.plugin_id.clone()).collect();
+    tracing::info!(
+        intents = ?intents,
+        matched_rules = rules.len(),
+        plugins = ?matched_plugins,
+        "Dynamic plugin routing rules matched"
+    );
+
+    let mut seen = std::collections::HashSet::new();
+    let mut lines = Vec::new();
+    let mut geolocation_handled = false;
+    for rule in rules.into_iter().take(4) {
+        if rule
+            .intent
+            .as_deref()
+            .is_some_and(|intent| intent.eq_ignore_ascii_case("geolocation_distance"))
+        {
+            geolocation_handled = true;
+        }
+        let instruction = rule.instruction.trim();
+        if instruction.is_empty() {
+            continue;
+        }
+        if seen.insert(instruction.to_string()) {
+            lines.push(format!("- {}", instruction));
+        }
+    }
+    if lines.is_empty() {
+        return (String::new(), geolocation_handled);
+    }
+
+    let block = format!(
+        "\n[Dynamic plugin routing rules — auto-loaded from installed plugin manifests]\n{}\n\n",
+        lines.join("\n")
+    );
+    (block, geolocation_handled)
+}
+
+fn build_runtime_tool_routing_enforcer(
+    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
+    message: &str,
+    flags: &MessageIntentFlags,
+    tools_executor_snapshot: Option<&std::sync::Arc<akasha_tools::ToolExecutor>>,
+) -> Option<RuntimeToolRoutingEnforcer> {
+    let registry = plugin_registry?;
+    let intents = active_intents_from_flags(flags);
+    if intents.is_empty() {
+        return None;
+    }
+
+    let rules = registry.match_routing_rules(message, &intents, |tool_name| {
+        tools_executor_snapshot
+            .as_ref()
+            .map(|e| e.policy.can_use_tool(tool_name))
+            .unwrap_or(false)
+    });
+
+    let enforcer = RuntimeToolRoutingEnforcer::from_rules(&rules)?;
+    tracing::info!(
+        intents = ?intents,
+        preferred_tools = ?enforcer.preferred_tools,
+        forbidden_tools = ?enforcer.forbidden_tools,
+        "Runtime tool routing enforcement enabled"
+    );
+    Some(enforcer)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SmallTalkLanguage {
+    French,
+    English,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SmallTalkIntent {
+    language: SmallTalkLanguage,
+    asks_status: bool,
+}
+
+fn classify_small_talk_message(message: &str) -> Option<SmallTalkIntent> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed
+        .to_lowercase()
+        .replace('’', "'")
+        .replace(['!', '?', '.', ',', ';', ':'], " ");
+    let collapsed = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Reject messages that mingle small-talk with "real request" keywords
+    let real_request_keywords = [
+        "peux tu", "peux-tu", "peut tu", "peut-tu",
+        "pouvez vous", "pouvez-vous", "tu peux", "peux me", "peux nous",
+        "could you", "can you", "would you", "can you help", "can you tell",
+        "me rappeler", "me rappelle", "help me", "show me", "tell me",
+        "lire", "read", "fichier", "file", "faire", "do", "créer", "create",
+        "écrire", "write", "générer", "generate",
+        "projet", "project",
+        "avait", "avaient", "avez", "have", "has", "fait", "done",
+        "hier", "yesterday", "dernier", "last",
+    ];
+    for keyword in real_request_keywords {
+        if collapsed.contains(keyword) {
+            return None;
+        }
+    }
+
+    let has_french = [
+        "salut",
+        "bonjour",
+        "bonsoir",
+        "coucou",
+        "ca va",
+        "ça va",
+        "comment ca va",
+        "comment ça va",
+    ]
+    .iter()
+    .any(|k| collapsed.contains(k));
+    let has_english = [
+        "hello",
+        "hi",
+        "hey",
+        "good morning",
+        "good evening",
+        "how are you",
+        "hows it going",
+        "how's it going",
+    ]
+    .iter()
+    .any(|k| collapsed.contains(k));
+    let asks_status = [
+        "ca va",
+        "ça va",
+        "comment ca va",
+        "comment ça va",
+        "how are you",
+        "hows it going",
+        "how's it going",
+    ]
+    .iter()
+    .any(|k| collapsed.contains(k));
+    if has_french {
+        Some(SmallTalkIntent {
+            language: SmallTalkLanguage::French,
+            asks_status,
+        })
+    } else if has_english {
+        Some(SmallTalkIntent {
+            language: SmallTalkLanguage::English,
+            asks_status,
+        })
+    } else {
+        None
+    }
+}
+
+fn small_talk_fast_lane(message: &str) -> Option<SmallTalkIntent> {
+    let intent = classify_small_talk_message(message)?;
+    let trimmed = message.trim();
+    if trimmed.contains('\n') || trimmed.chars().count() > 80 {
+        return None;
+    }
+    let word_count = trimmed
+        .split_whitespace()
+        .filter(|w| !w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-').is_empty())
+        .count();
+    if word_count > 8 {
+        return None;
+    }
+    let lower = trimmed.to_lowercase();
+    let flags = compute_message_intent_flags(trimmed);
+    if flags.save_file
+        || flags.external_info
+        || flags.social_feed_fetch
+        || flags.camera_or_mic
+        || flags.image_generation
+        || flags.code_generation
+        || flags.github_with_vault
+        || message_suggests_project(trimmed)
+    {
+        return None;
+    }
+    if [
+        "fichier",
+        "file",
+        "code",
+        "projet",
+        "project",
+        "browser",
+        "navigateur",
+        "outil",
+        "tool",
+        "github",
+        "api",
+        "cargo",
+        "rust",
+        "erreur",
+        "error",
+        "bug",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+    {
+        return None;
+    }
+    Some(intent)
+}
+
+fn small_talk_fast_reply(message: &str, intent: SmallTalkIntent) -> String {
+    let lower = message.to_lowercase();
+    match intent.language {
+        SmallTalkLanguage::French => {
+            if intent.asks_status {
+                "Salut ! Oui, ça va bien 😊 Et toi ?".to_string()
+            } else if lower.contains("bonsoir") {
+                "Bonsoir ! 👋".to_string()
+            } else if lower.contains("bonjour") {
+                "Bonjour ! 👋".to_string()
+            } else if lower.contains("coucou") {
+                "Coucou ! 👋".to_string()
+            } else {
+                "Salut ! 👋".to_string()
+            }
+        }
+        SmallTalkLanguage::English => {
+            if intent.asks_status {
+                "Hi! I'm doing well 😊 How about you?".to_string()
+            } else if lower.contains("good morning") {
+                "Good morning! 👋".to_string()
+            } else if lower.contains("good evening") {
+                "Good evening! 👋".to_string()
+            } else {
+                "Hi! 👋".to_string()
+            }
+        }
+    }
+}
+
+fn response_looks_off_topic_for_small_talk(response: &str) -> bool {
+    let lower = response.to_lowercase();
+    lower.contains("tool:")
+        || lower.contains("tools_policy")
+        || lower.contains("allowed_write_paths")
+        || lower.contains("allowed_read_paths")
+        || lower.contains("write_file")
+        || lower.contains("read_file")
+        || lower.contains("browser navigate")
+        || lower.contains("web_search")
+        || lower.contains("memory_store")
+        || lower.contains("delegate_to_agent")
+        || lower.contains("vault:")
+        || lower.len() > 240
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionRecallRange {
+    Yesterday,
+    CurrentDay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionRecallIntent {
+    range: SessionRecallRange,
+    language: SmallTalkLanguage,
+}
+
+fn detect_session_recall_intent(message: &str) -> Option<SessionRecallIntent> {
+    let lower = message
+        .trim()
+        .to_lowercase()
+        .replace('’', "'")
+        .replace(['!', '?', '.', ',', ';', ':'], " ");
+    if lower.is_empty() {
+        return None;
+    }
+    let asks_recall = [
+        "rappeler", "rappelle", "rappel", "ce qu'on a fait", "ce qu on a fait", "on a fait",
+        "what we did", "remind me", "recap", "recap what we did", "what did we do",
+    ]
+    .iter()
+    .any(|k| lower.contains(k));
+    if !asks_recall {
+        return None;
+    }
+    let range = if ["hier", "yesterday", "last night", "hier soir"].iter().any(|k| lower.contains(k)) {
+        SessionRecallRange::Yesterday
+    } else {
+        SessionRecallRange::CurrentDay
+    };
+    let language = if ["bonjour", "salut", "merci", "hier", "rappeler", "qu'on", "quoi"].iter().any(|k| lower.contains(k)) {
+        SmallTalkLanguage::French
+    } else {
+        SmallTalkLanguage::English
+    };
+    Some(SessionRecallIntent { range, language })
+}
+
+fn build_session_recap_reply(
+    turns: &[crate::memory::ConversationTurn],
+    intent: SessionRecallIntent,
+) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for t in turns {
+        let c = t.content.trim();
+        if c.is_empty() {
+            continue;
+        }
+        let lower = c.to_lowercase();
+        // Filter out system/error messages
+        if lower.contains("tools_policy")
+            || lower.contains("allowed_write_paths")
+            || lower.contains("allowed_read_paths")
+            || lower.contains("allowed_paths")
+            || lower.contains("llm response timed out")
+            || lower.contains("timed out")
+            || lower.starts_with("[recent context")
+            || lower.starts_with("[mémoire")
+            || lower.starts_with("[system")
+            || lower.starts_with("[error")
+            || lower.contains("not authorized")
+            || lower.contains("pas autorisé")
+            || lower.contains("cannot create")
+            || lower.contains("ne peux pas créer")
+            || lower.contains("cannot write")
+            || lower.contains("cannot read")
+            // Filter out previous recap generations
+            || lower.starts_with("bien sûr — voici")
+            || lower.starts_with("sure — here's")
+            || lower.starts_with("voici ce qu'on a fait")
+            || lower.starts_with("here's what we")
+            // Filter out generic greetings/closings
+            || (lower.contains("bonjour") && lower.len() < 100)
+            || (lower.contains("salut") && lower.len() < 80)
+            || lower == "oui" || lower == "yes"
+            || lower == "ok" || lower == "d'accord"
+            || lower == "merci" || lower == "thanks"
+            || lower == "merci beaucoup" || lower == "thank you"
+        {
+            continue;
+        }
+        let compact = c.replace('\n', " ").trim().to_string();
+        // Skip very short fragments
+        if compact.len() < 20 {
+            continue;
+        }
+        lines.push(compact);
+    }
+    lines.dedup();
+    if lines.is_empty() {
+        return None;
+    }
+    let selected: Vec<String> = lines.into_iter().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect();
+    match intent.language {
+        SmallTalkLanguage::French => {
+            let period = match intent.range {
+                SessionRecallRange::Yesterday => "hier",
+                SessionRecallRange::CurrentDay => "dans cette session",
+            };
+            let mut out = format!("Bien sûr — voici ce qu'on a fait {} :\n", period);
+            for item in selected {
+                out.push_str("- ");
+                let truncated = if item.len() > 400 {
+                    format!("{}…", item.chars().take(397).collect::<String>())
+                } else {
+                    item
+                };
+                out.push_str(&truncated);
+                out.push('\n');
+            }
+            Some(out.trim_end().to_string())
+        }
+        SmallTalkLanguage::English => {
+            let period = match intent.range {
+                SessionRecallRange::Yesterday => "yesterday",
+                SessionRecallRange::CurrentDay => "in this session",
+            };
+            let mut out = format!("Sure — here's what we did {}:\n", period);
+            for item in selected {
+                out.push_str("- ");
+                let truncated = if item.len() > 400 {
+                    format!("{}…", item.chars().take(397).collect::<String>())
+                } else {
+                    item
+                };
+                out.push_str(&truncated);
+                out.push('\n');
+            }
+            Some(out.trim_end().to_string())
+        }
+    }
 }
 
 /// Best-effort X handle from user text (e.g. `@akasha_anthiam` → `akasha_anthiam`).
@@ -685,6 +1605,27 @@ fn extract_x_profile_handle(message: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// True when policy allows at least one follow-up path after web_search: HTTP fetch and/or Playwright browser.
+fn web_followup_tools_configured(policy: &akasha_tools::ToolsPolicy) -> bool {
+    let web_fetch_ok = policy.can_use_tool("web_fetch") && !policy.allowed_web_domains.is_empty();
+    let browser_ok = policy.can_use_tool("browser")
+        && policy.browser_enabled
+        && (policy
+            .browser_allowed_domains
+            .iter()
+            .any(|d| d.trim().eq_ignore_ascii_case("*"))
+            || !policy.browser_allowed_domains.is_empty());
+    web_fetch_ok || browser_ok
+}
+
+/// True when the user likely refers to the SNCF regional product "TER".
+/// Substring `ter ` must not be used: it matches inside "connecter", "twitter", etc.
+fn message_mentions_ter_train_line(message_lower: &str) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"(?i)\bter\b").expect("valid regex"));
+    re.is_match(message_lower)
 }
 
 fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
@@ -737,7 +1678,8 @@ fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
         image_generation: [
             "génère une image", "genere une image", "générer une image", "génère moi une image",
             "generate an image", "generate a picture", "draw", "dessine", "dessiner",
-            "crée une image", "cree une image", "créer une image", "create an image",
+            "crée une image", "cree une image", "creer une image", "creer moi une image",
+            "créer une image", "create an image",
             "image par ia", "ai image", "dall-e", "dalle",
         ]
         .iter()
@@ -748,6 +1690,8 @@ fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
             "generate code", "génère le code", "code python", "python script",
             "un programme qui", "a program that", "fonction qui", "function that",
             "snippet", "extrait de code", "piece of code", "exemple de code",
+            "analyse ce projet", "analyze this project", "analyse le projet", "analyze the project",
+            "review the codebase", "auditer le code", "code review", "dépôt git", "depot git",
         ]
         .iter()
         .any(|k| m.contains(k)),
@@ -756,6 +1700,57 @@ fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
             let vault = ["vault", "github_token", "clé du vault", "cle du vault", "key in the vault", "token dans le vault", "clef dans le vault"].iter().any(|k| m.contains(k));
             github && vault
         },
+        transport: message_mentions_ter_train_line(&m)
+            || [
+                "train",
+                "tgv",
+                "sncf",
+                "gare ",
+                "horaires de train",
+                "horaires de bus",
+                "horaires du train",
+                "billet de train",
+                "trajet en train",
+                "rer ",
+                "transilien",
+                "bus ",
+                "métro ",
+                "metro ",
+                "tramway",
+                "tram ",
+                "vol ",
+                "aéroport",
+                "aeroport",
+                "airport",
+                "terminal ",
+                "itinéraire",
+                "itineraire",
+                "horaires de métro",
+                "horaires du métro",
+                "départ de ",
+                "depart de ",
+                "arrivée à ",
+                "arrivee a ",
+            ]
+            .iter()
+            .any(|k| m.contains(k)),
+        geolocation_distance: [
+            "distance entre",
+            "distance between",
+            "distance from",
+            "distance to",
+            "combien de km",
+            "how far",
+            "itinéraire entre",
+            "itineraire entre",
+            "route entre",
+            "trajet entre",
+            "km entre",
+            "kilomètre",
+            "kilometre",
+        ]
+        .iter()
+        .any(|k| m.contains(k)),
     }
 }
 
@@ -1285,7 +2280,25 @@ async fn do_uninstall_skill(
 
 const WRITE_FILE_REMINDER: &str = "\n[Reminder: the user is asking to save a file. You MUST reply ONLY with the line TOOL: write_file <full_path> then the file content on the following lines. Never say you cannot write to disk.]\n\n";
 
-const WEB_SEARCH_REMINDER: &str = "\n[Reminder: the user is asking for external information (weather/météo, news, etc.). You MUST use TOOL: web_search <query> to search — do NOT use bankr or portfolio for weather. Then reply with the results. Do not suggest visiting a site without having used web_search first.]\n\n";
+const WEB_SEARCH_REMINDER: &str = "\n[Reminder: the user is asking for external information (weather/météo, news, etc.). You MUST use TOOL: web_search <query> first — do NOT use bankr or portfolio for weather. If search snippets do not contain the precise facts (temperatures, sky state, rain risk, figures, tables), you MUST follow up with TOOL: web_fetch <url> on a relevant result URL, or TOOL: browser navigate <url> then TOOL: browser snapshot for JS-heavy or dynamic pages (e.g. many weather portals). Do not end by telling the user to visit links yourself if web_fetch or browser snapshot is available in your tool list and policy allows those domains — fetch and summarize. Do not suggest visiting a site without having used web_search first.]\n\n";
+
+/// Injected only when web_search is available and policy allows web_fetch and/or configured browser follow-up.
+const WEB_SEARCH_FOLLOWUP_REMINDER: &str = "\n[Reminder — page fetch: Search snippets are often incomplete. After web_search, if you still lack concrete details, call web_fetch on a result URL and/or browser navigate + browser snapshot (then answer from that output). Do not reply with only URLs for the user to open when these tools work.]\n\n";
+
+/// Reminder injected when the user asks for external information (weather, news, etc.) but
+/// web_search is not available in the current tools policy. Prevents the model from ignoring
+/// the question and falling back to a generic capability introduction.
+const WEB_SEARCH_UNAVAILABLE_REMINDER: &str = "\n[Note: the user is asking for weather, news, or other live external information. web_search is not currently enabled. Answer as best you can from your training knowledge, clearly state that the data may be outdated, and explain how to enable web search: set web_search_enabled: true in tools_policy.yaml and configure BRAVE_API_KEY. Do NOT respond with a generic capabilities introduction — address the user's question directly.]\n\n";
+
+const TRANSPORT_REMINDER: &str = "\n[Reminder: the user is asking about transport schedules, routes, or travel information. You MUST use TOOL: web_search <query> first (e.g. web_search \"horaires train Angoulême Paris CDG dimanche\"). Do NOT write any files, generate HTML, or ask about project file paths — the user wants travel information only. If web_search is unavailable, say so clearly and suggest the relevant site (e.g. sncf.com, ratp.fr, transilien.com).]\n\n";
+
+/// Transport reminder when web_search is not enabled: model cannot use the tool so we only anchor it to the domain.
+const TRANSPORT_REMINDER_NO_SEARCH: &str = "\n[Reminder: the user is asking about transport routes or travel (train, car, bus, etc.). Do NOT write any files, create HTML pages, or ask about project file paths — the user wants travel information only. Answer from your knowledge (e.g. compare train vs car for this route). If you cannot give accurate live schedules, say so clearly and suggest the relevant site (e.g. sncf.com, ratp.fr, transilien.com).  Do NOT ask about file paths or project details — this is a travel question.]\n\n";
+
+/// Generic distance reminder used when no plugin-specific routing rule matched.
+const GEO_DISTANCE_REMINDER_WITH_TOOLS: &str = "\n[Reminder: the user asks for a geographic distance/route between places. PRIORITY: use a relevant distance/route tool available in the current tools list. If location details are missing, use TOOL: web_search with a focused distance query. STRICTLY FORBIDDEN for this request: memory_store, project planning, code generation, file writes, and unrelated queries.]\n\n";
+
+const GEO_DISTANCE_REMINDER_NO_TOOL: &str = "\n[Reminder: the user asks for a geographic distance/route between places. No distance/search tool is available. Provide a concise best-effort estimate and clearly state uncertainty. Do NOT write files, ask for project paths, or perform unrelated tasks.]\n\n";
 
 /// X/Twitter/social feed fetches: do not use ask_user for unrelated onboarding; use tools first.
 const SOCIAL_FEED_REMINDER: &str = "\n[Reminder: SOCIAL / X / TWITTER — PRIORITY: The user wants posts, tweets, or timeline content from X (Twitter) or similar. Do NOT use TOOL: ask_user for generic greetings or unrelated menu choices — fulfill this request with tools. First TOOL: web_search <query> (e.g. site:x.com handle latest posts). If results are empty or insufficient, use TOOL: browser navigate <profile URL> then TOOL: browser snapshot (if browser is enabled in policy). Do not answer \"no context\" or \"blocked\" without having called web_search or browser.]\n\n";
@@ -1295,6 +2308,9 @@ const IMAGE_GENERATION_REMINDER: &str = "\n[Reminder: request to \"generate an i
 
 /// Reminder when the user asks for GitHub (private repo / API) and mentions the vault (e.g. GITHUB_TOKEN).
 const GITHUB_VAULT_REMINDER: &str = "\n[Reminder GitHub + vault: you MUST run the request yourself via TOOL: run_command. Exact format: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (or gh repo view owner/repo). FORBIDDEN: telling the user to do GITHUB_TOKEN=VAULT:... or export GITHUB_TOKEN=... or to put the token in plain text — you must emit the TOOL: line so the system injects the secret. Do not reply \"I did not find\" without having called run_command with VAULT:GITHUB_TOKEN=GITHUB_TOKEN.]\n\n";
+
+/// Injected when the message looks like code/script work: prefer workspace paths, git/diff tools, and explicit cwd for commands.
+const CODE_DEV_SANDBOX_REMINDER: &str = "\n[Reminder — code / project work: use workspace:/ paths for files in this task when no absolute path is given. For Git operations prefer TOOL: git_status, git_diff, git_log, git_rev_parse on the repo path (e.g. workspace:/ or an allowed folder) instead of raw git via run_command, unless you need a subcommand not covered. For file comparison use diff_unified or file_diff; for two trees use dir_compare. For build/test commands use TOOL: run_command --cwd workspace:/ cargo test (or npm test, etc.) so the command runs in the project root; or set run_command_default_cwd_workspace: true in tools_policy.yaml. For isolated execution with a toolchain image, use run_in_container when policy allows.]\n\n";
 
 /// Application context injected into the prompt: the agent knows it runs inside Akasha and can talk about it.
 const APP_CONTEXT: &str = concat!(
@@ -1311,10 +2327,16 @@ const APP_CONTEXT: &str = concat!(
     "Otherwise the user can place files in the skills folder and run /skills reload. ",
     "Full documentation is available in the Doc tab of the interface. ",
     "Language: ALWAYS reply in the same language as the user's last message (French → French, English → English, etc.). Do not switch language even if tool results or context are in another language. ",
+    "Autonomy: work autonomously until the user's request is completely resolved. Do not stop in the middle of a task to ask for confirmation unless you hit a hard blocker (missing credentials, genuinely ambiguous requirements that cannot be inferred from context). For anything you can discover via a tool (read_file, web_search, run_command, etc.), prefer the tool over asking the user. ",
+    "Research before acting: when you are unsure about file contents or codebase structure, use read_file and search tools before editing or answering. Never guess or invent code — your answer must be grounded in actual research. ",
+    "Code conventions: when editing code, first read the file to understand its existing conventions, imports, and style. Mimic existing patterns. Never assume a library or dependency is available — verify it is already declared in the project's dependency file (Cargo.toml, package.json, requirements.txt, etc.) before using it. ",
+    "Tests discipline: when tests fail, never modify the tests themselves unless the user explicitly asks you to. Assume the bug is in the code under test. If the same test or CI still fails after three consecutive attempts, stop and ask the user for guidance rather than iterating blindly. ",
+    "Debugging: when debugging, address the root cause rather than the symptoms. Add descriptive logging statements to track variable state. If multiple approaches have failed, step back and think big-picture before making more changes. ",
     "Never invent data. If you do not have the information to answer, say so clearly (e.g. \"I did not find that information\"). ",
-    "For questions about information you do not have (weather, forecasts, news, schedules, etc.), you must use the web_search tool to search yourself then reply with the results. When you have just received tool results (e.g. web_search, web_fetch), you must answer immediately with the synthesized result — do not reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"); the task ends after your message, so give the actual answer. ",
-    "Do not suggest the user visit a site without having used web_search first if you have access to that tool. ",
+    "For questions about information you do not have (weather, forecasts, news, schedules, etc.), you must use the web_search tool first, then if snippets are insufficient use web_fetch and/or browser navigate plus browser snapshot to read the page itself and reply with the synthesized facts. When you have just received tool results (e.g. web_search, web_fetch, browser snapshot), you must answer immediately with the synthesized result — do not reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"); the task ends after your message, so give the actual answer. ",
+    "Do not suggest the user visit a site without having used web_search first if you have access to that tool; do not only list URLs for the user when web_fetch or browser snapshot can retrieve the content. ",
     "If web_search returns an error (e.g. not enabled), you can then suggest sites and explain how to enable web search (tools_policy.yaml, web_search_enabled, BRAVE_API_KEY). ",
+    "Playwright / managed browser: the daemon may auto-install Chromium on first browser use unless AKASHA_PLAYWRIGHT_AUTO_INSTALL=0. If browser fails for missing Chromium, the runner is missing, or the user must explicitly approve a large download, use TOOL: ask_user (e.g. choices agreeing to install), then TOOL: install_playwright. List install_playwright in tool_profiles when using a profile. tools_policy require_approval can include install_playwright for UI approval before the install runs. For other dependencies (npm, cargo, etc.), use run_command with allowed_commands after ask_user consent. ",
     "You have access to the write_file tool: you MUST use it whenever the user asks to save, store or write a file (e.g. \"save the code to …\", \"write to file\"). ",
     "Reply ONLY with one line TOOL: write_file <full_path> then the file content on the following lines. ",
     "Never say \"I cannot write to disk\" or \"copy-paste the code yourself\" — if the path is denied by policy, the tool will return an error and you then explain how to add the prefix in tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...) or Unix. When the user did not specify a path, prefer workspace:/<filename> (e.g. workspace:/script.py) so the file is saved in the task workspace without policy errors. ",
@@ -1331,19 +2353,19 @@ const APP_CONTEXT: &str = concat!(
 pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
     match agent_type {
         "conversation" => None,
-        "code" => Some("You are the code generation agent. Produce correct, readable code. Prefer run_command or write_file when the user asks to create or run code. Do not invent APIs; use read_file when needed to match existing code. When the user asks to *perform* an action (take a photo, run a command, search the web, save a file), use the appropriate TOOL; do not generate a script. Use code only when the user explicitly asks to *write* or *generate* code or a script."),
-        "search" => Some("You are the search agent. Use web_search to find external information (weather, news, facts). Synthesize results and cite sources. Do not claim information you have not retrieved via web_search when it is available."),
+        "code" => Some("You are the code generation agent. Produce correct, readable code. Prefer write_file and workspace:/ paths for new files. For Git inspection use git_status, git_diff, git_log, git_rev_parse on the repo path when available; use diff_unified or dir_compare to compare files or trees. Run builds and tests with run_command --cwd workspace:/ (or the project root). Use run_in_container when policy allows and you need an isolated toolchain. Do not invent APIs; use read_file when needed to match existing code. When the user asks to *perform* an action (take a photo, search the web, save a file), use the appropriate TOOL; do not generate a script for that. Use code only when the user explicitly asks to *write* or *generate* code or a script. Before editing any file, read it to understand its conventions, imports, and style; mimic existing patterns. Never assume a library is available — verify it is already declared in the project dependency file (Cargo.toml, package.json, etc.). When tests fail, never modify the tests themselves; fix the code under test. If the same test still fails after three attempts, stop and ask the user for guidance."),
+        "search" => Some("You are the search agent. Use web_search to find external information (weather, news, facts). When search snippets lack concrete details, use web_fetch on a result URL and/or browser navigate plus browser snapshot, then synthesize and cite sources. Do not claim information you have not retrieved via tools when they are available."),
         "financial" => Some("You are the financial specialist. Help with budgets, cost analysis, financial reports, numeric reasoning. Be precise with figures and units. Do not invent data; state what is missing if needed."),
         "documentalist" => Some("You are the documentalist. Transform a pile of files into exploitable data. Answer from the user's document base (RAG). Prioritize [User documents] and [Long-term memory]. Use memory_search when relevant. Quote or summarize from excerpts; if insufficient, say so and suggest adding documents. Produce structured summaries when asked."),
         "project_manager" => Some("You are the project manager. Help with project tracking, milestones, task breakdown, planning. Refer to schedules and recurring tasks when relevant. Propose clear next steps and deliverables."),
         "technical_writer" => Some("You are the technical writing agent. Produce clear technical documentation, procedures, tutorials. Use a structured style (headings, steps, code blocks when relevant). Prefer clarity and precision. Use write_file when the user asks to save documentation."),
-        "research" => Some("You are the research agent. Perform in-depth research using web_search, memory_search, and the document base. Synthesize multiple sources; cite or summarize clearly. Do not invent facts."),
+        "research" => Some("You are the research agent. Perform in-depth research using web_search, memory_search, and the document base. After web_search, use web_fetch and/or browser navigate plus browser snapshot when snippets or excerpts are insufficient to answer factually. Synthesize multiple sources; cite or summarize clearly. Do not invent facts."),
         "security_audit" => Some("You are the security audit agent. Review code, config, or practices for security. Be methodical; highlight risks and suggest mitigations. Do not claim certainty where you lack context; recommend human review for critical decisions."),
         "creative" => Some("You are the creative agent. You have a strong creative sense for text and images. Produce marketing copy, creative content, stories, and audience-adapted text. Match tone and format to the requested channel and goal. When the task is to get a photo from the user's webcam/camera, use TOOL: device_invoke local_media camera capture first; for AI-generated images use generate_image."),
         "analyst" => Some("You are the product / functional analyst. Formalize the need before any production. Output: reformulated need, scope, assumptions, acceptance criteria, initial backlog. Do not jump to implementation; clarify and structure the request first."),
         "architect" => Some("You are the technical architect. Design the skeleton of the project. Output: proposed architecture, task list, dependencies between tasks, execution order, definition of done. Stay at design level; do not write full implementation."),
-        "frontend" => Some("You are the frontend agent. Produce UI components, views, and client-side logic. Focus on UX, accessibility, responsive layout, and integration with the design system. List impacted components. Do not modify database schema unless explicitly asked."),
-        "backend" => Some("You are the backend agent. Produce server-side logic, APIs, and business rules. Focus on correctness, performance, and clear contracts. Do not change frontend or DB schema unless the task explicitly requires it."),
+        "frontend" => Some("You are the frontend agent. Produce UI components, views, and client-side logic. Focus on UX, accessibility, responsive layout, and integration with the design system. List impacted components. Do not modify database schema unless explicitly asked. Before editing any file, read it to understand existing conventions and patterns; mimic the existing code style. Verify that any library you use is already declared in package.json before importing it."),
+        "backend" => Some("You are the backend agent. Produce server-side logic, APIs, and business rules. Focus on correctness, performance, and clear contracts. Do not change frontend or DB schema unless the task explicitly requires it. Before editing any file, read it to understand existing conventions, imports, and patterns; mimic the existing code style. Never assume a dependency is available — verify it in the project's dependency file. When debugging failures, address the root cause rather than the symptoms; add targeted logging to isolate the issue. If the same problem persists after three attempts, stop and ask the user."),
         "database" => Some("You are the database / data agent. Produce schemas, migrations, queries, and data pipelines. Focus on consistency, indexing, and data integrity. Output clear DDL or migration steps when applicable."),
         "integration" => Some("You are the integration agent. Wire components together: APIs, events, external services. Focus on contracts, error handling, and end-to-end flows. Produce a precise deliverable (config, glue code, or runbook)."),
         "qa" => Some("You are the quality control agent. You prevent false 'work done'. Verify coherence, requirement coverage, missing files, hidden TODOs, incomplete sections. Do not rewrite; report defects and gaps by severity. Do not validate if acceptance criteria are incomplete; output a clear report for rework."),
@@ -1423,8 +2445,244 @@ fn split_whitespace_respecting_quotes(s: &str) -> Vec<String> {
     out
 }
 
+/// Strip `- ` / `* ` / `1. ` list prefixes so tool lines can be detected.
+fn strip_optional_list_prefix(line: &str) -> &str {
+    let mut s = line.trim_start();
+    for p in ["- ", "* ", "+ ", "• "] {
+        if let Some(r) = s.strip_prefix(p) {
+            s = r.trim_start();
+            break;
+        }
+    }
+    if s.is_empty() {
+        return s;
+    }
+    if s.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        if let Some(dot) = s.find('.') {
+            if dot > 0 && s[..dot].chars().all(|c| c.is_ascii_digit()) {
+                return s[dot + 1..].trim_start();
+            }
+        }
+    }
+    s
+}
+
+/// Strip ATX heading hashes (`### Title` → `Title`).
+fn strip_markdown_heading_hashes(line: &str) -> &str {
+    let mut s = line.trim_start();
+    let mut n = 0usize;
+    while s.starts_with('#') && n < 7 {
+        n += 1;
+        s = &s[1..];
+    }
+    if n > 0 {
+        s = s.trim_start();
+    }
+    s
+}
+
+/// Leading markdown noise before `TOOL` (table pipes, headings, lists, bold, backticks).
+fn strip_leading_tool_line_noise(line: &str) -> &str {
+    let mut s = line.trim_start();
+    while s.starts_with('|') {
+        s = s[1..].trim_start();
+    }
+    s = strip_markdown_heading_hashes(s);
+    s = strip_optional_list_prefix(s);
+    s = s.trim_start_matches(|c: char| matches!(c, '*' | '`')).trim_start();
+    s
+}
+
+/// True if `prefix` is only whitespace and common markdown punctuation (no letters/words — avoids matching prose before `TOOL:`).
+fn tool_line_prefix_is_markdown_junk_only(prefix: &str) -> bool {
+    prefix.trim().chars().all(|c| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '#' | '*' | '`' | '|' | '•' | '-' | '+' | ':' | '.' | ';' | ',' | '/' | '\\'
+                    | '(' | ')' | '[' | ']'
+            )
+            || c.is_ascii_digit()
+    })
+}
+
+/// First word after `TOOL:` must match a real tool when using the "inline" heuristic (avoids prose `… TOOL: …`).
+const ORCH_INLINE_TOOL_FIRST_WORDS: &[&str] = &[
+    "write_file",
+    "read_file",
+    "edit_file",
+    "search_replace",
+    "apply_patch",
+    "list_dir",
+    "grep_content",
+    "web_search",
+    "web_fetch",
+    "run_command",
+    "browser",
+    "install_playwright",
+    "read_skill",
+    "memory_store",
+    "device_invoke",
+    "ask_user",
+    "generate_image",
+    "pdf",
+];
+
+/// `### Step — TOOL: write_file`, table junk, or other lines where `TOOL:` is not at column 0 after strips.
+fn inline_ascii_tool_colon_rest(line: &str) -> Option<&str> {
+    let t = line.trim();
+    let mut search = t;
+    let mut last_ok: Option<&str> = None;
+    while let Some(pos) = search.find("TOOL:") {
+        let abs = t.len() - search.len() + pos;
+        let prefix = &t[..abs];
+        let rest = t[abs + 5..].trim_start();
+        if let Some(tok) = rest.split_whitespace().next() {
+            let tl = tok.to_lowercase();
+            if ORCH_INLINE_TOOL_FIRST_WORDS
+                .iter()
+                .any(|&n| n == tl.as_str())
+            {
+                if tool_line_prefix_is_markdown_junk_only(prefix) {
+                    last_ok = Some(rest);
+                }
+            }
+        }
+        search = &t[abs + 5..];
+    }
+    last_ok
+}
+
+/// If the line begins with `tool` (case-insensitive) as a keyword followed by optional `*` / `` ` `` and `:`, return the rest.
+/// Handles models that emit `- Tool:`, `**TOOL:**`, table cells `| TOOL: ... |`, etc., when substring `TOOL:` is present but strict parse failed.
+fn line_rest_after_leading_tool(line: &str) -> Option<&str> {
+    line_rest_after_leading_tool_at_start(line).or_else(|| inline_ascii_tool_colon_rest(line))
+}
+
+fn line_rest_after_leading_tool_at_start(line: &str) -> Option<&str> {
+    let s = strip_leading_tool_line_noise(line);
+    if s.len() < 4 {
+        return None;
+    }
+    if !s.get(0..4)?.eq_ignore_ascii_case("tool") {
+        return None;
+    }
+    // Reject `tools:` / `toolkit:` — fifth char must not be ASCII letter.
+    if s
+        .as_bytes()
+        .get(4)
+        .is_some_and(|b| b.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    let mut rest = &s[4..];
+    rest = rest.trim_start();
+    while rest.starts_with('*') || rest.starts_with('`') {
+        rest = &rest[1..];
+    }
+    rest = rest.strip_prefix(':')?;
+    rest = rest.trim_start();
+    while rest.starts_with('*') || rest.starts_with('`') {
+        rest = &rest[1..];
+    }
+    // Drop trailing table pipe from first cell
+    let rest = rest.trim_end();
+    let rest = rest.strip_suffix('|').map(|x| x.trim_end()).unwrap_or(rest);
+    Some(rest.trim_start())
+}
+
+/// Returns true if `tool_name` (already lower-cased) takes a multiline body argument.
+fn tool_supports_multiline_body(tool_name: &str) -> bool {
+    matches!(tool_name, "apply_patch" | "edit_file" | "write_file" | "ask_user")
+}
+
+fn tool_name_is_safe_identifier(tool_name: &str) -> bool {
+    !tool_name.is_empty()
+        && tool_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+/// Rewrite lines so strict `TOOL:` prefix parsing succeeds (see `parse_tool_calls`).
+///
+/// Lines that are inside the body of a multiline tool (`write_file`, `edit_file`,
+/// `apply_patch`, `ask_user`) are **not** normalized — only a real tool header
+/// (canonical `TOOL: …` or a sloppy markdown-style prefix recognized by
+/// `line_rest_after_leading_tool`, e.g. `- Tool: …` or `**TOOL:** …`) can
+/// terminate a body.  Lines that merely *mention* a tool mid-sentence
+/// (e.g. `### Step — TOOL: read_file`) remain body content because
+/// `line_rest_after_leading_tool` requires the keyword to appear at the effective
+/// start of the line after stripping markdown noise.
+fn normalize_response_tool_prefixes(response: &str) -> String {
+    let mut in_fence = false;
+    let mut in_multiline_body = false;
+    let mut out_lines = Vec::new();
+
+    for raw in response.lines() {
+        let trimmed = raw.trim();
+
+        // Track fenced code blocks (``` or ```lang) — never normalize inside them.
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            out_lines.push(raw.to_string());
+            continue;
+        }
+
+        if in_fence {
+            out_lines.push(raw.to_string());
+            continue;
+        }
+
+        // Inside a multiline body, exit body mode only when the line is a real
+        // tool header — either the canonical "TOOL: …" form or a sloppy
+        // markdown-style prefix that `line_rest_after_leading_tool` recognises
+        // (e.g. "- Tool: …", "**TOOL:** …").  Lines where TOOL: is embedded
+        // after non-noise text (e.g. "### Step — TOOL: read_file") are kept as
+        // body content because `line_rest_after_leading_tool` requires the
+        // keyword at the effective start of the line.
+        if in_multiline_body {
+            if raw.trim_start().starts_with("TOOL:") || line_rest_after_leading_tool(raw).is_some() {
+                // Real tool header (canonical or sloppy) — exit body mode and fall through.
+                in_multiline_body = false;
+            } else {
+                out_lines.push(raw.to_string());
+                continue;
+            }
+        }
+
+        if let Some(rest) = line_rest_after_leading_tool(raw) {
+            let normalized = format!("TOOL: {}", rest);
+            // If this tool supports a multiline body, subsequent lines are body content.
+            if let Some(name) = rest.split_whitespace().next() {
+                if tool_supports_multiline_body(&name.to_lowercase()) {
+                    in_multiline_body = true;
+                }
+            }
+            out_lines.push(normalized);
+        } else {
+            // Already canonical TOOL: line — still need to track body-mode entry.
+            if let Some(rest) = trimmed.strip_prefix("TOOL:") {
+                if let Some(name) = rest.trim().split_whitespace().next() {
+                    if tool_supports_multiline_body(&name.to_lowercase()) {
+                        in_multiline_body = true;
+                    }
+                }
+            }
+            out_lines.push(raw.to_string());
+        }
+    }
+
+    out_lines.join("\n")
+}
+
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
 fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
+    let normalized = normalize_response_tool_prefixes(response);
+    parse_tool_calls_strict(&normalized)
+}
+
+/// Parse already-normalized tool lines (internal).
+fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
     let lines: Vec<&str> = response.lines().collect();
     let mut i = 0;
@@ -1435,13 +2693,14 @@ fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
             // Split by whitespace, respecting double-quoted args (so run_command -H "Bearer $VAR" works)
             let parts: Vec<String> = split_whitespace_respecting_quotes(rest);
             if let Some((name, fixed_args)) = parts.split_first() {
+                let tool_name_lc = name.to_lowercase();
+                if !tool_name_is_safe_identifier(&tool_name_lc) {
+                    i += 1;
+                    continue;
+                }
                 let mut args = fixed_args.to_vec();
                 // Only certain tools support a multi-line body argument.
-                let tool_name_lc = name.to_lowercase();
-                let supports_body = matches!(
-                    tool_name_lc.as_str(),
-                    "apply_patch" | "edit_file" | "write_file" | "ask_user"
-                );
+                let supports_body = tool_supports_multiline_body(&tool_name_lc);
 
                 if supports_body {
                     // Collect subsequent non-TOOL: lines as a raw multi-line body (for
@@ -1476,11 +2735,12 @@ fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
 }
 
 /// Parse run_command args: leading VAULT:vault_key=ENV_VAR entries are extracted;
-/// the first non-VAULT arg is the command, the rest are command arguments.
-/// Returns (vault_specs: (vault_key, env_var), command, cmd_args).
-fn parse_run_command_args(args: &[String]) -> (Vec<(String, String)>, String, Vec<String>) {
+/// optional `--cwd <path>` (after VAULT lines) sets the working directory;
+/// the next token is the command, the rest are command arguments.
+/// Returns (vault_specs, cwd_flag, command, cmd_args).
+fn parse_run_command_args(args: &[String]) -> (Vec<(String, String)>, Option<String>, String, Vec<String>) {
     let mut vault_specs = Vec::new();
-    let mut rest = Vec::new();
+    let mut rest: Vec<String> = Vec::new();
     for arg in args {
         if let Some(s) = arg.strip_prefix("VAULT:") {
             if let Some((vault_key, env_var)) = s.split_once('=') {
@@ -1490,11 +2750,54 @@ fn parse_run_command_args(args: &[String]) -> (Vec<(String, String)>, String, Ve
         }
         rest.push(arg.clone());
     }
+    let mut cwd_flag: Option<String> = None;
+    if rest.len() >= 2 && rest[0] == "--cwd" {
+        cwd_flag = Some(rest[1].clone());
+        rest.drain(..2);
+    }
     let (command, cmd_args) = rest
         .split_first()
         .map(|(c, a)| (c.clone(), a.to_vec()))
         .unwrap_or_else(|| (String::new(), Vec::new()));
-    (vault_specs, command, cmd_args)
+    (vault_specs, cwd_flag, command, cmd_args)
+}
+
+/// Resolve working directory for `run_command` / `run_terminal` / `run_command_background`.
+/// Returns `None` for legacy behavior (daemon process cwd). Returns `Some(path)` when `--cwd` was set
+/// or `run_command_default_cwd_workspace` applies.
+fn resolve_run_command_working_dir(
+    cwd_flag: Option<&str>,
+    workspace_root: Option<&std::path::Path>,
+    policy: &akasha_tools::ToolsPolicy,
+) -> Result<Option<std::path::PathBuf>, String> {
+    if let Some(raw) = cwd_flag {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err("--cwd requires a non-empty path".to_string());
+        }
+        let p = resolve_tool_disk_path(raw, workspace_root);
+        let p = strip_verbatim_prefix(p);
+        let meta = std::fs::metadata(&p).map_err(|e| format!("cwd {}: {}", p.display(), e))?;
+        if !meta.is_dir() {
+            return Err(format!("--cwd is not a directory: {}", p.display()));
+        }
+        if !policy.can_read(&p) {
+            return Err(format!(
+                "cwd not allowed by policy (allowed_read_paths): {}",
+                p.display()
+            ));
+        }
+        return Ok(Some(p));
+    }
+    if policy.run_command_default_cwd_workspace {
+        if let Some(root) = workspace_root {
+            let root_pb = strip_verbatim_prefix(root.to_path_buf());
+            if root_pb.is_dir() && policy.can_read(&root_pb) {
+                return Ok(Some(root_pb));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Open a URL in the system default browser. Only http and https URLs are allowed.
@@ -1546,7 +2849,152 @@ fn parse_device_invoke_params(args: &[String]) -> serde_json::Value {
     }
 }
 
-/// Execute one tool call via ToolExecutor. Returns `(success, display_string)` for structured events.
+/// Root task id for the `workspace:/` virtual store (same bucket as `write_file`).
+/// Orchestrated children must read the lineage root map; otherwise they miss files written under the parent id.
+fn workspace_lineage_root_task_id(task_id: Uuid, store_path: Option<&std::path::Path>) -> Uuid {
+    store_path
+        .and_then(|sp| TaskStore::open(sp).ok())
+        .map(|s| {
+            let mut current = task_id;
+            for _ in 0..8 {
+                let parent = s
+                    .get(current)
+                    .ok()
+                    .flatten()
+                    .and_then(|t| t.parent_task_id);
+                match parent {
+                    Some(p) => current = p,
+                    None => break,
+                }
+            }
+            current
+        })
+        .unwrap_or(task_id)
+}
+
+/// LLMs often paste a **stale** root id into `workspace:/.akasha/plan_<uuid>.md` (e.g. from an older run).
+/// Rewrite to this task's lineage root so reads/writes target the live orchestration plan.
+fn rewrite_workspace_plan_key_to_lineage_root(key: &str, lineage_root: Uuid) -> (String, Option<Uuid>) {
+    const PREFIX: &str = ".akasha/plan_";
+    const SUFFIX: &str = ".md";
+    let k = key.replace('\\', "/");
+    if !k.starts_with(PREFIX) || !k.ends_with(SUFFIX) {
+        return (key.to_string(), None);
+    }
+    let mid = &k[PREFIX.len()..k.len() - SUFFIX.len()];
+    let Ok(parsed) = Uuid::parse_str(mid) else {
+        return (key.to_string(), None);
+    };
+    if parsed == lineage_root {
+        return (k, None);
+    }
+    let new_key = format!("{PREFIX}{lineage_root}{SUFFIX}");
+    (new_key, Some(parsed))
+}
+
+/// Rewrite a full `workspace:/...` path string so that any stale plan UUID is replaced by the
+/// lineage-root UUID.  Non-workspace paths and non-plan-trace paths are returned unchanged.
+/// Used before calling `resolve_tool_disk_path` for partial-edit tools (`search_replace`,
+/// `edit_file`, `apply_patch`) so they operate on the live plan file rather than a stale copy.
+fn rewrite_workspace_plan_path_str(
+    path_str: &str,
+    task_id: Uuid,
+    store_path: Option<&std::path::Path>,
+) -> String {
+    if !(path_str.starts_with("workspace:/") || path_str.starts_with("workspace:")) {
+        return path_str.to_string();
+    }
+    let key = path_str
+        .trim_start_matches("workspace:/")
+        .trim_start_matches("workspace:")
+        .trim_start_matches('/');
+    let lineage_id = workspace_lineage_root_task_id(task_id, store_path);
+    let (new_key, _) = rewrite_workspace_plan_key_to_lineage_root(key, lineage_id);
+    format!("workspace:/{new_key}")
+}
+
+/// After a successful partial edit (`edit_file`, `search_replace`, `apply_patch`) on a `workspace:/` path,
+/// re-read the updated disk file and insert it into the in-memory workspace store so that subsequent
+/// `read_file workspace:/` calls return the latest content.
+async fn sync_workspace_store_from_disk(
+    workspace_store: Option<&TaskWorkspaceStore>,
+    task_id: Uuid,
+    store_path: Option<&std::path::Path>,
+    workspace_path_str: &str,
+    disk_path: &std::path::Path,
+) {
+    let Some(ws) = workspace_store else { return };
+    let key = workspace_path_str
+        .trim_start_matches("workspace:/")
+        .trim_start_matches("workspace:")
+        .trim_start_matches('/')
+        .to_string();
+    let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
+    let (key, _) = rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
+    if let Ok(updated) = tokio::fs::read_to_string(disk_path).await {
+        let mut guard = ws.write().await;
+        guard.entry(lineage_task_id).or_default().insert(key, updated);
+    }
+}
+
+fn parse_plugin_tool_invocation(
+    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
+    tool_name: &str,
+    args: &[String],
+) -> Option<(String, String)> {
+    let registry = plugin_registry?;
+    let available_ids: std::collections::HashSet<String> =
+        registry.list().into_iter().map(|p| p.id).collect();
+
+    if available_ids.is_empty() {
+        return None;
+    }
+
+    let (plugin_id, action, forwarded_args): (String, Option<String>, Vec<String>) =
+        if tool_name.eq_ignore_ascii_case("plugin.call")
+            || tool_name.eq_ignore_ascii_case("plugin_call")
+        {
+            let plugin_id = args.first()?.trim().to_string();
+            let forwarded = args.get(1..).map(|v| v.to_vec()).unwrap_or_default();
+            (plugin_id, None, forwarded)
+        } else if let Some(id) = tool_name.strip_prefix("plugin.") {
+            (id.trim().to_string(), None, args.to_vec())
+        } else if available_ids.contains(tool_name) {
+            (tool_name.to_string(), None, args.to_vec())
+        } else if let Some((prefix, suffix)) = tool_name.split_once('_') {
+            if available_ids.contains(prefix) {
+                (
+                    prefix.to_string(),
+                    Some(suffix.trim().to_string()),
+                    args.to_vec(),
+                )
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        };
+
+    if plugin_id.is_empty() || !available_ids.contains(&plugin_id) {
+        return None;
+    }
+
+    let payload = serde_json::json!({
+        "tool": tool_name,
+        "plugin_id": plugin_id,
+        "action": action,
+        "args": forwarded_args,
+    });
+    Some((
+        payload
+            .get("plugin_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        payload.to_string(),
+    ))
+}
+
 async fn execute_tool_call(
     executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
     tool_name: &str,
@@ -1557,58 +3005,133 @@ async fn execute_tool_call(
     store_path: Option<&std::path::Path>,
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     message_webhook_url: Option<&str>,
+    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
     device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
     workspace_store: Option<&TaskWorkspaceStore>,
     browser_registry: Option<&crate::browser::BrowserSessionRegistry>,
+    workspace_root: Option<&std::path::Path>,
 ) -> (bool, String, Option<String>) {
     use std::path::Path;
-    if !executor.policy.can_use_tool(tool_name) {
+    let plugin_invocation = parse_plugin_tool_invocation(plugin_registry, tool_name, args);
+    let is_plugin_candidate = plugin_invocation.is_some();
+    let can_use_named_tool = executor.policy.can_use_tool(tool_name);
+    let can_use_plugin_call = executor.policy.can_use_tool("plugin.call")
+        || executor.policy.can_use_tool("plugin_call");
+    if is_plugin_candidate && !can_use_plugin_call {
+        return (
+            false,
+            "[plugin] tool not allowed by current profile (enable plugin.call)".to_string(),
+            None,
+        );
+    }
+    if !can_use_named_tool && !is_plugin_candidate {
         return (false, format!("[{}] tool not allowed by current profile", tool_name), None);
     }
     let path_arg = |i: usize| args.get(i).map(|s| Path::new(s.as_str()));
+    // For tools that take a single path arg: rejoin args so paths with spaces (e.g. "Cas d'usage.pdf") work when the LLM splits them.
+    let path_arg_joined = |args: &[String]| -> String {
+        if args.is_empty() { String::new() } else { args.join(" ").trim().to_string() }
+    };
     let result = match tool_name {
         "read_file" => {
-            if let Some(path_str) = args.get(0) {
-                let path_str = path_str.as_str();
-                if path_str.starts_with("workspace:/") || path_str.starts_with("workspace:") {
-                    match workspace_store {
-                        Some(ws) => {
-                            let key = path_str
-                                .trim_start_matches("workspace:/")
-                                .trim_start_matches("workspace:")
-                                .trim_start_matches('/')
-                                .to_string();
-                            let guard = ws.read().await;
-                            if let Some(map) = guard.get(&task_id) {
-                                if let Some(content) = map.get(&key) {
-                                    let preview = if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] };
-                                    return (true, format!("[read_file workspace:{}] {} chars: {}", key, content.len(), preview), None);
-                                }
+            let path_str = normalize_tool_path_hint(&path_arg_joined(args));
+            if path_str.is_empty() {
+                (false, "[read_file] usage: read_file <path>".to_string(), None)
+            } else if is_workspace_virtual_path(&path_str) {
+                let key = path_str
+                    .trim_start_matches("workspace:/")
+                    .trim_start_matches("workspace:")
+                    .trim_start_matches('/')
+                    .to_string();
+                let key = normalize_apostrophes(&key);
+                let lineage_id = workspace_lineage_root_task_id(task_id, store_path);
+                let (key, _) = rewrite_workspace_plan_key_to_lineage_root(&key, lineage_id);
+                if let Some(ws) = workspace_store {
+                    let guard = ws.read().await;
+                    // Prefer lineage root (where write_file stores); fall back to this task id.
+                    let mem_map = guard
+                        .get(&lineage_id)
+                        .or_else(|| guard.get(&task_id));
+                    if let Some(map) = mem_map {
+                        if let Some(content) = map.get(&key) {
+                            // Empty in-memory entry must not mask the real file on disk (orchestrator
+                            // writes `.akasha/plan_*.md` with tokio::fs, not via this map).
+                            if !content.is_empty() {
+                                let preview = if content.len() <= 500 {
+                                    content.as_str()
+                                } else {
+                                    &content[..content.floor_char_boundary(500)]
+                                };
+                                return (
+                                    true,
+                                    format!(
+                                        "[read_file workspace:{}] {} chars: {}",
+                                        key,
+                                        content.len(),
+                                        preview
+                                    ),
+                                    None,
+                                );
                             }
-                            return (false, format!("[read_file workspace] path not found: {}", key), None);
                         }
-                        None => return (false, "[read_file] workspace paths require a workspace store.".to_string(), None),
                     }
+                } else {
+                    return (false, "[read_file] workspace paths require a workspace store.".to_string(), None);
                 }
-            }
-            if let Some(p) = path_arg(0) {
-                match executor.read_file(p).await {
+                let disk_path = strip_verbatim_prefix(
+                    workspace_root
+                        .map(|root| root.join(&key))
+                        .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                        .unwrap_or_else(|| Path::new(&key).to_path_buf()),
+                );
+                if !executor.policy.can_read(&disk_path) {
+                    return (false, format!("[read_file workspace] path not allowed: {} (allowed_read_paths)", key), None);
+                }
+                if path_extension_is_pdf(&disk_path) {
+                    return pdf_extract_message_from_disk(&disk_path, "read_file").await;
+                }
+                match executor.read_file(&disk_path).await {
                     Ok((content, res)) => {
                         let msg = if res.success {
-                            format!("[read_file {}] {} chars: {}", p.display(), content.len(), if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] })
+                            format!(
+                                "[read_file {}] {} chars: {}",
+                                disk_path.display(),
+                                content.len(),
+                                if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] }
+                            )
                         } else {
-                            format!("[read_file] denied or error: {}", res.summary)
+                            format!("[read_file workspace] read failed: {}", res.summary)
                         };
-                        (res.success, msg, None)
+                        return (res.success, msg, None);
                     }
-                    Err(e) => (false, format!("[read_file] error: {}", e), None),
-                }
+                    Err(e) => return (false, format!("[read_file workspace] read error for {} at {}: {}", key, disk_path.display(), e), None),
+                };
             } else {
-                (false, "[read_file] usage: read_file <path>".to_string(), None)
+                let p = Path::new(&path_str);
+                if path_extension_is_pdf(p) && executor.policy.can_read(p) {
+                    pdf_extract_message_from_disk(p, "read_file").await
+                } else {
+                    match executor.read_file(p).await {
+                        Ok((content, res)) => {
+                            let msg = if res.success {
+                                format!("[read_file {}] {} chars: {}", p.display(), content.len(), if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] })
+                            } else {
+                                format!("[read_file] denied or error: {}", res.summary)
+                            };
+                            (res.success, msg, None)
+                        }
+                        Err(e) => (false, format!("[read_file] error: {}", e), None),
+                    }
+                }
             }
         }
         "run_command" => {
-            let (vault_specs, cmd, cmd_args) = parse_run_command_args(args);
+            let (vault_specs, cwd_flag, cmd, cmd_args) = parse_run_command_args(args);
+            let cwd_resolved = match resolve_run_command_working_dir(cwd_flag.as_deref(), workspace_root, &executor.policy) {
+                Ok(c) => c,
+                Err(e) => return (false, format!("[run_command] {}", e), None),
+            };
+            let cwd_ref = cwd_resolved.as_deref();
             let extra_env = if vault_specs.is_empty() {
                 None
             } else {
@@ -1650,12 +3173,21 @@ async fn execute_tool_call(
                 }
             };
             let env_ref = extra_env.as_deref();
-            match executor.run_command(&cmd, &cmd_args, None, env_ref).await {
+            match executor.run_command(&cmd, &cmd_args, cwd_ref, env_ref).await {
                 Ok((out, res)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let stderr = String::from_utf8_lossy(&out.stderr);
+                    let cwd_note = cwd_ref
+                        .map(|p| format!(" cwd={}", p.display()))
+                        .unwrap_or_default();
                     let msg = if res.success {
-                        format!("[run_command {}] stdout: {} stderr: {}", cmd, stdout.trim(), stderr.trim())
+                        format!(
+                            "[run_command {}{}] stdout: {} stderr: {}",
+                            cmd,
+                            cwd_note,
+                            stdout.trim(),
+                            stderr.trim()
+                        )
                     } else {
                         format!("[run_command] {} stderr: {}", res.summary, stderr.trim())
                     };
@@ -1665,8 +3197,13 @@ async fn execute_tool_call(
             }
         }
         "run_terminal" => {
-            let (_vault_specs, cmd, cmd_args) = parse_run_command_args(args);
-            match executor.run_command(&cmd, &cmd_args, None, None).await {
+            let (_vault_specs, cwd_flag, cmd, cmd_args) = parse_run_command_args(args);
+            let cwd_resolved = match resolve_run_command_working_dir(cwd_flag.as_deref(), workspace_root, &executor.policy) {
+                Ok(c) => c,
+                Err(e) => return (false, format!("[run_terminal] {}", e), None),
+            };
+            let cwd_ref = cwd_resolved.as_deref();
+            match executor.run_command(&cmd, &cmd_args, cwd_ref, None).await {
                 Ok((out, res)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1681,7 +3218,11 @@ async fn execute_tool_call(
             }
         }
         "run_command_background" => {
-            let (_vault_specs, cmd, cmd_args) = parse_run_command_args(args);
+            let (_vault_specs, cwd_flag, cmd, cmd_args) = parse_run_command_args(args);
+            let cwd_resolved = match resolve_run_command_working_dir(cwd_flag.as_deref(), workspace_root, &executor.policy) {
+                Ok(c) => c,
+                Err(e) => return (false, format!("[run_command_background] {}", e), None),
+            };
             let cmd_display = format!("{} {}", cmd, cmd_args.join(" "));
             match process_registry {
                 Some(reg) => {
@@ -1691,7 +3232,8 @@ async fn execute_tool_call(
                     let cell_clone = cell.clone();
                     let reg_clone = reg.clone();
                     let task = tokio::spawn(async move {
-                        let result = exec.run_command(&cmd, &cmd_args, None, None).await;
+                        let cwd_ref = cwd_resolved.as_deref();
+                        let result = exec.run_command(&cmd, &cmd_args, cwd_ref, None).await;
                         *cell_clone.write().await = Some(result);
                         // Auto-cleanup after a TTL to prevent leaking sessions the client never polls.
                         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
@@ -1989,6 +3531,7 @@ async fn execute_tool_call(
                                     session_id: sid,
                                     image_data_urls: None,
                                     execution_mode: None,
+                                    preferred_task_type: None,
                                 })
                                 .await
                                 .is_err()
@@ -2044,7 +3587,7 @@ async fn execute_tool_call(
             let Some(runner_path) = crate::browser::find_playwright_runner_path() else {
                 return (
                     false,
-                    "[browser] Playwright runner not found. Set AKASHA_PLAYWRIGHT_RUNNER or run from repo with scripts/playwright-runner.".to_string(),
+                    "[browser] Playwright runner not found. Install: copy scripts/playwright-runner next to the executable (playwright-runner/run.mjs), or under %USERPROFILE%\\akasha\\playwright-runner, or set AKASHA_PLAYWRIGHT_RUNNER / AKASHA_DATA_DIR (see docs). Then npm install in that folder.".to_string(),
                     None,
                 );
             };
@@ -2087,9 +3630,15 @@ async fn execute_tool_call(
                     drop(g);
                     match crate::browser::create_browser_session(&runner_path, headless, action_timeout).await {
                         Ok(mut new_session) => {
-                            let res = new_session.send_command(&serde_json::json!({ "cmd": "navigate", "params": { "url": url, "timeout_secs": action_timeout } })).await;
-                            let mut g = registry.write().await;
-                            g.insert(task_id, new_session);
+                            let res = new_session
+                                .send_command(&serde_json::json!({ "cmd": "navigate", "params": { "url": url, "timeout_secs": action_timeout } }))
+                                .await;
+                            // Only register if IPC still works; on Err (e.g. runner stdout EOF) the child may
+                            // already be reaped — inserting a dead session poisons later navigate/snapshot calls.
+                            if res.is_ok() {
+                                let mut g = registry.write().await;
+                                g.insert(task_id, new_session);
+                            }
                             res
                         }
                         Err(e) => return (false, format!("[browser] error: {}", e), None),
@@ -2146,6 +3695,40 @@ async fn execute_tool_call(
                 (false, "[browser] usage: browser navigate <url> | browser snapshot | browser screenshot (Phase 2).".to_string(), None)
             }
         }
+        "install_playwright" => {
+            if !executor.policy.browser_enabled {
+                return (
+                    false,
+                    "[install_playwright] Browser automation is disabled. Set browser_enabled: true in tools_policy.yaml.".to_string(),
+                    None,
+                );
+            }
+            let Some(runner_path) = crate::browser::find_playwright_runner_path() else {
+                return (
+                    false,
+                    "[install_playwright] Playwright runner not found. Copy scripts/playwright-runner beside the executable or under ~/akasha/playwright-runner, or set AKASHA_PLAYWRIGHT_RUNNER / AKASHA_DATA_DIR.".to_string(),
+                    None,
+                );
+            };
+            let Some(runner_dir) = crate::browser::playwright_runner_dir(&runner_path) else {
+                return (
+                    false,
+                    "[install_playwright] Could not resolve runner directory.".to_string(),
+                    None,
+                );
+            };
+            match crate::browser::ensure_playwright_chromium(&runner_dir).await {
+                Ok(()) => (
+                    true,
+                    format!(
+                        "[install_playwright] npm install and playwright install chromium completed in {}.",
+                        runner_dir.display()
+                    ),
+                    None,
+                ),
+                Err(e) => (false, format!("[install_playwright] {}", e), None),
+            }
+        }
         "image" => {
             let path_or_url = args.get(0).map(String::as_str).unwrap_or("").trim();
             if path_or_url.is_empty() {
@@ -2155,9 +3738,42 @@ async fn execute_tool_call(
             }
         }
         "pdf" => {
-            let p = path_arg(0);
-            match p {
-                Some(path) if executor.policy.can_read(path) => {
+            let path_str = path_arg_joined(args);
+            let path_str = path_str.trim();
+            if path_str.is_empty() {
+                (false, "[pdf] usage: pdf <path> — path must be in allowed_read_paths".to_string(), None)
+            } else if path_str.starts_with("workspace:/") || path_str.starts_with("workspace:") {
+                let key = path_str
+                    .trim_start_matches("workspace:/")
+                    .trim_start_matches("workspace:")
+                    .trim_start_matches('/')
+                    .to_string();
+                let key = normalize_apostrophes(&key);
+                let disk_path = strip_verbatim_prefix(
+                    workspace_root
+                        .map(|root| root.join(&key))
+                        .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                        .unwrap_or_else(|| Path::new(&key).to_path_buf()),
+                );
+                if !executor.policy.can_read(&disk_path) {
+                    (false, "[pdf] path not allowed by policy (allowed_read_paths)".to_string(), None)
+                } else {
+                    match tokio::fs::read(&disk_path).await {
+                        Ok(bytes) => match pdf_extract::extract_text_from_mem(&bytes) {
+                            Ok(text) => {
+                                let preview = if text.len() > 2000 { format!("{}…", text.chars().take(2000).collect::<String>()) } else { text.clone() };
+                                (true, format!("[pdf {}] extracted {} chars:\n{}", disk_path.display(), text.len(), preview), None)
+                            }
+                            Err(e) => (false, format!("[pdf] extraction failed: {}", e), None),
+                        },
+                        Err(e) => (false, format!("[pdf] read failed: {} (ensure file exists at {})", e, disk_path.display()), None),
+                    }
+                }
+            } else {
+                let path = Path::new(path_str);
+                if !executor.policy.can_read(path) {
+                    (false, "[pdf] path not allowed by policy (allowed_read_paths)".to_string(), None)
+                } else {
                     match tokio::fs::read(path).await {
                         Ok(bytes) => match pdf_extract::extract_text_from_mem(&bytes) {
                             Ok(text) => {
@@ -2169,14 +3785,15 @@ async fn execute_tool_call(
                         Err(e) => (false, format!("[pdf] read failed: {}", e), None),
                     }
                 }
-                Some(_) => (false, "[pdf] path not allowed by policy (allowed_read_paths)".to_string(), None),
-                None => (false, "[pdf] usage: pdf <path> — path must be in allowed_read_paths".to_string(), None),
             }
         }
         "search_files" => {
-            let dir = path_arg(0).unwrap_or(Path::new("."));
+            let (args, respect_gitignore, _) = strip_file_search_flags(args);
+            let raw_dir = args.get(0).map(String::as_str).unwrap_or(".");
+            let dir_pb = resolve_tool_disk_path(raw_dir, workspace_root);
             let pattern = args.get(1).map(String::as_str).unwrap_or("*");
-            match executor.search_files(dir, pattern).await {
+            let dir = dir_pb.as_path();
+            match executor.search_files(dir, pattern, respect_gitignore).await {
                 Ok((paths, res)) => {
                     let msg = if res.success {
                         let list: Vec<String> = paths.iter().take(20).map(|p| p.display().to_string()).collect();
@@ -2190,13 +3807,23 @@ async fn execute_tool_call(
             }
         }
         "grep_content" => {
-            let dir = path_arg(0).unwrap_or(Path::new("."));
+            let (args, respect_gitignore, use_regex) = strip_file_search_flags(args);
+            let raw_dir = args.get(0).map(String::as_str).unwrap_or(".");
+            let dir_pb = resolve_tool_disk_path(raw_dir, workspace_root);
+            let dir = dir_pb.as_path();
             let pattern = args.get(1).map(String::as_str).unwrap_or("");
             let file_glob = args.get(2).map(String::as_str).filter(|s| !s.is_empty());
             if pattern.is_empty() {
-                return (false, "[grep_content] usage: grep_content <dir> <pattern> [file_glob]".to_string(), None);
+                return (
+                    false,
+                    "[grep_content] usage: grep_content <dir> <pattern> [file_glob] [--regex] [--no-ignore]".to_string(),
+                    None,
+                );
             }
-            match executor.grep_content(dir, pattern, file_glob, 50).await {
+            match executor
+                .grep_content(dir, pattern, file_glob, 50, use_regex, respect_gitignore)
+                .await
+            {
                 Ok((matches, res)) => {
                     let msg = if res.success {
                         let lines: Vec<String> = matches
@@ -2214,31 +3841,63 @@ async fn execute_tool_call(
             }
         }
         "write_file" => {
-            let path_str_opt = args.get(0).map(String::as_str);
-            if let Some(path_str) = path_str_opt {
-                if path_str.starts_with("workspace:/") || path_str.starts_with("workspace:") {
-                    match workspace_store {
-                        Some(ws) => {
-                            let key = path_str
-                                .trim_start_matches("workspace:/")
-                                .trim_start_matches("workspace:")
-                                .trim_start_matches('/')
-                                .to_string();
-                            let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
-                            let mut guard = ws.write().await;
-                            let per_task = guard.entry(task_id).or_default();
-                            per_task.insert(key.clone(), content);
-                            return (true, format!("[write_file workspace:{}] saved.", key), None);
+            let Some((path_str, content)) = parse_write_file_request(args) else {
+                return (false, "[write_file] usage: write_file <path> <content>".to_string(), None);
+            };
+            if is_workspace_virtual_path(&path_str) {
+                match workspace_store {
+                    Some(ws) => {
+                        let key = path_str
+                            .trim_start_matches("workspace:/")
+                            .trim_start_matches("workspace:")
+                            .trim_start_matches('/')
+                            .to_string();
+                        let mut key = key.trim().trim_matches('`').trim_matches('"').to_string();
+                        if key.ends_with('#') {
+                            key.pop();
                         }
-                        None => return (false, "[write_file] workspace paths require a workspace store.".to_string(), None),
+                        let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
+                        let (key, _) =
+                            rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
+                        let mut guard = ws.write().await;
+                        let per_task = guard.entry(lineage_task_id).or_default();
+                        let previous_mem = per_task.get(&key).cloned().unwrap_or_default();
+                        // Only prefer the longer previous content for plan-trace files
+                        // (.akasha/plan_*.md) where provider truncation is a known risk.
+                        // For all other files, always use the new content so legitimate
+                        // shortening edits (e.g. removing placeholder sections) are honoured.
+                        let is_plan_trace = key.starts_with(".akasha/plan_") && key.ends_with(".md");
+                        let effective_content = if is_plan_trace
+                            && !previous_mem.is_empty()
+                            && content.chars().count() < previous_mem.chars().count()
+                        {
+                            previous_mem.clone()
+                        } else {
+                            content.clone()
+                        };
+                        per_task.insert(key.clone(), effective_content.clone());
+                        drop(guard);
+                        // Also write to disk under data_dir (workspace root = store_path.parent())
+                        let rel_path = Path::new(&key);
+                        if executor.policy.can_write(rel_path) {
+                            let disk_path_opt = workspace_root.map(|root| root.join(&key))
+                                .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                                .map(strip_verbatim_prefix);
+                            if let Some(disk_path) = disk_path_opt {
+                                if let Some(parent) = disk_path.parent() {
+                                    let _ = tokio::fs::create_dir_all(parent).await;
+                                }
+                                if tokio::fs::write(&disk_path, &effective_content).await.is_ok() {
+                                    return (true, format!("[write_file workspace:{}] saved (disk).", key), None);
+                                }
+                            }
+                        }
+                        return (true, format!("[write_file workspace:{}] saved.", key), None);
                     }
+                    None => return (false, "[write_file] workspace paths require a workspace store.".to_string(), None),
                 }
             }
-            let path = match path_arg(0) {
-                Some(p) => p,
-                None => return (false, "[write_file] usage: write_file <path> <content>".to_string(), None),
-            };
-            let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
+            let path = Path::new(&path_str);
             match executor.write_file(path, &content).await {
                 Ok(res) => {
                     let msg = if res.success {
@@ -2252,7 +3911,14 @@ async fn execute_tool_call(
             }
         }
         "search_replace" => {
-            let path = path_arg(0);
+            let path_str = match args.get(0) {
+                Some(s) => s.as_str(),
+                None => return (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None),
+            };
+            let is_workspace = path_str.starts_with("workspace:/") || path_str.starts_with("workspace:");
+            let path_str_rewritten = rewrite_workspace_plan_path_str(path_str, task_id, store_path);
+            let path_str = path_str_rewritten.as_str();
+            let disk_path = resolve_tool_disk_path(path_str, workspace_root);
             let rest = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
             let Some((search, replace)) = rest
                 .split_once('|')
@@ -2260,76 +3926,225 @@ async fn execute_tool_call(
             else {
                 return (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None);
             };
-            match path {
-                Some(p) => match executor.search_replace(p, &search, &replace).await {
-                    Ok(res) => {
-                        let msg = if res.success {
-                            format!("[search_replace {}] {}", p.display(), res.summary)
-                        } else {
-                            format!("[search_replace] {}", res.summary)
-                        };
-                        (res.success, msg, None)
+            match executor.search_replace(&disk_path, &search, &replace).await {
+                Ok(res) => {
+                    if res.success && is_workspace {
+                        sync_workspace_store_from_disk(workspace_store, task_id, store_path, path_str, &disk_path).await;
                     }
-                    Err(e) => (false, format!("[search_replace] error: {}", e), None),
-                },
-                None => (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None),
+                    let msg = if res.success {
+                        format!("[search_replace {}] {}", disk_path.display(), res.summary)
+                    } else {
+                        format!("[search_replace] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[search_replace] error: {}", e), None),
             }
         }
         "edit_file" => {
-            let path = path_arg(0);
+            let path_str = match args.get(0) {
+                Some(s) => s.as_str(),
+                None => return (false, "[edit_file] usage: edit_file <path> <start_line> <end_line> <new_content>".to_string(), None),
+            };
+            let is_workspace = path_str.starts_with("workspace:/") || path_str.starts_with("workspace:");
+            let path_str_rewritten = rewrite_workspace_plan_path_str(path_str, task_id, store_path);
+            let path_str = path_str_rewritten.as_str();
+            let disk_path = resolve_tool_disk_path(path_str, workspace_root);
             let start_line = args.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
             let end_line = args.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
             let new_content = args.get(3..).map(|a| a.join("\n")).unwrap_or_default();
-            match path {
-                Some(p) => match executor.edit_file(p, start_line, end_line, &new_content).await {
-                    Ok(res) => {
-                        let msg = if res.success {
-                            format!("[edit_file {}] {}", p.display(), res.summary)
-                        } else {
-                            format!("[edit_file] {}", res.summary)
-                        };
-                        (res.success, msg, None)
+            match executor.edit_file(&disk_path, start_line, end_line, &new_content).await {
+                Ok(res) => {
+                    if res.success && is_workspace {
+                        sync_workspace_store_from_disk(workspace_store, task_id, store_path, path_str, &disk_path).await;
                     }
-                    Err(e) => (false, format!("[edit_file] error: {}", e), None),
-                },
-                None => (false, "[edit_file] usage: edit_file <path> <start_line> <end_line> <new_content>".to_string(), None),
+                    let msg = if res.success {
+                        format!("[edit_file {}] {}", disk_path.display(), res.summary)
+                    } else {
+                        format!("[edit_file] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[edit_file] error: {}", e), None),
             }
         }
         "apply_patch" => {
-            let path = path_arg(0);
+            let path_str = match args.get(0) {
+                Some(s) => s.as_str(),
+                None => return (false, "[apply_patch] usage: apply_patch <path> <patch_content>".to_string(), None),
+            };
+            let is_workspace = path_str.starts_with("workspace:/") || path_str.starts_with("workspace:");
+            let path_str_rewritten = rewrite_workspace_plan_path_str(path_str, task_id, store_path);
+            let path_str = path_str_rewritten.as_str();
+            let disk_path = resolve_tool_disk_path(path_str, workspace_root);
             let patch_content = args.get(1..).map(|a| a.join("\n")).unwrap_or_default();
-            match path {
-                Some(p) => match executor.apply_patch(p, &patch_content).await {
-                    Ok(res) => {
-                        let msg = if res.success {
-                            format!("[apply_patch {}] {}", p.display(), res.summary)
-                        } else {
-                            format!("[apply_patch] {}", res.summary)
-                        };
-                        (res.success, msg, None)
+            match executor.apply_patch(&disk_path, &patch_content).await {
+                Ok(res) => {
+                    if res.success && is_workspace {
+                        sync_workspace_store_from_disk(workspace_store, task_id, store_path, path_str, &disk_path).await;
                     }
-                    Err(e) => (false, format!("[apply_patch] error: {}", e), None),
-                },
-                None => (false, "[apply_patch] usage: apply_patch <path> <patch_content>".to_string(), None),
+                    let msg = if res.success {
+                        format!("[apply_patch {}] {}", disk_path.display(), res.summary)
+                    } else {
+                        format!("[apply_patch] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[apply_patch] error: {}", e), None),
             }
         }
         "file_diff" => {
-            let path_a = path_arg(0);
-            let path_b = path_arg(1);
-            match (path_a, path_b) {
-                (Some(a), Some(b)) => match executor.file_diff(a, b).await {
-                    Ok((diff, res)) => {
-                        let msg = if res.success {
-                            let preview = if diff.len() <= 400 { diff.as_str() } else { &diff[..diff.floor_char_boundary(400)] };
-                            format!("[file_diff] {} — {}", res.summary, preview)
+            let path_a_str = args.get(0).map(String::as_str).unwrap_or("");
+            let path_b_str = args.get(1).map(String::as_str).unwrap_or("");
+            if path_a_str.is_empty() || path_b_str.is_empty() {
+                return (false, "[file_diff] usage: file_diff <path_a> <path_b>".to_string(), None);
+            }
+            let disk_a = resolve_tool_disk_path(path_a_str, workspace_root);
+            let disk_b = resolve_tool_disk_path(path_b_str, workspace_root);
+            match executor.file_diff(&disk_a, &disk_b).await {
+                Ok((diff, res)) => {
+                    let msg = if res.success {
+                        let preview = if diff.len() <= 400 { diff.as_str() } else { &diff[..diff.floor_char_boundary(400)] };
+                        format!("[file_diff] {} — {}", res.summary, preview)
+                    } else {
+                        format!("[file_diff] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[file_diff] error: {}", e), None),
+            }
+        }
+        "diff_unified" => {
+            let path_a_str = args.get(0).map(String::as_str).unwrap_or("");
+            let path_b_str = args.get(1).map(String::as_str).unwrap_or("");
+            if path_a_str.is_empty() || path_b_str.is_empty() {
+                return (false, "[diff_unified] usage: diff_unified <path_a> <path_b> [context_lines]".to_string(), None);
+            }
+            let ctx = args
+                .get(2)
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(3);
+            let disk_a = resolve_tool_disk_path(path_a_str, workspace_root);
+            let disk_b = resolve_tool_disk_path(path_b_str, workspace_root);
+            match executor.file_diff_unified(&disk_a, &disk_b, ctx).await {
+                Ok((diff, res)) => {
+                    let msg = if res.success {
+                        let preview = if diff.len() <= 800 {
+                            diff.as_str()
                         } else {
-                            format!("[file_diff] {}", res.summary)
+                            &diff[..diff.floor_char_boundary(800)]
                         };
-                        (res.success, msg, None)
-                    }
-                    Err(e) => (false, format!("[file_diff] error: {}", e), None),
-                },
-                _ => (false, "[file_diff] usage: file_diff <path_a> <path_b>".to_string(), None),
+                        format!("[diff_unified] {} — {}", res.summary, preview)
+                    } else {
+                        format!("[diff_unified] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[diff_unified] error: {}", e), None),
+            }
+        }
+        "dir_compare" => {
+            let dir_a_str = args.get(0).map(String::as_str).unwrap_or("");
+            let dir_b_str = args.get(1).map(String::as_str).unwrap_or("");
+            if dir_a_str.is_empty() || dir_b_str.is_empty() {
+                return (false, "[dir_compare] usage: dir_compare <dir_a> <dir_b> [max_depth] [max_files]".to_string(), None);
+            }
+            let max_depth = args
+                .get(2)
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(8);
+            let max_files = args
+                .get(3)
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(100);
+            let disk_a = resolve_tool_disk_path(dir_a_str, workspace_root);
+            let disk_b = resolve_tool_disk_path(dir_b_str, workspace_root);
+            match executor
+                .compare_dirs(&disk_a, &disk_b, max_depth, max_files)
+                .await
+            {
+                Ok((report, res)) => {
+                    let msg = if res.success {
+                        let preview = if report.len() <= 1200 {
+                            report.as_str()
+                        } else {
+                            &report[..report.floor_char_boundary(1200)]
+                        };
+                        format!("[dir_compare] {} — {}", res.summary, preview)
+                    } else {
+                        format!("[dir_compare] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[dir_compare] error: {}", e), None),
+            }
+        }
+        "git_status" => {
+            let repo_str = args.get(0).map(String::as_str).unwrap_or("");
+            if repo_str.is_empty() {
+                return (false, "[git_status] usage: git_status <repo>".to_string(), None);
+            }
+            let disk = resolve_tool_disk_path(repo_str, workspace_root);
+            match executor.git_status(&disk).await {
+                Ok((out, res)) => {
+                    let msg = if res.success {
+                        format!("[git_status] {} — {}", res.summary, out.trim())
+                    } else {
+                        format!("[git_status] {} — {}", res.summary, out.trim())
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[git_status] error: {}", e), None),
+            }
+        }
+        "git_diff" => {
+            let repo_str = args.get(0).map(String::as_str).unwrap_or("");
+            if repo_str.is_empty() {
+                return (false, "[git_diff] usage: git_diff <repo> [--staged] [pathspec...]".to_string(), None);
+            }
+            let disk = resolve_tool_disk_path(repo_str, workspace_root);
+            let mut staged = false;
+            let mut rest_start = 1usize;
+            if args.get(1).map(|s| s.as_str()) == Some("--staged") {
+                staged = true;
+                rest_start = 2;
+            }
+            let pathspecs: Vec<String> = args.get(rest_start..).map(|s| s.to_vec()).unwrap_or_default();
+            match executor.git_diff(&disk, staged, &pathspecs).await {
+                Ok((out, res)) => {
+                    let msg = format!("[git_diff] {} — {}", res.summary, out.trim());
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[git_diff] error: {}", e), None),
+            }
+        }
+        "git_log" => {
+            let repo_str = args.get(0).map(String::as_str).unwrap_or("");
+            if repo_str.is_empty() {
+                return (false, "[git_log] usage: git_log <repo> [n]".to_string(), None);
+            }
+            let n = args.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(20);
+            let disk = resolve_tool_disk_path(repo_str, workspace_root);
+            match executor.git_log(&disk, n).await {
+                Ok((out, res)) => {
+                    let msg = format!("[git_log] {} — {}", res.summary, out.trim());
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[git_log] error: {}", e), None),
+            }
+        }
+        "git_rev_parse" => {
+            let repo_str = args.get(0).map(String::as_str).unwrap_or("");
+            if repo_str.is_empty() {
+                return (false, "[git_rev_parse] usage: git_rev_parse <repo>".to_string(), None);
+            }
+            let disk = resolve_tool_disk_path(repo_str, workspace_root);
+            match executor.git_rev_parse_head(&disk).await {
+                Ok((out, res)) => {
+                    let msg = format!("[git_rev_parse] {} — {}", res.summary, out.trim());
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[git_rev_parse] error: {}", e), None),
             }
         }
         "web_fetch" => {
@@ -2553,11 +4368,12 @@ async fn execute_tool_call(
             }
         }
         "generate_image" => {
-            let prompt = args.get(0).map(String::as_str).unwrap_or("").trim();
+            let (prompt, size_owned) = parse_generate_image_tool_args(args);
+            let prompt = prompt.trim();
             if prompt.is_empty() {
                 (false, "[generate_image] usage: generate_image <prompt> [size]".to_string(), None)
             } else {
-                let size = args.get(1).map(String::as_str).filter(|s| !s.is_empty());
+                let size = size_owned.as_deref();
                 let data_dir = store_path.and_then(|p| p.parent()).unwrap_or_else(|| Path::new("."));
                 match crate::image_generation::generate_image_impl(data_dir, prompt, size).await {
                     Ok((msg, data_url)) => (true, msg, Some(data_url)),
@@ -2586,23 +4402,62 @@ async fn execute_tool_call(
             }
         }
         _ => {
-            if executor.policy.can_run_command(tool_name) {
-                match executor.run_command(tool_name, args, None, None).await {
-                    Ok((out, res)) => {
-                        let stdout = String::from_utf8_lossy(&out.stdout);
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        let msg = if res.success {
-                            format!("[run_command {}] stdout: {} stderr: {}", tool_name, stdout.trim(), stderr.trim())
+            if let Some((plugin_id, plugin_payload)) = plugin_invocation {
+                match plugin_registry {
+                    Some(r) => match r.call_tool(&plugin_id, &plugin_payload) {
+                        Ok(out) => {
+                        if out.trim().is_empty() {
+                            return (
+                                false,
+                                format!(
+                                    "[plugin:{}] execution returned empty output (check plugin input/action)",
+                                    plugin_id
+                                ),
+                                None,
+                            );
+                        }
+                        let plugin_ok = serde_json::from_str::<serde_json::Value>(&out)
+                            .ok()
+                            .and_then(|v| v.get("ok").and_then(|b| b.as_bool()));
+                        let preview = if out.chars().count() > 600 {
+                            format!("{}…", out.chars().take(600).collect::<String>())
                         } else {
-                            format!("[run_command] {} stderr: {}", res.summary, stderr.trim())
+                            out
                         };
-                        (res.success, msg, None)
-                    }
-                    Err(e) => (false, format!("[run_command] error: {}", e), None),
+                        if plugin_ok == Some(false) {
+                            return (
+                                false,
+                                format!(
+                                    "[plugin:{}] execution failed: plugin returned ok=false: {}",
+                                    plugin_id, preview
+                                ),
+                                None,
+                            );
+                        }
+                        (
+                            true,
+                            format!("[plugin:{}] {}", plugin_id, preview),
+                            None,
+                        )
+                        }
+                        Err(err) => (
+                            false,
+                            format!("[plugin:{}] execution failed: {}", plugin_id, err),
+                            None,
+                        ),
+                    },
+                    None => (
+                        false,
+                        format!(
+                            "[plugin:{}] execution failed: plugin registry unavailable",
+                            plugin_id
+                        ),
+                        None,
+                    ),
                 }
             } else {
                 let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
-                (false, format!("[{}] unknown tool. Available: {}.", tool_name, names.join(", ")), None)
+                (false, format!("[{}] unknown tool. For shell commands, use: TOOL: run_command <cmd> .... Available: {}.", tool_name, names.join(", ")), None)
             }
         }
     };
@@ -2654,9 +4509,26 @@ async fn compact_short_term_if_needed(
         preferred_task_type: None,
         system_prompt: None,
         image_data_urls: None,
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        repeat_penalty: None,
+        num_ctx: None,
+        num_gpu: None,
+        thinking_level: None,
     };
-    match llm_router.complete(&req).await {
-        Ok(resp) => {
+    let compaction_timeout = env_duration_ms("AKASHA_COMPACTION_TIMEOUT_MS", 1_500);
+    match tokio::time::timeout(compaction_timeout, llm_router.complete(&req)).await {
+        Err(_) => {
+            tracing::debug!(
+                session_id,
+                timeout_ms = compaction_timeout.as_millis() as u64,
+                "Short-term compaction skipped: budget exceeded"
+            );
+        }
+        Ok(Err(e)) => tracing::warn!(error = %e, "Compaction LLM failed, keeping full history"),
+        Ok(Ok(resp)) => {
             let summary = resp.text.trim();
             if !summary.is_empty() {
                 short_term.replace_oldest_with_summary(session_id, summary.to_string(), to_summarize).await;
@@ -2679,7 +4551,6 @@ async fn compact_short_term_if_needed(
                 }
             }
         }
-        Err(e) => tracing::warn!(error = %e, "Compaction LLM failed, keeping full history"),
     }
 }
 
@@ -2727,6 +4598,14 @@ Factual response in English.\n\n{}",
         preferred_task_type: Some("system".to_string()),
         system_prompt: None,
         image_data_urls: None,
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        repeat_penalty: None,
+        num_ctx: None,
+        num_gpu: None,
+        thinking_level: None,
     };
     match llm_router.complete(&req).await {
         Ok(resp) => {
@@ -2791,6 +4670,8 @@ fn progress_message_for_tool(tool: &str, args: &[String]) -> String {
         "Capturing with camera…".to_string()
     } else if lower == "browser" && first_arg.eq_ignore_ascii_case("navigate") {
         "Opening in browser…".to_string()
+    } else if lower == "install_playwright" {
+        "Installing Playwright Chromium…".to_string()
     } else if lower.contains("run_command") {
         "Running the command…".to_string()
     } else if lower == "ask_user" {
@@ -2805,6 +4686,9 @@ fn progress_message_for_tool(tool: &str, args: &[String]) -> String {
 fn extract_how_to_call_from_message(msg: &str) -> Option<String> {
     let msg = msg.trim();
     if msg.is_empty() || msg.len() > 80 {
+        return None;
+    }
+    if classify_small_talk_message(msg).is_some() {
         return None;
     }
     let lower = msg.to_lowercase();
@@ -2853,6 +4737,150 @@ fn build_ack_message(user_message: &str) -> String {
     format!("On it — looking into {}. You can follow progress in the Tasks tab.", preview)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MemoryProfile {
+    recent_turns_limit: usize,
+    recent_context_max_chars: usize,
+    semantic_top_k: usize,
+    episodic_limit: usize,
+    facts_limit: usize,
+    user_rag_top_k: usize,
+    expand_by_graph: bool,
+    compact_before_prompt: bool,
+    allow_project_recall: bool,
+    allow_identity_lookup: bool,
+}
+
+fn memory_fast_path_enabled() -> bool {
+    std::env::var("AKASHA_MEMORY_FAST_PATH")
+        .ok()
+        .map(|s| s != "0" && !s.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
+fn memory_profile_for_task(
+    message: &str,
+    assigned_agent: &str,
+    is_subagent: bool,
+    orch_disk_deliverables: bool,
+) -> MemoryProfile {
+    if is_subagent {
+        return MemoryProfile {
+            recent_turns_limit: 0,
+            recent_context_max_chars: 0,
+            semantic_top_k: 0,
+            episodic_limit: 0,
+            facts_limit: 0,
+            user_rag_top_k: 0,
+            expand_by_graph: false,
+            compact_before_prompt: false,
+            allow_project_recall: false,
+            allow_identity_lookup: false,
+        };
+    }
+
+    let enriched = !memory_fast_path_enabled()
+        || orch_disk_deliverables
+        || message_suggests_project(message)
+        || assigned_agent != "conversation"
+        || message.chars().count() > 280;
+
+    if enriched {
+        MemoryProfile {
+            recent_turns_limit: 15,
+            recent_context_max_chars: 2_000,
+            semantic_top_k: 5,
+            episodic_limit: 5,
+            facts_limit: 10,
+            user_rag_top_k: 5,
+            expand_by_graph: std::env::var("AKASHA_GRAPH_EXPAND")
+                .ok()
+                .as_deref()
+                == Some("1"),
+            compact_before_prompt: true,
+            allow_project_recall: true,
+            allow_identity_lookup: true,
+        }
+    } else {
+        MemoryProfile {
+            recent_turns_limit: 6,
+            recent_context_max_chars: 800,
+            semantic_top_k: 2,
+            episodic_limit: 1,
+            facts_limit: 0,
+            user_rag_top_k: 0,
+            expand_by_graph: false,
+            compact_before_prompt: false,
+            allow_project_recall: false,
+            allow_identity_lookup: true,
+        }
+    }
+}
+
+fn spawn_progress_watchdog(
+    bus: EventBus,
+    correlation_id: Uuid,
+    task_id: Uuid,
+    mut cancel_rx: oneshot::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        let checkpoints = [
+            (2_u64, 12_u8, "Still spinning up the worker…"),
+            (5_u64, 18_u8, "Still working — routing tools and context…"),
+            (10_u64, 24_u8, "Still working — using a fallback path if needed…"),
+        ];
+        for (secs, pct, message) in checkpoints {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(secs)) => {
+                    let _ = bus.send(
+                        EventEnvelope::new(
+                            EventType::ProgressUpdate,
+                            Some(serde_json::json!({
+                                "task_id": task_id.to_string(),
+                                "progress_pct": pct,
+                                "message": message,
+                            })),
+                        )
+                        .with_correlation(correlation_id),
+                    );
+                }
+                _ = &mut cancel_rx => return,
+            }
+        }
+    });
+}
+
+fn cancel_progress_watchdog(cancel_tx: &mut Option<oneshot::Sender<()>>) {
+    if let Some(tx) = cancel_tx.take() {
+        let _ = tx.send(());
+    }
+}
+
+async fn wait_for_task_activity(
+    progress: &ProgressCache,
+    task_id: Uuid,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        {
+            let guard = progress.read().await;
+            let has_activity = guard
+                .get(&task_id)
+                .and_then(|q| q.back())
+                .map(|entry| !entry.message.trim().is_empty())
+                .unwrap_or(false);
+            if has_activity {
+                return true;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
 /// Returns true if the text looks like a placeholder / promise ("I'll do it", "one second") rather than an actual answer.
 /// Used after tool calls to avoid completing the task with "I will fetch…" instead of the real result.
 fn looks_like_placeholder_after_tools(text: &str) -> bool {
@@ -2897,8 +4925,51 @@ fn looks_like_placeholder_after_tools(text: &str) -> bool {
     placeholder_phrases.iter().any(|p| lower.contains(p))
 }
 
+fn looks_like_meta_agent_response(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    [
+        "i am ready to assist",
+        "i'm ready to assist",
+        "based on the instructions provided",
+        "according to the instructions provided",
+        "following the instructions provided",
+        "i am configured as",
+        "i'm configured as",
+        "as an ai assistant",
+        "as an ai language model",
+        "today, i will execute the phase 2 task",
+        "phase 2 task",
+        "click, fill, screenshot, and wait",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+}
+
+/// Returns true when the model output looks like generic greeting/small-talk
+/// instead of an answer to a concrete tool-backed request.
+fn looks_like_off_topic_greeting(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    [
+        "bonjour ! je suis prêt à vous aider",
+        "bonjour ! je suis pret a vous aider",
+        "que souhaitez-vous faire aujourd'hui",
+        "que souhaitez vous faire aujourd'hui",
+        "hi! i'm ready to help",
+        "what would you like to do today",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+}
+
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
 /// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
+/// preferred_task_type_override: when set (e.g. system selector task_type), overrides routing/reminders vs. assigned_agent alone.
 pub(crate) async fn run_message_via_llm(
     bus: EventBus,
     llm_router: Arc<akasha_llm::LLMRouter>,
@@ -2908,11 +4979,14 @@ pub(crate) async fn run_message_via_llm(
     message: String,
     session_id: String,
     image_data_urls: Option<Vec<String>>,
+    // When set (e.g. system selector task_type), overrides resolve_task_type_for_agent(assigned_agent) for LLM routing and image-gen reminders.
+    preferred_task_type_override: Option<String>,
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
     tools_executor: Option<std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>>,
     tools_policy_path: Option<std::path::PathBuf>,
     skill_registry: Option<std::sync::Arc<crate::skills::SkillRegistry>>,
+    plugin_registry: Option<std::sync::Arc<crate::plugins::PluginRegistry>>,
     process_registry: Option<ProcessRegistry>,
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     human_input_store: Option<HumanInputStore>,
@@ -2936,19 +5010,112 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
-    let structured = interpret_message(&message);
-    let assigned_agent = store
-        .get(task_id)
-        .ok()
-        .flatten()
+    // NOTE: interpret_message is called below, after guardrail extraction, so it uses clean_message.
+    let task_snapshot = store.get(task_id).ok().flatten();
+    let assigned_agent = task_snapshot
+        .as_ref()
         .map(|t| t.assigned_agent.clone())
         .unwrap_or_else(|| "conversation".to_string());
-    let timeline_correlation = store
-        .get(task_id)
-        .ok()
-        .flatten()
+    let role_agent_for_system_prompt =
+        if preferred_task_type_override.as_deref() == Some("image_generation") {
+            "image_generation"
+        } else {
+            assigned_agent.as_str()
+        };
+    let is_subagent = task_snapshot
+        .as_ref()
         .and_then(|t| t.parent_task_id)
+        .is_some();
+    // When main_agent prepends a guardrail block on selector timeout, extract the real user message.
+    // Format: "[Guardrail: …]\n\n<actual message>"
+    const GUARDRAIL_MARKER: &str = "[Guardrail:";
+    const GUARDRAIL_END: &str = "]\n\n";
+    let (guardrail_reminder_block, clean_message): (String, &str) =
+        if message.starts_with(GUARDRAIL_MARKER) {
+            if let Some(end) = message.find(GUARDRAIL_END) {
+                let block = format!("{}\n\n", &message[..end + 1]);
+                let actual = message[end + GUARDRAIL_END.len()..].trim_start();
+                (block, actual)
+            } else {
+                (String::new(), message.as_str())
+            }
+        } else {
+            (String::new(), message.as_str())
+        };
+    // Whether this is an orchestrated subtask message (starts with "[Task]\n").
+    // These messages must not pollute session goals, short-term history, or trigger full
+    // memory context — they are internal planner artefacts, not real user messages.
+    let is_orchestrated_task_msg = clean_message.starts_with("[Task]\n");
+
+    // Anchor the CLEAN user goal (without guardrail prefix) in session state at task start.
+    // Skip for orchestrated task messages — their [Task]\nObjective text is not a user goal.
+    if !is_subagent && !is_orchestrated_task_msg && !clean_message.trim().is_empty() {
+        let data_dir_goal = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+        let goal_text = clean_message.chars().take(240).collect::<String>();
+        let _ = crate::session_state::merge(data_dir_goal, &session_id, |s| {
+            if s.goals.iter().all(|g| g != &goal_text) {
+                s.goals.push(goal_text);
+            }
+        });
+    }
+    let timeline_correlation = resolve_root_task_id(&store_path, task_id)
+        .or_else(|| task_snapshot.as_ref().and_then(|t| t.parent_task_id))
         .unwrap_or(task_id);
+
+    // All intent detection / classification uses clean_message so a guardrail prefix never
+    // breaks fast-lane matching or memory profile selection.
+    let structured = interpret_message(clean_message);
+    let orch_disk_deliverables = clean_message.contains(ORCH_DISK_DELIVERABLES_MARKER);
+    let small_talk_intent = classify_small_talk_message(clean_message);
+    let small_talk_fast_lane_intent = small_talk_fast_lane(clean_message);
+    let session_recall_intent = detect_session_recall_intent(clean_message);
+    tracing::debug!(?session_recall_intent, "[RECALL_DEBUG] session_recall_intent");
+    let is_small_talk_fast_lane = small_talk_fast_lane_intent.is_some();
+    let is_session_recall = session_recall_intent.is_some();
+    let mut memory_profile = if is_small_talk_fast_lane || is_session_recall {
+        MemoryProfile {
+            recent_turns_limit: 0,
+            recent_context_max_chars: 0,
+            semantic_top_k: 0,
+            episodic_limit: 0,
+            facts_limit: 0,
+            user_rag_top_k: 0,
+            expand_by_graph: false,
+            compact_before_prompt: false,
+            allow_project_recall: false,
+            allow_identity_lookup: false,
+        }
+    } else {
+        memory_profile_for_task(
+            clean_message,
+            &assigned_agent,
+            is_subagent,
+            orch_disk_deliverables,
+        )
+    };
+    // For external/transport/general-knowledge queries, always isolate from recent context.
+    // Loading previous dev/Akasha-specific turns from short-term history actively misleads
+    // small local models: they latch onto the most recent topic (e.g. Akasha CLI discussion)
+    // and copy it instead of answering the actual question.
+    // This cap is unconditional — it does NOT require a guardrail prefix to be active.
+    if !is_small_talk_fast_lane && !is_subagent {
+        let clean_flags = compute_message_intent_flags(clean_message);
+        if clean_flags.external_info || clean_flags.transport {
+            memory_profile.recent_turns_limit = 0;
+            memory_profile.episodic_limit = 0;
+            memory_profile.semantic_top_k = 0;
+            memory_profile.facts_limit = 0;
+            memory_profile.allow_project_recall = false;
+        }
+    }
+    // Orchestrated task messages ([Task]\n prefix) already carry full context inside the message.
+    // Loading unrelated recent_turns from the short-term store only introduces noise and causes
+    // context contamination (e.g. bankr venv script appearing for a train/car question).
+    if is_orchestrated_task_msg {
+        memory_profile.recent_turns_limit = 0;
+        memory_profile.semantic_top_k = memory_profile.semantic_top_k.min(1);
+        memory_profile.compact_before_prompt = false;
+    }
 
     let tools_executor_snapshot = match &tools_executor {
         Some(r) => Some((*r.read().await).clone()),
@@ -2978,13 +5145,18 @@ pub(crate) async fn run_message_via_llm(
         )
         .with_correlation(task_id),
     );
+    let (watchdog_tx, watchdog_rx) = oneshot::channel();
+    let mut watchdog_cancel = Some(watchdog_tx);
+    spawn_progress_watchdog(bus.clone(), timeline_correlation, task_id, watchdog_rx);
 
     let max_tokens = std::env::var("AKASHA_MAX_RESPONSE_TOKENS")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(4096);
 
-    let tool_instruction = if tools_executor_snapshot.is_some() {
+    let tool_instruction = if is_small_talk_fast_lane {
+        String::new()
+    } else if tools_executor_snapshot.is_some() {
         let mut allowed_tools = tools_executor_snapshot.as_ref().and_then(|e| e.policy.allowed_tool_list());
         if let Some(ref list) = allowed_tools {
             let has_wildcard = tools_executor_snapshot.as_ref().map(|e| e.policy.allowed_commands.iter().any(|c| c.trim().eq_ignore_ascii_case("*"))).unwrap_or(false);
@@ -2992,6 +5164,18 @@ pub(crate) async fn run_message_via_llm(
                 let mut list = list.clone();
                 list.push("run_command".to_string());
                 allowed_tools = Some(list);
+            }
+        }
+        if orch_disk_deliverables {
+            if let Some(ref list) = allowed_tools {
+                if !list.iter().any(|t| t == "write_file") {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        "Orchestrated deliverables: tools_policy default_profile omits write_file; \
+                         workspace file tools will NOT be advertised to the model — add write_file \
+                         (and other file tools) to the profile to enable disk deliverables."
+                    );
+                }
             }
         }
         let base = available_tools_instruction(allowed_tools.as_deref());
@@ -3023,15 +5207,31 @@ pub(crate) async fn run_message_via_llm(
             _ => "RUN_COMMAND OS: You are on Linux/macos. Standard Unix commands (curl, grep, etc.) are available.\n\
              ",
         };
+        let compact_worker_tool_instruction = format!(
+            "\n\nYou may request tools by writing a single line exactly like: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
+             Worker rules:\n\
+             - Use only tools that are directly necessary for the CURRENT task.\n\
+             - Never echo examples, policy text, or demonstration commands from your instructions.\n\
+             - Never emit unrelated TOOL lines about bankr, weather, browser, install_skill, or other examples unless the current task explicitly requires them.\n\
+             - If the task asks to save/write a file, use TOOL: write_file <path> then the exact content, or TOOL: write_file {{\"path\":\"...\",\"content\":\"...\"}}.\n\
+             - Use write_todos / merge_todos (not create_todos) for todo lists.\n\
+             - If you need missing user information, use TOOL: ask_user with JSON.\n\
+             - If no tool is needed, answer normally.\n",
+            base, skills_part
+        );
+        if is_subagent || assigned_agent != "conversation" || orch_disk_deliverables {
+            compact_worker_tool_instruction
+        } else {
         format!(
             "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
              Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
              CAMERA RULE (PRIORITAIRE sur WRITE): When the user asks for a webcam/camera photo (e.g. \"prends une photo\", \"take a photo\", \"photo depuis la webcam\", \"affiche-la dans le chat\", \"display it in the chat\"), you MUST reply ONLY with TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture. Do NOT mention tools_policy.yaml, allowed_write_paths, or file writing. After the tool returns, if the user asked to \"display in the chat\" / \"affiche-la dans le chat\" / \"show it in the chat\", reply with ONLY a short confirmation in the user's language (e.g. in French: \"Photo prise. Elle s'affiche ci-dessous.\"; in English: \"Photo captured. It is shown below.\"). Do NOT offer \"save to file\", \"get a description\", \"take another photo\", or \"What would you like to do next?\" — the image is appended automatically below your message. Use the same language as the user (French if they wrote in French).\n\
              WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
-             WEATHER/MÉTEO RULE (PRIORITY): When the user asks for weather, météo, or forecasts (e.g. \"quel temps\", \"météo demain\", \"weather in X\"), you MUST use TOOL: web_search <query> (and optionally web_fetch) to get the forecast. Do NOT use bankr, portfolio, or any other skill for weather — only web_search and web_fetch.\n\
+             WEATHER/MÉTEO RULE (PRIORITY): When the user asks for weather, météo, or forecasts (e.g. \"quel temps\", \"météo demain\", \"weather in X\"), you MUST use TOOL: web_search <query> first, then if snippets lack numeric detail use TOOL: web_fetch <url> on a trusted result URL and/or TOOL: browser navigate <url> then TOOL: browser snapshot (many météo sites are JS-heavy). Do NOT use bankr, portfolio, or any other skill for weather — use web_search plus web_fetch/browser as needed.\n\
              BROWSER RULE (PRIORITY): When the user explicitly asks to open the browser, go to a website, or show something on X/Twitter (e.g. \"ouvre le navigateur\", \"open the browser\", \"va sur X\", \"go to twitter\", \"cherche sur X\", \"ouvre le navigateur et cherche\"), you MUST use TOOL: browser navigate <url> first with the appropriate URL (e.g. https://x.com/akashabot for a profile, https://x.com for the home page). You may then add a short message. Do NOT use only web_search when the user asked to open the browser or go to X/Twitter.\n\
-             WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first to search, then answer from the results. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. For météo/actualités: use web_search to find the info yourself, then summarize for the user. If web_search returns no useful results, or the content is inaccessible (e.g. X/Twitter pages, login-required sites), use TOOL: browser navigate <url> with the relevant URL so the user can open the page in their browser.\n\
+             SOCIAL / LOGGED-IN SITES RULE: If tools_policy allows the domain, use TOOL: browser navigate <https URL> and TOOL: browser snapshot when the user asks to open or inspect X/Twitter or similar. Do NOT refuse with vague \"security\", \"confidentiality\", or \"structural policy\" claims — the user runs Akasha locally and controls tools_policy. Real limitation: you cannot type the user's password or complete interactive MFA inside the managed browser on their behalf; if a login wall blocks content, say that clearly and offer practical options (user logs in manually in that same browser session if their environment keeps the session, or official API access via TOOL: run_command with VAULT:... when applicable). Do NOT state that vault-backed API access is forbidden when the user has configured secrets — follow VAULT ENV RULE.\n\
+             WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first, then answer from fetched content — not only from snippets. If snippets are insufficient, use TOOL: web_fetch <url> on a relevant result URL, or TOOL: browser navigate <url> then TOOL: browser snapshot so YOU retrieve the page text inside Akasha (managed browser), then summarize for the user. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. Do NOT tell the user to open links in their own browser when web_fetch or browser snapshot is available and allowed — retrieve and answer yourself.\n\
              INSTALL CLI RULE: When the user asks to install a CLI or package globally (e.g. \"install bankr CLI\", \"npm install -g @bankr/cli\", \"install the bankr cli in global\"), you MUST reply ONLY with TOOL: run_command <cmd> <args> (e.g. TOOL: run_command npm install -g @bankr/cli). Do NOT generate a script or ask the user to run commands themselves; run the installation command via the tool.\n\
              VAULT ENV RULE: To use a vault secret in a command you MUST call TOOL: run_command with VAULT:<vault_key>=<ENV_VAR> as the FIRST argument(s), then the command. The system injects the secret value into ENV_VAR for that command only. Example: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo. FORBIDDEN: never tell the user to run GITHUB_TOKEN=VAULT:GITHUB_TOKEN or export GITHUB_TOKEN=... or VAULT:GITHUB_TOKEN=ghp_... — you must output the TOOL: line yourself so the system runs the command and injects the token. For GitHub with token in vault: use TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (or gh repo view owner/repo). The vault key may be GITHUB_TOKEN or github_token; the part after = is the env var name the command uses (e.g. $GITHUB_TOKEN). Do NOT say you cannot access the repo without having called run_command with VAULT:... first.\n\
              {}\
@@ -3045,6 +5245,7 @@ pub(crate) async fn run_message_via_llm(
              (in the Akasha data directory) and add path prefixes under allowed_write_paths or allowed_read_paths. It is not impossible — the user controls this YAML file.",
             base, skills_part, run_command_os_rule, skills_rule
         )
+        }
     } else {
         String::new()
     };
@@ -3067,7 +5268,7 @@ pub(crate) async fn run_message_via_llm(
     let mut system_prompt = String::with_capacity(8192);
     system_prompt.push_str(APP_CONTEXT);
     system_prompt.push_str(os_env_block);
-    if let Some(role_prompt) = agent_role_system_prompt(&assigned_agent) {
+    if let Some(role_prompt) = agent_role_system_prompt(role_agent_for_system_prompt) {
         system_prompt.push_str("[Role]\n");
         system_prompt.push_str(role_prompt);
         system_prompt.push_str("\n\n");
@@ -3095,101 +5296,189 @@ pub(crate) async fn run_message_via_llm(
     let mut user_prefix = String::with_capacity(8192);
     user_prefix.push_str(&personality_reminder);
     user_prefix.push_str("Reply in the same language as the user message below (French, English, etc.).\n\n");
-    if let Some(ref st) = short_term {
-        let turns = st.get_turns(&session_id).await;
-        let last_15: Vec<_> = turns.iter().rev().take(15).cloned().rev().collect();
-        if !last_15.is_empty() {
-            let short_ctx = ShortTermStore::turns_to_context(&last_15);
-            let capped = if short_ctx.chars().count() > 2000 {
-                short_ctx.chars().take(2000).collect::<String>() + "…"
-            } else {
-                short_ctx
-            };
-            if !capped.is_empty() {
-                user_prefix.push_str("[Recent context (this session)]\n");
-                user_prefix.push_str(&capped);
-                user_prefix.push_str("\n\n");
-            }
-        }
-    }
     let turns_empty = match &short_term {
         Some(st) => st.get_turns(&session_id).await.is_empty(),
         None => true,
     };
-    let expand_by_graph = std::env::var("AKASHA_GRAPH_EXPAND").ok().as_deref() == Some("1");
     let user_profile = UserProfile::load(data_dir);
     let user_identity_prefix = user_profile.format_for_prompt();
     let recall_params = crate::memory_orchestrator::RecallParams {
         message: message.clone(),
         session_id: session_id.clone(),
+        semantic_top_k: memory_profile.semantic_top_k,
+        episodic_limit: memory_profile.episodic_limit,
+        facts_limit: memory_profile.facts_limit,
         filter_by_session: !turns_empty,
-        suggest_project: message_suggests_project(&message),
-        is_first_message: turns_empty,
-        expand_by_graph,
-        user_identity_prefix: if user_identity_prefix.is_empty() {
+        suggest_project: memory_profile.allow_project_recall && message_suggests_project(clean_message),
+        is_first_message: turns_empty && memory_profile.allow_identity_lookup,
+        expand_by_graph: memory_profile.expand_by_graph,
+        user_identity_prefix: if user_identity_prefix.is_empty() || !memory_profile.allow_identity_lookup {
             None
         } else {
             Some(user_identity_prefix)
         },
         ..Default::default()
     };
-    let fused = crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params).await;
-    let fused_str = fused.to_context_string();
-    if !fused_str.is_empty() {
-        user_prefix.push_str(&fused_str);
+    if memory_profile.semantic_top_k > 0
+        || memory_profile.episodic_limit > 0
+        || memory_profile.facts_limit > 0
+        || recall_params.user_identity_prefix.is_some()
+    {
+        let fused = crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params).await;
+        let fused_str = fused.to_context_string();
+        if !fused_str.is_empty() {
+            user_prefix.push_str(&fused_str);
+        }
     }
-    let user_rag_store = crate::user_rag::UserRagStore::new(data_dir);
-    let rag_query = message.clone();
-    let chunks = tokio::task::spawn_blocking(move || user_rag_store.retrieve(&rag_query, 5))
-        .await
-        .ok()
-        .and_then(|res| res.ok())
-        .unwrap_or_default();
-    if !chunks.is_empty() {
-        user_prefix.push_str("[User documents — use these excerpts if relevant to answer]\n");
-        for c in &chunks {
-            user_prefix.push_str("- ");
-            user_prefix.push_str(&c.replace('\n', " "));
+    if memory_profile.user_rag_top_k > 0 {
+        let user_rag_store = crate::user_rag::UserRagStore::new(data_dir);
+        let rag_query = message.clone();
+        let rag_top_k = memory_profile.user_rag_top_k;
+        let chunks = tokio::task::spawn_blocking(move || user_rag_store.retrieve(&rag_query, rag_top_k))
+            .await
+            .ok()
+            .and_then(|res| res.ok())
+            .unwrap_or_default();
+        if !chunks.is_empty() {
+            user_prefix.push_str("[User documents — use these excerpts if relevant to answer]\n");
+            for c in &chunks {
+                user_prefix.push_str("- ");
+                user_prefix.push_str(&c.replace('\n', " "));
+                user_prefix.push_str("\n");
+            }
             user_prefix.push_str("\n");
         }
-        user_prefix.push_str("\n");
     }
     if let Some(ref st) = short_term {
-        let new_msg_tokens = ShortTermStore::estimate_tokens(&message);
-        compact_short_term_if_needed(
-            st,
-            &session_id,
-            &llm_router,
-            new_msg_tokens,
-            long_term_client.as_ref(),
-        )
-        .await;
+        if memory_profile.compact_before_prompt {
+            let new_msg_tokens = ShortTermStore::estimate_tokens(&message);
+            compact_short_term_if_needed(
+                st,
+                &session_id,
+                &llm_router,
+                new_msg_tokens,
+                long_term_client.as_ref(),
+            )
+            .await;
+        }
         let turns = st.get_turns(&session_id).await;
-        let short_ctx = ShortTermStore::turns_to_context(&turns);
+        let final_turns: Vec<_> = turns
+            .iter()
+            .rev()
+            .take(memory_profile.recent_turns_limit)
+            .cloned()
+            .rev()
+            .collect();
+        let short_ctx = ShortTermStore::turns_to_context(&final_turns);
         if !short_ctx.is_empty() {
-            user_prefix.push_str(short_ctx.trim_end());
-            user_prefix.push_str("\n\n");
+            let capped = if memory_profile.recent_context_max_chars > 0
+                && short_ctx.chars().count() > memory_profile.recent_context_max_chars
+            {
+                short_ctx
+                    .chars()
+                    .take(memory_profile.recent_context_max_chars)
+                    .collect::<String>() + "…"
+            } else {
+                short_ctx
+            };
+            if !capped.is_empty() {
+                user_prefix.push_str("[Recent context (this session)]\n");
+                user_prefix.push_str(capped.trim_end());
+                user_prefix.push_str("\n\n");
+            }
         }
     }
-    if let Ok(todos) = store.get_todos(task_id) {
-        if let Some(block) = format_todos_plan_block(&todos) {
-            user_prefix.push_str(&block);
-            user_prefix.push_str("\n");
+    if !is_small_talk_fast_lane {
+        if let Ok(todos) = store.get_todos(task_id) {
+            if let Some(block) = format_todos_plan_block(&todos) {
+                user_prefix.push_str(&block);
+                user_prefix.push_str("\n");
+            }
         }
     }
     let intent_flags = compute_message_intent_flags(&message);
+    let runtime_tool_routing_enforcer = build_runtime_tool_routing_enforcer(
+        plugin_registry.as_ref(),
+        clean_message,
+        &intent_flags,
+        tools_executor_snapshot.as_ref(),
+    );
     let write_reminder = if intent_flags.save_file {
         WRITE_FILE_REMINDER
     } else {
         ""
     };
-    let web_search_reminder = if intent_flags.external_info
+    // web_search is effectively available only when the tool is allowed by the active profile,
+    // web_search_enabled is true in the policy, and a Brave API key is present (vault or env).
+    let web_search_effectively_available = tools_executor_snapshot
+        .as_ref()
+        .map(|e| {
+            e.policy.can_use_tool("web_search")
+                && e.policy.web_search_enabled
+                && (e.policy.brave_api_key.is_some()
+                    || std::env::var("BRAVE_API_KEY").is_ok())
+        })
+        .unwrap_or(false);
+    let web_search_reminder: &str = if intent_flags.external_info {
+        if web_search_effectively_available {
+            // web_search is available: instruct the model to use it.
+            WEB_SEARCH_REMINDER
+        } else {
+            // web_search is absent (not allowed, not enabled, or no API key): prevent the model
+            // from ignoring the question and returning a generic capability introduction.
+            WEB_SEARCH_UNAVAILABLE_REMINDER
+        }
+    } else {
+        ""
+    };
+    let web_search_followup_reminder: &str = if intent_flags.external_info
+        && web_search_effectively_available
         && tools_executor_snapshot
             .as_ref()
-            .map(|e| e.policy.can_use_tool("web_search"))
+            .map(|e| web_followup_tools_configured(&e.policy))
             .unwrap_or(false)
     {
-        WEB_SEARCH_REMINDER
+        WEB_SEARCH_FOLLOWUP_REMINDER
+    } else {
+        ""
+    };
+    let transport_reminder: &str = if intent_flags.transport {
+        // Always inject a transport reminder so the model cannot mistake a travel question
+        // for a file-creation or project task (e.g. "Quel est le chemin complet du fichier").
+        // Use the full reminder when web_search is available; use the no-search fallback otherwise.
+        let has_web_search = web_search_effectively_available;
+        if has_web_search {
+            TRANSPORT_REMINDER
+        } else {
+            TRANSPORT_REMINDER_NO_SEARCH
+        }
+    } else {
+        ""
+    };
+    let (plugin_routing_reminder, plugin_handles_geo_distance) = build_plugin_routing_reminders(
+        plugin_registry.as_ref(),
+        clean_message,
+        &intent_flags,
+        tools_executor_snapshot.as_ref(),
+    );
+    let geolocation_distance_reminder: &str = if intent_flags.geolocation_distance && !plugin_handles_geo_distance {
+        let has_any_tool = tools_executor_snapshot
+            .as_ref()
+            .map(|e| {
+                e.policy.can_use_tool("web_search")
+                    || e.policy.can_use_tool("plugin.call")
+            })
+            .unwrap_or(false);
+        tracing::info!(
+            task_id = %task_id,
+            has_any_tool,
+            "geolocation-distance intent detected; applying generic fallback guardrail"
+        );
+        if has_any_tool {
+            GEO_DISTANCE_REMINDER_WITH_TOOLS
+        } else {
+            GEO_DISTANCE_REMINDER_NO_TOOL
+        }
     } else {
         ""
     };
@@ -3212,7 +5501,9 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let image_generation_reminder = if intent_flags.image_generation {
+    let image_generation_reminder = if intent_flags.image_generation
+        || preferred_task_type_override.as_deref() == Some("image_generation")
+    {
         IMAGE_GENERATION_REMINDER
     } else {
         ""
@@ -3227,67 +5518,312 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
+    let code_dev_sandbox_reminder = if intent_flags.code_generation {
+        CODE_DEV_SANDBOX_REMINDER
+    } else {
+        ""
+    };
     // When user clearly wants a photo from camera, prefix the message with an imperative so the model responds with device_invoke directly (no ask_user).
     let user_message = if !device_camera_reminder.is_empty() {
         format!(
             "[Répondre par: TOOL: device_discover local_media puis TOOL: device_invoke local_media camera capture. Ne pas utiliser ask_user.]\n\n{}",
-            message
+            clean_message
         )
     } else {
-        message.clone()
+        clean_message.to_string()
     };
     let mut current_prompt = if user_prefix.trim().is_empty() {
         format!(
-            "{}{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
+            guardrail_reminder_block,
             write_reminder,
             web_search_reminder,
+            web_search_followup_reminder,
+            transport_reminder,
+            geolocation_distance_reminder,
+            plugin_routing_reminder,
             social_feed_reminder,
             device_camera_reminder,
             image_generation_reminder,
             github_vault_reminder,
+            code_dev_sandbox_reminder,
             user_message
         )
     } else {
         format!(
-            "{}{}{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
             user_prefix.trim_end(),
+            guardrail_reminder_block,
             write_reminder,
             web_search_reminder,
+            web_search_followup_reminder,
+            transport_reminder,
+            geolocation_distance_reminder,
+            plugin_routing_reminder,
             social_feed_reminder,
             device_camera_reminder,
             image_generation_reminder,
             github_vault_reminder,
+            code_dev_sandbox_reminder,
             user_message
         )
     };
     let reply_text;
-    let mut max_tool_rounds = std::env::var("AKASHA_MAX_TOOL_ROUNDS")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(10);
-    let mut round = 0u32;
-    let mut social_snapshot_seen = false;
-    let mut tool_loop_history: Vec<(String, String)> = Vec::new();
-    let mut last_tool_results_blob: Option<String> = None;
-    let mut force_synthesis_attempted = false;
-    let mut last_captured_image_base64: Option<String> = None;
     let mut last_llm_model_used: Option<String> = None;
+    let mut first_meaningful_progress_sent = false;
 
-    let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(300);
-    let idle_timeout_secs = std::env::var("AKASHA_LLM_STREAM_IDLE_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(60);
-    // First chunk can take long (model load, first token on CPU). Use longer wait so we don't hit idle before any data.
-    let first_chunk_timeout_secs = std::env::var("AKASHA_LLM_FIRST_CHUNK_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or_else(|| llm_timeout_secs.min(300));
+    if let Some(intent) = small_talk_fast_lane_intent {
+        reply_text = small_talk_fast_reply(&message, intent);
+        first_meaningful_progress_sent = true;
+        cancel_progress_watchdog(&mut watchdog_cancel);
+        if emit_timeline_once_for_task(
+            &bus,
+            Some(store_path.as_path()),
+            task_id,
+            "first_meaningful_progress",
+            Some(serde_json::json!({ "source": "small_talk_fast_lane" })),
+        ) {
+            log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
+        }
+    } else if let Some(intent) = session_recall_intent {
+        tracing::debug!(?intent, "[RECALL_LOAD] loading recall turns");
+        let recall_turns = match intent.range {
+            SessionRecallRange::Yesterday => {
+                tracing::debug!("[RECALL_LOAD] reading YESTERDAY data");
+                if short_term.is_some() {
+                    let short_term_dir = data_dir.join("short_term");
+                    let yesterday = chrono::Utc::now() - chrono::Duration::days(1);
+                    let sid = format!("day-{}", yesterday.format("%Y-%m-%d"));
+                    tracing::debug!(session_id = %sid, "[RECALL_LOAD] yesterday session_id");
+                    let turns = crate::memory::ShortTermStore::read_day_from_disk(&sid, &short_term_dir).unwrap_or_default();
+                    tracing::debug!(count = turns.len(), "[RECALL_LOAD] read turns from yesterday");
+                    turns
+                } else {
+                    tracing::debug!("[RECALL_LOAD] short_term is None, returning empty");
+                    Vec::new()
+                }
+            }
+            SessionRecallRange::CurrentDay => {
+                tracing::debug!("[RECALL_LOAD] reading CURRENT_DAY data");
+                if let Some(st) = short_term.as_ref() {
+                    let turns = st.get_turns(&session_id).await;
+                    tracing::debug!(count = turns.len(), "[RECALL_LOAD] read turns from current day");
+                    turns
+                } else {
+                    tracing::debug!("[RECALL_LOAD] short_term is None, returning empty");
+                    Vec::new()
+                }
+            }
+        };
+        tracing::debug!(count = recall_turns.len(), "[RECALL_BUILD] building recap");
+        reply_text = build_session_recap_reply(&recall_turns, intent).unwrap_or_else(|| {
+            match intent.language {
+                SmallTalkLanguage::French => "Je n'ai pas encore de résumé fiable à te partager pour cette période. Si tu veux, je peux te faire un récap dès qu'on a un peu plus d'historique utile.".to_string(),
+                SmallTalkLanguage::English => "I don't have a reliable recap for that period yet. If you want, I can provide one as soon as we have a bit more useful history.".to_string(),
+            }
+        });
+        first_meaningful_progress_sent = true;
+        cancel_progress_watchdog(&mut watchdog_cancel);
+        if emit_timeline_once_for_task(
+            &bus,
+            Some(store_path.as_path()),
+            task_id,
+            "first_meaningful_progress",
+            Some(serde_json::json!({ "source": "session_recap_fast_path" })),
+        ) {
+            log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
+        }
+    } else {
+        let mut max_tool_rounds = std::env::var("AKASHA_MAX_TOOL_ROUNDS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(10);
+        // Orchestrated subtasks / remediation: extra tool rounds (models often read/search first).
+        if orch_disk_deliverables {
+            let floor = std::env::var("AKASHA_MAX_TOOL_ROUNDS_ORCH_DELIVERABLES")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(24);
+            if max_tool_rounds < floor {
+                max_tool_rounds = floor;
+            }
+        }
+        let mut round = 0u32;
+        let mut social_snapshot_seen = false;
+        let mut tool_loop_history: Vec<(String, String)> = Vec::new();
+        let mut last_tool_results_blob: Option<String> = None;
+        let mut force_synthesis_attempted = false;
+        let mut meta_response_retry_count = 0u32;
+        let strict_tools_first = runtime_tool_routing_enforcer
+            .as_ref()
+            .map(|e| !e.preferred_tools.is_empty())
+            .unwrap_or(false);
+        let strict_tools_instruction = if strict_tools_first {
+            let preferred = runtime_tool_routing_enforcer
+                .as_ref()
+                .map(|e| {
+                    let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
+                    v.sort();
+                    v.join(", ")
+                })
+                .unwrap_or_default();
+            format!(
+                "\n\n[TOOLS-FIRST STRICT MODE]\n- PRIMARY USER REQUEST (must be satisfied): {}\n- You MUST output TOOL lines only until at least one allowed tool succeeds.\n- Preferred tools: {}\n- If inputs are missing, output ONLY: TOOL: ask_user {{\"question\":\"...\",\"context\":\"...\",\"choices\":[...]}}\n- Do NOT output prose, role acknowledgements, policy acknowledgements, or generic greetings.\n",
+                user_message, preferred
+            )
+        } else {
+            String::new()
+        };
+        let mut strict_no_tool_rounds = 0u32;
+        let mut strict_successful_tool_calls = 0u32;
+        let mut strict_preferred_tool_replay_input: Option<String> = None;
+        // Orchestrated deliverables: re-prompts when the model returns no parseable TOOL lines.
+        let mut orch_disk_write_nags = 0u32;
+        let mut last_captured_image_base64: Option<String> = None;
+
+        let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or_else(|| llm_router.default_timeout_secs());
+        let idle_timeout_secs = std::env::var("AKASHA_LLM_STREAM_IDLE_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+        // First chunk can take long (model load, first token on CPU). Use longer wait so we don't hit idle before any data.
+        let first_chunk_timeout_secs = std::env::var("AKASHA_LLM_FIRST_CHUNK_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or_else(|| llm_timeout_secs.min(300));
 
     'tool_rounds: loop {
+        let strict_mode_active = strict_tools_first && strict_successful_tool_calls == 0;
+        if strict_mode_active {
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::ProgressUpdate,
+                    Some(serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "progress_pct": 30,
+                        "message": "Applying dynamic plugin routing rules (tools-first)…"
+                    })),
+                )
+                .with_correlation(task_id),
+            );
+        }
+
+        // Deterministic first attempt in strict tools-first mode:
+        // try preferred tools with the full user request as input before asking the LLM again.
+        if strict_mode_active && (round == 0 || strict_preferred_tool_replay_input.is_some()) {
+            if let (Some(enforcer), Some(exec)) = (
+                &runtime_tool_routing_enforcer,
+                tools_executor_snapshot.as_ref(),
+            ) {
+                let preferred_tool_request = strict_preferred_tool_replay_input
+                    .take()
+                    .unwrap_or_else(|| user_message.clone());
+                let mut deterministic_results: Vec<String> = Vec::new();
+                const MAPS_RESULT_FULL_MAX: usize = 400_000;
+                for preferred_tool in enforcer.preferred_tools.iter().take(3) {
+                    let args_preview = if preferred_tool_request.chars().count() > 240 {
+                        format!("{}…", preferred_tool_request.chars().take(240).collect::<String>())
+                    } else {
+                        preferred_tool_request.clone()
+                    };
+                    let _ = bus.send(
+                        EventEnvelope::new(
+                            EventType::TimelineMilestone,
+                            Some(serde_json::json!({
+                                "name": "deterministic_preferred_tool_attempt",
+                                "task_id": task_id.to_string(),
+                                "round": round,
+                                "tool": preferred_tool,
+                                "args_preview": args_preview,
+                            })),
+                        )
+                        .with_correlation(timeline_correlation),
+                    );
+                    let auto_args = vec![preferred_tool_request.clone()];
+                    let (success, res, captured_image) = execute_tool_call(
+                        exec,
+                        preferred_tool,
+                        &auto_args,
+                        process_registry.as_ref(),
+                        long_term_client.as_ref(),
+                        task_id,
+                        Some(store_path.as_path()),
+                        conv_tx.clone(),
+                        message_webhook_url.as_deref(),
+                        plugin_registry.as_ref(),
+                        device_bridge.as_ref(),
+                        workspace_store.as_ref(),
+                        browser_registry.as_ref(),
+                        store_path.parent(),
+                    )
+                    .await;
+                    let result_preview = if res.chars().count() > 320 {
+                        format!("{}…", res.chars().take(320).collect::<String>())
+                    } else {
+                        res.clone()
+                    };
+                    // UI (chat) needs full plugin JSON for rich views (e.g. maps); preview is truncated.
+                    let mut milestone = serde_json::json!({
+                        "name": "deterministic_preferred_tool_result",
+                        "task_id": task_id.to_string(),
+                        "round": round,
+                        "tool": preferred_tool,
+                        "success": success,
+                        "result_preview": result_preview,
+                    });
+                    if success
+                        && preferred_tool.starts_with("maps_")
+                        && res.len() <= MAPS_RESULT_FULL_MAX
+                    {
+                        milestone["result_full"] = serde_json::Value::String(res.clone());
+                    }
+                    let _ = bus.send(
+                        EventEnvelope::new(EventType::TimelineMilestone, Some(milestone))
+                            .with_correlation(timeline_correlation),
+                    );
+                    tool_loop_history.push((
+                        preferred_tool.clone(),
+                        if success { "success" } else { "failure" }.to_string(),
+                    ));
+                    if let Some(img) = captured_image {
+                        last_captured_image_base64 = Some(img);
+                    }
+                    deterministic_results.push(res.clone());
+                    if success {
+                        strict_successful_tool_calls = strict_successful_tool_calls.saturating_add(1);
+                        log_tool_journal_if_write(preferred_tool, &auto_args, &res).await;
+                        break;
+                    }
+                }
+                if strict_successful_tool_calls > 0 {
+                    let results_blob = deterministic_results.join("\n");
+                    last_tool_results_blob = Some(results_blob.clone());
+                    current_prompt = format!(
+                        "User request: {}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, answer the user's request now. Do NOT reply with a promise. No TOOL: lines.",
+                        user_message,
+                        results_blob
+                    );
+                    // Continue to next round so the model synthesizes from concrete tool results.
+                    continue;
+                }
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::TimelineMilestone,
+                        Some(serde_json::json!({
+                            "name": "deterministic_preferred_tool_no_success",
+                            "task_id": task_id.to_string(),
+                            "round": round,
+                            "attempted_tools": enforcer.preferred_tools.iter().cloned().collect::<Vec<_>>(),
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
+                );
+            }
+        }
+
         // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
         if let Some(ref store) = task_usage_store {
             let (session_tokens, session_cost) = store.get_session(&session_id).await.unwrap_or((0, 0.0));
@@ -3304,9 +5840,28 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
         }
-        let preferred_task_type = Some(llm_router.resolve_task_type_for_agent(&assigned_agent));
+        // `task_types.image_generation` in llm_router.yaml configures the *pixel backend* for the
+        // `generate_image` tool (see image_generation.rs). Routing chat completion to that task
+        // type sends image-only models (e.g. Ollama z-image) through the text completion path, which
+        // expects a `response` string — those models return images/empty text and trigger fallback warnings.
+        // Here we always use a normal text route for the LLM turn; the tool call still uses image_generation config.
+        let router_task_type_for_llm =
+            if preferred_task_type_override.as_deref() == Some("image_generation")
+                || assigned_agent == "image_generation"
+            {
+                llm_router.resolve_task_type_for_agent("conversation")
+            } else {
+                preferred_task_type_override
+                    .clone()
+                    .unwrap_or_else(|| llm_router.resolve_task_type_for_agent(&assigned_agent))
+            };
+        let preferred_task_type = Some(router_task_type_for_llm);
         let request = CompletionRequest {
-            prompt: format!("{}{}", current_prompt, tool_instruction),
+            prompt: if strict_mode_active {
+                format!("{}{}", current_prompt, strict_tools_instruction)
+            } else {
+                format!("{}{}", current_prompt, tool_instruction)
+            },
             max_tokens: Some(max_tokens),
             temperature: Some(0.7),
             preferred_task_type,
@@ -3316,6 +5871,14 @@ pub(crate) async fn run_message_via_llm(
             } else {
                 None
             },
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repeat_penalty: None,
+            num_ctx: None,
+            num_gpu: None,
+            thinking_level: None,
         };
         // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
         // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
@@ -3356,6 +5919,19 @@ pub(crate) async fn run_message_via_llm(
             };
             match tokio::time::timeout(idle, tok_rx.recv()).await {
                 Ok(Some(chunk)) => {
+                    if !first_meaningful_progress_sent && !chunk.trim().is_empty() {
+                        first_meaningful_progress_sent = true;
+                        cancel_progress_watchdog(&mut watchdog_cancel);
+                        if emit_timeline_once_for_task(
+                            &bus,
+                            Some(store_path.as_path()),
+                            task_id,
+                            "first_meaningful_progress",
+                            Some(serde_json::json!({ "source": "stream_chunk" })),
+                        ) {
+                            log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
+                        }
+                    }
                     const MAX_ACCUMULATED: usize = 2 * 1024 * 1024; // 2 MiB cap to prevent unbounded allocation on long streams
                     if accumulated.len() + chunk.len() > MAX_ACCUMULATED {
                         accumulated.truncate(MAX_ACCUMULATED.saturating_sub(chunk.len()));
@@ -3426,27 +6002,168 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
         };
-        if !accumulated.is_empty() && response.is_empty() {
-            // Stream sent chunks but final response empty; use accumulated
-            reply_text = accumulated.trim().to_string();
-            break;
+        // Some providers return the full text only in stream chunks while `resp.text` is empty, or drop `TOOL:` lines
+        // from the final body. Parsing tools only from `resp.text` then skips execution entirely (user sees text, no disk writes).
+        // Use `parse_tool_calls` (which normalizes sloppy prefixes like `- Tool:` / `**TOOL:**`) instead of a raw
+        // `contains("TOOL:")` check so that any provider-specific formatting is handled consistently.
+        let r = response.trim();
+        let a = accumulated.trim();
+        let a_has_tools = !a.is_empty() && !parse_tool_calls(a).is_empty();
+        let r_has_tools = !r.is_empty() && !parse_tool_calls(r).is_empty();
+        let merged_for_tools = if r.is_empty() && !a.is_empty() {
+            a.to_string()
+        } else if a_has_tools && !r_has_tools {
+            a.to_string()
+        } else if !r.is_empty() {
+            r.to_string()
+        } else {
+            a.to_string()
+        };
+        let response = merged_for_tools;
+
+        if let Some(intent) = small_talk_intent {
+            if response_looks_off_topic_for_small_talk(&response) {
+                tracing::warn!(task_id = %task_id, "Small-talk guardrail triggered; suppressing off-topic/tool-heavy reply");
+                reply_text = small_talk_fast_reply(&message, intent);
+                break 'tool_rounds;
+            }
         }
 
-        let tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
+        let parsed_tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
             let calls = parse_tool_calls(&response);
             if calls.is_empty() { None } else { Some(calls) }
         });
+        let no_parseable_tools_this_round = parsed_tool_calls.is_none();
+        let response_plain = response
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("TOOL:"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
 
-        if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), tool_calls) {
+        if strict_tools_first
+            && no_parseable_tools_this_round
+            && strict_successful_tool_calls == 0
+        {
+            strict_no_tool_rounds = strict_no_tool_rounds.saturating_add(1);
+            let preferred_tools_hint = runtime_tool_routing_enforcer
+                .as_ref()
+                .map(|e| {
+                    let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
+                    v.sort();
+                    v.join(", ")
+                })
+                .unwrap_or_default();
+
+            if strict_no_tool_rounds <= 1 {
+                current_prompt = format!(
+                    "User request: {}\n\nYour previous reply:\n{}\n\nDynamic plugin routing rules are active for this request. You MUST emit TOOL lines only. Preferred tools: {}. If inputs are missing, call TOOL: ask_user with one precise question. Do NOT output prose-only answers now.",
+                    user_message,
+                    response_plain,
+                    preferred_tools_hint
+                );
+                continue;
+            }
+
+            reply_text = format!(
+                "Impossible de répondre de façon fiable sans exécuter un outil autorisé. Outils attendus: {}. Vérifiez les règles de routage des plugins installés ou fournissez les paramètres manquants.",
+                preferred_tools_hint
+            );
+            break 'tool_rounds;
+        }
+
+        if no_parseable_tools_this_round
+            && meta_response_retry_count < 2
+            && (is_subagent || assigned_agent != "conversation" || orch_disk_deliverables)
+            && looks_like_meta_agent_response(&response_plain)
+        {
+            meta_response_retry_count += 1;
+            current_prompt = format!(
+                "User request: {}\n\nYour previous reply:\n{}\n\nThat reply was meta/instruction recitation, not actual progress on the assigned task. Do the work now. Do NOT describe your role, say you are ready, mention instructions, or narrate a generic Phase 2 plan. If files are required, start with TOOL: read_file / write_file on the exact workspace paths. If you are blocked, state only the concrete missing input or exact tool failure.",
+                user_message,
+                response_plain
+            );
+            continue;
+        }
+
+        if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls) {
             round += 1;
             let mut tool_results = Vec::new();
-            for (name, args) in &calls {
+            let scheduled_lanes = akasha_tools::schedule_tool_calls(&calls);
+            for (lane, lane_calls) in scheduled_lanes {
+                let lane_name = match lane {
+                    akasha_tools::ToolExecutionLane::ParallelSafe => "parallel_safe",
+                    akasha_tools::ToolExecutionLane::SerialExclusive => "serial_exclusive",
+                };
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 50,
+                            "message": format!("Tool lane execution: {} ({} call(s))", lane_name, lane_calls.len())
+                        })),
+                    )
+                    .with_correlation(task_id),
+                );
+                for (name, args) in &lane_calls {
                 // Phase D: resolve skill name to tool_ref (spec 33)
                 let actual_tool = match &skill_registry {
                     Some(reg) => reg.get(name).await.map(|s| s.tool_ref).unwrap_or_else(|| name.clone()),
                     None => name.clone(),
                 };
-                let args_str = args.join(" ");
+                let actual_tool = canonicalize_tool_name(&actual_tool);
+                let should_forward_user_request = strict_tools_first
+                    && args.is_empty()
+                    && !actual_tool.eq_ignore_ascii_case("ask_user")
+                    && runtime_tool_routing_enforcer
+                        .as_ref()
+                        .map(|e| e.preferred_tools.contains(&actual_tool))
+                        .unwrap_or(false);
+                let forwarded_args: Vec<String> = if should_forward_user_request {
+                    vec![user_message.clone()]
+                } else {
+                    args.clone()
+                };
+                let tool_args: &[String] = &forwarded_args;
+                let effective_tool_for_routing = if actual_tool.is_empty() {
+                    name.as_str()
+                } else {
+                    actual_tool.as_str()
+                };
+                let device_routing_bypass = intent_flags.camera_or_mic
+                    && (effective_tool_for_routing.eq_ignore_ascii_case("device_discover")
+                        || effective_tool_for_routing.eq_ignore_ascii_case("device_invoke"));
+                if let Some(enforcer) = &runtime_tool_routing_enforcer {
+                    if !device_routing_bypass && !enforcer.is_tool_allowed(effective_tool_for_routing, tool_args) {
+                        let blocked = format!(
+                            "[tool_blocked_by_routing_rules] tool={} blocked by dynamic plugin routing rules",
+                            effective_tool_for_routing
+                        );
+                        let payload = serde_json::json!({
+                            "tool": effective_tool_for_routing,
+                            "args": tool_args,
+                            "result_preview": blocked,
+                            "success": false,
+                            "reason": "blocked_by_dynamic_plugin_routing_rules"
+                        });
+                        let _ = bus.send(
+                            EventEnvelope::new(EventType::ToolInvoked, Some(payload))
+                                .with_correlation(timeline_correlation),
+                        );
+                        tracing::warn!(
+                            task_id = %task_id,
+                            tool = %effective_tool_for_routing,
+                            preferred = ?enforcer.preferred_tools,
+                            forbidden = ?enforcer.forbidden_tools,
+                            "Tool blocked by runtime routing enforcer"
+                        );
+                        tool_results.push(blocked);
+                        continue;
+                    }
+                }
+                let args_str = tool_args.join(" ");
                 tool_loop_history.push((actual_tool.clone(), args_str.clone()));
                 // Phase 4: loop detection — same tool+args repeated 3 times
                 if tool_loop_history.len() >= 3 {
@@ -3458,7 +6175,23 @@ pub(crate) async fn run_message_via_llm(
                 }
                 // User-friendly progress at key step: what we are doing right now (use skill name when actual_tool is empty, e.g. bankr skill).
                 let display_tool = if actual_tool.is_empty() { name.as_str() } else { &actual_tool };
-                let progress_msg = progress_message_for_tool(display_tool, args);
+                let progress_msg = progress_message_for_tool(display_tool, tool_args);
+                if !first_meaningful_progress_sent {
+                    first_meaningful_progress_sent = true;
+                    cancel_progress_watchdog(&mut watchdog_cancel);
+                    if emit_timeline_once_for_task(
+                        &bus,
+                        Some(store_path.as_path()),
+                        task_id,
+                        "first_meaningful_progress",
+                        Some(serde_json::json!({
+                            "source": "tool_progress",
+                            "tool": display_tool,
+                        })),
+                    ) {
+                        log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
+                    }
+                }
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::ProgressUpdate,
@@ -3480,7 +6213,7 @@ pub(crate) async fn run_message_via_llm(
                             let args_preview: String = if matches!(actual_tool.as_str(), "apply_patch" | "edit_file" | "write_file") {
                                 "[redacted]".to_string()
                             } else {
-                                let truncated: Vec<String> = args.iter()
+                                let truncated: Vec<String> = tool_args.iter()
                                     .take(3)
                                     .map(|a| if a.chars().count() > MAX_APPROVAL_ARG_LEN {
                                         format!("{}…", a.chars().take(MAX_APPROVAL_ARG_LEN).collect::<String>())
@@ -3488,7 +6221,7 @@ pub(crate) async fn run_message_via_llm(
                                         a.clone()
                                     })
                                     .collect();
-                                let suffix = if args.len() > 3 { format!(" … ({} args)", args.len()) } else { String::new() };
+                                let suffix = if tool_args.len() > 3 { format!(" … ({} args)", tool_args.len()) } else { String::new() };
                                 truncated.join(" ") + &suffix
                             };
                             let question = format!("Approuver l'action : {} — {} ?", actual_tool, args_preview);
@@ -3693,7 +6426,7 @@ pub(crate) async fn run_message_via_llm(
                         }
                     }
                 } else if actual_tool == "uninstall_skill" {
-                    let skill_name = args.get(0).map(String::as_str).unwrap_or("").trim();
+                    let skill_name = tool_args.get(0).map(String::as_str).unwrap_or("").trim();
                     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
                     let tools_reload = tools_executor.as_ref().and_then(|arc| {
                         tools_policy_path.as_ref().map(|p| (arc, p.as_path()))
@@ -3800,7 +6533,7 @@ pub(crate) async fn run_message_via_llm(
                         None => (false, "[list_skills] skill registry not available.".to_string(), None),
                     }
                 } else if actual_tool == "read_skill" {
-                    let skill_name = args.get(0).map(String::as_str).unwrap_or("").trim();
+                    let skill_name = tool_args.get(0).map(String::as_str).unwrap_or("").trim();
                     if skill_name.is_empty() {
                         (false, "[read_skill] usage: read_skill <name>".to_string(), None)
                     } else {
@@ -3817,8 +6550,8 @@ pub(crate) async fn run_message_via_llm(
                     }
                 } else if actual_tool.is_empty() {
                     // Skill with no tool_ref: if args provided, run as run_command(skill_name, ...args) (e.g. bankr whoami)
-                    if !args.is_empty() {
-                        let run_args: Vec<String> = std::iter::once(name.clone()).chain(args.iter().cloned()).collect();
+                    if !tool_args.is_empty() {
+                        let run_args: Vec<String> = std::iter::once(name.clone()).chain(tool_args.iter().cloned()).collect();
                         let (s, r, _) = execute_tool_call(
                             exec,
                             "run_command",
@@ -3829,9 +6562,11 @@ pub(crate) async fn run_message_via_llm(
                             Some(store_path.as_path()),
                             conv_tx.clone(),
                             message_webhook_url.as_deref(),
+                            plugin_registry.as_ref(),
                             device_bridge.as_ref(),
                             workspace_store.as_ref(),
                             browser_registry.as_ref(),
+                            store_path.parent(),
                         )
                         .await;
                         (s, r, None)
@@ -3852,21 +6587,34 @@ pub(crate) async fn run_message_via_llm(
                     execute_tool_call(
                         exec,
                         &actual_tool,
-                        args,
+                        tool_args,
                         process_registry.as_ref(),
                         long_term_client.as_ref(),
                         task_id,
                         Some(store_path.as_path()),
                         conv_tx.clone(),
                         message_webhook_url.as_deref(),
+                        plugin_registry.as_ref(),
                         device_bridge.as_ref(),
                         workspace_store.as_ref(),
                         browser_registry.as_ref(),
+                        store_path.parent(),
                     )
                     .await
                 };
                 if let Some(img) = captured_image {
                     last_captured_image_base64 = Some(img);
+                }
+                if success && strict_tools_first && actual_tool.eq_ignore_ascii_case("ask_user") {
+                    if let Some(reply) = res.strip_prefix("[ask_user] User replied: ") {
+                        let reply = reply.trim();
+                        if !reply.is_empty() {
+                            strict_preferred_tool_replay_input = Some(format!(
+                                "Original user request: {}\n\nUser clarification: {}",
+                                user_message, reply
+                            ));
+                        }
+                    }
                 }
                 // Phase F: emit ToolInvoked for Actions tab (spec 33)
                 // Redact or truncate args in the event to avoid leaking large blobs or secrets.
@@ -3874,7 +6622,7 @@ pub(crate) async fn run_message_via_llm(
                     vec!["[redacted for write-like tool]".to_string()]
                 } else {
                     const MAX_ARG_PREVIEW_LEN: usize = 512;
-                    args.iter()
+                    tool_args.iter()
                         .map(|arg| {
                             if arg.len() > MAX_ARG_PREVIEW_LEN {
                                 format!("{}...[truncated {} chars]", &arg[..arg.floor_char_boundary(MAX_ARG_PREVIEW_LEN)], arg.len().saturating_sub(MAX_ARG_PREVIEW_LEN))
@@ -3910,10 +6658,41 @@ pub(crate) async fn run_message_via_llm(
                     )
                     .with_correlation(timeline_correlation),
                 );
+                // Chat UI loads map / rich views from timeline_milestone + result_full (same as strict tools-first path).
+                if success
+                    && tool_display.starts_with("maps_")
+                    && res.len() <= 400_000usize
+                {
+                    let result_preview = if res.chars().count() > 320 {
+                        format!("{}…", res.chars().take(320).collect::<String>())
+                    } else {
+                        res.clone()
+                    };
+                    let milestone = serde_json::json!({
+                        "name": "deterministic_preferred_tool_result",
+                        "task_id": task_id.to_string(),
+                        "round": round,
+                        "tool": tool_display,
+                        "success": true,
+                        "result_preview": result_preview,
+                        "result_full": res.clone(),
+                    });
+                    let _ = bus.send(
+                        EventEnvelope::new(EventType::TimelineMilestone, Some(milestone))
+                            .with_correlation(timeline_correlation),
+                    );
+                }
                 if success {
-                    log_tool_journal_if_write(&actual_tool, args, &res).await;
+                    // In tools-first strict mode, ask_user is a clarification step, not
+                    // a terminal success for the primary objective. Keep strict mode active
+                    // until a non-ask_user tool actually succeeds.
+                    if !actual_tool.eq_ignore_ascii_case("ask_user") {
+                        strict_successful_tool_calls = strict_successful_tool_calls.saturating_add(1);
+                    }
+                    log_tool_journal_if_write(&actual_tool, tool_args, &res).await;
                 }
                 tool_results.push(res);
+            }
             }
             let results_blob = tool_results.join("\n");
             last_tool_results_blob = Some(results_blob.clone());
@@ -4097,6 +6876,37 @@ pub(crate) async fn run_message_via_llm(
             continue;
         }
 
+        // When the model returns prose / JSON only, this loop would exit with zero tool rounds — UI shows an
+        // answer but nothing is written. For orchestrated disk deliverables, nudge additional LLM rounds until
+        // a write-like tool appears in history. Only nag when the active policy actually permits write tools;
+        // if the profile blocks them the nudge would just churn through "tool not allowed" errors.
+        const MAX_ORCH_DISK_WRITE_NAGS: u32 = 8;
+        if orch_disk_deliverables
+            && tools_executor_snapshot.is_some()
+            && no_parseable_tools_this_round
+        {
+            let policy_allows_write = tools_executor_snapshot
+                .as_ref()
+                .map(|e| e.policy.can_use_tool("write_file"))
+                .unwrap_or(false);
+            if policy_allows_write {
+                let disk_write_attempted = tool_loop_history.iter().any(|(t, _)| {
+                    matches!(
+                        t.as_str(),
+                        "write_file" | "edit_file" | "search_replace" | "apply_patch"
+                    )
+                });
+                if !disk_write_attempted && orch_disk_write_nags < MAX_ORCH_DISK_WRITE_NAGS {
+                    orch_disk_write_nags += 1;
+                    current_prompt = format!(
+                        "{}\n\n[Orchestrator — disk deliverables] Your last assistant message did not include any executable TOOL: lines (or they were not parsed). This step MUST call tools: use TOOL: read_file on the shared plan trace if needed, then TOOL: write_file / edit_file / search_replace for every mandatory workspace path and update the plan sections **Fait (agent)** / **Reste (agent)**. Do not finish with prose-only or ```json``` — emit TOOL lines now.",
+                        current_prompt
+                    );
+                    continue;
+                }
+            }
+        }
+
         let response_for_user = response
             .lines()
             .filter(|l| !l.trim_start().starts_with("TOOL:"))
@@ -4104,6 +6914,21 @@ pub(crate) async fn run_message_via_llm(
             .join("\n")
             .trim()
             .to_string();
+        if strict_tools_first && strict_successful_tool_calls == 0 {
+            let preferred_tools_hint = runtime_tool_routing_enforcer
+                .as_ref()
+                .map(|e| {
+                    let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
+                    v.sort();
+                    v.join(", ")
+                })
+                .unwrap_or_default();
+            reply_text = format!(
+                "Réponse bloquée: aucune exécution d'outil autorisé n'a réussi pour cette demande. Outils attendus: {}. Merci de vérifier la configuration des plugins/routing rules ou de préciser les paramètres requis.",
+                preferred_tools_hint
+            );
+            break;
+        }
         // If we already ran tools but the model returned a placeholder ("Je vais… Une seconde."), force one more round to get the actual answer.
         if !tool_loop_history.is_empty()
             && last_tool_results_blob.as_ref().map_or(false, |b| !b.is_empty())
@@ -4113,6 +6938,22 @@ pub(crate) async fn run_message_via_llm(
             force_synthesis_attempted = true;
             current_prompt = format!(
                 "User request: {}\n\nTool results:\n{}\n\nThe user is waiting for the actual answer. Your previous message was a promise — the task is about to close, so you must answer NOW. Using the tool results above, write ONLY the final answer to the user's request. No TOOL: lines, no \"action in progress\".",
+                user_message,
+                last_tool_results_blob.as_deref().unwrap_or("")
+            );
+            continue;
+        }
+        // Guardrail: when a plugin/tool already succeeded, reject generic
+        // greeting responses and force one synthesis round from tool outputs.
+        if strict_tools_first
+            && strict_successful_tool_calls > 0
+            && last_tool_results_blob.as_ref().map_or(false, |b| !b.is_empty())
+            && looks_like_off_topic_greeting(&response_for_user)
+            && !force_synthesis_attempted
+        {
+            force_synthesis_attempted = true;
+            current_prompt = format!(
+                "User request: {}\n\nTool results:\n{}\n\nYour previous reply was off-topic greeting text. Answer the user's request NOW using the tool results above. Return only the concrete final answer (distance/itinerary if available). No greeting, no TOOL: lines.",
                 user_message,
                 last_tool_results_blob.as_deref().unwrap_or("")
             );
@@ -4135,6 +6976,8 @@ pub(crate) async fn run_message_via_llm(
         break;
     }
 
+    }
+
     let reply_text = if reply_text.is_empty() {
         tracing::warn!("LLM returned empty text");
         "No response from the model. Check Ollama or your LLM provider.".to_string()
@@ -4146,14 +6989,34 @@ pub(crate) async fn run_message_via_llm(
         }
         reply_text
     };
+    if !first_meaningful_progress_sent && !reply_text.trim().is_empty() {
+        cancel_progress_watchdog(&mut watchdog_cancel);
+        if emit_timeline_once_for_task(
+            &bus,
+            Some(store_path.as_path()),
+            task_id,
+            "first_meaningful_progress",
+            Some(serde_json::json!({ "source": "final_reply" })),
+        ) {
+            log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
+        }
+    } else {
+        cancel_progress_watchdog(&mut watchdog_cancel);
+    }
 
     // Persist this exchange in short-term memory (spec 06)
-    if let Some(ref st) = short_term {
-        st.append(&session_id, "user", message.clone()).await;
-        st.append(&session_id, "assistant", reply_text.clone()).await;
+    // Skip orchestrated task messages ([Task]\n prefix): they are internal planner artefacts,
+    // not real user/assistant turns. Storing them pollutes future context with unrelated content.
+    if !is_small_talk_fast_lane && !is_orchestrated_task_msg {
+        if let Some(ref st) = short_term {
+            // Store the clean user message (without any guardrail prefix) so history is human-readable.
+            st.append(&session_id, "user", clean_message.to_string()).await;
+            st.append(&session_id, "assistant", reply_text.clone()).await;
+        }
     }
 
     // Extract and promote personal facts to long-term memory (spec 06: nom, préférences, décisions).
+    if !is_small_talk_fast_lane {
     if let Some(ref long_term) = long_term_client {
         // Heuristic: capture obvious name/intro from user message. Promote these *immediately* so they appear in Memory tab right away.
         // Case-insensitive matching on lowercased text, but extract from original message to preserve casing.
@@ -4249,6 +7112,14 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                 preferred_task_type: Some("system".to_string()),
                 system_prompt: None,
                 image_data_urls: None,
+                top_p: None,
+                top_k: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                repeat_penalty: None,
+                num_ctx: None,
+                num_gpu: None,
+                thinking_level: None,
             };
             let mut to_promote: Vec<(String, String)> = Vec::new();
             let mut agent_updates: Vec<(String, String)> = Vec::new();
@@ -4332,6 +7203,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             }
         });
     }
+    }
 
     let _ = bus.send(
         EventEnvelope::new(
@@ -4379,6 +7251,10 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     if let Some(reg) = &browser_registry {
         crate::browser::close_task(reg, task_id).await;
     }
+    // Release per-task workspace memory immediately — no longer needed once the task finishes.
+    if let Some(ws) = &workspace_store {
+        ws.write().await.remove(&task_id);
+    }
 
     let final_event_type = if is_paused {
         EventType::TaskPaused
@@ -4398,6 +7274,14 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         )
         .with_correlation(task_id),
     );
+    emit_timeline_once_for_task(
+        &bus,
+        Some(store_path.as_path()),
+        task_id,
+        "task_completed",
+        Some(serde_json::json!({ "status": final_status_str })),
+    );
+    clear_task_milestones(task_id, Some(store_path.as_path()));
 
     // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
     if !is_paused {
@@ -4410,10 +7294,47 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             .flatten()
             .map(|t| t.parent_task_id.is_none())
             .unwrap_or(true);
-        if is_root_task {
+        if is_root_task && !is_small_talk_fast_lane && !is_orchestrated_task_msg {
             if let Ok(st) = crate::session_state::merge(data_dir_sess, &session_id, |s| {
                 let fact = reply_text.chars().take(240).collect::<String>();
-                if !fact.trim().is_empty() {
+                // Skip storing agent confusion/redirects as facts — they poison future context.
+                let fact_lower = fact.to_lowercase();
+                let is_confused_redirect = fact_lower.contains("chemin complet")
+                    || fact_lower.contains("quel chemin")
+                    || fact_lower.contains("pouvez-vous me préciser")
+                    || fact_lower.contains("pouvez-vous préciser")
+                    || fact_lower.contains("plan du projet")
+                    || fact_lower.contains("quel texte voulez")
+                    || (fact_lower.contains("fichier") && fact_lower.contains("chemin") && fact_lower.ends_with('?'))
+                    || (fact_lower.contains("dossier") && fact_lower.contains("préciser"))
+                    // Generic LLM "here is…" answers are one-off responses, not session facts.
+                    // Storing them causes context contamination on future unrelated requests.
+                    || fact_lower.starts_with("voici ")
+                    || fact_lower.starts_with("here is ")
+                    || fact_lower.starts_with("here's ")
+                    || fact_lower.starts_with("voilà ")
+                    || fact_lower.contains("```")
+                    || fact_lower.contains("## ")
+                    || fact_lower.contains("| étape ")
+                    || fact_lower.contains("| step ")
+                    || fact_lower.contains("souhaitez-vous")
+                    || fact.starts_with("[Task]\n")
+                    // Confused assistant responses: clarifying questions, enthusiastic capability
+                    // listings, or structured documents that are not user-relevant session facts.
+                    || fact_lower.starts_with("could you ")
+                    || fact_lower.starts_with("sure! ")
+                    || fact_lower.starts_with("sure, ")
+                    || fact_lower.starts_with("bien sûr !")
+                    || fact_lower.starts_with("bien sur !")
+                    || fact_lower.starts_with("bien sûr,")
+                    || fact_lower.starts_with("bien sur,")
+                    || fact_lower.starts_with("vous pouvez me ")
+                    || fact_lower.starts_with("vous pouvez m'")
+                    || fact_lower.starts_with("certainly! ")
+                    || fact_lower.starts_with("certainly, ")
+                    || fact_lower.starts_with("of course! ")
+                    || fact_lower.starts_with("of course, ");
+                if !fact.trim().is_empty() && !is_confused_redirect {
                     s.facts.push(fact);
                 }
             }) {
@@ -4430,17 +7351,19 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                 );
             }
         }
-        let summary_preview: String = reply_text.chars().take(300).collect();
-        learn_from_task_outcome_async(
-            long_term_client.clone(),
-            task_id,
-            message.clone(),
-            "completed".to_string(),
-            summary_preview,
-            Some(session_id.clone()),
-            structured.intent_slug.clone(),
-        )
-        .await;
+        if !is_small_talk_fast_lane {
+            let summary_preview: String = reply_text.chars().take(300).collect();
+            learn_from_task_outcome_async(
+                long_term_client.clone(),
+                task_id,
+                message.clone(),
+                "completed".to_string(),
+                summary_preview,
+                Some(session_id.clone()),
+                structured.intent_slug.clone(),
+            )
+            .await;
+        }
     }
 }
 
@@ -5001,6 +7924,113 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
+    // DELETE /api/memory/session?session_id=... — remove short-term turns and session_state for this session
+    if method == "DELETE" && path.starts_with("/api/memory/session") {
+        let session_id = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| {
+                q.split('&').find_map(|p| {
+                    if let Some(v) = p.strip_prefix("session_id=") {
+                        Some(
+                            urlencoding::decode(v)
+                                .map(|c| c.into_owned())
+                                .unwrap_or_else(|_| v.to_string()),
+                        )
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or_default();
+        if session_id.is_empty() || !crate::memory::is_safe_session_id(&session_id) {
+            return json_response("400 Bad Request", r#"{"error":"invalid or missing session_id"}"#);
+        }
+        if let Some(ref st) = short_term {
+            st.delete_session(&session_id).await;
+        } else {
+            let path = data_dir.join("short_term").join(format!("{}.json", session_id));
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        let _ = crate::session_state::delete(data_dir, &session_id);
+        let body_json = serde_json::json!({ "ok": true, "session_id": session_id });
+        return json_response("200 OK", &body_json.to_string());
+    }
+
+    // POST /api/chat/suggest-thread-title — short title from first user message (UI chat threads)
+    if method == "POST" && path == "/api/chat/suggest-thread-title" {
+        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let message = body_json
+            .as_ref()
+            .and_then(|v| v.get("message").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .trim();
+        if message.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing message"}"#);
+        }
+        fn fallback_title(msg: &str) -> String {
+            const MAX: usize = 48;
+            let t = msg.trim();
+            let n = t.chars().count();
+            if n <= MAX {
+                t.to_string()
+            } else {
+                format!("{}…", t.chars().take(MAX).collect::<String>())
+            }
+        }
+        let fallback = fallback_title(message);
+        let prompt = format!(
+            "Reply with ONLY a short conversation title (max 60 characters, no quotation marks, same language as the user message).\n\nUser message:\n{}",
+            message
+        );
+        let req = CompletionRequest {
+            prompt,
+            max_tokens: Some(80),
+            temperature: Some(0.3),
+            preferred_task_type: None,
+            system_prompt: Some(
+                "Output only the title text. No quotes. No leading 'Title:'.".to_string(),
+            ),
+            image_data_urls: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repeat_penalty: None,
+            num_ctx: None,
+            num_gpu: None,
+            thinking_level: None,
+        };
+        let title_timeout = std::time::Duration::from_secs(15);
+        let title = match tokio::time::timeout(title_timeout, llm_router.complete(&req)).await {
+            Ok(Ok(resp)) => {
+                let mut t = resp.text.trim().to_string();
+                if let Some(i) = t.find('\n') {
+                    t.truncate(i);
+                }
+                t = t.trim().trim_matches('"').trim_matches('\'').trim().to_string();
+                if t.starts_with("Title:") || t.starts_with("Titre:") {
+                    t = t
+                        .trim_start_matches("Title:")
+                        .trim_start_matches("Titre:")
+                        .trim()
+                        .to_string();
+                }
+                if t.chars().count() > 60 {
+                    t = t.chars().take(60).collect();
+                }
+                if t.is_empty() {
+                    fallback
+                } else {
+                    t
+                }
+            }
+            _ => fallback,
+        };
+        let body = serde_json::json!({ "title": title });
+        return json_response("200 OK", &body.to_string());
+    }
+
     // GET /api/memory/search?q=...&top_k=... — semantic search in long-term memory
     if method == "GET" && path.starts_with("/api/memory/search") {
         let (q, top_k) = path
@@ -5287,7 +8317,9 @@ pub async fn handle_api(
             Err(_) => (0, 0, 0, 0, 0, 0),
         };
         let body_json = serde_json::json!({
-            "tasks": { "pending": pending, "running": running, "completed": completed, "failed": failed, "paused": paused, "interrupted": interrupted }
+            "tasks": { "pending": pending, "running": running, "completed": completed, "failed": failed, "paused": paused, "interrupted": interrupted },
+            "stability": llm_router.metrics().stability_summary(),
+            "protocol": { "unknown_message_count": unknown_external_message_count() }
         });
         return json_response("200 OK", &body_json.to_string());
     }
@@ -5307,23 +8339,8 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
-    // GET /api/plugins — list loaded skills/plugins (Phase 6 AI OS cockpit).
-    if method == "GET" && path == "/api/plugins" {
-        let list: Vec<serde_json::Value> = skill_registry
-            .list()
-            .await
-            .into_iter()
-            .map(|s| {
-                serde_json::json!({
-                    "name": s.name,
-                    "description": s.description,
-                    "parameters": s.parameters,
-                })
-            })
-            .collect();
-        let body_json = serde_json::json!({ "plugins": list });
-        return json_response("200 OK", &body_json.to_string());
-    }
+    // GET /api/plugins — voir plus bas (Phase 5 PluginRegistry) : tableau JSON pour CLI/Tauri/TUI.
+    // Les skills chargeables pour agents sont sur GET /api/skills (pas de doublon ici).
 
     // GET /api/doctor — health checks from daemon (for slash /doctor)
     if method == "GET" && path == "/api/doctor" {
@@ -5376,8 +8393,108 @@ pub async fn handle_api(
             "description": embedded_desc
         }));
 
+        // Playwright managed browser (optional): runner path, npm package, node/npm on PATH
+        let runner_path = crate::browser::find_playwright_runner_path();
+        let runner_path_str = runner_path.as_ref().map(|p| p.display().to_string());
+        let runner_ok = runner_path.is_some();
+        let playwright_pkg_path = runner_path.as_ref().and_then(|p| {
+            crate::browser::playwright_runner_dir(p).map(|d| d.join("node_modules").join("playwright"))
+        });
+        let playwright_pkg_present = playwright_pkg_path.as_ref().map(|p| p.is_dir()).unwrap_or(false);
+        let auto_install_off = std::env::var("AKASHA_PLAYWRIGHT_AUTO_INSTALL")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false);
+        let playwright_pkg_ok = if playwright_pkg_present {
+            true
+        } else if !runner_ok {
+            false
+        } else {
+            !auto_install_off
+        };
+        let playwright_pkg_desc = if playwright_pkg_present {
+            "node_modules/playwright present"
+        } else if !runner_ok {
+            "Playwright runner not resolved"
+        } else if auto_install_off {
+            "node_modules/playwright missing (set AKASHA_PLAYWRIGHT_AUTO_INSTALL or run npm install in runner dir)"
+        } else {
+            "node_modules/playwright not installed yet (will auto-install on first browser use)"
+        };
+
+        let (node_on_path, node_version_line) = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::process::Command::new("node")
+                .arg("--version")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .output(),
+        )
+        .await
+        {
+            Ok(Ok(o)) if o.status.success() => (
+                true,
+                String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string()),
+            ),
+            _ => (false, None),
+        };
+
+        let npm_on_path = matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                tokio::process::Command::new("npm")
+                    .arg("--version")
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .output(),
+            )
+            .await,
+            Ok(Ok(ref o)) if o.status.success()
+        );
+
+        checks.push(serde_json::json!({
+            "id": "playwright_runner",
+            "ok": runner_ok,
+            "description": if runner_ok {
+                format!("Playwright runner: {}", runner_path_str.as_deref().unwrap_or("?"))
+            } else {
+                "Playwright runner not found (use release layout, AKASHA_PLAYWRIGHT_RUNNER, or data dir)".to_string()
+            }
+        }));
+        checks.push(serde_json::json!({
+            "id": "playwright_node",
+            "ok": node_on_path,
+            "description": if node_on_path {
+                format!(
+                    "node on PATH ({})",
+                    node_version_line.as_deref().unwrap_or("?")
+                )
+            } else {
+                "node not found on PATH (install Node.js for managed browser)".to_string()
+            }
+        }));
+        checks.push(serde_json::json!({
+            "id": "playwright_npm",
+            "ok": npm_on_path,
+            "description": if npm_on_path { "npm on PATH" } else { "npm not found on PATH" }
+        }));
+        checks.push(serde_json::json!({
+            "id": "playwright_package",
+            "ok": playwright_pkg_ok,
+            "description": playwright_pkg_desc
+        }));
+
+        let playwright_json = serde_json::json!({
+            "runner_path": runner_path_str,
+            "runner_found": runner_ok,
+            "node_modules_playwright": playwright_pkg_present,
+            "auto_install_disabled": auto_install_off,
+            "node_on_path": node_on_path,
+            "node_version": node_version_line,
+            "npm_on_path": npm_on_path,
+        });
+
         let all_ok = checks.iter().all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
-        let body_json = serde_json::json!({ "ok": all_ok, "checks": checks }).to_string();
+        let body_json = serde_json::json!({ "ok": all_ok, "checks": checks, "playwright": playwright_json }).to_string();
         return format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body_json.len(),
@@ -5650,19 +8767,8 @@ pub async fn handle_api(
                 }
             }
         }
-        // Reconnect: if UI says user just reconnected and there is already history today, ask agent to briefly recap then answer
-        let reconnect = body_json.as_ref().and_then(|v| v.get("reconnect")).and_then(|v| v.as_bool()).unwrap_or(false);
-        if reconnect {
-            if let Some(ref st) = short_term {
-                let turns = st.get_turns(&session_id).await;
-                if !turns.is_empty() {
-                    message = format!(
-                        "[L'utilisateur vient de se reconnecter. Rappelez-lui brièvement ce que vous avez fait ensemble jusqu'ici aujourd'hui, puis répondez à son message.]\n\n{}",
-                        message
-                    );
-                }
-            }
-        }
+        // Reconnect recap temporarily disabled: it polluted the real user request when the daemon
+        // is restarted several times during the same day and could generate repeated summaries.
         // Update last user activity for proactive check-in
         let _ = UserProfile::save_last_activity(data_dir, chrono::Utc::now());
         let priority = body_json
@@ -5673,7 +8779,7 @@ pub async fn handle_api(
         // Build acknowledgment message before moving `message` into the envelope.
         let ack_message = build_ack_message(&message);
         let envelope = crate::gateway::MessageEnvelope::api(session_id.clone(), message, image_data_urls, priority);
-        match crate::gateway::handle_envelope(main_agent, store_path, envelope) {
+        match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
             Ok(task_id) => {
                 let body = serde_json::json!({
                     "ack": true,
@@ -5742,7 +8848,7 @@ pub async fn handle_api(
                     return resume_task(store_path, id, main_agent).await;
                 }
                 if method == "GET" && parts.get(1) == Some(&"events") {
-                    return get_task_events(events, id).await;
+                    return get_task_events(store_path, events, id).await;
                 }
                 // Human in the loop: GET pending question/context/choices for the task
                 if method == "GET" && parts.get(1) == Some(&"human-input") {
@@ -5857,7 +8963,7 @@ pub async fn handle_api(
         }
     }
     if method == "GET" && path == "/api/schedule_run_reports" {
-        return get_schedule_run_reports(store_path, progress).await;
+        return get_schedule_run_reports(store_path).await;
     }
 
     // Phase 5: Plugins
@@ -5866,9 +8972,195 @@ pub async fn handle_api(
         let body = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
         return json_response("200 OK", &body);
     }
+    // GET /api/plugins/routing_rules[?message=...] — debug dynamic plugin routing rules
+    // - Without message: returns all declared routing rules from loaded plugin manifests.
+    // - With message: also returns active intents and matched rules for this message.
+    if method == "GET"
+        && (path == "/api/plugins/routing_rules" || path.starts_with("/api/plugins/routing_rules?"))
+    {
+        let query = path.split('?').nth(1).unwrap_or("");
+        let message = query
+            .split('&')
+            .find(|p| p.starts_with("message="))
+            .and_then(|p| p.strip_prefix("message="))
+            .and_then(|raw| urlencoding::decode(raw).ok().map(|d| d.into_owned()));
+
+        let manifests = plugin_registry.manifests();
+        let declared_rules: Vec<serde_json::Value> = manifests
+            .iter()
+            .flat_map(|m| {
+                m.routing_rules.iter().map(|r| {
+                    serde_json::json!({
+                        "plugin_id": m.id,
+                        "intent": r.intent,
+                        "keywords": r.keywords,
+                        "preferred_tools": r.preferred_tools,
+                        "forbidden_tools": r.forbidden_tools,
+                        "instruction": r.instruction,
+                        "priority": r.priority,
+                    })
+                })
+            })
+            .collect();
+
+        let (active_intents, matched_rules) = if let Some(ref msg) = message {
+            let flags = compute_message_intent_flags(msg);
+            let intents = active_intents_from_flags(&flags);
+            let tools_executor_snapshot = if let Some(exec_lock) = _tools_executor {
+                Some(exec_lock.read().await.clone())
+            } else {
+                None
+            };
+            let matched = plugin_registry.match_routing_rules(msg, &intents, |tool_name| {
+                tools_executor_snapshot
+                    .as_ref()
+                    .map(|e| e.policy.can_use_tool(tool_name))
+                    .unwrap_or(true)
+            });
+            (intents, matched)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        let body = serde_json::json!({
+            "rules_count": declared_rules.len(),
+            "rules": declared_rules,
+            "message": message,
+            "active_intents": active_intents,
+            "matched_rules_count": matched_rules.len(),
+            "matched_rules": matched_rules,
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    // POST /api/plugins/routing_rules/match — debug dynamic plugin routing rules with JSON body
+    // Body: { "message": "...", "allowed_tools": ["tool_a", "tool_b"] (optional) }
+    if method == "POST" && path == "/api/plugins/routing_rules/match" {
+        let Some(raw_body) = body.as_deref() else {
+            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
+        };
+
+        let parsed: serde_json::Value = match serde_json::from_slice(raw_body) {
+            Ok(v) => v,
+            Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
+        };
+
+        let Some(message) = parsed
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return json_response("400 Bad Request", r#"{"error":"message_required"}"#);
+        };
+
+        let allowed_tools: Option<std::collections::HashSet<String>> = parsed
+            .get("allowed_tools")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            });
+
+        let manifests = plugin_registry.manifests();
+        let declared_rules: Vec<serde_json::Value> = manifests
+            .iter()
+            .flat_map(|m| {
+                m.routing_rules.iter().map(|r| {
+                    serde_json::json!({
+                        "plugin_id": m.id,
+                        "intent": r.intent,
+                        "keywords": r.keywords,
+                        "preferred_tools": r.preferred_tools,
+                        "forbidden_tools": r.forbidden_tools,
+                        "instruction": r.instruction,
+                        "priority": r.priority,
+                    })
+                })
+            })
+            .collect();
+
+        let flags = compute_message_intent_flags(message);
+        let intents = active_intents_from_flags(&flags);
+        let tools_executor_snapshot = if let Some(exec_lock) = _tools_executor {
+            Some(exec_lock.read().await.clone())
+        } else {
+            None
+        };
+        let matched_rules = plugin_registry.match_routing_rules(message, &intents, |tool_name| {
+            let policy_allowed = tools_executor_snapshot
+                .as_ref()
+                .map(|e| e.policy.can_use_tool(tool_name))
+                .unwrap_or(true);
+            let list_allowed = allowed_tools
+                .as_ref()
+                .map(|set| set.contains(tool_name))
+                .unwrap_or(true);
+            policy_allowed && list_allowed
+        });
+
+        let body = serde_json::json!({
+            "message": message,
+            "rules_count": declared_rules.len(),
+            "rules": declared_rules,
+            "active_intents": intents,
+            "allowed_tools": allowed_tools,
+            "matched_rules_count": matched_rules.len(),
+            "matched_rules": matched_rules,
+        });
+        return json_response("200 OK", &body.to_string());
+    }
     if method == "POST" && path == "/api/plugins/reload" {
         plugin_registry.reload();
         return json_response("200 OK", r#"{"reloaded":true}"#);
+    }
+    // POST /api/plugins/reputation/reset
+    // Body optional:
+    // - { "plugin_id": "maps" } to reset one plugin
+    // - {} or empty body to reset all plugins
+    if method == "POST" && path == "/api/plugins/reputation/reset" {
+        let body_json = match parse_plugin_reputation_reset_body(body.as_deref()) {
+            PluginReputationResetBody::Parsed(v) => Some(v),
+            PluginReputationResetBody::Empty => None,
+            PluginReputationResetBody::Invalid(detail) => {
+                let body = serde_json::json!({
+                    "error": "invalid_json",
+                    "detail": detail
+                });
+                return json_response("400 Bad Request", &body.to_string());
+            }
+        };
+        let plugin_id = body_json
+            .as_ref()
+            .and_then(|j| j.get("plugin_id"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+
+        let result = if let Some(id) = plugin_id.as_deref() {
+            plugin_registry.reset_reputation(id)
+        } else {
+            plugin_registry.reset_all_reputation()
+        };
+
+        match result {
+            Ok(_) => {
+                plugin_registry.reload();
+                let body = serde_json::json!({
+                    "ok": true,
+                    "plugin_id": plugin_id,
+                    "reloaded": true,
+                });
+                return json_response("200 OK", &body.to_string());
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": "reputation_reset_failed", "detail": e.to_string() });
+                return json_response("500 Internal Server Error", &body.to_string());
+            }
+        }
     }
 
     // Phase D: Skills (loadable skills for agents; Agent Skills spec + flat YAML)
@@ -5919,6 +9211,55 @@ pub async fn handle_api(
             }
             None => {
                 let body = serde_json::json!({ "error": "missing_name", "detail": "Body must be JSON with \"name\": \"<skill_name>\"" }).to_string();
+                return json_response("400 Bad Request", &body);
+            }
+        }
+    }
+
+    // POST /api/skills/install — install a skill from a URL (GitHub or any allowed HTTPS host).
+    // Body: { "url": "<skill_url>" }
+    if method == "POST" && path == "/api/skills/install" {
+        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let url = body_json
+            .as_ref()
+            .and_then(|j| j.get("url"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        match url {
+            Some(skill_url) => {
+                let allowed_hosts = if let Some(exec_lock) = _tools_executor {
+                    exec_lock.read().await.policy.skill_install_allowed_hosts()
+                } else {
+                    vec![
+                        "github.com".into(),
+                        "raw.githubusercontent.com".into(),
+                        "www.github.com".into(),
+                    ]
+                };
+                let policy_path = data_dir.join("tools_policy.yaml");
+                // tools_reload: passed to do_install_skill so it can hot-reload tools_policy
+                // after the new skill command entry is registered.
+                let tools_reload = _tools_executor.map(|r| (r, policy_path.as_path()));
+                let (ok, msg) = do_install_skill(
+                    &skill_url,
+                    data_dir,
+                    spec_dir,
+                    skill_registry,
+                    &allowed_hosts,
+                    tools_reload,
+                )
+                .await;
+                if ok {
+                    let body = serde_json::json!({ "installed": true, "message": msg }).to_string();
+                    return json_response("200 OK", &body);
+                }
+                let body = serde_json::json!({ "error": "install_failed", "detail": msg }).to_string();
+                return json_response("400 Bad Request", &body);
+            }
+            None => {
+                let body = serde_json::json!({ "error": "missing_url", "detail": "Body must be JSON with \"url\": \"<skill_url>\"" }).to_string();
                 return json_response("400 Bad Request", &body);
             }
         }
@@ -6012,6 +9353,14 @@ pub async fn handle_api(
             preferred_task_type: None,
             system_prompt: None,
             image_data_urls: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repeat_penalty: None,
+            num_ctx: None,
+            num_gpu: None,
+            thinking_level: None,
         };
         match llm_router.complete(&req).await {
             Ok(resp) => {
@@ -6377,6 +9726,14 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
             preferred_task_type: None,
             system_prompt: None,
             image_data_urls: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repeat_penalty: None,
+            num_ctx: None,
+            num_gpu: None,
+            thinking_level: None,
         };
         let advice_timeout = std::time::Duration::from_secs(120);
         match tokio::time::timeout(advice_timeout, llm_router.complete(&req)).await {
@@ -7023,8 +10380,12 @@ async fn get_task_run_by_id(store_path: &Path, id: Uuid) -> String {
 }
 
 /// GET /api/schedule_run_reports — recent completed schedule runs with schedule name and task result message (for chat).
-async fn get_schedule_run_reports(store_path: &Path, progress: &ProgressCache) -> String {
+async fn get_schedule_run_reports(store_path: &Path) -> String {
     let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let task_store = match TaskStore::open(store_path) {
         Ok(s) => s,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
@@ -7048,16 +10409,15 @@ async fn get_schedule_run_reports(store_path: &Path, progress: &ProgressCache) -
             }
         }
     }
-    let progress_guard = progress.read().await;
     let reports: Vec<serde_json::Value> = completed
         .into_iter()
         .filter_map(|r| {
             let schedule_id = r.schedule_id?;
             let schedule_name = schedule_names.get(&schedule_id)?.clone();
-            let message = progress_guard
-                .get(&r.task_id)
-                .and_then(|q| q.back())
-                .map(|e| e.message.clone())
+            let message = task_store
+                .get_progress(r.task_id)
+                .ok()
+                .and_then(|entries| entries.last().map(|(_, msg)| msg.clone()))
                 .unwrap_or_else(|| "Exécuté.".to_string());
             Some(serde_json::json!({
                 "schedule_id": schedule_id.to_string(),
@@ -7076,11 +10436,21 @@ async fn get_schedule_run_reports(store_path: &Path, progress: &ProgressCache) -
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_role_system_prompt, build_image_markdown, ensure_no_open_code_block,
-        is_pausable, is_resumable,
-        message_suggests_tool_only_action, parse_content_length, parse_device_invoke_params,
+        agent_role_system_prompt, build_image_markdown, build_session_recap_reply,
+        canonicalize_tool_name, classify_small_talk_message, detect_session_recall_intent,
+        ensure_no_open_code_block, extract_how_to_call_from_message, is_pausable, is_resumable,
+        looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
+        normalize_tool_path_hint, parse_content_length, parse_device_invoke_params,
+        parse_generate_image_tool_args, parse_plugin_reputation_reset_body,
+        parse_run_command_args, parse_skill_install_url, parse_tool_calls, parse_write_file_request,
+        resolve_run_command_working_dir,
+        PluginReputationResetBody,
+        response_looks_off_topic_for_small_talk, rewrite_workspace_plan_key_to_lineage_root,
+        rewrite_workspace_plan_path_str, small_talk_fast_lane, SessionRecallIntent,
+        SessionRecallRange, SmallTalkLanguage,
     };
     use akasha_store::TaskStatus;
+    use uuid::Uuid;
 
     #[test]
     fn parse_content_length_returns_header_end_and_content_length() {
@@ -7135,6 +10505,30 @@ mod tests {
         assert_eq!(p, serde_json::json!(["hello", "world"]));
     }
 
+    // --- parse_generate_image_tool_args (whitespace-split TOOL: lines) ---
+
+    #[test]
+    fn generate_image_args_join_words_into_prompt() {
+        let args = vec![
+            s("A"),
+            s("cute"),
+            s("cat"),
+            s("playing"),
+            s("guitar"),
+        ];
+        let (prompt, size) = parse_generate_image_tool_args(&args);
+        assert_eq!(prompt, "A cute cat playing guitar");
+        assert!(size.is_none());
+    }
+
+    #[test]
+    fn generate_image_args_trailing_size_token() {
+        let args = vec![s("cat"), s("on"), s("sofa"), s("1024x1024")];
+        let (prompt, size) = parse_generate_image_tool_args(&args);
+        assert_eq!(prompt, "cat on sofa");
+        assert_eq!(size.as_deref(), Some("1024x1024"));
+    }
+
     // --- message_suggests_tool_only_action ---
 
     #[test]
@@ -7168,6 +10562,429 @@ mod tests {
     fn tool_only_action_false_when_code_intent_dominates() {
         // Explicit code request even if it mentions photo → do not override to conversation
         assert!(!message_suggests_tool_only_action("écris un script qui prend une photo"));
+    }
+
+    #[test]
+    fn memory_profile_uses_fast_path_for_simple_root_requests() {
+        let profile = memory_profile_for_task("Bonjour, ça va ?", "conversation", false, false);
+        assert_eq!(profile.semantic_top_k, 2);
+        assert_eq!(profile.user_rag_top_k, 0);
+        assert!(!profile.expand_by_graph);
+        assert!(!profile.compact_before_prompt);
+    }
+
+    #[test]
+    fn memory_profile_is_lean_for_subagents() {
+        let profile = memory_profile_for_task(
+            "Implémente la route demandée dans le plan partagé",
+            "backend",
+            true,
+            true,
+        );
+        assert_eq!(profile.semantic_top_k, 0);
+        assert_eq!(profile.episodic_limit, 0);
+        assert_eq!(profile.user_rag_top_k, 0);
+        assert!(!profile.compact_before_prompt);
+    }
+
+    #[test]
+    fn small_talk_fast_lane_detects_simple_greeting() {
+        let intent = small_talk_fast_lane("Salut, ça va ?").expect("small-talk should be detected");
+        assert_eq!(intent.language, SmallTalkLanguage::French);
+        assert!(intent.asks_status);
+    }
+
+    #[test]
+    fn small_talk_fast_lane_rejects_real_request_after_greeting() {
+        assert!(small_talk_fast_lane("Bonjour, peux-tu lire ce fichier ?").is_none());
+    }
+
+    #[test]
+    fn extract_how_to_call_ignores_greetings() {
+        assert!(extract_how_to_call_from_message("salut").is_none());
+        assert!(extract_how_to_call_from_message("bonjour").is_none());
+    }
+
+    #[test]
+    fn classify_small_talk_rejects_small_talk_with_real_request() {
+        // "ça va merci, tu peux me rappeler ce qu'on a fait hier ?"
+        // Should be rejected because it contains "peux me" + "rappeler" + "hier"
+        assert!(classify_small_talk_message("ça va merci, tu peux me rappeler ce qu'on a fait hier ?").is_none());
+
+        // "ça va, peux-tu lire ce fichier ?" should be rejected
+        assert!(classify_small_talk_message("ça va, peux-tu lire ce fichier ?").is_none());
+
+        // But "salut, ça va ?" should still pass
+        assert!(classify_small_talk_message("salut, ça va ?").is_some());
+    }
+
+    #[test]
+    fn small_talk_guardrail_flags_tool_leaks() {
+        assert!(response_looks_off_topic_for_small_talk(
+            "TOOL: write_file c:/tmp/x.txt\nJe vais d'abord modifier tools_policy.yaml"
+        ));
+        assert!(!response_looks_off_topic_for_small_talk("Salut ! 👋"));
+    }
+
+    #[test]
+    fn detect_session_recall_intent_for_yesterday() {
+        let intent = detect_session_recall_intent("tu peux me rappeler ce qu'on a fait hier ?")
+            .expect("intent should be detected");
+        assert_eq!(intent.range, SessionRecallRange::Yesterday);
+        assert_eq!(intent.language, SmallTalkLanguage::French);
+    }
+
+    #[test]
+    fn build_session_recap_reply_filters_noise() {
+        let turns = vec![
+            crate::memory::ConversationTurn {
+                role: "assistant".to_string(),
+                content: "tools_policy.yaml blocked write_file".to_string(),
+            },
+            crate::memory::ConversationTurn {
+                role: "assistant".to_string(),
+                content: "On a mis en place le fast-path small-talk et ajouté des garde-fous de pertinence.".to_string(),
+            },
+        ];
+        let intent = SessionRecallIntent {
+            range: SessionRecallRange::Yesterday,
+            language: SmallTalkLanguage::French,
+        };
+        let recap = build_session_recap_reply(&turns, intent).expect("recap should exist");
+        assert!(recap.contains("fast-path small-talk"));
+        assert!(!recap.to_lowercase().contains("tools_policy.yaml"));
+    }
+
+    // --- parse_tool_calls (normalized markdown / list TOOL lines) ---
+
+    #[test]
+    fn parse_tool_calls_markdown_list_and_title_case_tool() {
+        let s = "- Tool: write_file workspace:/out.md hello world";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, "write_file");
+        assert!(c[0].1[0].contains("workspace:"), "{:?}", c[0].1);
+    }
+
+    #[test]
+    fn parse_tool_calls_bold_wrapped_tool_keyword() {
+        let s = "**TOOL:** write_file workspace:/x.md\nhello block";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, "write_file");
+        assert_eq!(c[0].1[0], "workspace:/x.md");
+        assert_eq!(c[0].1[1], "hello block");
+    }
+
+    #[test]
+    fn parse_tool_calls_table_cell_with_leading_pipe() {
+        let s = "| TOOL: read_file workspace:/plan.md |";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, "read_file");
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_tools_plain_word() {
+        let s = "tools: hammer and nail";
+        let c = parse_tool_calls(s);
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_nested_tool_keyword_as_name() {
+        let s = "TOOL: TOOL: install_skill https://github.com/bankr/cli";
+        let c = parse_tool_calls(s);
+        assert!(c.is_empty(), "nested TOOL: should not become a tool named TOOL:");
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_non_ascii_tool_name() {
+        let s = "TOOL: prévision météo Paris";
+        let c = parse_tool_calls(s);
+        assert!(c.is_empty(), "non-ASCII pseudo tool names must be ignored");
+    }
+
+    #[test]
+    fn normalize_tool_path_hint_accepts_workspace_slash_form() {
+        assert_eq!(
+            normalize_tool_path_hint("workspace/analyze/comparatif.md"),
+            "workspace:/analyze/comparatif.md"
+        );
+        assert_eq!(
+            normalize_tool_path_hint("workspace\\analyze\\comparatif.md"),
+            "workspace:/analyze\\comparatif.md"
+        );
+    }
+
+    #[test]
+    fn parse_write_file_request_accepts_json_payload() {
+        let args = vec![
+            "{".to_string(),
+            "\"path\": \"workspace/project_plan.md\",".to_string(),
+            "\"content\": \"# Plan\\n- item\"".to_string(),
+            "}".to_string(),
+        ];
+        let (path, content) = parse_write_file_request(&args).expect("json payload should parse");
+        assert_eq!(path, "workspace:/project_plan.md");
+        assert!(content.contains("# Plan"));
+    }
+
+    #[test]
+    fn parse_plugin_reputation_reset_body_rejects_invalid_json() {
+        let parsed = parse_plugin_reputation_reset_body(Some(br#"{"plugin_id":"maps""#));
+        assert!(matches!(parsed, PluginReputationResetBody::Invalid(_)));
+    }
+
+    #[test]
+    fn parse_plugin_reputation_reset_body_accepts_empty_body_as_reset_all() {
+        let parsed = parse_plugin_reputation_reset_body(None);
+        assert!(matches!(parsed, PluginReputationResetBody::Empty));
+    }
+
+    #[test]
+    fn canonicalize_tool_name_supports_create_todos_alias() {
+        assert_eq!(canonicalize_tool_name("create_todos"), "write_todos");
+        assert_eq!(canonicalize_tool_name("append_todos"), "merge_todos");
+    }
+
+    #[test]
+    fn looks_like_meta_agent_response_flags_instruction_recitation() {
+        assert!(looks_like_meta_agent_response(
+            "Based on the instructions provided, I am ready to assist with this Phase 2 task."
+        ));
+        assert!(!looks_like_meta_agent_response(
+            "Voici le rapport demandé et le fichier a été écrit dans workspace:/analyze/comparatif.md."
+        ));
+    }
+
+    // Headings with textual content before `TOOL:` are not treated as tool calls.
+    // Only markdown "junk" (e.g. `#` heading markers, list bullets) may precede `TOOL:`.
+    #[test]
+    fn parse_tool_calls_heading_then_tool_on_same_line() {
+        let s = "### Step 4 — TOOL: write_file workspace:/out.md hello";
+        let c = parse_tool_calls(s);
+        assert!(
+            c.is_empty(),
+            "alphabetic heading text before `TOOL:` must not be parsed as a tool call"
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_tool_in_long_prose_line() {
+        let s = "According to the documentation and the specification we note that TOOL: write_file workspace:/x y";
+        let c = parse_tool_calls(s);
+        assert!(
+            c.is_empty(),
+            "long alphabetic prefix before TOOL: must not become a false tool call"
+        );
+    }
+
+    // After the fix, sloppy "- Tool: …" headers DO terminate multiline bodies.
+    // A line like "- Tool: read_file …" inside a body is treated as the start of a new tool call.
+    #[test]
+    fn parse_tool_calls_sloppy_header_terminates_multiline_body() {
+        // write_file body is ended when "- Tool: read_file …" appears — new tool starts.
+        let s = "TOOL: write_file workspace:/docs/tools.md\n# Available tools\n\n- Tool: read_file — reads a file\n- Tool: write_file — writes a file\n\nEnd of list";
+        let c = parse_tool_calls(s);
+        // The "- Tool: read_file" line terminates the write_file body and starts a new call.
+        assert!(c.len() >= 2, "expected at least 2 tool calls, got {:?}", c);
+        assert_eq!(c[0].0, "write_file");
+        // The write_file body ends just before "- Tool: read_file …".
+        let body = &c[0].1[1];
+        assert!(
+            !body.contains("End of list"),
+            "write_file body should be truncated at the sloppy header, got: {:?}",
+            body
+        );
+        // The second call should be read_file (started by the sloppy header).
+        assert_eq!(c[1].0, "read_file");
+    }
+
+    #[test]
+    fn parse_tool_calls_body_with_heading_tool_mention_not_truncated() {
+        // edit_file body contains "### Step — TOOL: read_file …" — must NOT split here.
+        let s = "- Tool: edit_file workspace:/spec.md\n### Step — TOOL: read_file some args\nmore content\nTOOL: read_file workspace:/next.md";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 2, "expected edit_file + read_file, got {:?}", c);
+        assert_eq!(c[0].0, "edit_file");
+        let body = &c[0].1[1];
+        assert!(
+            body.contains("### Step — TOOL: read_file"),
+            "body should contain the heading tool mention verbatim, got: {:?}",
+            body
+        );
+        assert_eq!(c[1].0, "read_file");
+    }
+
+    #[test]
+    fn parse_tool_calls_body_terminated_by_canonical_tool_line() {
+        // After a body-supporting tool, a canonical TOOL: line correctly ends the body.
+        let s = "TOOL: write_file workspace:/a.txt\nsome content\nTOOL: read_file workspace:/b.txt";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].0, "write_file");
+        assert_eq!(c[1].0, "read_file");
+    }
+
+
+    #[test]
+    fn parse_tool_calls_sloppy_provider_all_headers_after_multiline_tool() {
+        // Providers that always emit sloppy "- Tool: …" headers must not lose tool calls
+        // that come after a multiline-body tool (write_file / edit_file / apply_patch).
+        let s = concat!(
+            "- Tool: write_file workspace:/out.txt\n",
+            "hello content\n",
+            "- Tool: read_file workspace:/in.txt\n",
+            "- Tool: list_dir workspace:/\n",
+        );
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 3, "expected write_file + read_file + list_dir, got {:?}", c);
+        assert_eq!(c[0].0, "write_file");
+        assert_eq!(c[1].0, "read_file");
+        assert_eq!(c[2].0, "list_dir");
+    }
+
+    #[test]
+    fn parse_tool_calls_bold_sloppy_provider_after_multiline_tool() {
+        // "**TOOL:** …" style also terminates a multiline body.
+        let s = concat!(
+            "**TOOL:** write_file workspace:/out.txt\n",
+            "some generated content\n",
+            "**TOOL:** read_file workspace:/plan.md\n",
+        );
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 2, "expected write_file + read_file, got {:?}", c);
+        assert_eq!(c[0].0, "write_file");
+        assert_eq!(c[1].0, "read_file");
+    }
+
+    // --- merged_for_tools selection logic ---
+    // These tests mirror the merge branch `a_has_tools && !r_has_tools`
+    // introduced to fix the sloppy-prefix streaming case.
+
+    /// Helper that reproduces the merge logic from `run_message_via_llm`.
+    fn merged_for_tools(response_text: &str, accumulated: &str) -> String {
+        let r = response_text.trim();
+        let a = accumulated.trim();
+        let a_has_tools = !a.is_empty() && !parse_tool_calls(a).is_empty();
+        let r_has_tools = !r.is_empty() && !parse_tool_calls(r).is_empty();
+        if r.is_empty() && !a.is_empty() {
+            a.to_string()
+        } else if a_has_tools && !r_has_tools {
+            a.to_string()
+        } else if !r.is_empty() {
+            r.to_string()
+        } else {
+            a.to_string()
+        }
+    }
+
+    #[test]
+    fn merge_prefers_accumulated_when_streamed_has_title_case_tool_and_resp_does_not() {
+        // Provider streams `- Tool: write_file …` but the final body omits tool lines.
+        let accumulated = "- Tool: write_file workspace:/out.md hello";
+        let resp_text = "I will write the file for you.";
+        let merged = merged_for_tools(resp_text, accumulated);
+        assert_eq!(merged, accumulated);
+        // The merged string must still parse as a tool call.
+        let calls = parse_tool_calls(&merged);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "write_file");
+    }
+
+    #[test]
+    fn merge_prefers_accumulated_when_streamed_has_bold_tool_and_resp_does_not() {
+        // Provider streams `**TOOL:** write_file …` but the final body is plain text.
+        let accumulated = "**TOOL:** write_file workspace:/x.md\nhello block";
+        let resp_text = "Here is your file.";
+        let merged = merged_for_tools(resp_text, accumulated);
+        assert_eq!(merged, accumulated);
+        let calls = parse_tool_calls(&merged);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "write_file");
+    }
+
+    #[test]
+    fn merge_uses_resp_text_when_both_have_tool_calls() {
+        // When both accumulated and resp_text have parseable tool calls, prefer resp_text (the
+        // final body is authoritative as long as it contains tools).
+        let accumulated = "TOOL: write_file workspace:/a.txt\nfoo";
+        let resp_text = "TOOL: write_file workspace:/b.txt\nbar";
+        let merged = merged_for_tools(resp_text, accumulated);
+        assert_eq!(merged, resp_text);
+    }
+
+    #[test]
+    fn merge_uses_resp_text_when_accumulated_has_no_tool_calls() {
+        // If the streamed chunk contains no parseable tools at all, use resp_text.
+        let accumulated = "Thinking about what to do…";
+        let resp_text = "TOOL: read_file workspace:/plan.md";
+        let merged = merged_for_tools(resp_text, accumulated);
+        assert_eq!(merged, resp_text);
+    }
+
+    // --- rewrite_workspace_plan_key_to_lineage_root ---
+
+    #[test]
+    fn rewrite_plan_key_stale_uuid_rewritten_to_lineage_root() {
+        let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
+        let stale = Uuid::parse_str("216364b2-9308-47a7-9c2b-1c3b84c55c8c").unwrap();
+        let (k, bad) = rewrite_workspace_plan_key_to_lineage_root(
+            &format!(".akasha/plan_{stale}.md"),
+            root,
+        );
+        assert_eq!(bad, Some(stale));
+        assert_eq!(k, format!(".akasha/plan_{root}.md"));
+    }
+
+    #[test]
+    fn rewrite_plan_key_matching_root_unchanged() {
+        let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
+        let (k, bad) = rewrite_workspace_plan_key_to_lineage_root(&format!(".akasha/plan_{root}.md"), root);
+        assert!(bad.is_none());
+        assert_eq!(k, format!(".akasha/plan_{root}.md"));
+    }
+
+    #[test]
+    fn rewrite_plan_key_non_plan_paths_passthrough() {
+        let root = Uuid::nil();
+        let (k, bad) = rewrite_workspace_plan_key_to_lineage_root("certification_ai/exo/x.md", root);
+        assert!(bad.is_none());
+        assert_eq!(k, "certification_ai/exo/x.md");
+    }
+
+    // --- rewrite_workspace_plan_path_str ---
+
+    #[test]
+    fn rewrite_workspace_plan_path_str_stale_uuid_rewritten() {
+        let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
+        let stale = Uuid::parse_str("216364b2-9308-47a7-9c2b-1c3b84c55c8c").unwrap();
+        // rewrite_workspace_plan_path_str calls workspace_lineage_root_task_id which needs a real
+        // store, so we test the path-string wrapper via a nil store_path (lineage = task_id = root).
+        let result = rewrite_workspace_plan_path_str(
+            &format!("workspace:/.akasha/plan_{stale}.md"),
+            root,
+            None,
+        );
+        assert_eq!(result, format!("workspace:/.akasha/plan_{root}.md"));
+    }
+
+    #[test]
+    fn rewrite_workspace_plan_path_str_non_workspace_unchanged() {
+        let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
+        let stale = Uuid::parse_str("216364b2-9308-47a7-9c2b-1c3b84c55c8c").unwrap();
+        let input = format!("/abs/path/.akasha/plan_{stale}.md");
+        let result = rewrite_workspace_plan_path_str(&input, root, None);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn rewrite_workspace_plan_path_str_non_plan_workspace_path_unchanged() {
+        let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
+        let result =
+            rewrite_workspace_plan_path_str("workspace:/certification_ai/exo/x.md", root, None);
+        assert_eq!(result, "workspace:/certification_ai/exo/x.md");
     }
 
     // --- agent_role_system_prompt ---
@@ -7274,5 +11091,105 @@ mod tests {
         assert_eq!(TaskStatus::Cancelled.as_str(), "cancelled");
         assert_eq!(TaskStatus::Interrupted.as_str(), "interrupted");
         assert_eq!(TaskStatus::WaitingUserInput.as_str(), "waiting_user_input");
+    }
+
+    #[test]
+    fn parse_skill_install_url_accepts_github_tree_url() {
+        // Standard GitHub tree URL for a skill directory
+        let allowed = vec!["github.com".into(), "raw.githubusercontent.com".into()];
+        let r = parse_skill_install_url(
+            "https://github.com/BankrBot/skills/tree/main/bankr",
+            &allowed,
+        );
+        assert!(r.is_some(), "GitHub tree URL must be accepted");
+        let parsed = r.unwrap();
+        assert_eq!(parsed.skill_name, "bankr");
+        assert!(
+            parsed.raw_skill_url.contains("raw.githubusercontent.com"),
+            "raw URL must point to raw.githubusercontent.com"
+        );
+    }
+
+    #[test]
+    fn parse_skill_install_url_rejects_disallowed_host() {
+        // Host not in the allowed list must be rejected to prevent SSRF
+        let allowed = vec!["github.com".into(), "raw.githubusercontent.com".into()];
+        let r = parse_skill_install_url("https://evil.example.com/bad.md", &allowed);
+        assert!(
+            r.is_none(),
+            "URL from a non-allowed host must be rejected by parse_skill_install_url"
+        );
+    }
+
+    #[test]
+    fn parse_skill_install_url_wildcard_allows_any_https() {
+        // When allowed_hosts contains "*", any HTTPS URL is allowed
+        let allowed = vec!["*".into()];
+        let r = parse_skill_install_url("https://example.com/my-skill/SKILL.md", &allowed);
+        assert!(
+            r.is_some(),
+            "Wildcard allowed_hosts must accept any HTTPS URL"
+        );
+    }
+
+    #[test]
+    fn parse_skill_install_url_rejects_http_scheme() {
+        // Only HTTPS is allowed; plain HTTP must be rejected
+        let allowed = vec!["*".into()];
+        let r = parse_skill_install_url("http://github.com/user/skills/tree/main/bankr", &allowed);
+        assert!(
+            r.is_none(),
+            "HTTP scheme must be rejected (only HTTPS is allowed)"
+        );
+    }
+
+    // --- parse_run_command_args / resolve_run_command_working_dir ---
+
+    #[test]
+    fn parse_run_command_args_extracts_cwd_after_vault() {
+        let args = vec![
+            s("VAULT:foo=BAR"),
+            s("--cwd"),
+            s("workspace:/"),
+            s("git"),
+            s("status"),
+        ];
+        let (vault, cwd, cmd, a) = parse_run_command_args(&args);
+        assert_eq!(vault.len(), 1);
+        assert_eq!(cwd.as_deref(), Some("workspace:/"));
+        assert_eq!(cmd, "git");
+        assert_eq!(a, vec![s("status")]);
+    }
+
+    #[test]
+    fn parse_run_command_args_no_cwd() {
+        let args = vec![s("cargo"), s("build")];
+        let (_, cwd, cmd, a) = parse_run_command_args(&args);
+        assert!(cwd.is_none());
+        assert_eq!(cmd, "cargo");
+        assert_eq!(a, vec![s("build")]);
+    }
+
+    #[test]
+    fn resolve_run_command_working_dir_default_off_returns_none() {
+        let mut p = akasha_tools::ToolsPolicy::default();
+        p.run_command_default_cwd_workspace = false;
+        let tmp = tempfile::tempdir().unwrap();
+        p.allowed_read_paths = vec![tmp.path().to_string_lossy().to_string()];
+        let r = resolve_run_command_working_dir(None, Some(tmp.path()), &p).unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn resolve_run_command_working_dir_workspace_when_policy_on() {
+        let mut p = akasha_tools::ToolsPolicy::default();
+        p.run_command_default_cwd_workspace = true;
+        let tmp = tempfile::tempdir().unwrap();
+        p.allowed_read_paths = vec![tmp.path().to_string_lossy().to_string()];
+        let r = resolve_run_command_working_dir(None, Some(tmp.path()), &p).unwrap();
+        let got = r.expect("expected workspace cwd");
+        let exp = std::fs::canonicalize(tmp.path()).unwrap();
+        let got_c = std::fs::canonicalize(&got).unwrap();
+        assert_eq!(got_c, exp);
     }
 }

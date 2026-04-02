@@ -6,6 +6,7 @@ pub mod discovery;
 pub mod fallback;
 pub mod metrics;
 pub mod provider;
+pub mod retry;
 pub mod router;
 
 pub use classifier::{classify_task_type, TaskType};
@@ -18,4 +19,5 @@ pub use provider::{
     CompletionRequest, CompletionResponse, GoogleAIProvider, LLMProvider, OllamaProvider, OpenAIProvider,
     OpenRouterProvider,
 };
+pub use retry::{RetryClass, RetryPolicy};
 pub use router::LLMRouter;

@@ -1,4 +1,5 @@
 # Akasha installation script (Windows)
+# Release archives include playwright-runner\ beside the binaries; Node.js is only needed for the managed browser feature.
 # Usage: .\install.ps1 [-InstallDir <path>] [-NoAutoStart]
 # -InstallDir: where to copy binaries (default: C:\Akasha)
 # -NoAutoStart: do not register daemon to start at user logon

@@ -1,5 +1,7 @@
 # Non Functional Requirements
 
+> **Résumé exécutif** — liste courte des NFR. Spécification détaillée : [04_non_fonctional_requirements.md](04_non_fonctional_requirements.md).
+
 NFR-001 — 24/7 uptime
 NFR-002 — Auto-restart composants
 NFR-003 — Self-healing runtime

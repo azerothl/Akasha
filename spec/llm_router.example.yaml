@@ -17,6 +17,10 @@ providers:
   openai:
     api_key_ref: "vault://openai_api_key"   # ou définir OPENAI_API_KEY
     # base_url optionnel (défaut: https://api.openai.com/v1)
+  # Azure OpenAI (OpenAI-compatible via endpoint Azure + deployment model)
+  # azure_openai:
+  #   api_key_ref: "vault://azure_openai_api_key"   # ou AZURE_OPENAI_API_KEY si votre setup l'exporte
+  #   base_url: "https://my-resource.openai.azure.com"
   openrouter:
     api_key_ref: "vault://openrouter_api_key"   # ou OPENROUTER_API_KEY
     # base_url optionnel (défaut: https://openrouter.ai/api/v1)
@@ -45,6 +49,14 @@ task_types:
     primary:
       provider: akasha_embedded
       model: default
+      # Optional: per-model config (temperature, top_p, top_k, etc.).
+      # These settings override global defaults and are passed to the provider.
+      config:
+        temperature: 0.7
+        top_p: 0.9
+        top_k: 40
+        # Optional thinking/reasoning effort (if provider/model supports it): off|low|medium|high
+        thinking_level: medium
     fallback:
       - provider: akasha_core
         model: core
@@ -53,6 +65,13 @@ task_types:
     primary:
       provider: akasha_embedded
       model: default
+      # Example: lower temperature + top_k for more deterministic code generation
+      config:
+        temperature: 0.3
+        top_p: 0.95
+        top_k: 20
+        thinking_level: low
+        max_tokens: 4096
     fallback:
       - provider: akasha_core
         model: core
@@ -61,6 +80,12 @@ task_types:
     primary:
       provider: akasha_embedded
       model: default
+      # Example: higher temperature for more creative outputs
+      config:
+        temperature: 1.2
+        top_p: 0.95
+        repeat_penalty: 1.1  # Prevent repetition (Ollama-compatible)
+        thinking_level: medium
     fallback:
       - provider: akasha_core
         model: core
@@ -69,6 +94,9 @@ task_types:
     primary:
       provider: akasha_embedded
       model: default
+      config:
+        temperature: 0.5
+        max_tokens: 2048
     fallback:
       - provider: akasha_core
         model: core
@@ -81,3 +109,69 @@ task_types:
     fallback:
       - provider: akasha_core
         model: core
+
+  # Décomposition orchestrateur (optionnel mais recommandé pour demandes longues/projet).
+  # Si absent, l'orchestrateur retombe sur task_type: system.
+  orchestrator:
+    primary:
+      provider: akasha_embedded
+      model: default
+    fallback:
+      - provider: akasha_core
+        model: core
+
+# Example: Using Ollama with custom model config
+# Uncomment and configure to switch to Ollama:
+#
+#  conversation:
+#    primary:
+#      provider: ollama
+#      model: llama3.2
+#      config:
+#        temperature: 0.7
+#        top_p: 0.9
+#        top_k: 40
+#        num_ctx: 2048      # Context window size (local Ollama)
+#        num_gpu: 1         # GPU layers (Ollama)
+#        repeat_penalty: 1.1
+#    fallback:
+#      - provider: openai
+#        model: gpt-4o-mini
+#        config:
+#          temperature: 0.7
+#          top_p: 0.9
+#          frequency_penalty: 0.0
+#          presence_penalty: 0.0
+#
+# Supported config parameters by provider:
+#
+#  Ollama / Local (llama-server, BitNet):
+#    - temperature (float, default 0.7)
+#    - top_p (float, nucleus sampling, 0.0-1.0)
+#    - top_k (int, top-k sampling)
+#    - repeat_penalty (float, default 1.1; >1.0 = penalize repetition)
+#    - num_ctx (int, context window size)
+#    - num_gpu (int, GPU layers to use)
+#    - max_tokens (int, length limit)
+#    - thinking_level (off|low|medium|high, mapped to provider-specific thinking mode when available)
+#
+#  OpenAI / Azure OpenAI / OpenRouter / BitNet (OpenAI-compatible):
+#    - temperature (float, default 0.7, range 0.0-2.0)
+#    - top_p (float, nucleus sampling, 0.0-1.0)
+#    - frequency_penalty (float, range -2.0 to 2.0)
+#    - presence_penalty (float, range -2.0 to 2.0)
+#    - max_tokens (int, length limit)
+#    - thinking_level (off|low|medium|high, mapped to reasoning_effort on supported models)
+#
+# Example Azure route:
+#  conversation:
+#    primary:
+#      provider: azure_openai
+#      model: gpt-4o-mini   # nom du deployment Azure
+#
+#  Google Gemini:
+#    - temperature (float)
+#    - top_p (float)
+#    - top_k (int)
+#    - max_tokens (int, as maxOutputTokens)
+#    - thinking_level (off|low|medium|high, mapped to thinkingConfig for Gemini 2.5 models)

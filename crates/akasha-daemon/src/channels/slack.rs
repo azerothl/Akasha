@@ -91,7 +91,7 @@ pub fn handle_slack_command(
     let store_path = store_path.to_path_buf();
     let envelope = gateway::MessageEnvelope::slack("slack".to_string(), text.clone());
     tokio::spawn(async move {
-        let task_id = match gateway::handle_envelope(&main_agent, &store_path, envelope) {
+        let task_id = match gateway::handle_envelope(&main_agent, &store_path, envelope).await {
             Ok(id) => id,
             Err(_) => {
                 let _ = post_slack_response(&response_url, "Failed to create task.").await;

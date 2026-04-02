@@ -487,6 +487,12 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("No manifest.toml or manifest.json in {}", path.display()))?;
             let manifest = akasha_plugin_api::PluginManifest::load_from_path(&manifest_path)
                 .map_err(|e| anyhow::anyhow!("Invalid manifest: {}", e))?;
+            if !is_safe_plugin_id(&manifest.id) {
+                anyhow::bail!(
+                    "Invalid plugin id '{}': expected only [A-Za-z0-9_-], no path separators",
+                    manifest.id
+                );
+            }
             let dest = plugins_dir.join(&manifest.id);
             std::fs::create_dir_all(&dest)?;
             for entry in std::fs::read_dir(&path)? {
@@ -543,6 +549,21 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn is_safe_plugin_id(id: &str) -> bool {
+    if id.is_empty() || id == "." || id == ".." {
+        return false;
+    }
+    if !id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return false;
+    }
+    use std::path::Component;
+    let mut comps = std::path::Path::new(id).components();
+    matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none()
 }
 
 fn cmd_vault(sub: VaultSub) -> anyhow::Result<()> {
@@ -2765,19 +2786,24 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
         "config_paths": config_paths
     });
 
-    // When daemon is reachable, fetch its checks (ollama, vault, spec_dir, embedded_llm, etc.)
-    let daemon_checks: Vec<serde_json::Value> = if daemon_healthy {
-        reqwest::blocking::Client::new()
-            .get(format!("http://127.0.0.1:{}/api/doctor", port))
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .ok()
-            .and_then(|r| r.json::<serde_json::Value>().ok())
-            .and_then(|j| j.get("checks").and_then(|c| c.as_array()).cloned())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    // When daemon is reachable, fetch its checks (ollama, vault, spec_dir, embedded_llm, playwright, etc.)
+    let (daemon_checks, daemon_playwright): (Vec<serde_json::Value>, Option<serde_json::Value>) =
+        if daemon_healthy {
+            reqwest::blocking::Client::new()
+                .get(format!("http://127.0.0.1:{}/api/doctor", port))
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .ok()
+                .and_then(|r| r.json::<serde_json::Value>().ok())
+                .map(|j| {
+                    let checks = j.get("checks").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+                    let pw = j.get("playwright").cloned();
+                    (checks, pw)
+                })
+                .unwrap_or_else(|| (Vec::new(), None))
+        } else {
+            (Vec::new(), None)
+        };
 
     if json {
         if !daemon_checks.is_empty() {
@@ -2787,6 +2813,9 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
             if let Some(obj) = payload.as_object_mut() {
                 obj.insert("ok".to_string(), serde_json::json!(combined_ok));
                 obj.insert("daemon_checks".to_string(), serde_json::json!(daemon_checks));
+                if let Some(pw) = daemon_playwright {
+                    obj.insert("playwright".to_string(), pw);
+                }
             }
             println!("{}", serde_json::to_string_pretty(&payload)?);
         } else {

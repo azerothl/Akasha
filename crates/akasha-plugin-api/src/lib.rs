@@ -5,7 +5,7 @@ mod kinds;
 mod manifest;
 
 pub use kinds::PluginKind;
-pub use manifest::PluginManifest;
+pub use manifest::{PluginManifest, PluginNetworkConfig, PluginRoutingRule};
 
 /// Common metadata for any plugin.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -40,8 +40,39 @@ pub struct ChannelMessage {
 /// Tool plugin: execute a single tool call (API connectors, automations).
 pub trait ToolPlugin: Send + Sync {
     fn meta(&self) -> &PluginMeta;
+    /// Optional schema identifier/version for host-side validation.
+    fn input_schema_version(&self) -> Option<&str> {
+        None
+    }
+    /// Tool capabilities advertised to the host scheduler.
+    fn capabilities(&self) -> ToolPluginCapabilities {
+        ToolPluginCapabilities::default()
+    }
     /// Execute with JSON input, returns JSON output.
     fn execute(&self, input: &str) -> Result<String, PluginError>;
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolPluginCapabilities {
+    #[serde(default)]
+    pub concurrency_safe: bool,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub interrupt_safe: bool,
+    #[serde(default)]
+    pub requires_approval: bool,
+}
+
+impl Default for ToolPluginCapabilities {
+    fn default() -> Self {
+        Self {
+            concurrency_safe: false,
+            read_only: false,
+            interrupt_safe: false,
+            requires_approval: false,
+        }
+    }
 }
 
 /// Skill plugin: specialized business capability (spec 16).

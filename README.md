@@ -48,7 +48,7 @@ akasha/
 │   ├── akasha-cluster/      # Mode cluster : NATS, élection de leader, mTLS
 │   ├── akasha-daemon/       # Daemon 24/7, API, agents, canaux, plugins, skills
 │   ├── akasha-cli/          # CLI : start, stop, doctor, vault, config, router, plugin, init, tui
-│   ├── akasha-tui/          # Interface terminal (Chat, Routeur, Doc)
+│   ├── akasha-tui/          # Interface terminal (7 onglets : Chat, Retours planifiés, Routeur, Doc, Tâches, Calendrier, Mémoire)
 │   └── akasha-evals/        # Suite d’évals (sécurité, runbooks, hallucinations)
 ├── apps/
 │   └── akasha-ui/           # Application Tauri (React + TypeScript)
@@ -103,10 +103,10 @@ cargo build -p akasha-cli -p akasha-tui
 akasha tui
 ```
 
-- **Onglets** : Chat, Routeur (métriques LLM), Doc (guide utilisateur servi par le daemon), Activité (tâches et événements).
+- **Onglets** : Chat, **Retours planifiés** (réponses des tâches récurrentes / planifiées), Routeur (métriques LLM), Doc (guide servi par le daemon), Tâches, Calendrier, Mémoire.
 - **Chat** : envoi de messages au daemon ; réponses via l’orchestrateur (ack immédiat, traitement en arrière-plan). Défilement : ↑↓, PgUp/PgDn, Home/End.
 - **Commandes slash** (dans le chat, identiques en TUI et Tauri) : `/help`, `/status`, `/doctor`, `/advice`, `/embedded`, `/embedded reload`, `/metrics`, `/models`, `/models list`, `/models set CATÉGORIE PROVIDER MODÈLE`, `/routes`, `/config list` / `get` / `set`, `/vault list`, `/plugins`, `/reload`, `/skills reload`, `/skills uninstall <nom>`, `/restart`, `/task create "msg"`, `/schedule create` / `delete`, `/stop TASK_ID`, `/cancel TASK_ID`, `/newsession`. Liste complète : taper `/help` dans le chat.
-- **Raccourcis** : Tab = changer d’onglet, R = rafraîchir (métriques ou doc), Échap / Ctrl+Q = quitter.
+- **Raccourcis** : Tab = changer d’onglet ; R = rafraîchir (Routeur, Retours planifiés ou liste des tâches selon l’onglet) ; Échap / Ctrl+Q = quitter. **Tâches** : ↑/↓ pour sélectionner, D = filtrer les racines. **Mémoire** : / ou S = recherche, G = vue graphe, D ou Suppr = supprimer une entrée long terme. Détail : [docs/user_guide_final.md](docs/user_guide_final.md) § 6.
 
 ### Interface web (Tauri)
 
@@ -117,8 +117,8 @@ npm run tauri dev
 ```
 
 - Connexion au daemon sur le port **3876** (`AKASHA_PORT`).
-- **Onglets** : Chat, Routeur, Documentation, Paramètres.
-- Mêmes commandes slash que la TUI dans le champ de chat.
+- **Onglets** : Chat, **Retours planifiés**, Routeur, Documentation, Tâches, Calendrier, Mémoire, Paramètres.
+- Mêmes commandes slash que la TUI dans le champ de chat. Raccourcis **1–8** pour changer d’onglet lorsque le focus n’est pas dans un champ de saisie.
 
 ### Flux des demandes (orchestrateur)
 

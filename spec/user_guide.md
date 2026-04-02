@@ -2,7 +2,7 @@
 
 Documentation accessible depuis l'interface TUI et l'interface web. Elle décrit les commandes, l'onboarding, les options de configuration et le lancement des différentes interfaces.
 
-**Utilisateurs des binaires uniquement** : le guide dédié aux utilisateurs qui n'ont pas accès au code source est dans [docs/user_guide_final.md](../docs/user_guide_final.md). Il est servi dans l'onglet Doc des interfaces lorsque vous lancez le daemon depuis le dossier d'extraction contenant `docs/user_guide.md` (voir [spec/distribution.md](distribution.md)).
+**Utilisateurs des binaires uniquement** : le guide dédié aux utilisateurs qui n'ont pas accès au code source est dans [docs/user_guide_final.md](../docs/user_guide_final.md). Il est servi dans l'onglet Doc des interfaces lorsque vous lancez le daemon depuis le dossier d'extraction contenant `docs/user_guide.md` (voir [spec/distribution.md](distribution.md)). **En dev** depuis ce dépôt, `GET /api/docs` lit ce fichier (`spec/user_guide.md`) en priorité — garder les commandes et onglets alignés avec `user_guide_final.md` sauf sections réservées au build / contributeurs.
 
 ---
 
@@ -125,7 +125,7 @@ Les services du projet **akasha-models** (Docker Compose) peuvent être install�
 
 | Commande | Description |
 |----------|-------------|
-| `akasha tui` | Lance l'interface terminal (TUI) : Chat + métriques routeur + Documentation |
+| `akasha tui` | Lance la TUI : Chat, Retours planifiés, Routeur, Doc, Tâches, Calendrier, Mémoire |
 
 Pour une description détaillée de la gestion des interfaces (TUI, desktop Tauri, onglets, raccourcis) et des **interfaces matérielles du poste client** (clavier, affichage, souris, accessibilité, prérequis terminal), voir [38_interfaces.md](38_interfaces.md).
 
@@ -189,7 +189,7 @@ Les variables définies via `akasha config env set` sont enregistrées dans `dat
 
 Pour les **formats, types de données et exemples** de chaque fichier, voir [35_configuration_reference.md](35_configuration_reference.md).
 
-- **llm_router.yaml** : recherché dans l'ordre : data_dir, puis racine du projet. Définit les providers (Ollama, OpenAI, OpenRouter) et les modèles par type de tâche. **Section `providers` vide** : ce n'est pas la cause de timeouts. Le daemon enregistre Ollama (URL = `OLLAMA_HOST` ou découverte auto), le modèle embarqué, et **OpenRouter/OpenAI dès qu’une clé API est disponible** (env `OPENROUTER_API_KEY` / `OPENAI_API_KEY` ou vault). Vous pouvez donc définir une route primary vers openrouter/openai (TUI ou fichier) sans ajouter `providers.openrouter` dans le YAML si la clé est en variable d’environnement. Pour les modèles avec « thinking » (ex. glm-4.7-flash) qui renvoient une réponse vide (done_reason: length), augmenter **AKASHA_SYSTEM_TASK_MAX_TOKENS** (défaut 4096). Voir `spec/llm_router.example.yaml`.
+- **llm_router.yaml** : recherché dans l'ordre : data_dir, puis racine du projet. Définit les providers (Ollama, OpenAI, OpenRouter) et les modèles par type de tâche. **Section `providers` vide** : ce n'est pas la cause de timeouts. Le daemon enregistre Ollama (URL = `OLLAMA_HOST` ou découverte auto), le modèle embarqué, et **OpenRouter dès qu’une clé API est disponible** (env `OPENROUTER_API_KEY` ou vault). Pour OpenAI, conserver une section `providers.openai` (avec `api_key_ref`) dans `llm_router.yaml`. Pour les modèles avec « thinking » (ex. glm-4.7-flash) qui renvoient une réponse vide (done_reason: length), augmenter **AKASHA_SYSTEM_TASK_MAX_TOKENS** (défaut 4096). Voir `spec/llm_router.example.yaml`.
 - **voice_router.yaml** (dans le data_dir, optionnel) : configuration TTS/STT. Créé automatiquement par `akasha services install --voice` ou par `akasha init` si vous choisissez d’installer les services Docker (option Voice). Sinon, copier `spec/voice_router.example.yaml` vers `data_dir/voice_router.yaml` et renseigner `tts.base_url` et/ou `stt.base_url`. Lorsque STT est configuré, l’interface web affiche un bouton **Message vocal** (micro). Voir [35_configuration_reference.md](35_configuration_reference.md) et [akasha-models/README.md](../akasha-models/README.md).
 - **connectors.env** : variables d'activation des connecteurs (chargé par `akasha start`).
 - **akasha.env** : variables persistantes (chargé après connectors.env).
@@ -237,12 +237,14 @@ cargo build -p akasha-cli -p akasha-tui
 akasha tui
 ```
 
+**Onglets** : Chat, **Retours planifiés** (réponses des tâches récurrentes), Routeur (métriques), Doc (documentation utilisateur), Tâches, Calendrier, Mémoire.
+
 Raccourcis TUI :
-- **Tab** : basculer entre Chat, Routeur (métriques), Doc (documentation) et Activité (tâches et événements)
+- **Tab** : changer d’onglet (ordre ci-dessus)
 - **Entrée** : envoyer le message (mode Chat)
-- **↑ / ↓, PgUp / PgDn, Home / End** : défilement du contenu (Chat, Doc, panneau détail Activité)
-- **R** : rafraîchir les métriques (Routeur), la doc (Doc) ou la liste des tâches (Activité)
-- **Échap** ou **Ctrl+Q** : quitter
+- **↑ / ↓, PgUp / PgDn, Home / End** : défilement (Chat, Doc, listes)
+- **R** : rafraîchir Routeur, Retours planifiés ou liste des tâches selon l’onglet
+- **Échap** ou **Ctrl+Q** : quitter — **Tâches** : ↑/↓ (sélection), D (racines seules) — **Mémoire** : / ou S (recherche), G (graphe), D ou Suppr (supprimer entrée long terme)
 
 ### Interface web (Tauri)
 
@@ -252,13 +254,19 @@ npm install
 npm run tauri dev
 ```
 
-L'UI se connecte au daemon sur le port 3876 (configurable via `AKASHA_PORT`). **Onglets** : Chat, Routeur (métriques), Documentation, Tâches, Calendrier, Mémoire, Paramètres. **Paramètres** : quatre sections (Affichage, Système, Agent, Data). Dans Agent : sous-onglets pour le profil (Identité, Personnalité, Règles, Autorisé, Interdit), sélecteur de template de personnalité (Neutre, Bienveillant, Concis/technique, Créatif, Strict/sécurisé), limites de caractères affichées.
+L'UI se connecte au daemon sur le port 3876 (configurable via `AKASHA_PORT`). **Onglets** : Chat, **Retours planifiés**, Routeur (métriques), Documentation, Tâches, Calendrier, Mémoire, Paramètres. Touches **1–8** pour changer d’onglet si le focus n’est pas dans un champ. **Paramètres** : quatre sections (Affichage, Système, Agent, Data). Dans Agent : sous-onglets pour le profil (Identité, Personnalité, Règles, Autorisé, Interdit), sélecteur de template de personnalité (Neutre, Bienveillant, Concis/technique, Créatif, Strict/sécurisé), limites de caractères affichées.
 
 **Pièces jointes (interface web uniquement)** : dans le Chat, le bouton « Joindre » permet d’ajouter des images ou des documents (texte, PDF). Les images sont envoyées au modèle (vision) ; les documents texte et PDF sont extraits et inclus dans le message pour l’agent. Utile pour « analyse ce document » ou pour fournir un fichier sans le copier-coller.
 
 **Message vocal (interface web, lorsque STT est configuré)** : si `voice_router.yaml` contient `stt.base_url`, un bouton micro (Message vocal) apparaît à côté du champ de saisie. Premier clic : démarrage de l’enregistrement au micro. Second clic : arrêt, transcription par le service STT, puis envoi du message comme un envoi classique. Les réponses de l’agent peuvent inclure des lecteurs audio lorsque l'agent utilise l'outil TTS (data URL audio dans le markdown). Si la question a été envoyée en vocal et que TTS est configuré (tts.base_url), la réponse est en outre lue automatiquement en audio.
 
 **RAG utilisateur (interface web uniquement)** : dans l’onglet Paramètres, la section « Mes documents (RAG utilisateur) » permet d’ajouter ou supprimer des documents (texte). Ces documents sont indexés et les extraits pertinents sont injectés dans le contexte des agents lors des réponses. En TUI ou sans interface web, le RAG utilisateur peut être géré via l’API : `GET/POST/DELETE /api/user-rag/documents`.
+
+**Contrat pièces jointes / RAG (API)** :
+- **Chat** (`POST /api/message`) : le champ `attachments` attend une liste d’objets `{ "name": "...", "type": "image|document", "content_base64": "...", "mime_type": "..." }`.  
+  - `type: "image"` : transmis au modèle sous forme de data URL vision.  
+  - `type: "document"` : texte extrait puis injecté dans le message.
+- **RAG utilisateur** (`POST /api/user-rag/documents`) : body `{ "name": "...", "content_base64": "...", "mime_type": "..." }` (`content_base64` requis).
 
 **OpenRouter** : pour que l’application apparaisse dans le dashboard OpenRouter (usage, identification), définir `site_url` et `app_title` dans `providers.openrouter` du fichier `llm_router.yaml`, ou les variables d’environnement `OPENROUTER_SITE_URL` et `OPENROUTER_APP_TITLE`. Voir [35_configuration_reference.md](35_configuration_reference.md).
 
@@ -346,3 +354,34 @@ cargo run -p akasha-evals
 | Lancer l'interface web | `cd apps/akasha-ui && npm run tauri dev` |
 
 **Où trouver cette doc** : dans le dépôt : [spec/user_guide.md](user_guide.md), [spec/onboarding.md](onboarding.md), [spec/README.md](README.md) (index des specs), [README.md](../README.md) à la racine. Quand le daemon tourne : `GET /api/docs` ou onglet Doc (TUI / UI web).
+
+---
+
+## 9. Nouveautés de la version 0.7.0
+
+### Orchestration renforcée
+
+- **Route `orchestrator` dans le routeur LLM** : ajoutez un bloc `task_types.orchestrator` dans `llm_router.yaml` pour dédier un modèle à la décomposition de requêtes complexes (multi-agents). Sans cette route, l’orchestrateur utilise automatiquement la route `system` (compatibilité ascendante).
+- **Livrables vérifiés** : pour les plans multi-étapes avec `deliverables` (ex. `workspace:/rapport.md`), l’orchestrateur vérifie que les fichiers existent avant de marquer l’étape comme terminée.
+- **Sécurité des chemins de livrables** : les chemins absolus et les sorties du workspace (`..`) sont rejetés ; les chemins `workspace:/...` restent obligatoirement résolus dans le workspace autorisé.
+- **Retry ciblé si livrable manquant** : lorsqu’un agent termine sans produire un livrable attendu, l’orchestrateur relance une tentative focalisée sur la production du fichier manquant.
+- **Trace de plan persistée** : l’orchestrateur écrit un fichier `.akasha/plan_<task_id>.md` dans le workspace à chaque mise à jour du plan — consultable pendant et après l’exécution.
+- **Détection de réponses méta** : les sous-agents qui renvoient une réponse méta (ex. « Je suis prêt à commencer la Phase 2 ») au lieu d’un vrai résultat déclenchent automatiquement un retry.
+
+### Sécurité
+
+- **Politique de chemins renforcée** : `can_read`/`can_write` utilisent `Path::starts_with` (comparaison par composant) au lieu d’un préfixe textuel, éliminant la confusion `/data` ↔ `/database`.
+- **Livrables absolus rejetés** : les chemins absolus Unix (ex. `/tmp/out.md`) dans les livrables sont rejetés pour éviter qu’un plan puisse « satisfaire » un livrable en pointant vers un fichier système préexistant.
+- **Suppression des approbations terminales automatiques** : le fichier `.code-workspace` ne contient plus de règles `chat.tools.terminal.autoApprove` qui activaient silencieusement l’exécution de commandes terminales pour tous les développeurs ouvrant le workspace.
+
+### Robustesse des appels LLM
+
+- **Clamping des entiers de config** : `max_tokens`, `top_k`, `num_ctx`, `num_gpu` supérieurs à `u32::MAX` dans `llm_router.yaml` sont limités à `u32::MAX` (plus de troncature silencieuse).
+- **Azure `max_tokens`** : la valeur par défaut du provider Azure OpenAI est alignée à 4 096 (cohérence avec les autres providers OpenAI-compatible).
+- **Niveau de log** : la troncature de réponse (due à `max_tokens`) est maintenant journalisée en `WARN` et non `ERROR`.
+
+### Correctifs UI
+
+- **Envoi de documents RAG** : les clés `content_base64` / `mime_type` dans le formulaire d’upload correspondent désormais à la signature Rust de la commande Tauri.
+- **Affichage du plan et des livrables** : les vues de sous-agents affichent les étapes du plan et les livrables attendus.
+- **Plugins (routing/réputation)** : l’UI expose le statut des plugins, les règles de routage dynamiques, et les actions de reset de réputation (plugin unique ou global) via l’API (`POST /api/plugins/reputation/reset`).

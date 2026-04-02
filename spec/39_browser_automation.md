@@ -91,6 +91,8 @@ Puis il **réessaie** la création de session. Nécessite **Node.js** et **npm**
 
 - **Désactivation** : variable d’environnement `AKASHA_PLAYWRIGHT_AUTO_INSTALL=0` — dans ce cas, seul le message d’erreur initial est retourné (comportement manuel : `npm install` + `npx playwright install chromium` dans le répertoire du runner).
 
+- **Installation avec consentement** : l’outil dédié `install_playwright` exécute les mêmes étapes (`npm install` puis `npx playwright install chromium`) dans le répertoire du runner, sans passer par la création de session navigateur. Utile lorsque l’auto-install est désactivée, après échec, ou lorsque l’utilisateur doit approuver explicitement le téléchargement (combiner avec `ask_user` et optionnellement `require_approval: [install_playwright]` dans `tools_policy.yaml` — préférable à `require_approval` sur tout l’outil `browser`, qui bloquerait chaque navigation).
+
 ---
 
 ## 4. Sécurité et politique

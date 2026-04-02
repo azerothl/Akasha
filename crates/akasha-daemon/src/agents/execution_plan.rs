@@ -13,6 +13,12 @@ pub struct PlanStep {
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub parallel_group: Option<u32>,
+    /// Optional definition-of-done / acceptance criteria for this step.
+    #[serde(default)]
+    pub acceptance_criteria: Option<String>,
+    /// Optional list of expected deliverables (paths, filenames).
+    #[serde(default)]
+    pub deliverables: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +26,19 @@ pub struct ExecutionPlan {
     pub plan_id: Uuid,
     pub steps: Vec<PlanStep>,
 }
+
+/// Max characters for shared plan injected into sub-agents (env override).
+pub fn plan_context_max_chars() -> usize {
+    std::env::var("AKASHA_PLAN_CONTEXT_MAX_CHARS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12_000)
+}
+
+const MAX_INTENT_CHARS: usize = 8000;
+const MAX_ACCEPTANCE_CHARS: usize = 4000;
+const MAX_DELIVERABLES: usize = 24;
+const MAX_DELIVERABLE_ITEM_LEN: usize = 500;
 
 impl ExecutionPlan {
     pub fn from_legacy(subtasks: &[(String, String)]) -> Self {
@@ -32,6 +51,8 @@ impl ExecutionPlan {
                 intent: msg.clone(),
                 depends_on: Vec::new(),
                 parallel_group: Some(0),
+                acceptance_criteria: None,
+                deliverables: None,
             })
             .collect();
         Self {
@@ -88,6 +109,149 @@ impl ExecutionPlan {
             .map(|s| (s.agent_type.clone(), s.intent.clone()))
             .collect()
     }
+
+    /// Markdown block: root request + minimal plan map + highlighted current step.
+    ///
+    /// Keep this intentionally narrow so orchestrated sub-agents stay focused on
+    /// their assignment instead of inheriting the whole execution plan narrative.
+    pub fn shared_context_markdown(&self, user_request: &str, current: &PlanStep) -> String {
+        let max_total = plan_context_max_chars();
+        let user_trim = truncate_chars(user_request.trim(), 1_200);
+        let dependency_steps: Vec<&PlanStep> = current
+            .depends_on
+            .iter()
+            .filter_map(|dep| self.steps.iter().find(|s| s.step_id == *dep))
+            .collect();
+        let sibling_steps: Vec<&PlanStep> = self
+            .steps
+            .iter()
+            .filter(|s| s.step_id != current.step_id && !current.depends_on.iter().any(|dep| dep == &s.step_id))
+            .collect();
+        let mut out = String::new();
+        out.push_str("## User request (root)\n\n");
+        out.push_str(user_trim.trim());
+        out.push_str("\n\n## Plan map (minimal)\n\n");
+        out.push_str(&format!(
+            "- Total steps: `{}`\n- Your step: `{}` (`{}`)\n",
+            self.steps.len(),
+            current.step_id,
+            current.agent_type
+        ));
+        if current.depends_on.is_empty() {
+            out.push_str("- Direct dependencies: `(none)`\n");
+        } else {
+            out.push_str(&format!(
+                "- Direct dependencies: {}\n",
+                current
+                    .depends_on
+                    .iter()
+                    .map(|dep| format!("`{}`", dep))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !dependency_steps.is_empty() {
+            out.push_str("\n### Dependencies you may rely on\n\n");
+            for s in dependency_steps {
+                out.push_str(&format!(
+                    "- `{}` (`{}`) — dependency output is injected separately by the orchestrator.\n",
+                    s.step_id, s.agent_type
+                ));
+            }
+        }
+        if !sibling_steps.is_empty() {
+            out.push_str("\n### Other steps (awareness only)\n\n");
+            for s in sibling_steps {
+                out.push_str(&format!("- `{}` (`{}`)\n", s.step_id, s.agent_type));
+            }
+        }
+        out.push_str("\n## Your assignment (this step only)\n\n");
+        out.push_str(&format!(
+            "- **step_id**: `{}`\n- **agent_type**: `{}`\n",
+            current.step_id, current.agent_type
+        ));
+        if !current.depends_on.is_empty() {
+            out.push_str(&format!(
+                "- **depends_on**: {}\n",
+                current.depends_on.join(", ")
+            ));
+        }
+        out.push_str("\n### Intent\n\n");
+        out.push_str(&current.intent);
+        if let Some(ref a) = current.acceptance_criteria {
+            out.push_str("\n\n### Acceptance criteria\n\n");
+            out.push_str(a);
+        }
+        if let Some(ref d) = current.deliverables {
+            if !d.is_empty() {
+                out.push_str("\n\n### Expected deliverables\n\n");
+                for x in d {
+                    out.push_str(&format!("- {}\n", x));
+                }
+            }
+        }
+        out.push_str(
+            "\n\n---\nFocus only on this step. Dependency outputs, if any, are provided separately above your task. Ignore unrelated steps unless they directly affect your deliverables.\n",
+        );
+
+        if out.len() <= max_total {
+            return out;
+        }
+        // Truncate: keep head through "## Your assignment" start, then full current intent section.
+        let marker = "## Your assignment (this step only)";
+        if let Some(pos) = out.find(marker) {
+            let head = truncate_bytes_safe(&out[..pos], max_total.saturating_sub(4000));
+            let tail = &out[pos..];
+            let tail_trim = truncate_bytes_safe(tail, max_total - head.len());
+            format!("{}\n\n_(Earlier plan rows truncated for context limit.)_\n\n{}", head, tail_trim)
+        } else {
+            truncate_bytes_safe(&out, max_total)
+        }
+    }
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    s.chars().take(max_chars).chain(std::iter::once('…')).collect()
+}
+
+fn truncate_bytes_safe(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+    let mut end = max_len;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
+fn sanitize_plan_step(s: &mut PlanStep) {
+    if s.intent.len() > MAX_INTENT_CHARS {
+        s.intent = truncate_bytes_safe(&s.intent, MAX_INTENT_CHARS);
+    }
+    if let Some(ref mut a) = s.acceptance_criteria {
+        if a.len() > MAX_ACCEPTANCE_CHARS {
+            *a = truncate_bytes_safe(a, MAX_ACCEPTANCE_CHARS);
+        }
+        if a.trim().is_empty() {
+            s.acceptance_criteria = None;
+        }
+    }
+    if let Some(ref mut d) = s.deliverables {
+        d.retain(|x| !x.trim().is_empty());
+        d.truncate(MAX_DELIVERABLES);
+        for x in d.iter_mut() {
+            if x.len() > MAX_DELIVERABLE_ITEM_LEN {
+                *x = truncate_bytes_safe(x, MAX_DELIVERABLE_ITEM_LEN);
+            }
+        }
+        if d.is_empty() {
+            s.deliverables = None;
+        }
+    }
 }
 
 /// Parse JSON plan from LLM output. Accepts raw JSON or fenced ```json block.
@@ -109,7 +273,7 @@ pub fn parse_plan_json(text: &str) -> Option<ExecutionPlan> {
         #[serde(default)]
         plan_id: Option<Uuid>,
     }
-    let raw: Raw = serde_json::from_str(json_str).ok()?;
+    let mut raw: Raw = serde_json::from_str(json_str).ok()?;
     if raw.steps.is_empty() {
         return None;
     }
@@ -117,18 +281,19 @@ pub fn parse_plan_json(text: &str) -> Option<ExecutionPlan> {
     if raw.steps.len() > MAX_STEPS {
         return None;
     }
-    for (i, s) in raw.steps.iter().enumerate() {
+    for s in raw.steps.iter_mut() {
         if s.step_id.is_empty() {
             return None;
         }
         if s.agent_type.is_empty() || s.intent.is_empty() {
             return None;
         }
-        // Ensure unique step_ids
+        sanitize_plan_step(s);
+    }
+    for s in &raw.steps {
         if raw.steps.iter().filter(|x| x.step_id == s.step_id).count() > 1 {
             return None;
         }
-        let _ = i;
     }
     Some(ExecutionPlan {
         plan_id: raw.plan_id.unwrap_or_else(Uuid::new_v4),
@@ -162,6 +327,8 @@ mod tests {
                     intent: "find X".into(),
                     depends_on: vec![],
                     parallel_group: None,
+                    acceptance_criteria: None,
+                    deliverables: None,
                 },
                 PlanStep {
                     step_id: "s1".into(),
@@ -169,6 +336,8 @@ mod tests {
                     intent: "use X".into(),
                     depends_on: vec!["s0".into()],
                     parallel_group: None,
+                    acceptance_criteria: None,
+                    deliverables: None,
                 },
             ],
         };
@@ -176,5 +345,52 @@ mod tests {
         assert_eq!(w.len(), 2);
         assert_eq!(w[0], vec![0]);
         assert_eq!(w[1], vec![1]);
+    }
+
+    #[test]
+    fn parse_plan_json_enriched_fields() {
+        let j = r#"{"steps":[{"step_id":"s0","agent_type":"analyst","intent":"Full intent here","depends_on":[],"acceptance_criteria":"Must output backlog","deliverables":["workspace:/out/a.md"]}]}"#;
+        let p = parse_plan_json(j).expect("parse");
+        assert_eq!(p.steps.len(), 1);
+        assert_eq!(p.steps[0].acceptance_criteria.as_deref(), Some("Must output backlog"));
+        assert_eq!(p.steps[0].deliverables.as_ref().map(|v| v.len()), Some(1));
+    }
+
+    #[test]
+    fn shared_context_includes_current_step_full_intent() {
+        let p = ExecutionPlan {
+            plan_id: Uuid::nil(),
+            steps: vec![
+                PlanStep {
+                    step_id: "s0".into(),
+                    agent_type: "documentalist".into(),
+                    intent: "Read PDF".into(),
+                    depends_on: vec![],
+                    parallel_group: None,
+                    acceptance_criteria: None,
+                    deliverables: None,
+                },
+                PlanStep {
+                    step_id: "s1".into(),
+                    agent_type: "code".into(),
+                    intent: "Implement all features from PDF".into(),
+                    depends_on: vec!["s0".into()],
+                    parallel_group: None,
+                    acceptance_criteria: Some("Tests pass".into()),
+                    deliverables: Some(vec!["workspace:/x.py".into()]),
+                },
+            ],
+        };
+        let ctx = p.shared_context_markdown("User wants exam deliverables", &p.steps[1]);
+        assert!(ctx.contains("User wants exam"));
+        assert!(ctx.contains("s0"));
+        assert!(ctx.contains("s1"));
+        assert!(ctx.contains("Implement all features"));
+        assert!(ctx.contains("Tests pass"));
+        assert!(ctx.contains("workspace:/x.py"));
+        assert!(ctx.contains("Your assignment"));
+        assert!(ctx.contains("Dependencies you may rely on"));
+        assert!(!ctx.contains("intent: Read PDF"));
+        assert!(!ctx.contains("Read PDF\n"));
     }
 }

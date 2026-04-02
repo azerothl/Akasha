@@ -121,6 +121,10 @@ Les binaires sont produits automatiquement par **GitHub Actions** à chaque tag 
 
 **Note** : Sous Windows, le daemon est compilé sans la mémoire long terme (ONNX) pour éviter les erreurs de liaison. Les utilisateurs Windows qui veulent la mémoire long terme peuvent utiliser WSL2 et la version Linux.
 
+### Navigateur géré (Playwright)
+
+Les utilisateurs n’ont pas le dossier de dépôt `scripts/` : le **zip de release** doit inclure le répertoire **`playwright-runner`** (copie de `scripts/playwright-runner`, au minimum `package.json` + `run.mjs`), placé par exemple **à côté des binaires** (`playwright-runner/run.mjs`) ou sous **`%USERPROFILE%\akasha\playwright-runner`** (voir résolution dans `find_playwright_runner_path` / variables `AKASHA_PLAYWRIGHT_RUNNER`, `AKASHA_DATA_DIR`). Au premier usage du tool `browser`, le daemon peut lancer `npm install` et `npx playwright install chromium` dans ce dossier (sauf si `AKASHA_PLAYWRIGHT_AUTO_INSTALL=0`). Prérequis côté machine : **Node.js + npm** dans le PATH.
+
 ---
 
 ## 5. Application desktop (Tauri)

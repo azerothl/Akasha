@@ -1,0 +1,7 @@
+[
+  { "id": "slash", "en": "Type /help in chat for slash commands.", "fr": "Tapez /help dans le chat pour les commandes slash." },
+  { "id": "doctor", "en": "Run `akasha doctor` after updates to validate your setup.", "fr": "Lancez `akasha doctor` après une mise à jour pour valider la configuration." },
+  { "id": "tasks", "en": "Open the Tasks tab to follow delegations and sub-agents.", "fr": "Ouvrez l’onglet Tâches pour suivre les délégations et sous-agents." },
+  { "id": "skills", "en": "Install skills with install_skill or place SKILL.md under your skills folder.", "fr": "Installez des skills avec install_skill ou placez SKILL.md dans le dossier skills." },
+  { "id": "memory", "en": "Long-term memory can store facts; check the Memory tab when enabled.", "fr": "La mémoire long terme peut stocker des faits ; consultez l’onglet Mémoire si activé." }
+]

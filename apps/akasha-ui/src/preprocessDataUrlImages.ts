@@ -25,10 +25,12 @@ function isValidDataAudioUrl(url: string): boolean {
  */
 export function preprocessDataUrlImages(text: string): string {
   if (!text || typeof text !== "string") return text;
-  const marker = "](<data:image/";
   let result = text;
+
+  /** Reference-style with angle brackets: ![alt](<data:image/...>) */
+  const markerAngle = "](<data:image/";
   let idx: number;
-  while ((idx = result.indexOf(marker)) !== -1) {
+  while ((idx = result.indexOf(markerAngle)) !== -1) {
     const altStart = result.lastIndexOf("![", idx);
     const alt = altStart !== -1 ? result.slice(altStart + 2, idx) : "Image";
     const urlStart = idx + 3; // start of "data:image/"
@@ -40,14 +42,33 @@ export function preprocessDataUrlImages(text: string): string {
     const fullMatchStart = altStart !== -1 ? altStart : idx;
     const fullMatchEnd = closeBracket !== -1 ? closeBracket + 2 : result.length;
     if (!isValidDataImageUrl(url)) {
-      // Skip invalid/unsafe URLs: advance past this marker to avoid infinite loop.
-      result = result.slice(0, idx) + result.slice(idx + marker.length);
+      result = result.slice(0, idx) + result.slice(idx + markerAngle.length);
       continue;
     }
-    // Wrap in <div> so the markdown parser recognizes it as an HTML block (inline <img> alone may be escaped).
     const img = `\n\n<div class="markdown-data-image-wrap"><img src="${escapeHtmlAttr(url)}" alt="${escapeHtmlAttr(alt)}" class="markdown-data-image" /></div>\n\n`;
     result = result.slice(0, fullMatchStart) + img + result.slice(fullMatchEnd);
   }
+
+  /** Common markdown without angle brackets: ![alt](data:image/...;base64,...)
+   *  micromark strips data: in link destinations, so we must inject raw HTML here too. */
+  const markerPlain = "](data:image/";
+  while ((idx = result.indexOf(markerPlain)) !== -1) {
+    const altStart = result.lastIndexOf("![", idx);
+    const alt = altStart !== -1 ? result.slice(altStart + 2, idx) : "Image";
+    const urlStart = idx + 2; // start of "data:image/"
+    const closeParen = result.indexOf(")", urlStart);
+    const url = closeParen !== -1 ? result.slice(urlStart, closeParen) : result.slice(urlStart);
+    const fullMatchStart = altStart !== -1 ? altStart : idx;
+    const fullMatchEnd = closeParen !== -1 ? closeParen + 1 : result.length;
+    const validPlain = isValidDataImageUrl(url);
+    if (!validPlain) {
+      result = result.slice(0, idx) + result.slice(idx + markerPlain.length);
+      continue;
+    }
+    const img = `\n\n<div class="markdown-data-image-wrap"><img src="${escapeHtmlAttr(url)}" alt="${escapeHtmlAttr(alt)}" class="markdown-data-image" /></div>\n\n`;
+    result = result.slice(0, fullMatchStart) + img + result.slice(fullMatchEnd);
+  }
+
   return result;
 }
 

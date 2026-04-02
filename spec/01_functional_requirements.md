@@ -1,5 +1,7 @@
 # Functional Requirements
 
+> **Résumé exécutif** — liste courte des FR. Spécification détaillée (descriptions et critères) : [03_fonctional_requirements.md](03_fonctional_requirements.md).
+
 FR-001 — Accusé réception < 500ms
 FR-002 — Délégation intelligente automatique
 FR-003 — Reporting temps réel

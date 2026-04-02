@@ -2,6 +2,8 @@
 
 Ce guide s'adresse aux utilisateurs qui ont téléchargé les **binaires précompilés** d'Akasha (sans compiler l'application). Il décrit les commandes, la configuration et les interfaces disponibles. Cette documentation est affichée dans l'onglet **Doc** des interfaces lorsque le daemon est démarré depuis le dossier d'extraction contenant le dossier `docs`.
 
+**Maintenance** : le workflow Release copie ce fichier vers `docs/user_guide.md` dans les archives. Le guide **développeur** (dépôt source, build, détails techniques) est [spec/user_guide.md](../spec/user_guide.md). Le site public **Akasha_app** (`docs.html`, anglais) est tenu manuellement ; une checklist de synchronisation figure dans le dépôt **Akasha_app** (`docs/DOCUMENTATION_SYNC.md`).
+
 ---
 
 ## 1. Obtenir et lancer Akasha
@@ -53,7 +55,8 @@ Pour afficher l'interface en terminal : `akasha tui` (ou `.\akasha.exe tui` sous
 - **Modèle embarqué** : par défaut Akasha utilise un modèle LLM intégré (akasha_embedded). Aucune installation externe n'est obligatoire pour recevoir des réponses.
 - **Ollama** (optionnel) : pour utiliser d'autres modèles locaux. Configurez-le lors de l'initialisation ou plus tard via `akasha config models set conversation ollama <modèle>`.
 - **Cloud** (optionnel) : OpenAI ou OpenRouter, configurés lors de l'init (clés dans le vault ou variables d'environnement).
-- Aucune installation de Rust ou Node n'est nécessaire pour utiliser les binaires.
+- **Rust** : inutile pour les binaires précompilés.
+- **Node.js** (optionnel) : nécessaire seulement pour l’outil **navigateur géré** (Playwright). Les archives de release incluent le dossier `playwright-runner` à côté des exécutables ; installez [Node.js](https://nodejs.org/) (npm inclus) si vous utilisez cette fonctionnalité. Au premier lancement d’une tâche navigateur, le daemon peut exécuter `npm install` et télécharger Chromium — cela peut prendre plusieurs minutes selon la connexion. Pour désactiver l’installation automatique des dépendances Playwright, définissez `AKASHA_PLAYWRIGHT_AUTO_INSTALL=0` (variable d’environnement ou entrée dans `akasha.env`). Le diagnostic `akasha doctor` (daemon actif) indique si le runner, Node/npm et le paquet Playwright sont détectés.
 
 **Important** : lancez `akasha start` depuis le dossier d'installation (ou après avoir ajouté ce dossier au PATH) afin que l'onglet **Doc** des interfaces affiche cette documentation.
 
@@ -151,7 +154,7 @@ Le répertoire de données est créé automatiquement par `akasha init` ou `akas
 
 | Commande | Description |
 |----------|-------------|
-| `akasha tui` | Lance l'interface en terminal (Chat, Routeur, Doc, Tâches, Calendrier, Mémoire). |
+| `akasha tui` | Lance l'interface en terminal (Chat, Retours planifiés, Routeur, Doc, Tâches, Calendrier, Mémoire). |
 
 Si vous avez installé l'**application desktop** (Akasha UI), lancez-la ; elle se connecte au daemon sur le port 3876 (configurable via la variable d'environnement `AKASHA_PORT`).
 
@@ -215,6 +218,7 @@ Les variables définies via `akasha config env set` sont enregistrées dans le f
 - **Pièces jointes** : dans le Chat, vous pouvez joindre des images ou des documents (texte, PDF) ; l'agent les reçoit pour analyse.
 - **RAG utilisateur** : dans Paramètres, section « Mes documents (RAG utilisateur) », vous pouvez ajouter ou supprimer des documents ; les extraits pertinents sont utilisés par l'agent lors des réponses.
 - **Profil de l'agent** : dans Paramètres → Profil de l'agent, vous pouvez définir le nom, le rôle, la personnalité, les règles et les comportements autorisés/interdits ; des modèles (Neutre, Bienveillant, Concis/technique, etc.) sont proposés.
+- **Plugins** : la vue plugins affiche l’état d’activation, les règles de routage dynamiques et permet de réinitialiser la réputation d’un plugin (ou de tous les plugins) si nécessaire.
 
 Le daemon écoute par défaut sur le port **3876**. Pour que l'onglet Doc affiche ce guide, lancez `akasha start` depuis le dossier où vous avez extrait l'archive (contenant le dossier `docs`).
 
@@ -333,3 +337,23 @@ Les variables d'activation sont chargées depuis le fichier **connectors.env** d
 | Ouvrir la page de téléchargement | `akasha update install` |
 
 Cette documentation est également affichée dans l'**onglet Doc** des interfaces lorsque le daemon est démarré depuis le dossier d'extraction contenant le dossier `docs`. Pour les contributeurs et développeurs, la documentation technique (spécifications, architecture, runbooks) est disponible dans le dépôt source (dossier `spec/` et README à la racine).
+
+---
+
+## 14. Nouveautés de la version 0.7.0
+
+### Orchestration multi-agents
+
+- **Route `orchestrator` dédiée** : si votre `llm_router.yaml` contient un bloc `task_types.orchestrator`, l’orchestrateur l’utilise pour la décomposition de requêtes complexes. Sans cette route, la route `system` est utilisée (compatibilité ascendante).
+- **Livrables vérifiés sur disque** : l’orchestrateur s’assure que les fichiers attendus (`workspace:/rapport.md`, etc.) ont bien été créés avant de valider une étape.
+- **Sécurité des livrables** : les chemins absolus et les chemins qui sortent du workspace (`..`) sont rejetés. Les livrables restent confinés au workspace autorisé.
+- **Retry automatique ciblé** : si un livrable attendu manque, l’orchestrateur peut relancer une tentative focalisée sur la création du fichier manquant.
+- **Trace de plan** : un fichier `.akasha/plan_<id>.md` est maintenu en temps réel dans le workspace pour les requêtes multi-étapes — consultable à tout moment.
+
+### Sécurité et correctifs
+
+- **Politique de chemins** : comparaison stricte par composant de chemin (`Path::starts_with`) — évite la confusion entre `/data` et `/database`.
+- **Envoi de documents RAG** : l’upload de documents fonctionne désormais correctement depuis l’interface Tauri.
+- **Contrat d’upload unifié** : côté API, les uploads utilisent `content_base64` + `mime_type` (chat via `attachments[]`, RAG via `POST /api/user-rag/documents`).
+- **Paramètres LLM** : les valeurs `max_tokens` / `top_k` / `num_ctx` / `num_gpu` très grandes dans `llm_router.yaml` sont limitées proprement (plus de comportement imprévisible).
+- **Azure OpenAI** : `max_tokens` par défaut aligné à 4 096 (comme les autres providers).

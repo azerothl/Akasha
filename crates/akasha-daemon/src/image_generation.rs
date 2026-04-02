@@ -262,6 +262,25 @@ async fn call_ollama_image(
     ))
 }
 
+/// Extract a `data:image/...;base64,...` URL from OpenRouter's assistant `message`.
+/// Docs: https://openrouter.ai/docs/guides/overview/multimodal/image-generation — images are in
+/// `message.images[].image_url.url`, not only in `content`.
+fn extract_openrouter_image_data_url(message: &serde_json::Value) -> Option<String> {
+    if let Some(images) = message.get("images").and_then(|v| v.as_array()) {
+        for img in images {
+            let url = img
+                .get("image_url")
+                .or_else(|| img.get("imageUrl"))
+                .and_then(|u| u.get("url"))
+                .and_then(|u| u.as_str());
+            if let Some(u) = url.filter(|s| s.starts_with("data:")) {
+                return Some(u.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// OpenRouter image generation via /api/v1/chat/completions with modalities ["image"].
 /// Returns base64 data URL from assistant message content.
 async fn call_openrouter_image(
@@ -310,38 +329,40 @@ async fn call_openrouter_image(
     let json: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| format!("[generate_image] OpenRouter response JSON: {}", e))?;
 
-    // OpenRouter returns images as data URLs in choices[0].message.content (string or array of parts).
-    let content = json
+    let message = json
         .get("choices")
         .and_then(|c| c.as_array())
         .and_then(|a| a.first())
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"));
+        .and_then(|c| c.get("message"));
 
-    let data_url_opt = match content {
-        Some(serde_json::Value::String(s)) if s.starts_with("data:") => Some(s.clone()),
-        Some(serde_json::Value::Array(parts)) => parts
-            .iter()
-            .find_map(|p| {
-                let url = p.get("image_url").and_then(|u| u.get("url")).and_then(|u| u.as_str())?;
-                if url.starts_with("data:") {
-                    Some(url.to_string())
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                parts.iter().find_map(|p| {
-                    let s = p.as_str()?;
-                    if s.starts_with("data:") {
-                        Some(s.to_string())
+    let data_url_opt = message.and_then(extract_openrouter_image_data_url).or_else(|| {
+        // Legacy/alternate: data URL only in message.content (string or content parts).
+        let content = message.and_then(|m| m.get("content"))?;
+        match content {
+            serde_json::Value::String(s) if s.starts_with("data:") => Some(s.clone()),
+            serde_json::Value::Array(parts) => parts
+                .iter()
+                .find_map(|p| {
+                    let url = p.get("image_url").and_then(|u| u.get("url")).and_then(|u| u.as_str())?;
+                    if url.starts_with("data:") {
+                        Some(url.to_string())
                     } else {
                         None
                     }
                 })
-            }),
-        _ => None,
-    };
+                .or_else(|| {
+                    parts.iter().find_map(|p| {
+                        let s = p.as_str()?;
+                        if s.starts_with("data:") {
+                            Some(s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                }),
+            _ => None,
+        }
+    });
 
     let data_url = data_url_opt.ok_or_else(|| {
         "[generate_image] OpenRouter: pas d'image (data URL) dans la réponse.".to_string()
@@ -356,6 +377,20 @@ async fn call_openrouter_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_openrouter_reads_message_images_image_url() {
+        let msg = serde_json::json!({
+            "role": "assistant",
+            "content": "Here is your image.",
+            "images": [{
+                "type": "image_url",
+                "image_url": { "url": "data:image/png;base64,ABC" }
+            }]
+        });
+        let url = super::extract_openrouter_image_data_url(&msg).expect("data url");
+        assert_eq!(url, "data:image/png;base64,ABC");
+    }
 
     #[test]
     fn resolve_api_key_fallback_default_env() {

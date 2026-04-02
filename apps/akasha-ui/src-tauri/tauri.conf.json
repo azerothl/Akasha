@@ -20,7 +20,14 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self' customprotocol: asset:",
+        "connect-src": "ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:* wss://127.0.0.1:* wss://localhost:*",
+        "font-src": "'self' data:",
+        "img-src": "'self' asset: http://asset.localhost blob: data: https: http:",
+        "style-src": "'unsafe-inline' 'self'",
+        "frame-src": "'self' https://www.openstreetmap.org https://openstreetmap.org"
+      }
     }
   },
   "bundle": {

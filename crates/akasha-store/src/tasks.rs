@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 /// Maximum number of progress entries retained per task (in both store and in-memory cache).
 pub const MAX_PROGRESS_PER_TASK: usize = 32;
+/// Maximum number of task event entries retained per task in SQLite.
+pub const MAX_TASK_EVENTS_PER_TASK: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -73,6 +75,13 @@ pub struct Task {
     pub initial_message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskEventRecord {
+    pub event_type: String,
+    pub payload: Option<serde_json::Value>,
+    pub at: String,
+}
+
 pub struct TaskStore {
     conn: Connection,
 }
@@ -102,6 +111,22 @@ impl TaskStore {
                 PRIMARY KEY (task_id, seq)
             );
             CREATE INDEX IF NOT EXISTS idx_task_progress_task_id ON task_progress(task_id);
+            CREATE TABLE IF NOT EXISTS task_events (
+                task_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                payload_json TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (task_id, seq)
+            );
+            CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id);
+            CREATE TABLE IF NOT EXISTS task_leases (
+                task_id TEXT PRIMARY KEY,
+                owner TEXT NOT NULL,
+                heartbeat_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_task_leases_expires_at ON task_leases(expires_at);
             "#,
         )?;
         // Migration: add initial_message if missing (existing DBs).
@@ -115,6 +140,42 @@ impl TaskStore {
         }
         crate::todos::create_task_todos_table(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// Acquire or refresh a lease for a running task.
+    pub fn upsert_lease(&self, task_id: Uuid, owner: &str, ttl_secs: u64) -> anyhow::Result<()> {
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
+        self.conn.execute(
+            "INSERT INTO task_leases (task_id, owner, heartbeat_at, expires_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(task_id) DO UPDATE SET owner = excluded.owner, heartbeat_at = excluded.heartbeat_at, expires_at = excluded.expires_at",
+            rusqlite::params![task_id.to_string(), owner, now.to_rfc3339(), expires_at.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_lease(&self, task_id: Uuid) -> anyhow::Result<()> {
+        self.conn
+            .execute("DELETE FROM task_leases WHERE task_id = ?1", [task_id.to_string()])?;
+        Ok(())
+    }
+
+    /// Return task ids with expired leases.
+    pub fn expired_leases(&self, now: DateTime<Utc>, limit: usize) -> anyhow::Result<Vec<Uuid>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT task_id FROM task_leases WHERE datetime(expires_at) <= datetime(?1) ORDER BY expires_at ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![now.to_rfc3339(), limit as i64], |row| {
+            let id: String = row.get(0)?;
+            Ok(Uuid::parse_str(&id).ok())
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Some(id) = row? {
+                out.push(id);
+            }
+        }
+        Ok(out)
     }
 
     /// Get the todo list for a task (Deep Agents-style write_todos).
@@ -180,6 +241,56 @@ impl TaskStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Append a task event for a task and retain only the most recent entries.
+    pub fn insert_event(
+        &self,
+        task_id: Uuid,
+        event_type: &str,
+        payload: Option<&serde_json::Value>,
+        at: &str,
+    ) -> anyhow::Result<()> {
+        let payload_json = payload.map(serde_json::to_string).transpose()?;
+        // Use a scalar subquery so seq assignment and INSERT are a single atomic statement,
+        // eliminating the SELECT-then-INSERT race that could produce a (task_id, seq) PK collision.
+        self.conn.execute(
+            "INSERT INTO task_events (task_id, seq, event_type, payload_json, created_at) \
+             VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM task_events WHERE task_id = ?1), ?2, ?3, ?4)",
+            rusqlite::params![task_id.to_string(), event_type, payload_json, at],
+        )?;
+        let max_events: i64 = MAX_TASK_EVENTS_PER_TASK as i64;
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ?1",
+            [task_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if count > max_events {
+            self.conn.execute(
+                "DELETE FROM task_events WHERE task_id = ?1 AND seq IN (SELECT seq FROM task_events WHERE task_id = ?1 ORDER BY seq ASC LIMIT ?2)",
+                rusqlite::params![task_id.to_string(), count - max_events],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Get persisted task events for a task in chronological order.
+    pub fn get_events(&self, task_id: Uuid) -> anyhow::Result<Vec<TaskEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_type, payload_json, created_at FROM task_events WHERE task_id = ?1 ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map([task_id.to_string()], |row| {
+            let payload_json: Option<String> = row.get(1)?;
+            let payload = payload_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            Ok(TaskEventRecord {
+                event_type: row.get(0)?,
+                payload,
+                at: row.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn insert(&self, task: &Task) -> anyhow::Result<()> {
         self.conn.execute(
             r#"
@@ -195,6 +306,15 @@ impl TaskStore {
                 task.updated_at.to_rfc3339(),
                 task.initial_message.as_deref(),
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_assigned_agent(&self, id: Uuid, agent: &str) -> anyhow::Result<()> {
+        let now = Utc::now();
+        self.conn.execute(
+            "UPDATE tasks SET assigned_agent = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![agent, now.to_rfc3339(), id.to_string()],
         )?;
         Ok(())
     }
@@ -327,5 +447,30 @@ impl TaskStore {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lease_lifecycle_and_expiry() {
+        let tmp = tempfile::NamedTempFile::new().expect("temp db");
+        let store = TaskStore::open(tmp.path()).expect("open");
+        let id = Uuid::new_v4();
+
+        store.upsert_lease(id, "orchestrator", 1).expect("upsert lease");
+        let now = Utc::now();
+        let expired_now = store.expired_leases(now, 10).expect("expired now");
+        assert!(expired_now.is_empty(), "fresh lease should not be expired immediately");
+
+        let future = now + chrono::Duration::seconds(2);
+        let expired_future = store.expired_leases(future, 10).expect("expired future");
+        assert!(expired_future.contains(&id), "lease should expire after ttl");
+
+        store.clear_lease(id).expect("clear lease");
+        let expired_after_clear = store.expired_leases(future, 10).expect("expired after clear");
+        assert!(!expired_after_clear.contains(&id), "cleared lease must not be listed");
     }
 }

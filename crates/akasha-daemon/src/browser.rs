@@ -20,6 +20,8 @@ pub struct BrowserSession {
     _child: Child,
     stdin: Option<tokio::process::ChildStdin>,
     stdout: BufReader<tokio::process::ChildStdout>,
+    /// Last lines of the runner's stderr (filled by a background task) for diagnostics when stdout EOFs.
+    stderr_tail: Arc<tokio::sync::Mutex<String>>,
     /// Wall-clock instant when this session was created, used to enforce `browser_session_timeout_secs`.
     pub started_at: std::time::Instant,
 }
@@ -36,7 +38,20 @@ impl BrowserSession {
         let mut buf = String::new();
         let n = self.stdout.read_line(&mut buf).await.map_err(|e| e.to_string())?;
         if n == 0 {
-            return Err("Runner closed stdout".to_string());
+            // Child exited or closed stdout; stderr often has the real reason (import error, Playwright, etc.).
+            let _ = self._child.wait().await;
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            let tail = self.stderr_tail.lock().await.clone();
+            let detail = tail.trim();
+            if detail.is_empty() {
+                return Err(
+                    "Runner closed stdout before sending a response (stderr empty). Check that Node.js is installed, scripts/playwright-runner has run npm install, and npx playwright install chromium succeeded."
+                        .to_string(),
+                );
+            }
+            return Err(format!("Runner closed stdout (Node stderr):\n{}", detail));
         }
         let trimmed = buf.trim();
         serde_json::from_str(trimmed).map_err(|e| format!("Invalid JSON from runner: {}", e))
@@ -63,6 +78,10 @@ fn init_failure_suggests_missing_browser(msg: &str) -> bool {
         || m.contains("playwright install")
         || m.contains("could not find browser")
         || m.contains("browser is not installed")
+        || m.contains("cannot find module")
+        || m.contains("cannot find package")
+        || m.contains("err_module_not_found")
+        || m.contains("node:internal/modules")
 }
 
 fn npm_program() -> &'static str {
@@ -111,6 +130,15 @@ pub async fn ensure_playwright_chromium(runner_dir: &Path) -> Result<(), String>
         ));
     }
 
+    let playwright_pkg = runner_dir.join("node_modules").join("playwright").join("package.json");
+    if !playwright_pkg.is_file() {
+        return Err(format!(
+            "npm install reported success but `playwright` is missing at {}. Run manually in a shell: cd \"{}\" && npm install",
+            playwright_pkg.display(),
+            runner_dir.display()
+        ));
+    }
+
     tracing::info!("Downloading Playwright Chromium (this may take several minutes)…");
     let px_out = Command::new(npx_program())
         .current_dir(runner_dir)
@@ -136,7 +164,15 @@ pub async fn ensure_playwright_chromium(runner_dir: &Path) -> Result<(), String>
     Ok(())
 }
 
-/// Resolve path to playwright-runner run.mjs. Tries AKASHA_PLAYWRIGHT_RUNNER, then scripts/playwright-runner/run.mjs from cwd or exe parent.
+/// Resolve path to `playwright-runner/run.mjs`.
+///
+/// Resolution order (first existing file wins):
+/// 1. `AKASHA_PLAYWRIGHT_RUNNER` — path to `run.mjs` or to a directory containing it
+/// 2. `AKASHA_DATA_DIR/playwright-runner/run.mjs` — shipped / first-run copy (writable)
+/// 3. `~/akasha/playwright-runner/run.mjs` — default user data layout (same as daemon store parent)
+/// 4. `%LOCALAPPDATA%/Akasha/playwright-runner/run.mjs` — optional Windows layout
+/// 5. Next to the executable: `playwright-runner/run.mjs`, `resources/playwright-runner/run.mjs` (portable / installer)
+/// 6. Dev tree: `cwd/scripts/...`, `exe/../../scripts/...` (repo / `target/debug` builds)
 pub fn find_playwright_runner_path() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("AKASHA_PLAYWRIGHT_RUNNER") {
         let path = std::path::PathBuf::from(p);
@@ -151,17 +187,45 @@ pub fn find_playwright_runner_path() -> Option<std::path::PathBuf> {
         // spawning a runner with a non-existent script.
         return None;
     }
-    let cwd = std::env::current_dir().ok()?;
-    let from_cwd = cwd.join("scripts").join("playwright-runner").join("run.mjs");
-    if from_cwd.is_file() {
-        return Some(from_cwd);
+
+    if let Ok(d) = std::env::var("AKASHA_DATA_DIR") {
+        let run = PathBuf::from(d)
+            .join("playwright-runner")
+            .join("run.mjs");
+        if run.is_file() {
+            return Some(run);
+        }
     }
-    let from_parent = cwd.join("..").join("scripts").join("playwright-runner").join("run.mjs");
-    if from_parent.is_file() {
-        return Some(from_parent.canonicalize().unwrap_or(from_parent));
+
+    if let Some(h) = dirs::home_dir() {
+        let run = h.join("akasha").join("playwright-runner").join("run.mjs");
+        if run.is_file() {
+            return Some(run);
+        }
     }
+
+    if let Some(ld) = dirs::data_local_dir() {
+        let run = ld.join("Akasha").join("playwright-runner").join("run.mjs");
+        if run.is_file() {
+            return Some(run);
+        }
+    }
+
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
+            for rel in [
+                ["playwright-runner", "run.mjs"].as_slice(),
+                ["resources", "playwright-runner", "run.mjs"].as_slice(),
+            ] {
+                let mut p = parent.to_path_buf();
+                for c in rel {
+                    p.push(c);
+                }
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+
             let from_target = parent
                 .join("..")
                 .join("..")
@@ -173,6 +237,17 @@ pub fn find_playwright_runner_path() -> Option<std::path::PathBuf> {
             }
         }
     }
+
+    let cwd = std::env::current_dir().ok()?;
+    let from_cwd = cwd.join("scripts").join("playwright-runner").join("run.mjs");
+    if from_cwd.is_file() {
+        return Some(from_cwd);
+    }
+    let from_parent = cwd.join("..").join("scripts").join("playwright-runner").join("run.mjs");
+    if from_parent.is_file() {
+        return Some(from_parent.canonicalize().unwrap_or(from_parent));
+    }
+
     None
 }
 
@@ -181,31 +256,72 @@ async fn create_browser_session_once(
     headless: bool,
     action_timeout_secs: u64,
 ) -> Result<BrowserSession, String> {
+    let runner_dir = playwright_runner_dir(runner_path).ok_or_else(|| {
+        format!(
+            "Playwright runner path has no parent directory: {}",
+            runner_path.display()
+        )
+    })?;
+    let script_name = runner_path.file_name().ok_or_else(|| {
+        format!(
+            "Playwright runner path has no file name: {}",
+            runner_path.display()
+        )
+    })?;
     let mut child = Command::new("node")
-        .arg(runner_path.as_os_str())
+        .current_dir(&runner_dir)
+        .arg(script_name)
         .arg(if headless { "--headless" } else { "--headed" })
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to start Playwright runner (is Node installed?): {}", e))?;
-
     let stdin = child.stdin.take().ok_or("Failed to take stdin")?;
     let stdout = child.stdout.take().ok_or("Failed to take stdout")?;
+    let stderr = child.stderr.take().ok_or("Failed to take stderr")?;
+
+    let stderr_tail = Arc::new(tokio::sync::Mutex::new(String::new()));
+    let tail_for_task = stderr_tail.clone();
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    let mut g = tail_for_task.lock().await;
+                    g.push_str(&line);
+                    const MAX: usize = 16384;
+                    if g.len() > MAX {
+                        let trim = g.len() - MAX;
+                        g.drain(..trim);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
 
     let mut session = BrowserSession {
         _child: child,
         stdin: Some(stdin),
         stdout: BufReader::new(stdout),
+        stderr_tail,
         started_at: std::time::Instant::now(),
     };
 
-    let init_result = session
+    let init_result = match session
         .send_command(&serde_json::json!({
             "cmd": "init",
             "params": { "headless": headless, "action_timeout_secs": action_timeout_secs }
         }))
-        .await?;
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return Err(e),
+    };
 
     let ok = init_result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     if !ok {

@@ -5,6 +5,7 @@ use crate::config::{RoutingConfig, TaskTypeConfig};
 use crate::fallback::{FallbackEngine, ProviderResolver};
 use crate::metrics::{MetricsCollector, MetricsPersistence};
 use crate::provider::{CompletionRequest, CompletionResponse, LLMProvider};
+use crate::retry::RetryPolicy;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::{info, Instrument};
@@ -89,6 +90,10 @@ impl LLMRouter {
         let fallback = FallbackEngine {
             max_retries,
             timeout_per_call: std::time::Duration::from_secs(timeout_secs),
+            retry_policy: RetryPolicy {
+                max_retries,
+                ..RetryPolicy::default()
+            },
         };
         let metrics = match persistence {
             Some(p) => Arc::new(MetricsCollector::with_persistence(p)),
@@ -120,6 +125,32 @@ impl LLMRouter {
         self.metrics.clone()
     }
 
+    /// Global per-call timeout (seconds) from routing config.
+    /// Priority: env AKASHA_LLM_TIMEOUT_SECS -> llm_router.yaml global.default_timeout_secs -> 300s
+    pub fn default_timeout_secs(&self) -> u64 {
+        if let Ok(env_val) = std::env::var("AKASHA_LLM_TIMEOUT_SECS") {
+            if let Ok(secs) = env_val.parse::<u64>() {
+                return secs;
+            }
+        }
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .global
+            .default_timeout_secs
+            .unwrap_or(300)
+    }
+
+    /// List models per provider from routing config (for GET /api/router/models).
+    /// Get the global configuration settings (timeout, retries, metrics, fallback).
+    pub fn global_config(&self) -> crate::config::GlobalConfig {
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .global
+            .clone()
+    }
+
     /// List models per provider from routing config (for GET /api/router/models).
     pub fn list_models_from_config(&self) -> std::collections::HashMap<String, Vec<String>> {
         self.config.read().unwrap_or_else(|e| e.into_inner()).list_models_by_provider()
@@ -145,6 +176,24 @@ impl LLMRouter {
             .providers
             .get("ollama")
             .and_then(|c| c.base_url.clone())
+    }
+
+    /// Returns true when the primary provider for `task_type` is Ollama.
+    /// Used to inflate per-operation timeouts and account for Ollama model loading time.
+    pub fn is_ollama_primary(&self, task_type: &str) -> bool {
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_route(task_type)
+            .and_then(|c| c.primary.as_ref())
+            .map(|p| p.provider == "ollama")
+            .unwrap_or(false)
+    }
+
+    /// Returns true when Ollama is registered as a provider (regardless of which task types use it).
+    /// Used as a broadbrush signal that Ollama model cold-start latency must be accounted for.
+    pub fn is_ollama_registered(&self) -> bool {
+        self.providers.contains_key("ollama")
     }
 
     /// Whether the embedded provider (akasha_embedded) is registered and available.
@@ -364,6 +413,10 @@ mod tests {
                 }),
                 model_used: "mock".into(),
                 cost_usd: None,
+                thinking: None,
+                done_reason: None,
+                eval_count: None,
+                total_duration_ns: None,
             })
         }
     }
@@ -391,6 +444,14 @@ mod tests {
             preferred_task_type: Some("conversation".into()),
             system_prompt: None,
             image_data_urls: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repeat_penalty: None,
+            num_ctx: None,
+            num_gpu: None,
+            thinking_level: None,
         };
         let response = router.complete(&request).await.expect("complete should succeed");
         assert_eq!(response.text, mock_text);
@@ -416,5 +477,43 @@ mod tests {
         let config = RoutingConfig::default_config();
         let router = LLMRouter::new(config);
         assert_eq!(router.resolve_task_type_for_agent("conversation"), "conversation");
+    }
+
+    #[test]
+    fn router_routes_by_category_contains_orchestrator_when_configured() {
+        // The decomposer uses routes_by_category() to check for an "orchestrator" route
+        // and sets preferred_task_type: "orchestrator" when found (0.7.0 feature).
+        let mut config = RoutingConfig::default_config();
+        config.task_types.insert(
+            "orchestrator".into(),
+            crate::config::TaskTypeConfig {
+                primary: Some(RouteEntry {
+                    provider: "openai".into(),
+                    model: "gpt-4o-mini".into(),
+                    config: None,
+                }),
+                fallback: vec![],
+                constraints: None,
+            },
+        );
+        let router = LLMRouter::new(config);
+        let routes = router.routes_by_category();
+        assert!(
+            routes.contains_key("orchestrator"),
+            "routes_by_category must expose the 'orchestrator' route when it is configured"
+        );
+    }
+
+    #[test]
+    fn router_routes_by_category_no_orchestrator_in_default_config() {
+        // Without an explicit "orchestrator" task_type, the decomposer falls back to
+        // "system" for backward compatibility (pre-0.7.0 llm_router.yaml).
+        let config = RoutingConfig::default_config();
+        let router = LLMRouter::new(config);
+        let routes = router.routes_by_category();
+        assert!(
+            !routes.contains_key("orchestrator"),
+            "default config must NOT have an 'orchestrator' route; decomposer falls back to 'system'"
+        );
     }
 }

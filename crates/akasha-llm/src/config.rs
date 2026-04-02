@@ -57,6 +57,66 @@ pub struct RouteEntry {
     pub config: Option<serde_json::Value>,
 }
 
+impl RouteEntry {
+    /// Extract model config from serde_json::Value and apply to CompletionRequest.
+    /// Supports: temperature, top_p, top_k, frequency_penalty, presence_penalty, repeat_penalty,
+    /// num_ctx, num_gpu, max_tokens, thinking_level.
+    pub fn apply_config_to_request(&self, request: &mut crate::provider::CompletionRequest) {
+        if let Some(ref config) = self.config {
+            // Accept both YAML styles:
+            // 1) config: { max_tokens: 40960, temperature: 0.7 }
+            // 2) config: [ { max_tokens: 40960 }, { temperature: 0.7 } ]
+            // The second style is not ideal, but we support it for backward compatibility.
+            let get_value = |key: &str| -> Option<&serde_json::Value> {
+                match config {
+                    serde_json::Value::Object(map) => map.get(key),
+                    serde_json::Value::Array(arr) => arr.iter().find_map(|item| item.get(key)),
+                    _ => None,
+                }
+            };
+
+            if let Some(temp) = get_value("temperature").and_then(|v| v.as_f64()) {
+                request.temperature = Some(temp as f32);
+            }
+            if let Some(tp) = get_value("top_p").and_then(|v| v.as_f64()) {
+                request.top_p = Some(tp as f32);
+            }
+            if let Some(tk) = get_value("top_k").and_then(|v| v.as_u64()) {
+                request.top_k = Some(tk.min(u32::MAX as u64) as u32);
+            }
+            if let Some(fp) = get_value("frequency_penalty").and_then(|v| v.as_f64()) {
+                request.frequency_penalty = Some(fp as f32);
+            }
+            if let Some(pp) = get_value("presence_penalty").and_then(|v| v.as_f64()) {
+                request.presence_penalty = Some(pp as f32);
+            }
+            if let Some(rp) = get_value("repeat_penalty").and_then(|v| v.as_f64()) {
+                request.repeat_penalty = Some(rp as f32);
+            }
+            if let Some(nc) = get_value("num_ctx").and_then(|v| v.as_u64()) {
+                request.num_ctx = Some(nc.min(u32::MAX as u64) as u32);
+            }
+            if let Some(ng) = get_value("num_gpu").and_then(|v| v.as_u64()) {
+                request.num_gpu = Some(ng.min(u32::MAX as u64) as u32);
+            }
+            // Accept both max_tokens (preferred) and max_token (legacy typo).
+            if let Some(mt) = get_value("max_tokens")
+                .and_then(|v| v.as_u64())
+                .or_else(|| get_value("max_token").and_then(|v| v.as_u64()))
+            {
+                request.max_tokens = Some(mt.min(u32::MAX as u64) as u32);
+            }
+            if let Some(level) = get_value("thinking_level")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                request.thinking_level = Some(level.to_string());
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteConstraints {
     pub max_cost_per_request: Option<f64>,
@@ -186,5 +246,116 @@ impl RoutingConfig {
             .into_iter()
             .map(|(k, v)| (k, v.into_iter().collect::<Vec<_>>()))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::CompletionRequest;
+
+    fn empty_request() -> CompletionRequest {
+        CompletionRequest {
+            prompt: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repeat_penalty: None,
+            num_ctx: None,
+            num_gpu: None,
+            thinking_level: None,
+            preferred_task_type: None,
+            system_prompt: None,
+            image_data_urls: None,
+        }
+    }
+
+    fn route_entry_with_config(config_json: serde_json::Value) -> RouteEntry {
+        RouteEntry {
+            provider: "ollama".into(),
+            model: "test".into(),
+            config: Some(config_json),
+        }
+    }
+
+    #[test]
+    fn apply_config_max_tokens_normal_value() {
+        let entry = route_entry_with_config(serde_json::json!({ "max_tokens": 4096u64 }));
+        let mut req = empty_request();
+        entry.apply_config_to_request(&mut req);
+        assert_eq!(req.max_tokens, Some(4096));
+    }
+
+    #[test]
+    fn apply_config_max_tokens_clamps_at_u32_max() {
+        // Values above u32::MAX must be clamped to u32::MAX, not truncate/wrap.
+        let large: u64 = u32::MAX as u64 + 1;
+        let entry = route_entry_with_config(serde_json::json!({ "max_tokens": large }));
+        let mut req = empty_request();
+        entry.apply_config_to_request(&mut req);
+        assert_eq!(req.max_tokens, Some(u32::MAX),
+            "max_tokens exceeding u32::MAX must clamp to u32::MAX, not truncate");
+    }
+
+    #[test]
+    fn apply_config_top_k_clamps_at_u32_max() {
+        let large: u64 = u32::MAX as u64 + 100;
+        let entry = route_entry_with_config(serde_json::json!({ "top_k": large }));
+        let mut req = empty_request();
+        entry.apply_config_to_request(&mut req);
+        assert_eq!(req.top_k, Some(u32::MAX),
+            "top_k exceeding u32::MAX must clamp to u32::MAX");
+    }
+
+    #[test]
+    fn apply_config_num_ctx_clamps_at_u32_max() {
+        let large: u64 = u32::MAX as u64 + 1;
+        let entry = route_entry_with_config(serde_json::json!({ "num_ctx": large }));
+        let mut req = empty_request();
+        entry.apply_config_to_request(&mut req);
+        assert_eq!(req.num_ctx, Some(u32::MAX),
+            "num_ctx exceeding u32::MAX must clamp to u32::MAX");
+    }
+
+    #[test]
+    fn apply_config_num_gpu_clamps_at_u32_max() {
+        let large: u64 = u32::MAX as u64 + 1;
+        let entry = route_entry_with_config(serde_json::json!({ "num_gpu": large }));
+        let mut req = empty_request();
+        entry.apply_config_to_request(&mut req);
+        assert_eq!(req.num_gpu, Some(u32::MAX),
+            "num_gpu exceeding u32::MAX must clamp to u32::MAX");
+    }
+
+    #[test]
+    fn apply_config_normal_values_not_clamped() {
+        let entry = route_entry_with_config(serde_json::json!({
+            "max_tokens": 8192,
+            "top_k": 40,
+            "num_ctx": 4096,
+            "num_gpu": 32
+        }));
+        let mut req = empty_request();
+        entry.apply_config_to_request(&mut req);
+        assert_eq!(req.max_tokens, Some(8192));
+        assert_eq!(req.top_k, Some(40));
+        assert_eq!(req.num_ctx, Some(4096));
+        assert_eq!(req.num_gpu, Some(32));
+    }
+
+    #[test]
+    fn apply_config_accepts_array_style_config() {
+        // Backward-compat: config as array of objects
+        let entry = route_entry_with_config(serde_json::json!([
+            { "max_tokens": 2048 },
+            { "temperature": 0.7 }
+        ]));
+        let mut req = empty_request();
+        entry.apply_config_to_request(&mut req);
+        assert_eq!(req.max_tokens, Some(2048));
+        assert_eq!(req.temperature, Some(0.7f32));
     }
 }
