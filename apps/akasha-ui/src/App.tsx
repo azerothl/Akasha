@@ -5783,7 +5783,7 @@ function App() {
             <button
               type="button"
               className="refresh-btn"
-              onClick={fetchTasksList}
+              onClick={() => void fetchTasksList()}
               aria-label="Rafraîchir l’activité"
               disabled={tasksLoading}
             >
@@ -8400,7 +8400,7 @@ function App() {
               <button
                 type="button"
                 className="refresh-btn sidebar-right-refresh"
-                onClick={fetchTasksList}
+                onClick={() => void fetchTasksList()}
                 disabled={tasksLoading}
               >
                 {t("sidebar.refresh_tasks")}
