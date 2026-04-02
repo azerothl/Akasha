@@ -1277,8 +1277,10 @@ pre,
   color: var(--akasha-text-muted);
 }
 
-.human-input-free input {
+.human-input-free input,
+.human-input-free textarea {
   width: 100%;
+  box-sizing: border-box;
   padding: 0.5rem;
   margin-bottom: 0.5rem;
   background: var(--akasha-bg-surface);
@@ -1286,6 +1288,13 @@ pre,
   color: var(--akasha-text);
   border-radius: 6px;
   font-size: 0.875rem;
+  font-family: inherit;
+}
+
+.human-input-free textarea {
+  min-height: 4.5rem;
+  resize: vertical;
+  line-height: 1.4;
 }
 
 .human-input-free button {
@@ -1904,6 +1913,14 @@ pre,
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.chat-inline-human-reply-custom-label {
+  display: block;
+  font-size: 0.8125rem;
+  margin-bottom: 0.35rem;
+  color: var(--akasha-text-muted, #71717a);
 }
 
 .chat-inline-human-reply-choice-btn {
@@ -1922,22 +1939,33 @@ pre,
 
 .chat-inline-human-reply-free {
   display: flex;
+  flex-direction: column;
   gap: 0.5rem;
-  align-items: center;
   margin-top: 0.5rem;
 }
 
-.chat-inline-human-reply-free input {
+.chat-inline-human-reply-free-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
+}
+
+.chat-inline-human-reply-free-row textarea {
   flex: 1;
+  min-width: 0;
+  min-height: 4rem;
+  resize: vertical;
   padding: 0.5rem 0.75rem;
   font-size: 0.875rem;
+  font-family: inherit;
+  line-height: 1.4;
   color: var(--akasha-text, #fafafa);
   background: var(--akasha-bg, #18181b);
   border: 1px solid var(--akasha-bg-surface-hover, #3f3f46);
   border-radius: 6px;
 }
 
-.chat-inline-human-reply-free input:focus {
+.chat-inline-human-reply-free-row textarea:focus {
   outline: none;
   border-color: var(--akasha-accent, #6366f1);
 }

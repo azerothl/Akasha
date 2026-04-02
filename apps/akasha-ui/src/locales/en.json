@@ -381,6 +381,7 @@
   "human_input.submit": "Submit",
   "human_input.action_required": "Action required",
   "human_input.placeholder": "Type your response…",
+  "human_input.or_custom": "Or type a custom answer",
   "device_bridge.title": "Device access",
   "device_bridge.description": "The agent wants to use:",
   "device_bridge.allow": "Allow",

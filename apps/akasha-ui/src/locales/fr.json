@@ -381,6 +381,7 @@
   "human_input.submit": "Valider",
   "human_input.action_required": "Action requise",
   "human_input.placeholder": "Saisissez votre réponse…",
+  "human_input.or_custom": "Ou saisissez une autre réponse",
   "device_bridge.title": "Accès appareil",
   "device_bridge.description": "L'agent souhaite utiliser :",
   "device_bridge.allow": "Autoriser",

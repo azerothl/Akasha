@@ -2415,6 +2415,11 @@ function App() {
     }
   }, [tab, humanInputModalTaskId, pendingHumanInputKeys.length]);
   useEffect(() => {
+    if (humanInputModalTaskId != null) {
+      setHumanInputFreeText("");
+    }
+  }, [humanInputModalTaskId]);
+  useEffect(() => {
     if (tab === "chat") chatInputRef.current?.focus();
   }, [tab]);
 
@@ -4768,6 +4773,7 @@ function App() {
                           await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: choice, port: DAEMON_PORT });
                           setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
                           setHumanInputModalTaskId(null);
+                          setHumanInputFreeText("");
                         } catch (e) {
                           console.error(e);
                         }
@@ -4777,35 +4783,37 @@ function App() {
                     </button>
                   ))}
                 </div>
-              ) : (
-                <div className="human-input-free">
-                  <input
-                    type="text"
-                    value={humanInputFreeText}
-                    onChange={(e) => setHumanInputFreeText(e.target.value)}
-                    placeholder={t("human_input.placeholder")}
-                    onKeyDown={(e) => e.key === "Enter" && document.getElementById("human-input-submit-btn")?.click()}
-                  />
-                  <button
-                    id="human-input-submit-btn"
-                    type="button"
-                    onClick={async () => {
-                      const text = humanInputFreeText.trim();
-                      if (!text) return;
-                      try {
-                        await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: text, port: DAEMON_PORT });
-                        setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
-                        setHumanInputModalTaskId(null);
-                        setHumanInputFreeText("");
-                      } catch (e) {
-                        console.error(e);
-                      }
-                    }}
-                  >
-                    {t("human_input.submit")}
-                  </button>
-                </div>
-              )}
+              ) : null}
+              <div className="human-input-free">
+                {pendingHumanInput[humanInputModalTaskId].choices?.length ? (
+                  <label htmlFor="human-input-free-textarea">{t("human_input.or_custom")}</label>
+                ) : null}
+                <textarea
+                  id="human-input-free-textarea"
+                  rows={3}
+                  value={humanInputFreeText}
+                  onChange={(e) => setHumanInputFreeText(e.target.value)}
+                  placeholder={t("human_input.placeholder")}
+                />
+                <button
+                  id="human-input-submit-btn"
+                  type="button"
+                  onClick={async () => {
+                    const text = humanInputFreeText.trim();
+                    if (!text) return;
+                    try {
+                      await invoke("post_task_human_reply", { taskId: humanInputModalTaskId, response: text, port: DAEMON_PORT });
+                      setPendingHumanInput((prev) => { const next = { ...prev }; delete next[humanInputModalTaskId!]; return next; });
+                      setHumanInputModalTaskId(null);
+                      setHumanInputFreeText("");
+                    } catch (e) {
+                      console.error(e);
+                    }
+                  }}
+                >
+                  {t("human_input.submit")}
+                </button>
+              </div>
               <button type="button" className="human-input-close" onClick={() => setHumanInputModalTaskId(null)} aria-label={t("common.close")}>
                 ×
               </button>
@@ -5354,6 +5362,7 @@ function App() {
                               await invoke("post_task_human_reply", { taskId: pendingTaskId, response: choice, port: DAEMON_PORT });
                               setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskId]; return next; });
                               setHumanInputModalTaskId((c) => (c === pendingTaskId ? null : c));
+                              setInlineHumanReplyText("");
                             } catch (e) {
                               console.error(e);
                             }
@@ -5363,16 +5372,24 @@ function App() {
                         </button>
                       ))}
                     </div>
-                  ) : (
-                    <div className="chat-inline-human-reply-free">
-                      <label htmlFor="inline-human-reply-input" className="sr-only">Votre réponse</label>
-                      <input
-                        id="inline-human-reply-input"
-                        type="text"
+                  ) : null}
+                  <div className="chat-inline-human-reply-free">
+                    {pending.choices?.length ? (
+                      <label htmlFor="inline-human-reply-textarea" className="chat-inline-human-reply-custom-label">
+                        {t("human_input.or_custom")}
+                      </label>
+                    ) : (
+                      <label htmlFor="inline-human-reply-textarea" className="sr-only">
+                        {t("human_input.placeholder")}
+                      </label>
+                    )}
+                    <div className="chat-inline-human-reply-free-row">
+                      <textarea
+                        id="inline-human-reply-textarea"
+                        rows={3}
                         value={inlineHumanReplyText}
                         onChange={(e) => setInlineHumanReplyText(e.target.value)}
-                        placeholder="Saisissez votre réponse…"
-                        onKeyDown={(e) => e.key === "Enter" && document.getElementById("inline-human-reply-submit")?.click()}
+                        placeholder={t("human_input.placeholder")}
                       />
                       <button
                         id="inline-human-reply-submit"
@@ -5390,10 +5407,10 @@ function App() {
                           }
                         }}
                       >
-                        Envoyer la réponse
+                        {t("human_input.submit")}
                       </button>
                     </div>
-                  )}
+                  </div>
                 </div>
               );
             })()}

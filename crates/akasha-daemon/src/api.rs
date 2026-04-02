@@ -970,7 +970,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("install_playwright", "install_playwright — run npm install and npx playwright install chromium in the Playwright runner directory (scripts/playwright-runner or AKASHA_PLAYWRIGHT_RUNNER). Requires browser_enabled. Use after ask_user consent if you need explicit approval before download; optional require_approval in tools_policy."),
     ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
     ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
-    ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
+    ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Pour une réponse ouverte (chemin, texte libre, secret), omettre choices ou laisser un tableau vide. Si choices est fourni, l'UI propose quand même une saisie libre en plus des boutons. Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
     ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent. agent_type: search | code | conversation | financial | documentalist | project_manager | technical_writer | research | security_audit | creative | analyst | architect | frontend | backend | database | integration | qa | system | image_generation. Un seul niveau de délégation autorisé."),
     ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
     ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
@@ -1620,6 +1620,14 @@ fn web_followup_tools_configured(policy: &akasha_tools::ToolsPolicy) -> bool {
     web_fetch_ok || browser_ok
 }
 
+/// True when the user likely refers to the SNCF regional product "TER".
+/// Substring `ter ` must not be used: it matches inside "connecter", "twitter", etc.
+fn message_mentions_ter_train_line(message_lower: &str) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"(?i)\bter\b").expect("valid regex"));
+    re.is_match(message_lower)
+}
+
 fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
     let m = message.to_lowercase();
     MessageIntentFlags {
@@ -1692,16 +1700,40 @@ fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
             let vault = ["vault", "github_token", "clé du vault", "cle du vault", "key in the vault", "token dans le vault", "clef dans le vault"].iter().any(|k| m.contains(k));
             github && vault
         },
-        transport: [
-            "train", "tgv", "ter ", "sncf", "gare ", "horaires de train", "horaires de bus",
-            "horaires du train", "billet de train", "trajet en train", "rer ", "transilien",
-            "bus ", "métro ", "metro ", "tramway", "tram ",
-            "vol ", "aéroport", "aeroport", "airport", "terminal ",
-            "itinéraire", "itineraire", "horaires de métro", "horaires du métro",
-            "départ de ", "depart de ", "arrivée à ", "arrivee a ",
-        ]
-        .iter()
-        .any(|k| m.contains(k)),
+        transport: message_mentions_ter_train_line(&m)
+            || [
+                "train",
+                "tgv",
+                "sncf",
+                "gare ",
+                "horaires de train",
+                "horaires de bus",
+                "horaires du train",
+                "billet de train",
+                "trajet en train",
+                "rer ",
+                "transilien",
+                "bus ",
+                "métro ",
+                "metro ",
+                "tramway",
+                "tram ",
+                "vol ",
+                "aéroport",
+                "aeroport",
+                "airport",
+                "terminal ",
+                "itinéraire",
+                "itineraire",
+                "horaires de métro",
+                "horaires du métro",
+                "départ de ",
+                "depart de ",
+                "arrivée à ",
+                "arrivee a ",
+            ]
+            .iter()
+            .any(|k| m.contains(k)),
         geolocation_distance: [
             "distance entre",
             "distance between",
@@ -3555,7 +3587,7 @@ async fn execute_tool_call(
             let Some(runner_path) = crate::browser::find_playwright_runner_path() else {
                 return (
                     false,
-                    "[browser] Playwright runner not found. Set AKASHA_PLAYWRIGHT_RUNNER or run from repo with scripts/playwright-runner.".to_string(),
+                    "[browser] Playwright runner not found. Install: copy scripts/playwright-runner next to the executable (playwright-runner/run.mjs), or under %USERPROFILE%\\akasha\\playwright-runner, or set AKASHA_PLAYWRIGHT_RUNNER / AKASHA_DATA_DIR (see docs). Then npm install in that folder.".to_string(),
                     None,
                 );
             };
@@ -3598,9 +3630,15 @@ async fn execute_tool_call(
                     drop(g);
                     match crate::browser::create_browser_session(&runner_path, headless, action_timeout).await {
                         Ok(mut new_session) => {
-                            let res = new_session.send_command(&serde_json::json!({ "cmd": "navigate", "params": { "url": url, "timeout_secs": action_timeout } })).await;
-                            let mut g = registry.write().await;
-                            g.insert(task_id, new_session);
+                            let res = new_session
+                                .send_command(&serde_json::json!({ "cmd": "navigate", "params": { "url": url, "timeout_secs": action_timeout } }))
+                                .await;
+                            // Only register if IPC still works; on Err (e.g. runner stdout EOF) the child may
+                            // already be reaped — inserting a dead session poisons later navigate/snapshot calls.
+                            if res.is_ok() {
+                                let mut g = registry.write().await;
+                                g.insert(task_id, new_session);
+                            }
                             res
                         }
                         Err(e) => return (false, format!("[browser] error: {}", e), None),
@@ -3668,7 +3706,7 @@ async fn execute_tool_call(
             let Some(runner_path) = crate::browser::find_playwright_runner_path() else {
                 return (
                     false,
-                    "[install_playwright] Playwright runner not found. Set AKASHA_PLAYWRIGHT_RUNNER or run from repo with scripts/playwright-runner.".to_string(),
+                    "[install_playwright] Playwright runner not found. Copy scripts/playwright-runner beside the executable or under ~/akasha/playwright-runner, or set AKASHA_PLAYWRIGHT_RUNNER / AKASHA_DATA_DIR.".to_string(),
                     None,
                 );
             };
@@ -5192,6 +5230,7 @@ pub(crate) async fn run_message_via_llm(
              WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
              WEATHER/MÉTEO RULE (PRIORITY): When the user asks for weather, météo, or forecasts (e.g. \"quel temps\", \"météo demain\", \"weather in X\"), you MUST use TOOL: web_search <query> first, then if snippets lack numeric detail use TOOL: web_fetch <url> on a trusted result URL and/or TOOL: browser navigate <url> then TOOL: browser snapshot (many météo sites are JS-heavy). Do NOT use bankr, portfolio, or any other skill for weather — use web_search plus web_fetch/browser as needed.\n\
              BROWSER RULE (PRIORITY): When the user explicitly asks to open the browser, go to a website, or show something on X/Twitter (e.g. \"ouvre le navigateur\", \"open the browser\", \"va sur X\", \"go to twitter\", \"cherche sur X\", \"ouvre le navigateur et cherche\"), you MUST use TOOL: browser navigate <url> first with the appropriate URL (e.g. https://x.com/akashabot for a profile, https://x.com for the home page). You may then add a short message. Do NOT use only web_search when the user asked to open the browser or go to X/Twitter.\n\
+             SOCIAL / LOGGED-IN SITES RULE: If tools_policy allows the domain, use TOOL: browser navigate <https URL> and TOOL: browser snapshot when the user asks to open or inspect X/Twitter or similar. Do NOT refuse with vague \"security\", \"confidentiality\", or \"structural policy\" claims — the user runs Akasha locally and controls tools_policy. Real limitation: you cannot type the user's password or complete interactive MFA inside the managed browser on their behalf; if a login wall blocks content, say that clearly and offer practical options (user logs in manually in that same browser session if their environment keeps the session, or official API access via TOOL: run_command with VAULT:... when applicable). Do NOT state that vault-backed API access is forbidden when the user has configured secrets — follow VAULT ENV RULE.\n\
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first, then answer from fetched content — not only from snippets. If snippets are insufficient, use TOOL: web_fetch <url> on a relevant result URL, or TOOL: browser navigate <url> then TOOL: browser snapshot so YOU retrieve the page text inside Akasha (managed browser), then summarize for the user. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. Do NOT tell the user to open links in their own browser when web_fetch or browser snapshot is available and allowed — retrieve and answer yourself.\n\
              INSTALL CLI RULE: When the user asks to install a CLI or package globally (e.g. \"install bankr CLI\", \"npm install -g @bankr/cli\", \"install the bankr cli in global\"), you MUST reply ONLY with TOOL: run_command <cmd> <args> (e.g. TOOL: run_command npm install -g @bankr/cli). Do NOT generate a script or ask the user to run commands themselves; run the installation command via the tool.\n\
              VAULT ENV RULE: To use a vault secret in a command you MUST call TOOL: run_command with VAULT:<vault_key>=<ENV_VAR> as the FIRST argument(s), then the command. The system injects the secret value into ENV_VAR for that command only. Example: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo. FORBIDDEN: never tell the user to run GITHUB_TOKEN=VAULT:GITHUB_TOKEN or export GITHUB_TOKEN=... or VAULT:GITHUB_TOKEN=ghp_... — you must output the TOOL: line yourself so the system runs the command and injects the token. For GitHub with token in vault: use TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (or gh repo view owner/repo). The vault key may be GITHUB_TOKEN or github_token; the part after = is the env var name the command uses (e.g. $GITHUB_TOKEN). Do NOT say you cannot access the repo without having called run_command with VAULT:... first.\n\
