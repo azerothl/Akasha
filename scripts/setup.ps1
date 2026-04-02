@@ -1,5 +1,6 @@
 # Akasha unified setup (Windows)
 # Run after extracting the "full" zip. Prompts for: install desktop app (Tauri), daemon at logon.
+# The release zip also includes playwright-runner\ next to the binaries (managed browser). Node.js + npm are required only if you use that feature; the daemon can auto-install deps on first use unless AKASHA_PLAYWRIGHT_AUTO_INSTALL=0.
 # Usage: .\setup.ps1 [-InstallDir <path>] [-InstallUi] [-NoInstallUi] [-AutoStart] [-NoAutoStart]
 # Without flags, prompts interactively.
 

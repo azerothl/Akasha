@@ -2786,19 +2786,24 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
         "config_paths": config_paths
     });
 
-    // When daemon is reachable, fetch its checks (ollama, vault, spec_dir, embedded_llm, etc.)
-    let daemon_checks: Vec<serde_json::Value> = if daemon_healthy {
-        reqwest::blocking::Client::new()
-            .get(format!("http://127.0.0.1:{}/api/doctor", port))
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .ok()
-            .and_then(|r| r.json::<serde_json::Value>().ok())
-            .and_then(|j| j.get("checks").and_then(|c| c.as_array()).cloned())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    // When daemon is reachable, fetch its checks (ollama, vault, spec_dir, embedded_llm, playwright, etc.)
+    let (daemon_checks, daemon_playwright): (Vec<serde_json::Value>, Option<serde_json::Value>) =
+        if daemon_healthy {
+            reqwest::blocking::Client::new()
+                .get(format!("http://127.0.0.1:{}/api/doctor", port))
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .ok()
+                .and_then(|r| r.json::<serde_json::Value>().ok())
+                .map(|j| {
+                    let checks = j.get("checks").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+                    let pw = j.get("playwright").cloned();
+                    (checks, pw)
+                })
+                .unwrap_or_else(|| (Vec::new(), None))
+        } else {
+            (Vec::new(), None)
+        };
 
     if json {
         if !daemon_checks.is_empty() {
@@ -2808,6 +2813,9 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
             if let Some(obj) = payload.as_object_mut() {
                 obj.insert("ok".to_string(), serde_json::json!(combined_ok));
                 obj.insert("daemon_checks".to_string(), serde_json::json!(daemon_checks));
+                if let Some(pw) = daemon_playwright {
+                    obj.insert("playwright".to_string(), pw);
+                }
             }
             println!("{}", serde_json::to_string_pretty(&payload)?);
         } else {

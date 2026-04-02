@@ -8393,8 +8393,108 @@ pub async fn handle_api(
             "description": embedded_desc
         }));
 
+        // Playwright managed browser (optional): runner path, npm package, node/npm on PATH
+        let runner_path = crate::browser::find_playwright_runner_path();
+        let runner_path_str = runner_path.as_ref().map(|p| p.display().to_string());
+        let runner_ok = runner_path.is_some();
+        let playwright_pkg_path = runner_path.as_ref().and_then(|p| {
+            crate::browser::playwright_runner_dir(p).map(|d| d.join("node_modules").join("playwright"))
+        });
+        let playwright_pkg_present = playwright_pkg_path.as_ref().map(|p| p.is_dir()).unwrap_or(false);
+        let auto_install_off = std::env::var("AKASHA_PLAYWRIGHT_AUTO_INSTALL")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false);
+        let playwright_pkg_ok = if playwright_pkg_present {
+            true
+        } else if !runner_ok {
+            false
+        } else {
+            !auto_install_off
+        };
+        let playwright_pkg_desc = if playwright_pkg_present {
+            "node_modules/playwright present"
+        } else if !runner_ok {
+            "Playwright runner not resolved"
+        } else if auto_install_off {
+            "node_modules/playwright missing (set AKASHA_PLAYWRIGHT_AUTO_INSTALL or run npm install in runner dir)"
+        } else {
+            "node_modules/playwright not installed yet (will auto-install on first browser use)"
+        };
+
+        let (node_on_path, node_version_line) = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::process::Command::new("node")
+                .arg("--version")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .output(),
+        )
+        .await
+        {
+            Ok(Ok(o)) if o.status.success() => (
+                true,
+                String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string()),
+            ),
+            _ => (false, None),
+        };
+
+        let npm_on_path = matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                tokio::process::Command::new("npm")
+                    .arg("--version")
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .output(),
+            )
+            .await,
+            Ok(Ok(ref o)) if o.status.success()
+        );
+
+        checks.push(serde_json::json!({
+            "id": "playwright_runner",
+            "ok": runner_ok,
+            "description": if runner_ok {
+                format!("Playwright runner: {}", runner_path_str.as_deref().unwrap_or("?"))
+            } else {
+                "Playwright runner not found (use release layout, AKASHA_PLAYWRIGHT_RUNNER, or data dir)".to_string()
+            }
+        }));
+        checks.push(serde_json::json!({
+            "id": "playwright_node",
+            "ok": node_on_path,
+            "description": if node_on_path {
+                format!(
+                    "node on PATH ({})",
+                    node_version_line.as_deref().unwrap_or("?")
+                )
+            } else {
+                "node not found on PATH (install Node.js for managed browser)".to_string()
+            }
+        }));
+        checks.push(serde_json::json!({
+            "id": "playwright_npm",
+            "ok": npm_on_path,
+            "description": if npm_on_path { "npm on PATH" } else { "npm not found on PATH" }
+        }));
+        checks.push(serde_json::json!({
+            "id": "playwright_package",
+            "ok": playwright_pkg_ok,
+            "description": playwright_pkg_desc
+        }));
+
+        let playwright_json = serde_json::json!({
+            "runner_path": runner_path_str,
+            "runner_found": runner_ok,
+            "node_modules_playwright": playwright_pkg_present,
+            "auto_install_disabled": auto_install_off,
+            "node_on_path": node_on_path,
+            "node_version": node_version_line,
+            "npm_on_path": npm_on_path,
+        });
+
         let all_ok = checks.iter().all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
-        let body_json = serde_json::json!({ "ok": all_ok, "checks": checks }).to_string();
+        let body_json = serde_json::json!({ "ok": all_ok, "checks": checks, "playwright": playwright_json }).to_string();
         return format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body_json.len(),

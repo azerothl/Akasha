@@ -89,6 +89,9 @@ jobs:
           cp target/${{ matrix.target }}/release/akasha-tui${{ matrix.ext }} staging/
           cp docs/user_guide_final.md staging/docs/user_guide.md
           cp scripts/install.sh scripts/setup.sh staging/scripts/
+          mkdir -p staging/playwright-runner
+          cp -R scripts/playwright-runner/. staging/playwright-runner/
+          rm -rf staging/playwright-runner/node_modules
           chmod +x staging/* staging/scripts/install.sh staging/scripts/setup.sh
 
       - name: Prepare artifact (Windows)
@@ -102,6 +105,9 @@ jobs:
           Copy-Item docs/user_guide_final.md -Destination staging/docs/user_guide.md
           Copy-Item scripts/install.ps1 -Destination staging/scripts/
           Copy-Item scripts/setup.ps1 -Destination staging/scripts/
+          New-Item -ItemType Directory -Force -Path staging\playwright-runner | Out-Null
+          Copy-Item -Path scripts\playwright-runner\* -Destination staging\playwright-runner\ -Recurse -Force
+          Remove-Item -Recurse -Force staging\playwright-runner\node_modules -ErrorAction SilentlyContinue
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

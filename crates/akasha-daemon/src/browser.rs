@@ -214,8 +214,8 @@ pub fn find_playwright_runner_path() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             for rel in [
-                ["playwright-runner", "run.mjs"],
-                ["resources", "playwright-runner", "run.mjs"],
+                ["playwright-runner", "run.mjs"].as_slice(),
+                ["resources", "playwright-runner", "run.mjs"].as_slice(),
             ] {
                 let mut p = parent.to_path_buf();
                 for c in rel {

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Akasha unified setup (Linux / macOS)
 # Run after extracting the "full" zip. Prompts for: install desktop app (Tauri), daemon at login.
+# The release zip also includes playwright-runner/ next to the binaries (managed browser). Node.js + npm are required only if you use that feature; the daemon can auto-install deps on first use unless AKASHA_PLAYWRIGHT_AUTO_INSTALL=0.
 # Usage: ./setup.sh [--dir DIR] [--install-ui] [--no-install-ui] [--auto-start] [--no-auto-start]
 
 set -e

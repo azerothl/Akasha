@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Akasha installation script (Linux / macOS)
+# Release archives include playwright-runner/ beside the binaries; Node.js is only needed for the managed browser feature.
 # Usage: ./install.sh [--dir DIR] [--no-auto-start]
 # --dir: install binaries to DIR (default: /usr/local/bin or ~/.local/bin if not writable)
 # --no-auto-start: do not enable daemon at login

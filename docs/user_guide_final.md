@@ -55,7 +55,8 @@ Pour afficher l'interface en terminal : `akasha tui` (ou `.\akasha.exe tui` sous
 - **Modèle embarqué** : par défaut Akasha utilise un modèle LLM intégré (akasha_embedded). Aucune installation externe n'est obligatoire pour recevoir des réponses.
 - **Ollama** (optionnel) : pour utiliser d'autres modèles locaux. Configurez-le lors de l'initialisation ou plus tard via `akasha config models set conversation ollama <modèle>`.
 - **Cloud** (optionnel) : OpenAI ou OpenRouter, configurés lors de l'init (clés dans le vault ou variables d'environnement).
-- Aucune installation de Rust ou Node n'est nécessaire pour utiliser les binaires.
+- **Rust** : inutile pour les binaires précompilés.
+- **Node.js** (optionnel) : nécessaire seulement pour l’outil **navigateur géré** (Playwright). Les archives de release incluent le dossier `playwright-runner` à côté des exécutables ; installez [Node.js](https://nodejs.org/) (npm inclus) si vous utilisez cette fonctionnalité. Au premier lancement d’une tâche navigateur, le daemon peut exécuter `npm install` et télécharger Chromium — cela peut prendre plusieurs minutes selon la connexion. Pour désactiver l’installation automatique des dépendances Playwright, définissez `AKASHA_PLAYWRIGHT_AUTO_INSTALL=0` (variable d’environnement ou entrée dans `akasha.env`). Le diagnostic `akasha doctor` (daemon actif) indique si le runner, Node/npm et le paquet Playwright sont détectés.
 
 **Important** : lancez `akasha start` depuis le dossier d'installation (ou après avoir ajouté ce dossier au PATH) afin que l'onglet **Doc** des interfaces affiche cette documentation.
 
