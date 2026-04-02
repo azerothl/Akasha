@@ -3779,7 +3779,7 @@ function App() {
         try {
           const ack = await invoke<{ message?: string; task_id?: string }>("send_message_ack", {
             message: msg,
-            session_id: sessionId,
+            sessionId: sessionId,
             port: DAEMON_PORT,
           });
           return (ack?.message ?? "Tâche créée.") + (ack?.task_id ? ` Task #${ack.task_id.slice(-8)}` : "");
@@ -4204,9 +4204,9 @@ function App() {
       const sessionAtSend = sessionId;
       const ack = await invoke<{ task_id: string; session_id: string; message: string }>("send_message_ack", {
         message: userMessage,
-        session_id: sessionId,
+        sessionId: sessionId,
         attachments: attachmentsPayload,
-        new_session: useNewSession ? true : undefined,
+        newSession: useNewSession ? true : undefined,
         port: DAEMON_PORT,
       });
       setLoading(false);
