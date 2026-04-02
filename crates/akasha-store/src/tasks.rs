@@ -249,15 +249,13 @@ impl TaskStore {
         payload: Option<&serde_json::Value>,
         at: &str,
     ) -> anyhow::Result<()> {
-        let seq: i64 = self.conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM task_events WHERE task_id = ?1",
-            [task_id.to_string()],
-            |row| row.get(0),
-        )?;
         let payload_json = payload.map(serde_json::to_string).transpose()?;
+        // Use a scalar subquery so seq assignment and INSERT are a single atomic statement,
+        // eliminating the SELECT-then-INSERT race that could produce a (task_id, seq) PK collision.
         self.conn.execute(
-            "INSERT INTO task_events (task_id, seq, event_type, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![task_id.to_string(), seq, event_type, payload_json, at],
+            "INSERT INTO task_events (task_id, seq, event_type, payload_json, created_at) \
+             VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM task_events WHERE task_id = ?1), ?2, ?3, ?4)",
+            rusqlite::params![task_id.to_string(), event_type, payload_json, at],
         )?;
         let max_events: i64 = MAX_TASK_EVENTS_PER_TASK as i64;
         let count: i64 = self.conn.query_row(
