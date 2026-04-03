@@ -17,7 +17,49 @@ on:
         type: string
 
 jobs:
+  verify-release-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify embedded version matches git tag
+        run: |
+          set -e
+          REF="${{ github.ref }}"
+          if [[ "$REF" != refs/tags/v* ]]; then
+            echo "Not a tag ref ($REF); skipping version check (e.g. workflow_dispatch)."
+            exit 0
+          fi
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          CARGO_VER=$(python3 -c "
+          import re
+          from pathlib import Path
+          t = Path('Cargo.toml').read_text(encoding='utf-8')
+          m = re.search(r'\[workspace\.package\]\s*\nversion = \"([^\"]+)\"', t)
+          print(m.group(1) if m else '')
+          ")
+          PKG_VER=$(jq -r .version apps/akasha-ui/package.json)
+          TAURI_VER=$(jq -r .version apps/akasha-ui/src-tauri/tauri.conf.json)
+          if [[ -z "$CARGO_VER" ]]; then
+            echo "::error::Could not read [workspace.package] version from Cargo.toml"
+            exit 1
+          fi
+          if [[ "$TAG_VER" != "$CARGO_VER" ]]; then
+            echo "::error::Tag v$TAG_VER does not match Cargo.toml workspace.package version ($CARGO_VER). Run workflow 'Sync release version' first, then tag."
+            exit 1
+          fi
+          if [[ "$TAG_VER" != "$PKG_VER" ]]; then
+            echo "::error::Tag v$TAG_VER does not match apps/akasha-ui/package.json ($PKG_VER)."
+            exit 1
+          fi
+          if [[ "$TAG_VER" != "$TAURI_VER" ]]; then
+            echo "::error::Tag v$TAG_VER does not match apps/akasha-ui/src-tauri/tauri.conf.json ($TAURI_VER)."
+            exit 1
+          fi
+          echo "OK: tag v$TAG_VER matches Cargo workspace, package.json, and tauri.conf.json"
+
   build:
+    needs: verify-release-version
     strategy:
       fail-fast: false
       matrix:
@@ -116,6 +158,7 @@ jobs:
           path: staging/
 
   build-tauri:
+    needs: verify-release-version
     strategy:
       fail-fast: false
       matrix:
