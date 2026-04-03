@@ -337,8 +337,7 @@ fn doctor_is_source_checkout(cwd: &Path) -> bool {
     cwd.join("Cargo.toml").exists() || cwd.join(".git").exists() || cwd.join("spec").is_dir()
 }
 
-fn doctor_uses_source_checkout_checks(spec_dir_override: Option<&OsStr>, cwd: &Path) -> bool {
-    let _ = spec_dir_override;
+fn doctor_uses_source_checkout_checks(cwd: &Path) -> bool {
     doctor_is_source_checkout(cwd)
 }
 
@@ -3025,7 +3024,7 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let spec_dir_override = std::env::var_os("AKASHA_SPEC_DIR");
     let source_checkout_checks =
-        doctor_uses_source_checkout_checks(spec_dir_override.as_deref(), &cwd);
+        doctor_uses_source_checkout_checks(&cwd);
 
     let data_dir = akasha_data_dir();
     if fix {
