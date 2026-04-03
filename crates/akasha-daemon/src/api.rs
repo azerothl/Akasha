@@ -9535,10 +9535,11 @@ pub async fn handle_api(
             _ => (false, None),
         };
 
+        let npm_exe = if cfg!(windows) { "npm.cmd" } else { "npm" };
         let npm_on_path = matches!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(3),
-                tokio::process::Command::new("npm")
+                tokio::process::Command::new(npm_exe)
                     .arg("--version")
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::null())
