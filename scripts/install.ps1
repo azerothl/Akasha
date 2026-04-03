@@ -11,6 +11,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if ($InstallDir -match '^-[a-zA-Z]' -and -not (Test-Path -LiteralPath $InstallDir -ErrorAction SilentlyContinue)) {
+    Write-Error "Invalid installation directory '$InstallDir'. Use an absolute path with -InstallDir (e.g. -InstallDir C:\Akasha)."
+    exit 1
+}
+
 # Script must be run from the directory containing the extracted release (akasha.exe, akasha-daemon.exe, etc.)
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ParentDir = Split-Path -Parent $ScriptDir
@@ -63,7 +68,12 @@ if (-not $NoAutoStart) {
 
 # Start daemon once (background, so installer does not wait)
 Write-Host "Starting daemon once..."
-Start-Process -FilePath $akashaExe -ArgumentList "start" -WorkingDirectory $InstallDir -WindowStyle Hidden
-Write-Host "Daemon started."
+try {
+    Start-Process -FilePath $akashaExe -ArgumentList "start" -WorkingDirectory $InstallDir -WindowStyle Hidden -ErrorAction Stop
+    Write-Host "Daemon started."
+} catch {
+    Write-Warning "Could not start the daemon automatically: $($_.Exception.Message)"
+    Write-Host "Start it manually: & '$akashaExe' start"
+}
 
 Write-Host "Installation complete."
