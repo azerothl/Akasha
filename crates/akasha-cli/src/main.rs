@@ -36,7 +36,7 @@ enum Commands {
         /// Fetch diagnostic advice from daemon (RAG + Core Model, requires daemon running)
         #[arg(long)]
         advice: bool,
-        /// Fix missing or minimal config: create llm_router.yaml, tools_policy.yaml, connectors.env in data_dir if absent
+        /// Fix missing or minimal config: create llm_router.yaml, tools_policy.yaml, connectors.env, akasha.env in data_dir if absent
         #[arg(long)]
         fix: bool,
     },
