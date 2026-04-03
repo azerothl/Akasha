@@ -1,22 +1,25 @@
 //! Simple HTTP API: POST /api/message, GET /api/tasks/:id, GET / (health)
 
-use akasha_core::{EventEnvelope, EventType};
-use akasha_vault::Vault;
-use akasha_llm::CompletionRequest;
-use akasha_store::{
-    format_todos_plan_block, parse_todos_from_payload, Schedule, ScheduleException, ScheduleExceptionType,
-    ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore, TodoStatus,
-};
-pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use crate::agent_profile::AgentProfile;
-use crate::user_profile::UserProfile;
 use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority};
+use crate::latency::{
+    clear_task_milestones, emit_timeline_once_for_task, env_duration_ms, log_latency_metric,
+    resolve_root_task_id,
+};
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use crate::protocol_adapter::unknown_external_message_count;
-use crate::latency::{clear_task_milestones, emit_timeline_once_for_task, env_duration_ms, log_latency_metric, resolve_root_task_id};
-use std::path::{Path, PathBuf};
+use crate::user_profile::UserProfile;
+use akasha_core::{EventEnvelope, EventType};
+use akasha_llm::CompletionRequest;
+pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
+use akasha_store::{
+    format_todos_plan_block, parse_todos_from_payload, Schedule, ScheduleException,
+    ScheduleExceptionType, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore, TodoStatus,
+};
+use akasha_vault::Vault;
 use std::cmp::Ordering;
+use std::path::{Path, PathBuf};
 
 /// On Windows, paths with verbatim prefix `\\?\` can cause "file not found" with some APIs. Return a path without it.
 #[cfg(windows)]
@@ -130,7 +133,9 @@ fn parse_write_file_request(args: &[String]) -> Option<(String, String)> {
                         .filter_map(|item| item.as_str().map(str::to_string))
                         .collect::<Vec<_>>()
                         .join("\n"),
-                    other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+                    other => {
+                        serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string())
+                    }
                 });
             if let Some(path) = path {
                 return Some((path, content.unwrap_or_default()));
@@ -195,12 +200,18 @@ fn path_extension_is_pdf(p: &Path) -> bool {
 }
 
 /// Read bytes from disk and return the same user-visible message shape as `pdf` tool.
-async fn pdf_extract_message_from_disk(disk_path: &Path, via_tool: &str) -> (bool, String, Option<String>) {
+async fn pdf_extract_message_from_disk(
+    disk_path: &Path,
+    via_tool: &str,
+) -> (bool, String, Option<String>) {
     match tokio::fs::read(disk_path).await {
         Ok(bytes) => match pdf_extract::extract_text_from_mem(&bytes) {
             Ok(text) => {
-                let preview =
-                    if text.len() > 2000 { format!("{}…", text.chars().take(2000).collect::<String>()) } else { text.clone() };
+                let preview = if text.len() > 2000 {
+                    format!("{}…", text.chars().take(2000).collect::<String>())
+                } else {
+                    text.clone()
+                };
                 (
                     true,
                     format!(
@@ -215,13 +226,23 @@ async fn pdf_extract_message_from_disk(disk_path: &Path, via_tool: &str) -> (boo
             }
             Err(e) => (
                 false,
-                format!("[{}] PDF extraction failed for {}: {}", via_tool, disk_path.display(), e),
+                format!(
+                    "[{}] PDF extraction failed for {}: {}",
+                    via_tool,
+                    disk_path.display(),
+                    e
+                ),
                 None,
             ),
         },
         Err(e) => (
             false,
-            format!("[{}] read failed for {}: {}", via_tool, disk_path.display(), e),
+            format!(
+                "[{}] read failed for {}: {}",
+                via_tool,
+                disk_path.display(),
+                e
+            ),
             None,
         ),
     }
@@ -247,20 +268,21 @@ fn resolve_tool_disk_path(raw: &str, workspace_root: Option<&Path>) -> PathBuf {
     }
 }
 
-use std::collections::{VecDeque, BinaryHeap};
+use std::collections::{BinaryHeap, VecDeque};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::RwLock;
-use uuid::Uuid;
 use tracing::Instrument;
+use uuid::Uuid;
 
 /// In-memory cache for AgentProfile to avoid repeated disk reads (invalidated on POST /api/agent-profile and after profile save in run_message_via_llm).
 pub type AgentProfileCache = Arc<RwLock<Option<AgentProfile>>>;
 
 /// Virtual workspace per task (Deep Agents-style). Paths prefixed with "workspace:/" or "workspace:" are read/written here instead of disk.
-pub type TaskWorkspaceStore = Arc<RwLock<std::collections::HashMap<Uuid, std::collections::HashMap<String, String>>>>;
+pub type TaskWorkspaceStore =
+    Arc<RwLock<std::collections::HashMap<Uuid, std::collections::HashMap<String, String>>>>;
 
 pub fn new_task_workspace_store() -> TaskWorkspaceStore {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
@@ -359,7 +381,10 @@ pub async fn run_update_check_once(cache: &UpdateCheckCache, base_url: &str) {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    g.release_notes_url = data.get("release_notes_url").and_then(|v| v.as_str()).map(String::from);
+    g.release_notes_url = data
+        .get("release_notes_url")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     g.last_checked_at = Some(chrono::Utc::now());
     g.error = None;
 }
@@ -373,10 +398,13 @@ pub struct DelegationRequest {
 }
 
 /// Limits concurrent background LLM fact-extraction tasks to prevent unbounded queue growth under load.
-static EXTRACT_SEMAPHORE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+static EXTRACT_SEMAPHORE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::OnceLock::new();
 
 fn extract_semaphore() -> Arc<tokio::sync::Semaphore> {
-    EXTRACT_SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2))).clone()
+    EXTRACT_SEMAPHORE
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
+        .clone()
 }
 
 async fn get_task_list(store_path: &Path, status_filter: Option<String>) -> String {
@@ -525,8 +553,7 @@ pub struct TaskEventEntry {
     pub task_id: Option<String>,
 }
 
-pub type EventsCache =
-    Arc<RwLock<std::collections::HashMap<Uuid, VecDeque<TaskEventEntry>>>>;
+pub type EventsCache = Arc<RwLock<std::collections::HashMap<Uuid, VecDeque<TaskEventEntry>>>>;
 
 /// Heap entry used for `/api/timeline` bounded min-heap of recent events.
 /// Ordering uses `at_ms` (milliseconds since Unix epoch) to avoid relying on
@@ -573,10 +600,13 @@ pub fn new_events_cache() -> EventsCache {
 }
 
 /// Per-session result cell for background commands. The spawned task writes the result when done.
-type BackgroundResultCell = Arc<RwLock<Option<anyhow::Result<(std::process::Output, akasha_tools::ToolResult)>>>>;
+type BackgroundResultCell =
+    Arc<RwLock<Option<anyhow::Result<(std::process::Output, akasha_tools::ToolResult)>>>>;
 
 /// Registry of background command sessions: session_id -> (task handle to abort, result cell).
-pub type ProcessRegistry = Arc<RwLock<std::collections::HashMap<Uuid, (tokio::task::JoinHandle<()>, BackgroundResultCell)>>>;
+pub type ProcessRegistry = Arc<
+    RwLock<std::collections::HashMap<Uuid, (tokio::task::JoinHandle<()>, BackgroundResultCell)>>,
+>;
 
 pub fn new_process_registry() -> ProcessRegistry {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
@@ -585,7 +615,8 @@ pub fn new_process_registry() -> ProcessRegistry {
 /// Registry of task-completion notifiers: task_id → Notify. Written by the conversation worker
 /// on task completion; awaited by run_delegation_handler and the orchestrator aggregator so they
 /// can react immediately instead of polling TaskStore every 500 ms.
-pub type TaskCompletionRegistry = Arc<RwLock<std::collections::HashMap<Uuid, Arc<tokio::sync::Notify>>>>;
+pub type TaskCompletionRegistry =
+    Arc<RwLock<std::collections::HashMap<Uuid, Arc<tokio::sync::Notify>>>>;
 
 /// Per-task and per-session LLM usage (tokens, cost USD) for GET /api/tasks/:id and cost visibility.
 #[derive(Default)]
@@ -639,7 +670,9 @@ pub async fn run_delegation_handler(
             Ok(p) => p,
             Err(_) => {
                 tracing::warn!("Delegation backpressure: max concurrent delegations reached");
-                let _ = req.reply_tx.send(Err("Système surchargé, réessayez plus tard.".to_string()));
+                let _ = req
+                    .reply_tx
+                    .send(Err("Système surchargé, réessayez plus tard.".to_string()));
                 continue;
             }
         };
@@ -659,7 +692,9 @@ pub async fn run_delegation_handler(
         let requesting = match store.get(req.requesting_task_id) {
             Ok(Some(t)) => t,
             Ok(None) => {
-                let _ = req.reply_tx.send(Err("requesting task not found".to_string()));
+                let _ = req
+                    .reply_tx
+                    .send(Err("requesting task not found".to_string()));
                 continue;
             }
             Err(e) => {
@@ -670,7 +705,9 @@ pub async fn run_delegation_handler(
         if let Some(parent_id) = requesting.parent_task_id {
             if let Ok(Some(parent)) = store.get(parent_id) {
                 if parent.parent_task_id.is_some() {
-                    let _ = req.reply_tx.send(Err("max delegation depth (sous-sous-agent non autorisé)".to_string()));
+                    let _ = req.reply_tx.send(Err(
+                        "max delegation depth (sous-sous-agent non autorisé)".to_string(),
+                    ));
                     continue;
                 }
             }
@@ -716,8 +753,16 @@ pub async fn run_delegation_handler(
         };
         let child_id = Uuid::new_v4();
         const WORKER_AGENT_TYPES: &[&str] = &[
-            "search", "code", "conversation", "financial", "documentalist", "project_manager",
-            "technical_writer", "research", "security_audit", "creative",
+            "search",
+            "code",
+            "conversation",
+            "financial",
+            "documentalist",
+            "project_manager",
+            "technical_writer",
+            "research",
+            "security_audit",
+            "creative",
         ];
         let agent_type = if WORKER_AGENT_TYPES.contains(&req.agent_type.as_str()) {
             req.agent_type.clone()
@@ -726,7 +771,13 @@ pub async fn run_delegation_handler(
         };
         const MAX_INITIAL_MSG: usize = 500;
         let initial_message = if delegated_message.chars().count() > MAX_INITIAL_MSG {
-            Some(delegated_message.chars().take(MAX_INITIAL_MSG).chain(std::iter::once('…')).collect::<String>())
+            Some(
+                delegated_message
+                    .chars()
+                    .take(MAX_INITIAL_MSG)
+                    .chain(std::iter::once('…'))
+                    .collect::<String>(),
+            )
         } else if delegated_message.is_empty() {
             None
         } else {
@@ -784,9 +835,12 @@ pub async fn run_delegation_handler(
                 child_task_id = %child_id_span,
                 assigned_agent = %agent_type_span
             );
-            let first_activity_timeout = env_duration_ms("AKASHA_DELEGATION_FIRST_ACTIVITY_TIMEOUT_MS", 15_000);
-            let completion_timeout = env_duration_ms("AKASHA_DELEGATION_COMPLETION_TIMEOUT_MS", 300_000);
-            let had_first_activity = wait_for_task_activity(&progress, child_id_span, first_activity_timeout).await;
+            let first_activity_timeout =
+                env_duration_ms("AKASHA_DELEGATION_FIRST_ACTIVITY_TIMEOUT_MS", 15_000);
+            let completion_timeout =
+                env_duration_ms("AKASHA_DELEGATION_COMPLETION_TIMEOUT_MS", 300_000);
+            let had_first_activity =
+                wait_for_task_activity(&progress, child_id_span, first_activity_timeout).await;
             if !had_first_activity {
                 task_completion.write().await.remove(&child_id_span);
                 let _ = reply_tx.send(Err(format!(
@@ -795,12 +849,10 @@ pub async fn run_delegation_handler(
                 )));
                 return;
             }
-            let timed_out = tokio::time::timeout(
-                completion_timeout,
-                notify.notified().instrument(span),
-            )
-            .await
-            .is_err();
+            let timed_out =
+                tokio::time::timeout(completion_timeout, notify.notified().instrument(span))
+                    .await
+                    .is_err();
             // Ensure the registry entry is removed regardless of outcome.
             task_completion.write().await.remove(&child_id_span);
             if timed_out {
@@ -830,7 +882,13 @@ pub async fn run_delegation_handler(
                 g.get(&child_id_span)
                     .and_then(|q| q.back())
                     .map(|e| e.message.clone())
-                    .unwrap_or_else(|| if matches!(task.status, TaskStatus::Failed) { "Échec.".to_string() } else { "Terminé.".to_string() })
+                    .unwrap_or_else(|| {
+                        if matches!(task.status, TaskStatus::Failed) {
+                            "Échec.".to_string()
+                        } else {
+                            "Terminé.".to_string()
+                        }
+                    })
             };
             let _ = reply_tx.send(match task.status {
                 TaskStatus::Completed => Ok(msg),
@@ -879,7 +937,14 @@ pub fn parse_content_length(buf: &[u8]) -> Option<(usize, usize)> {
 }
 
 /// Parsed HTTP request: method, path, body, and lowercase header map.
-pub fn parse_request(buf: &[u8]) -> (String, String, Option<Vec<u8>>, std::collections::HashMap<String, String>) {
+pub fn parse_request(
+    buf: &[u8],
+) -> (
+    String,
+    String,
+    Option<Vec<u8>>,
+    std::collections::HashMap<String, String>,
+) {
     let mut method = String::new();
     let mut path = String::new();
     let mut content_length = 0usize;
@@ -893,7 +958,9 @@ pub fn parse_request(buf: &[u8]) -> (String, String, Option<Vec<u8>>, std::colle
     };
     let lines: Vec<&[u8]> = header_slice.split(|&b| b == b'\n').collect();
     for (i, line) in lines.iter().enumerate() {
-        let line_str = String::from_utf8_lossy(line).trim_end_matches('\r').to_string();
+        let line_str = String::from_utf8_lossy(line)
+            .trim_end_matches('\r')
+            .to_string();
         if i == 0 {
             let parts: Vec<&str> = line_str.splitn(3, ' ').collect();
             if parts.len() >= 2 {
@@ -912,7 +979,8 @@ pub fn parse_request(buf: &[u8]) -> (String, String, Option<Vec<u8>>, std::colle
         }
     }
     const MAX_BODY_PARSE: usize = 10 * 1024 * 1024; // 10 MiB — refuse to allocate larger body
-    let will_allocate = content_length > 0 && content_length <= MAX_BODY_PARSE && rest.len() >= content_length;
+    let will_allocate =
+        content_length > 0 && content_length <= MAX_BODY_PARSE && rest.len() >= content_length;
     let body = if will_allocate {
         Some(rest[..content_length].to_vec())
     } else {
@@ -996,29 +1064,23 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
     let iter: Box<dyn Iterator<Item = &(&str, &str)>> = if let Some(allowed) = allowed_tools {
-        Box::new(
-            AVAILABLE_TOOLS
-                .iter()
-                .filter(move |(name, _)| {
-                    let always_misc = *name == "ask_user"
-                        || *name == "install_skill"
-                        || *name == "uninstall_skill"
-                        || *name == "write_todos"
-                        || *name == "merge_todos"
-                        || *name == "read_todos"
-                        || *name == "update_todo"
-                        || *name == "list_skills"
-                        || *name == "read_skill";
-                    let in_profile = allowed.iter().any(|a| a == *name);
-                    always_misc || in_profile
-                }),
-        )
+        Box::new(AVAILABLE_TOOLS.iter().filter(move |(name, _)| {
+            let always_misc = *name == "ask_user"
+                || *name == "install_skill"
+                || *name == "uninstall_skill"
+                || *name == "write_todos"
+                || *name == "merge_todos"
+                || *name == "read_todos"
+                || *name == "update_todo"
+                || *name == "list_skills"
+                || *name == "read_skill";
+            let in_profile = allowed.iter().any(|a| a == *name);
+            always_misc || in_profile
+        }))
     } else {
         Box::new(AVAILABLE_TOOLS.iter())
     };
-    iter.map(|(_, desc)| *desc)
-        .collect::<Vec<_>>()
-        .join(" ; ")
+    iter.map(|(_, desc)| *desc).collect::<Vec<_>>().join(" ; ")
 }
 
 /// Single-pass intent flags for a message (one to_lowercase() shared by all checks).
@@ -1288,15 +1350,50 @@ fn classify_small_talk_message(message: &str) -> Option<SmallTalkIntent> {
 
     // Reject messages that mingle small-talk with "real request" keywords
     let real_request_keywords = [
-        "peux tu", "peux-tu", "peut tu", "peut-tu",
-        "pouvez vous", "pouvez-vous", "tu peux", "peux me", "peux nous",
-        "could you", "can you", "would you", "can you help", "can you tell",
-        "me rappeler", "me rappelle", "help me", "show me", "tell me",
-        "lire", "read", "fichier", "file", "faire", "do", "créer", "create",
-        "écrire", "write", "générer", "generate",
-        "projet", "project",
-        "avait", "avaient", "avez", "have", "has", "fait", "done",
-        "hier", "yesterday", "dernier", "last",
+        "peux tu",
+        "peux-tu",
+        "peut tu",
+        "peut-tu",
+        "pouvez vous",
+        "pouvez-vous",
+        "tu peux",
+        "peux me",
+        "peux nous",
+        "could you",
+        "can you",
+        "would you",
+        "can you help",
+        "can you tell",
+        "me rappeler",
+        "me rappelle",
+        "help me",
+        "show me",
+        "tell me",
+        "lire",
+        "read",
+        "fichier",
+        "file",
+        "faire",
+        "do",
+        "créer",
+        "create",
+        "écrire",
+        "write",
+        "générer",
+        "generate",
+        "projet",
+        "project",
+        "avait",
+        "avaient",
+        "avez",
+        "have",
+        "has",
+        "fait",
+        "done",
+        "hier",
+        "yesterday",
+        "dernier",
+        "last",
     ];
     for keyword in real_request_keywords {
         if collapsed.contains(keyword) {
@@ -1362,7 +1459,10 @@ fn small_talk_fast_lane(message: &str) -> Option<SmallTalkIntent> {
     }
     let word_count = trimmed
         .split_whitespace()
-        .filter(|w| !w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-').is_empty())
+        .filter(|w| {
+            !w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-')
+                .is_empty()
+        })
         .count();
     if word_count > 8 {
         return None;
@@ -1474,20 +1574,37 @@ fn detect_session_recall_intent(message: &str) -> Option<SessionRecallIntent> {
         return None;
     }
     let asks_recall = [
-        "rappeler", "rappelle", "rappel", "ce qu'on a fait", "ce qu on a fait", "on a fait",
-        "what we did", "remind me", "recap", "recap what we did", "what did we do",
+        "rappeler",
+        "rappelle",
+        "rappel",
+        "ce qu'on a fait",
+        "ce qu on a fait",
+        "on a fait",
+        "what we did",
+        "remind me",
+        "recap",
+        "recap what we did",
+        "what did we do",
     ]
     .iter()
     .any(|k| lower.contains(k));
     if !asks_recall {
         return None;
     }
-    let range = if ["hier", "yesterday", "last night", "hier soir"].iter().any(|k| lower.contains(k)) {
+    let range = if ["hier", "yesterday", "last night", "hier soir"]
+        .iter()
+        .any(|k| lower.contains(k))
+    {
         SessionRecallRange::Yesterday
     } else {
         SessionRecallRange::CurrentDay
     };
-    let language = if ["bonjour", "salut", "merci", "hier", "rappeler", "qu'on", "quoi"].iter().any(|k| lower.contains(k)) {
+    let language = if [
+        "bonjour", "salut", "merci", "hier", "rappeler", "qu'on", "quoi",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+    {
         SmallTalkLanguage::French
     } else {
         SmallTalkLanguage::English
@@ -1549,7 +1666,14 @@ fn build_session_recap_reply(
     if lines.is_empty() {
         return None;
     }
-    let selected: Vec<String> = lines.into_iter().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect();
+    let selected: Vec<String> = lines
+        .into_iter()
+        .rev()
+        .take(5)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     match intent.language {
         SmallTalkLanguage::French => {
             let period = match intent.range {
@@ -1632,17 +1756,49 @@ fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
     let m = message.to_lowercase();
     MessageIntentFlags {
         save_file: [
-            "enregistre", "enregistrer", "sauvegarde", "sauvegarder", "écris dans", "ecris dans",
-            "write to file", "save to", "save the file", "write the file", "dans le dossier",
-            "dans le fichier", "dans un fichier", "sur le disque", "to disk", "to the file",
+            "enregistre",
+            "enregistrer",
+            "sauvegarde",
+            "sauvegarder",
+            "écris dans",
+            "ecris dans",
+            "write to file",
+            "save to",
+            "save the file",
+            "write the file",
+            "dans le dossier",
+            "dans le fichier",
+            "dans un fichier",
+            "sur le disque",
+            "to disk",
+            "to the file",
         ]
         .iter()
         .any(|k| m.contains(k)),
         external_info: [
-            "météo", "meteo", "weather", "prévisions", "previsions", "actualités", "actualites",
-            "horaires", "trafic", "prix", "cours ", "bourse", "news", "nouvelle", "semaine à",
-            "aujourd'hui", "demain", "connaître la", "connaitre la", "quelle est la météo",
-            "quel temps", "prévision", "prevision",
+            "météo",
+            "meteo",
+            "weather",
+            "prévisions",
+            "previsions",
+            "actualités",
+            "actualites",
+            "horaires",
+            "trafic",
+            "prix",
+            "cours ",
+            "bourse",
+            "news",
+            "nouvelle",
+            "semaine à",
+            "aujourd'hui",
+            "demain",
+            "connaître la",
+            "connaitre la",
+            "quelle est la météo",
+            "quel temps",
+            "prévision",
+            "prevision",
         ]
         .iter()
         .any(|k| m.contains(k)),
@@ -1665,39 +1821,114 @@ fn compute_message_intent_flags(message: &str) -> MessageIntentFlags {
             on_x_or_twitter && wants_posts
         },
         camera_or_mic: [
-            "webcam", "caméra", "camera", "prend une photo", "prends une photo", "prendre une photo",
-            "take a photo", "take a picture", "prends moi en photo", "photo avec la webcam",
-            "accède à la webcam", "accede a la webcam", "utilise la caméra", "utilise la camera",
-            "affiche-la dans le chat", "afficher dans le chat", "display in the chat", "show in the chat",
-            "micro", "microphone", "enregistre avec le micro", "enregistrer avec le micro",
-            "obtenir une image", "get an image", "image avec la webcam", "image avec la caméra",
-            "continuer pour obtenir une image", "proceed to get an image",
+            "webcam",
+            "caméra",
+            "camera",
+            "prend une photo",
+            "prends une photo",
+            "prendre une photo",
+            "take a photo",
+            "take a picture",
+            "prends moi en photo",
+            "photo avec la webcam",
+            "accède à la webcam",
+            "accede a la webcam",
+            "utilise la caméra",
+            "utilise la camera",
+            "affiche-la dans le chat",
+            "afficher dans le chat",
+            "display in the chat",
+            "show in the chat",
+            "micro",
+            "microphone",
+            "enregistre avec le micro",
+            "enregistrer avec le micro",
+            "obtenir une image",
+            "get an image",
+            "image avec la webcam",
+            "image avec la caméra",
+            "continuer pour obtenir une image",
+            "proceed to get an image",
         ]
         .iter()
         .any(|k| m.contains(k)),
         image_generation: [
-            "génère une image", "genere une image", "générer une image", "génère moi une image",
-            "generate an image", "generate a picture", "draw", "dessine", "dessiner",
-            "crée une image", "cree une image", "creer une image", "creer moi une image",
-            "créer une image", "create an image",
-            "image par ia", "ai image", "dall-e", "dalle",
+            "génère une image",
+            "genere une image",
+            "générer une image",
+            "génère moi une image",
+            "generate an image",
+            "generate a picture",
+            "draw",
+            "dessine",
+            "dessiner",
+            "crée une image",
+            "cree une image",
+            "creer une image",
+            "creer moi une image",
+            "créer une image",
+            "create an image",
+            "image par ia",
+            "ai image",
+            "dall-e",
+            "dalle",
         ]
         .iter()
         .any(|k| m.contains(k)),
         code_generation: [
-            "écris un script", "ecris un script", "écrire un script", "ecrire un script",
-            "write a script", "write the script", "génère du code", "genere du code",
-            "generate code", "génère le code", "code python", "python script",
-            "un programme qui", "a program that", "fonction qui", "function that",
-            "snippet", "extrait de code", "piece of code", "exemple de code",
-            "analyse ce projet", "analyze this project", "analyse le projet", "analyze the project",
-            "review the codebase", "auditer le code", "code review", "dépôt git", "depot git",
+            "écris un script",
+            "ecris un script",
+            "écrire un script",
+            "ecrire un script",
+            "write a script",
+            "write the script",
+            "génère du code",
+            "genere du code",
+            "generate code",
+            "génère le code",
+            "code python",
+            "python script",
+            "un programme qui",
+            "a program that",
+            "fonction qui",
+            "function that",
+            "snippet",
+            "extrait de code",
+            "piece of code",
+            "exemple de code",
+            "analyse ce projet",
+            "analyze this project",
+            "analyse le projet",
+            "analyze the project",
+            "review the codebase",
+            "auditer le code",
+            "code review",
+            "dépôt git",
+            "depot git",
         ]
         .iter()
         .any(|k| m.contains(k)),
         github_with_vault: {
-            let github = ["github", "dépôt privé", "depot prive", "private repo", "api.github.com"].iter().any(|k| m.contains(k));
-            let vault = ["vault", "github_token", "clé du vault", "cle du vault", "key in the vault", "token dans le vault", "clef dans le vault"].iter().any(|k| m.contains(k));
+            let github = [
+                "github",
+                "dépôt privé",
+                "depot prive",
+                "private repo",
+                "api.github.com",
+            ]
+            .iter()
+            .any(|k| m.contains(k));
+            let vault = [
+                "vault",
+                "github_token",
+                "clé du vault",
+                "cle du vault",
+                "key in the vault",
+                "token dans le vault",
+                "clef dans le vault",
+            ]
+            .iter()
+            .any(|k| m.contains(k));
             github && vault
         },
         transport: message_mentions_ter_train_line(&m)
@@ -1773,8 +2004,24 @@ const CAPTURE_MAX_PER_TURN: usize = 20;
 
 /// Short acknowledgments that should not be stored in long-term memory.
 static CAPTURE_ACK_PATTERNS: &[&str] = &[
-    "ok", "okay", "oui", "non", "merci", "thanks", "thank you", "d'accord", "daccord",
-    "👍", "👌", "ok.", "parfait", "super", "cool", "noted", "compris", "c'est noté",
+    "ok",
+    "okay",
+    "oui",
+    "non",
+    "merci",
+    "thanks",
+    "thank you",
+    "d'accord",
+    "daccord",
+    "👍",
+    "👌",
+    "ok.",
+    "parfait",
+    "super",
+    "cool",
+    "noted",
+    "compris",
+    "c'est noté",
 ];
 
 /// If the text ends with an unclosed fenced code block (odd number of ```), appends "\n```\n" so that
@@ -1814,7 +2061,10 @@ fn should_skip_capture_content(content: &str) -> bool {
     }
     let lower = t.to_lowercase();
     let lower_trim = lower.trim();
-    if CAPTURE_ACK_PATTERNS.iter().any(|p| lower_trim == *p || lower_trim.starts_with(&format!("{} ", p))) {
+    if CAPTURE_ACK_PATTERNS
+        .iter()
+        .any(|p| lower_trim == *p || lower_trim.starts_with(&format!("{} ", p)))
+    {
         return true;
     }
     false
@@ -1823,16 +2073,36 @@ fn should_skip_capture_content(content: &str) -> bool {
 fn message_suggests_project(message: &str) -> bool {
     let m = message.to_lowercase();
     let keywords = [
-        "roman", "bd", "bande dessinée", "bande dessinee", "comic", "novel",
-        "projet de code", "code project", "écris un", "ecris un", "écris le", "ecris le",
-        "chapitre", "chapter", "continue", "la suite", "and the rest", "poursuis", "reprends",
-        "crée un projet", "cree un projet", "create a project", "set up a project",
+        "roman",
+        "bd",
+        "bande dessinée",
+        "bande dessinee",
+        "comic",
+        "novel",
+        "projet de code",
+        "code project",
+        "écris un",
+        "ecris un",
+        "écris le",
+        "ecris le",
+        "chapitre",
+        "chapter",
+        "continue",
+        "la suite",
+        "and the rest",
+        "poursuis",
+        "reprends",
+        "crée un projet",
+        "cree un projet",
+        "create a project",
+        "set up a project",
     ];
     keywords.iter().any(|k| m.contains(k))
 }
 
 /// Default hosts when policy does not set allowed_skill_install_hosts (GitHub only).
-const INSTALL_SKILL_DEFAULT_HOSTS: &[&str] = &["github.com", "raw.githubusercontent.com", "www.github.com"];
+const INSTALL_SKILL_DEFAULT_HOSTS: &[&str] =
+    &["github.com", "raw.githubusercontent.com", "www.github.com"];
 
 fn is_github_host(host: &str) -> bool {
     INSTALL_SKILL_DEFAULT_HOSTS
@@ -1859,7 +2129,9 @@ fn parse_skill_install_url(url: &str, allowed_hosts: &[String]) -> Option<Parsed
     }
     let host = parsed.host_str()?.to_lowercase();
     let host_allowed = allowed_hosts.iter().any(|h| h == "*")
-        || allowed_hosts.iter().any(|h| host == *h || host.ends_with(&format!(".{}", h)));
+        || allowed_hosts
+            .iter()
+            .any(|h| host == *h || host.ends_with(&format!(".{}", h)));
     if !host_allowed {
         return None;
     }
@@ -1875,14 +2147,25 @@ fn parse_skill_install_url(url: &str, allowed_hosts: &[String]) -> Option<Parsed
                 return None;
             }
             let (raw_skill_url, skill_name) = if path.ends_with("SKILL.md") {
-                let skill_name = segments.get(segments.len().saturating_sub(2)).copied().unwrap_or("skill").to_string();
+                let skill_name = segments
+                    .get(segments.len().saturating_sub(2))
+                    .copied()
+                    .unwrap_or("skill")
+                    .to_string();
                 if !crate::user_rag::is_safe_relative_filename(&skill_name) {
                     return None;
                 }
                 (url.to_string(), skill_name)
             } else {
-                let raw_url = format!("https://raw.githubusercontent.com/{}", path.trim_end_matches('/'));
-                let raw_skill_url = if raw_url.ends_with(".md") { raw_url } else { format!("{}/SKILL.md", raw_url) };
+                let raw_url = format!(
+                    "https://raw.githubusercontent.com/{}",
+                    path.trim_end_matches('/')
+                );
+                let raw_skill_url = if raw_url.ends_with(".md") {
+                    raw_url
+                } else {
+                    format!("{}/SKILL.md", raw_url)
+                };
                 let skill_name = segments.last().copied().unwrap_or("skill").to_string();
                 if !crate::user_rag::is_safe_relative_filename(&skill_name) {
                     return None;
@@ -1894,12 +2177,20 @@ fn parse_skill_install_url(url: &str, allowed_hosts: &[String]) -> Option<Parsed
                 let repo = segments[1].to_string();
                 let branch = segments[2].to_string();
                 let path_part = segments[3..].join("/");
-                let path_part = path_part.strip_suffix("SKILL.md").map(|s| s.trim_end_matches('/')).unwrap_or(&path_part).to_string();
+                let path_part = path_part
+                    .strip_suffix("SKILL.md")
+                    .map(|s| s.trim_end_matches('/'))
+                    .unwrap_or(&path_part)
+                    .to_string();
                 Some((owner, repo, branch, path_part))
             } else {
                 None
             };
-            Some(ParsedSkillUrl { raw_skill_url, skill_name, api_path })
+            Some(ParsedSkillUrl {
+                raw_skill_url,
+                skill_name,
+                api_path,
+            })
         } else {
             let tree_idx = segments.iter().position(|s| *s == "tree")?;
             if tree_idx + 2 > segments.len() {
@@ -1915,7 +2206,10 @@ fn parse_skill_install_url(url: &str, allowed_hosts: &[String]) -> Option<Parsed
                 return None;
             }
             let raw_skill_url = if path_part.is_empty() {
-                format!("https://raw.githubusercontent.com/{}/{}/{}/SKILL.md", owner, repo, branch)
+                format!(
+                    "https://raw.githubusercontent.com/{}/{}/{}/SKILL.md",
+                    owner, repo, branch
+                )
             } else {
                 format!(
                     "https://raw.githubusercontent.com/{}/{}/{}/{}/SKILL.md",
@@ -1923,7 +2217,11 @@ fn parse_skill_install_url(url: &str, allowed_hosts: &[String]) -> Option<Parsed
                 )
             };
             let api_path = Some((owner, repo, branch, path_part));
-            Some(ParsedSkillUrl { raw_skill_url, skill_name, api_path })
+            Some(ParsedSkillUrl {
+                raw_skill_url,
+                skill_name,
+                api_path,
+            })
         }
     } else {
         // Generic host (site web, GitLab, etc.): single-file install. URL must point to a .md file or we use path as skill name.
@@ -2047,14 +2345,28 @@ async fn fetch_github_skill_extra_files(
                         if let Ok(content) = resp.text().await {
                             let dest = dir.join(name);
                             if std::fs::write(&dest, &content).is_ok() {
-                                let rel = if path == root_path { name.to_string() } else { format!("{}/{}", path.strip_prefix(root_path).unwrap_or(path.as_str()).trim_start_matches('/'), name) };
+                                let rel = if path == root_path {
+                                    name.to_string()
+                                } else {
+                                    format!(
+                                        "{}/{}",
+                                        path.strip_prefix(root_path)
+                                            .unwrap_or(path.as_str())
+                                            .trim_start_matches('/'),
+                                        name
+                                    )
+                                };
                                 downloaded.push(rel);
                             }
                         }
                     }
                 }
             } else if typ == "dir" {
-                let subpath = if path.is_empty() { name.to_string() } else { format!("{}/{}", path, name) };
+                let subpath = if path.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{}/{}", path, name)
+                };
                 let subdir = dir.join(name);
                 let _ = std::fs::create_dir_all(&subdir);
                 queue.push((subpath, subdir));
@@ -2106,24 +2418,47 @@ async fn do_install_skill(
             Ok(t) => t,
             Err(e) => return (false, format!("[install_skill] lecture réponse: {}", e)),
         },
-        Ok(r) => return (false, format!("[install_skill] HTTP {} — {}", r.status(), parsed.raw_skill_url)),
+        Ok(r) => {
+            return (
+                false,
+                format!(
+                    "[install_skill] HTTP {} — {}",
+                    r.status(),
+                    parsed.raw_skill_url
+                ),
+            )
+        }
         Err(e) => return (false, format!("[install_skill] requête: {}", e)),
     };
     if body.trim().is_empty() {
-        return (false, format!("[install_skill] SKILL.md vide ou introuvable: {}", parsed.raw_skill_url));
+        return (
+            false,
+            format!(
+                "[install_skill] SKILL.md vide ou introuvable: {}",
+                parsed.raw_skill_url
+            ),
+        );
     }
     let skill_dir = data_dir.join("skills").join(&parsed.skill_name);
     if let Err(e) = std::fs::create_dir_all(&skill_dir) {
         return (
             false,
-            format!("[install_skill] impossible de créer le dossier {}: {}", skill_dir.display(), e),
+            format!(
+                "[install_skill] impossible de créer le dossier {}: {}",
+                skill_dir.display(),
+                e
+            ),
         );
     }
     let skill_md_path = skill_dir.join("SKILL.md");
     if let Err(e) = std::fs::write(&skill_md_path, &body) {
         return (
             false,
-            format!("[install_skill] écriture {}: {}", skill_md_path.display(), e),
+            format!(
+                "[install_skill] écriture {}: {}",
+                skill_md_path.display(),
+                e
+            ),
         );
     }
     let extra_files = if let Some((ref owner, ref repo, ref branch, ref path)) = parsed.api_path {
@@ -2137,14 +2472,20 @@ async fn do_install_skill(
             let total_chars = body_instructions.chars().count();
             let body_preview = if total_chars > 8000 {
                 let truncated: String = body_instructions.chars().take(8000).collect();
-                format!("{}... [tronqué, {} caractères au total]", truncated, total_chars)
+                format!(
+                    "{}... [tronqué, {} caractères au total]",
+                    truncated, total_chars
+                )
             } else {
                 body_instructions.to_string()
             };
             let extra_msg = if extra_files.is_empty() {
                 String::new()
             } else {
-                format!(" Fichiers additionnels récupérés (scripts/, references/, assets/) : {}.", extra_files.join(", "))
+                format!(
+                    " Fichiers additionnels récupérés (scripts/, references/, assets/) : {}.",
+                    extra_files.join(", ")
+                )
             };
             let (mut commands_added_msg, need_hot_reload) = {
                 let bins = skill_required_bins(&body, &parsed.skill_name);
@@ -2171,8 +2512,10 @@ async fn do_install_skill(
                         if let Ok(v) = akasha_vault::open_vault(data_dir) {
                             reloaded.brave_api_key = v.get("brave_api_key").ok();
                         }
-                        *r.write().await = std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
-                        commands_added_msg = commands_added_msg.replace(" (allowed_commands) :", " ; politique rechargée à chaud :");
+                        *r.write().await =
+                            std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
+                        commands_added_msg = commands_added_msg
+                            .replace(" (allowed_commands) :", " ; politique rechargée à chaud :");
                     }
                 }
             }
@@ -2181,13 +2524,21 @@ async fn do_install_skill(
                 "[install_skill] Skill « {} » installé et rechargé ({} skill(s) chargé(s)).{}{}\n\
                  Répertoire du skill (pour read_file sur references/, scripts/, assets/) : {}\n\n\
                  Contenu du skill (à utiliser pour savoir comment l'utiliser) :\n\n---\n{}",
-                parsed.skill_name, count, extra_msg, commands_added_msg, skill_dir_display, body_preview
+                parsed.skill_name,
+                count,
+                extra_msg,
+                commands_added_msg,
+                skill_dir_display,
+                body_preview
             );
             (true, msg)
         }
         Err(e) => (
             false,
-            format!("[install_skill] skill écrit mais rechargement échoué: {}", e),
+            format!(
+                "[install_skill] skill écrit mais rechargement échoué: {}",
+                e
+            ),
         ),
     }
 }
@@ -2205,12 +2556,20 @@ async fn do_uninstall_skill(
 ) -> (bool, String) {
     let name = name.trim();
     if name.is_empty() {
-        return (false, "[uninstall_skill] usage: uninstall_skill <name> (ex. uninstall_skill bankr)".to_string());
-    }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
         return (
             false,
-            "[uninstall_skill] nom invalide (utiliser uniquement lettres, chiffres, _ et -)".to_string(),
+            "[uninstall_skill] usage: uninstall_skill <name> (ex. uninstall_skill bankr)"
+                .to_string(),
+        );
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return (
+            false,
+            "[uninstall_skill] nom invalide (utiliser uniquement lettres, chiffres, _ et -)"
+                .to_string(),
         );
     }
     let skill_dir = data_dir.join("skills").join(name);
@@ -2226,13 +2585,20 @@ async fn do_uninstall_skill(
     if !skill_dir.is_dir() {
         return (
             false,
-            format!("[uninstall_skill] « {} » n'est pas un répertoire.", skill_dir.display()),
+            format!(
+                "[uninstall_skill] « {} » n'est pas un répertoire.",
+                skill_dir.display()
+            ),
         );
     }
     if let Err(e) = std::fs::remove_dir_all(&skill_dir) {
         return (
             false,
-            format!("[uninstall_skill] impossible de supprimer {}: {}", skill_dir.display(), e),
+            format!(
+                "[uninstall_skill] impossible de supprimer {}: {}",
+                skill_dir.display(),
+                e
+            ),
         );
     }
     let policy_path = data_dir.join("tools_policy.yaml");
@@ -2259,7 +2625,10 @@ async fn do_uninstall_skill(
     match skill_registry.reload(data_dir, spec_dir).await {
         Ok(count) => {
             let policy_msg = if policy_updated {
-                format!(" Commande « {} » retirée de tools_policy.yaml (allowed_commands).", name)
+                format!(
+                    " Commande « {} » retirée de tools_policy.yaml (allowed_commands).",
+                    name
+                )
             } else {
                 String::new()
             };
@@ -2273,7 +2642,10 @@ async fn do_uninstall_skill(
         }
         Err(e) => (
             false,
-            format!("[uninstall_skill] dossier supprimé mais rechargement du registry échoué: {}", e),
+            format!(
+                "[uninstall_skill] dossier supprimé mais rechargement du registry échoué: {}",
+                e
+            ),
         ),
     }
 }
@@ -2387,7 +2759,11 @@ async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: 
             chrono::Utc::now().to_rfc3339(),
             tool,
             args.join(" ").replace('\n', " "),
-            result_preview.replace('\n', " ").chars().take(200).collect::<String>()
+            result_preview
+                .replace('\n', " ")
+                .chars()
+                .take(200)
+                .collect::<String>()
         );
         if let Ok(mut f) = tokio::fs::OpenOptions::new()
             .append(true)
@@ -2489,7 +2865,9 @@ fn strip_leading_tool_line_noise(line: &str) -> &str {
     }
     s = strip_markdown_heading_hashes(s);
     s = strip_optional_list_prefix(s);
-    s = s.trim_start_matches(|c: char| matches!(c, '*' | '`')).trim_start();
+    s = s
+        .trim_start_matches(|c: char| matches!(c, '*' | '`'))
+        .trim_start();
     s
 }
 
@@ -2499,8 +2877,22 @@ fn tool_line_prefix_is_markdown_junk_only(prefix: &str) -> bool {
         c.is_whitespace()
             || matches!(
                 c,
-                '#' | '*' | '`' | '|' | '•' | '-' | '+' | ':' | '.' | ';' | ',' | '/' | '\\'
-                    | '(' | ')' | '[' | ']'
+                '#' | '*'
+                    | '`'
+                    | '|'
+                    | '•'
+                    | '-'
+                    | '+'
+                    | ':'
+                    | '.'
+                    | ';'
+                    | ','
+                    | '/'
+                    | '\\'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
             )
             || c.is_ascii_digit()
     })
@@ -2568,11 +2960,7 @@ fn line_rest_after_leading_tool_at_start(line: &str) -> Option<&str> {
         return None;
     }
     // Reject `tools:` / `toolkit:` — fifth char must not be ASCII letter.
-    if s
-        .as_bytes()
-        .get(4)
-        .is_some_and(|b| b.is_ascii_alphabetic())
-    {
+    if s.as_bytes().get(4).is_some_and(|b| b.is_ascii_alphabetic()) {
         return None;
     }
     let mut rest = &s[4..];
@@ -2593,7 +2981,10 @@ fn line_rest_after_leading_tool_at_start(line: &str) -> Option<&str> {
 
 /// Returns true if `tool_name` (already lower-cased) takes a multiline body argument.
 fn tool_supports_multiline_body(tool_name: &str) -> bool {
-    matches!(tool_name, "apply_patch" | "edit_file" | "write_file" | "ask_user")
+    matches!(
+        tool_name,
+        "apply_patch" | "edit_file" | "write_file" | "ask_user"
+    )
 }
 
 fn tool_name_is_safe_identifier(tool_name: &str) -> bool {
@@ -2641,7 +3032,8 @@ fn normalize_response_tool_prefixes(response: &str) -> String {
         // body content because `line_rest_after_leading_tool` requires the
         // keyword at the effective start of the line.
         if in_multiline_body {
-            if raw.trim_start().starts_with("TOOL:") || line_rest_after_leading_tool(raw).is_some() {
+            if raw.trim_start().starts_with("TOOL:") || line_rest_after_leading_tool(raw).is_some()
+            {
                 // Real tool header (canonical or sloppy) — exit body mode and fall through.
                 in_multiline_body = false;
             } else {
@@ -2738,7 +3130,9 @@ fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String>)> {
 /// optional `--cwd <path>` (after VAULT lines) sets the working directory;
 /// the next token is the command, the rest are command arguments.
 /// Returns (vault_specs, cwd_flag, command, cmd_args).
-fn parse_run_command_args(args: &[String]) -> (Vec<(String, String)>, Option<String>, String, Vec<String>) {
+fn parse_run_command_args(
+    args: &[String],
+) -> (Vec<(String, String)>, Option<String>, String, Vec<String>) {
     let mut vault_specs = Vec::new();
     let mut rest: Vec<String> = Vec::new();
     for arg in args {
@@ -2807,7 +3201,9 @@ fn open_url_in_browser(url: &str) -> Result<(), String> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err("Only http and https URLs are allowed".to_string());
     }
-    let parsed = url.parse::<url::Url>().map_err(|e| format!("Invalid URL: {}", e))?;
+    let parsed = url
+        .parse::<url::Url>()
+        .map_err(|e| format!("Invalid URL: {}", e))?;
     let scheme = parsed.scheme().to_ascii_lowercase();
     if scheme != "http" && scheme != "https" {
         return Err("Only http and https URLs are allowed".to_string());
@@ -2857,11 +3253,7 @@ fn workspace_lineage_root_task_id(task_id: Uuid, store_path: Option<&std::path::
         .map(|s| {
             let mut current = task_id;
             for _ in 0..8 {
-                let parent = s
-                    .get(current)
-                    .ok()
-                    .flatten()
-                    .and_then(|t| t.parent_task_id);
+                let parent = s.get(current).ok().flatten().and_then(|t| t.parent_task_id);
                 match parent {
                     Some(p) => current = p,
                     None => break,
@@ -2874,7 +3266,10 @@ fn workspace_lineage_root_task_id(task_id: Uuid, store_path: Option<&std::path::
 
 /// LLMs often paste a **stale** root id into `workspace:/.akasha/plan_<uuid>.md` (e.g. from an older run).
 /// Rewrite to this task's lineage root so reads/writes target the live orchestration plan.
-fn rewrite_workspace_plan_key_to_lineage_root(key: &str, lineage_root: Uuid) -> (String, Option<Uuid>) {
+fn rewrite_workspace_plan_key_to_lineage_root(
+    key: &str,
+    lineage_root: Uuid,
+) -> (String, Option<Uuid>) {
     const PREFIX: &str = ".akasha/plan_";
     const SUFFIX: &str = ".md";
     let k = key.replace('\\', "/");
@@ -2933,7 +3328,10 @@ async fn sync_workspace_store_from_disk(
     let (key, _) = rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
     if let Ok(updated) = tokio::fs::read_to_string(disk_path).await {
         let mut guard = ws.write().await;
-        guard.entry(lineage_task_id).or_default().insert(key, updated);
+        guard
+            .entry(lineage_task_id)
+            .or_default()
+            .insert(key, updated);
     }
 }
 
@@ -2950,30 +3348,30 @@ fn parse_plugin_tool_invocation(
         return None;
     }
 
-    let (plugin_id, action, forwarded_args): (String, Option<String>, Vec<String>) =
-        if tool_name.eq_ignore_ascii_case("plugin.call")
-            || tool_name.eq_ignore_ascii_case("plugin_call")
-        {
-            let plugin_id = args.first()?.trim().to_string();
-            let forwarded = args.get(1..).map(|v| v.to_vec()).unwrap_or_default();
-            (plugin_id, None, forwarded)
-        } else if let Some(id) = tool_name.strip_prefix("plugin.") {
-            (id.trim().to_string(), None, args.to_vec())
-        } else if available_ids.contains(tool_name) {
-            (tool_name.to_string(), None, args.to_vec())
-        } else if let Some((prefix, suffix)) = tool_name.split_once('_') {
-            if available_ids.contains(prefix) {
-                (
-                    prefix.to_string(),
-                    Some(suffix.trim().to_string()),
-                    args.to_vec(),
-                )
-            } else {
-                return None;
-            }
+    let (plugin_id, action, forwarded_args): (String, Option<String>, Vec<String>) = if tool_name
+        .eq_ignore_ascii_case("plugin.call")
+        || tool_name.eq_ignore_ascii_case("plugin_call")
+    {
+        let plugin_id = args.first()?.trim().to_string();
+        let forwarded = args.get(1..).map(|v| v.to_vec()).unwrap_or_default();
+        (plugin_id, None, forwarded)
+    } else if let Some(id) = tool_name.strip_prefix("plugin.") {
+        (id.trim().to_string(), None, args.to_vec())
+    } else if available_ids.contains(tool_name) {
+        (tool_name.to_string(), None, args.to_vec())
+    } else if let Some((prefix, suffix)) = tool_name.split_once('_') {
+        if available_ids.contains(prefix) {
+            (
+                prefix.to_string(),
+                Some(suffix.trim().to_string()),
+                args.to_vec(),
+            )
         } else {
             return None;
-        };
+        }
+    } else {
+        return None;
+    };
 
     if plugin_id.is_empty() || !available_ids.contains(&plugin_id) {
         return None;
@@ -3015,8 +3413,8 @@ async fn execute_tool_call(
     let plugin_invocation = parse_plugin_tool_invocation(plugin_registry, tool_name, args);
     let is_plugin_candidate = plugin_invocation.is_some();
     let can_use_named_tool = executor.policy.can_use_tool(tool_name);
-    let can_use_plugin_call = executor.policy.can_use_tool("plugin.call")
-        || executor.policy.can_use_tool("plugin_call");
+    let can_use_plugin_call =
+        executor.policy.can_use_tool("plugin.call") || executor.policy.can_use_tool("plugin_call");
     if is_plugin_candidate && !can_use_plugin_call {
         return (
             false,
@@ -3025,12 +3423,20 @@ async fn execute_tool_call(
         );
     }
     if !can_use_named_tool && !is_plugin_candidate {
-        return (false, format!("[{}] tool not allowed by current profile", tool_name), None);
+        return (
+            false,
+            format!("[{}] tool not allowed by current profile", tool_name),
+            None,
+        );
     }
     let path_arg = |i: usize| args.get(i).map(|s| Path::new(s.as_str()));
     // For tools that take a single path arg: rejoin args so paths with spaces (e.g. "Cas d'usage.pdf") work when the LLM splits them.
     let path_arg_joined = |args: &[String]| -> String {
-        if args.is_empty() { String::new() } else { args.join(" ").trim().to_string() }
+        if args.is_empty() {
+            String::new()
+        } else {
+            args.join(" ").trim().to_string()
+        }
     };
     let result = match tool_name {
         "read_file" => {
@@ -4474,7 +4880,9 @@ async fn compact_short_term_if_needed(
     new_message_tokens: usize,
     long_term_client: Option<&LongTermMemoryClient>,
 ) {
-    if short_term.get_compaction_count(session_id).await >= crate::memory::MAX_COMPACTIONS_PER_SESSION {
+    if short_term.get_compaction_count(session_id).await
+        >= crate::memory::MAX_COMPACTIONS_PER_SESSION
+    {
         tracing::info!(session_id, "Short-term compaction skipped: max compactions per session reached (start a new session if context is too long)");
         return;
     }
@@ -4531,7 +4939,9 @@ async fn compact_short_term_if_needed(
         Ok(Ok(resp)) => {
             let summary = resp.text.trim();
             if !summary.is_empty() {
-                short_term.replace_oldest_with_summary(session_id, summary.to_string(), to_summarize).await;
+                short_term
+                    .replace_oldest_with_summary(session_id, summary.to_string(), to_summarize)
+                    .await;
                 short_term.increment_compaction_count(session_id).await;
                 tracing::debug!(session_id, to_summarize, "Short-term memory compacted");
                 // Promote summary to long-term memory (spec 06)
@@ -4561,7 +4971,9 @@ pub async fn summarize_yesterday_and_promote(
     llm_router: Arc<akasha_llm::LLMRouter>,
     long_term_client: Option<LongTermMemoryClient>,
 ) {
-    let Some(client) = long_term_client else { return };
+    let Some(client) = long_term_client else {
+        return;
+    };
     let yesterday = chrono::Utc::now() - chrono::Duration::days(1);
     let yesterday_str = yesterday.format("%Y-%m-%d").to_string();
     let session_id = format!("day-{}", yesterday_str);
@@ -4611,17 +5023,48 @@ Factual response in English.\n\n{}",
         Ok(resp) => {
             let summary = resp.text.trim();
             if !summary.is_empty() {
-                let content = format!("Summary for {}: {}", session_id.trim_start_matches("day-"), summary);
+                let content = format!(
+                    "Summary for {}: {}",
+                    session_id.trim_start_matches("day-"),
+                    summary
+                );
                 let client = client.clone();
                 match tokio::task::spawn_blocking(move || {
-                    let res = client.promote(content.clone(), "daily_summary".to_string(), None, None, None, Some(1), None, None, None, None);
+                    let res = client.promote(
+                        content.clone(),
+                        "daily_summary".to_string(),
+                        None,
+                        None,
+                        None,
+                        Some(1),
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
                     if res.is_ok() {
-                        let _ = client.emit_event("memory_promoted".to_string(), content, None, None, None, None, Some(1), None, Some("daily_summary".to_string()));
+                        let _ = client.emit_event(
+                            "memory_promoted".to_string(),
+                            content,
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some(1),
+                            None,
+                            Some("daily_summary".to_string()),
+                        );
                     }
                     res
-                }).await {
-                    Ok(Ok(())) => tracing::info!(session_id = %session_id, "Yesterday summarized and stored in long-term memory"),
-                    Ok(Err(e)) => tracing::warn!(error = %e, "Daily summary promote to long-term failed"),
+                })
+                .await
+                {
+                    Ok(Ok(())) => {
+                        tracing::info!(session_id = %session_id, "Yesterday summarized and stored in long-term memory")
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "Daily summary promote to long-term failed")
+                    }
                     Err(e) => tracing::warn!(error = %e, "Daily summary task join failed"),
                 }
             }
@@ -4656,7 +5099,10 @@ fn progress_message_for_tool(tool: &str, args: &[String]) -> String {
         } else {
             "Running Bankr…".to_string()
         }
-    } else if lower.contains("write_file") || lower.contains("search_replace") || lower.contains("edit_file") {
+    } else if lower.contains("write_file")
+        || lower.contains("search_replace")
+        || lower.contains("edit_file")
+    {
         "Writing the file…".to_string()
     } else if lower.contains("read_file") {
         "Reading the file…".to_string()
@@ -4692,7 +5138,16 @@ fn extract_how_to_call_from_message(msg: &str) -> Option<String> {
         return None;
     }
     let lower = msg.to_lowercase();
-    let skip_prefixes = ["je m'appelle", "je suis", "c'est", "my name is", "i'm", "i am", "call me", "moi c'est"];
+    let skip_prefixes = [
+        "je m'appelle",
+        "je suis",
+        "c'est",
+        "my name is",
+        "i'm",
+        "i am",
+        "call me",
+        "moi c'est",
+    ];
     let mut text = msg;
     for prefix in skip_prefixes {
         if lower.starts_with(prefix) {
@@ -4711,7 +5166,9 @@ fn extract_how_to_call_from_message(msg: &str) -> Option<String> {
     } else {
         words[0].trim().to_string()
     };
-    let name = name.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '\'').to_string();
+    let name = name
+        .trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '\'')
+        .to_string();
     if name.is_empty() || name.len() > 50 {
         None
     } else {
@@ -4734,7 +5191,10 @@ fn build_ack_message(user_message: &str) -> String {
             format!("« {} »", truncated)
         }
     };
-    format!("On it — looking into {}. You can follow progress in the Tasks tab.", preview)
+    format!(
+        "On it — looking into {}. You can follow progress in the Tasks tab.",
+        preview
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4793,10 +5253,7 @@ fn memory_profile_for_task(
             episodic_limit: 5,
             facts_limit: 10,
             user_rag_top_k: 5,
-            expand_by_graph: std::env::var("AKASHA_GRAPH_EXPAND")
-                .ok()
-                .as_deref()
-                == Some("1"),
+            expand_by_graph: std::env::var("AKASHA_GRAPH_EXPAND").ok().as_deref() == Some("1"),
             compact_before_prompt: true,
             allow_project_recall: true,
             allow_identity_lookup: true,
@@ -4827,7 +5284,11 @@ fn spawn_progress_watchdog(
         let checkpoints = [
             (2_u64, 12_u8, "Still spinning up the worker…"),
             (5_u64, 18_u8, "Still working — routing tools and context…"),
-            (10_u64, 24_u8, "Still working — using a fallback path if needed…"),
+            (
+                10_u64,
+                24_u8,
+                "Still working — using a fallback path if needed…",
+            ),
         ];
         for (secs, pct, message) in checkpoints {
             tokio::select! {
@@ -4983,7 +5444,9 @@ pub(crate) async fn run_message_via_llm(
     preferred_task_type_override: Option<String>,
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
-    tools_executor: Option<std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>>,
+    tools_executor: Option<
+        std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>,
+    >,
     tools_policy_path: Option<std::path::PathBuf>,
     skill_registry: Option<std::sync::Arc<crate::skills::SkillRegistry>>,
     plugin_registry: Option<std::sync::Arc<crate::plugins::PluginRegistry>>,
@@ -5069,7 +5532,10 @@ pub(crate) async fn run_message_via_llm(
     let small_talk_intent = classify_small_talk_message(clean_message);
     let small_talk_fast_lane_intent = small_talk_fast_lane(clean_message);
     let session_recall_intent = detect_session_recall_intent(clean_message);
-    tracing::debug!(?session_recall_intent, "[RECALL_DEBUG] session_recall_intent");
+    tracing::debug!(
+        ?session_recall_intent,
+        "[RECALL_DEBUG] session_recall_intent"
+    );
     let is_small_talk_fast_lane = small_talk_fast_lane_intent.is_some();
     let is_session_recall = session_recall_intent.is_some();
     let mut memory_profile = if is_small_talk_fast_lane || is_session_recall {
@@ -5157,9 +5623,19 @@ pub(crate) async fn run_message_via_llm(
     let tool_instruction = if is_small_talk_fast_lane {
         String::new()
     } else if tools_executor_snapshot.is_some() {
-        let mut allowed_tools = tools_executor_snapshot.as_ref().and_then(|e| e.policy.allowed_tool_list());
+        let mut allowed_tools = tools_executor_snapshot
+            .as_ref()
+            .and_then(|e| e.policy.allowed_tool_list());
         if let Some(ref list) = allowed_tools {
-            let has_wildcard = tools_executor_snapshot.as_ref().map(|e| e.policy.allowed_commands.iter().any(|c| c.trim().eq_ignore_ascii_case("*"))).unwrap_or(false);
+            let has_wildcard = tools_executor_snapshot
+                .as_ref()
+                .map(|e| {
+                    e.policy
+                        .allowed_commands
+                        .iter()
+                        .any(|c| c.trim().eq_ignore_ascii_case("*"))
+                })
+                .unwrap_or(false);
             if has_wildcard && !list.iter().any(|t| t == "run_command") {
                 let mut list = list.clone();
                 list.push("run_command".to_string());
@@ -5190,7 +5666,10 @@ pub(crate) async fn run_message_via_llm(
                         .map(|s| format!("{} ({})", s.name, s.description))
                         .collect();
                     let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
-                    let part = format!(" ; Skills (use skill name as tool): {}", skills_desc.join(", "));
+                    let part = format!(
+                        " ; Skills (use skill name as tool): {}",
+                        skills_desc.join(", ")
+                    );
                     let rule = format!(
                         " INSTALLED SKILLS RULE: You have access to skills (extra capabilities). To see the list use TOOL: list_skills. To load full instructions for a skill use TOOL: read_skill <name> before invoking it by name. Currently installed: {}. Do NOT say they are not installed or suggest install_skill for them. Use bankr ONLY for balance/solde/wallet/portfolio/Base — never for weather, météo, or news (use web_search for those). For balance/solde/wallet/Base requests, if \"bankr\" is in the list, reply ONLY with TOOL: bankr <args> (e.g. TOOL: bankr portfolio 7d). Use the skill name as the tool name.\n\
              ",
@@ -5222,7 +5701,7 @@ pub(crate) async fn run_message_via_llm(
         if is_subagent || assigned_agent != "conversation" || orch_disk_deliverables {
             compact_worker_tool_instruction
         } else {
-        format!(
+            format!(
             "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
              Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
@@ -5295,7 +5774,9 @@ pub(crate) async fn run_message_via_llm(
     );
     let mut user_prefix = String::with_capacity(8192);
     user_prefix.push_str(&personality_reminder);
-    user_prefix.push_str("Reply in the same language as the user message below (French, English, etc.).\n\n");
+    user_prefix.push_str(
+        "Reply in the same language as the user message below (French, English, etc.).\n\n",
+    );
     let turns_empty = match &short_term {
         Some(st) => st.get_turns(&session_id).await.is_empty(),
         None => true,
@@ -5309,10 +5790,13 @@ pub(crate) async fn run_message_via_llm(
         episodic_limit: memory_profile.episodic_limit,
         facts_limit: memory_profile.facts_limit,
         filter_by_session: !turns_empty,
-        suggest_project: memory_profile.allow_project_recall && message_suggests_project(clean_message),
+        suggest_project: memory_profile.allow_project_recall
+            && message_suggests_project(clean_message),
         is_first_message: turns_empty && memory_profile.allow_identity_lookup,
         expand_by_graph: memory_profile.expand_by_graph,
-        user_identity_prefix: if user_identity_prefix.is_empty() || !memory_profile.allow_identity_lookup {
+        user_identity_prefix: if user_identity_prefix.is_empty()
+            || !memory_profile.allow_identity_lookup
+        {
             None
         } else {
             Some(user_identity_prefix)
@@ -5324,7 +5808,9 @@ pub(crate) async fn run_message_via_llm(
         || memory_profile.facts_limit > 0
         || recall_params.user_identity_prefix.is_some()
     {
-        let fused = crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params).await;
+        let fused =
+            crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params)
+                .await;
         let fused_str = fused.to_context_string();
         if !fused_str.is_empty() {
             user_prefix.push_str(&fused_str);
@@ -5334,11 +5820,12 @@ pub(crate) async fn run_message_via_llm(
         let user_rag_store = crate::user_rag::UserRagStore::new(data_dir);
         let rag_query = message.clone();
         let rag_top_k = memory_profile.user_rag_top_k;
-        let chunks = tokio::task::spawn_blocking(move || user_rag_store.retrieve(&rag_query, rag_top_k))
-            .await
-            .ok()
-            .and_then(|res| res.ok())
-            .unwrap_or_default();
+        let chunks =
+            tokio::task::spawn_blocking(move || user_rag_store.retrieve(&rag_query, rag_top_k))
+                .await
+                .ok()
+                .and_then(|res| res.ok())
+                .unwrap_or_default();
         if !chunks.is_empty() {
             user_prefix.push_str("[User documents — use these excerpts if relevant to answer]\n");
             for c in &chunks {
@@ -5377,7 +5864,8 @@ pub(crate) async fn run_message_via_llm(
                 short_ctx
                     .chars()
                     .take(memory_profile.recent_context_max_chars)
-                    .collect::<String>() + "…"
+                    .collect::<String>()
+                    + "…"
             } else {
                 short_ctx
             };
@@ -5415,8 +5903,7 @@ pub(crate) async fn run_message_via_llm(
         .map(|e| {
             e.policy.can_use_tool("web_search")
                 && e.policy.web_search_enabled
-                && (e.policy.brave_api_key.is_some()
-                    || std::env::var("BRAVE_API_KEY").is_ok())
+                && (e.policy.brave_api_key.is_some() || std::env::var("BRAVE_API_KEY").is_ok())
         })
         .unwrap_or(false);
     let web_search_reminder: &str = if intent_flags.external_info {
@@ -5461,13 +5948,12 @@ pub(crate) async fn run_message_via_llm(
         &intent_flags,
         tools_executor_snapshot.as_ref(),
     );
-    let geolocation_distance_reminder: &str = if intent_flags.geolocation_distance && !plugin_handles_geo_distance {
+    let geolocation_distance_reminder: &str = if intent_flags.geolocation_distance
+        && !plugin_handles_geo_distance
+    {
         let has_any_tool = tools_executor_snapshot
             .as_ref()
-            .map(|e| {
-                e.policy.can_use_tool("web_search")
-                    || e.policy.can_use_tool("plugin.call")
-            })
+            .map(|e| e.policy.can_use_tool("web_search") || e.policy.can_use_tool("plugin.call"))
             .unwrap_or(false);
         tracing::info!(
             task_id = %task_id,
@@ -5485,8 +5971,7 @@ pub(crate) async fn run_message_via_llm(
     let social_feed_reminder = if intent_flags.social_feed_fetch
         && tools_executor_snapshot.as_ref().map_or(false, |e| {
             e.policy.can_use_tool("web_search") || e.policy.can_use_tool("browser")
-        })
-    {
+        }) {
         SOCIAL_FEED_REMINDER
     } else {
         ""
@@ -5595,8 +6080,13 @@ pub(crate) async fn run_message_via_llm(
                     let yesterday = chrono::Utc::now() - chrono::Duration::days(1);
                     let sid = format!("day-{}", yesterday.format("%Y-%m-%d"));
                     tracing::debug!(session_id = %sid, "[RECALL_LOAD] yesterday session_id");
-                    let turns = crate::memory::ShortTermStore::read_day_from_disk(&sid, &short_term_dir).unwrap_or_default();
-                    tracing::debug!(count = turns.len(), "[RECALL_LOAD] read turns from yesterday");
+                    let turns =
+                        crate::memory::ShortTermStore::read_day_from_disk(&sid, &short_term_dir)
+                            .unwrap_or_default();
+                    tracing::debug!(
+                        count = turns.len(),
+                        "[RECALL_LOAD] read turns from yesterday"
+                    );
                     turns
                 } else {
                     tracing::debug!("[RECALL_LOAD] short_term is None, returning empty");
@@ -5607,7 +6097,10 @@ pub(crate) async fn run_message_via_llm(
                 tracing::debug!("[RECALL_LOAD] reading CURRENT_DAY data");
                 if let Some(st) = short_term.as_ref() {
                     let turns = st.get_turns(&session_id).await;
-                    tracing::debug!(count = turns.len(), "[RECALL_LOAD] read turns from current day");
+                    tracing::debug!(
+                        count = turns.len(),
+                        "[RECALL_LOAD] read turns from current day"
+                    );
                     turns
                 } else {
                     tracing::debug!("[RECALL_LOAD] short_term is None, returning empty");
@@ -5695,867 +6188,61 @@ pub(crate) async fn run_message_via_llm(
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or_else(|| llm_timeout_secs.min(300));
 
-    'tool_rounds: loop {
-        let strict_mode_active = strict_tools_first && strict_successful_tool_calls == 0;
-        if strict_mode_active {
-            let _ = bus.send(
-                EventEnvelope::new(
-                    EventType::ProgressUpdate,
-                    Some(serde_json::json!({
-                        "task_id": task_id.to_string(),
-                        "progress_pct": 30,
-                        "message": "Applying dynamic plugin routing rules (tools-first)…"
-                    })),
-                )
-                .with_correlation(task_id),
-            );
-        }
-
-        // Deterministic first attempt in strict tools-first mode:
-        // try preferred tools with the full user request as input before asking the LLM again.
-        if strict_mode_active && (round == 0 || strict_preferred_tool_replay_input.is_some()) {
-            if let (Some(enforcer), Some(exec)) = (
-                &runtime_tool_routing_enforcer,
-                tools_executor_snapshot.as_ref(),
-            ) {
-                let preferred_tool_request = strict_preferred_tool_replay_input
-                    .take()
-                    .unwrap_or_else(|| user_message.clone());
-                let mut deterministic_results: Vec<String> = Vec::new();
-                const MAPS_RESULT_FULL_MAX: usize = 400_000;
-                for preferred_tool in enforcer.preferred_tools.iter().take(3) {
-                    let args_preview = if preferred_tool_request.chars().count() > 240 {
-                        format!("{}…", preferred_tool_request.chars().take(240).collect::<String>())
-                    } else {
-                        preferred_tool_request.clone()
-                    };
-                    let _ = bus.send(
-                        EventEnvelope::new(
-                            EventType::TimelineMilestone,
-                            Some(serde_json::json!({
-                                "name": "deterministic_preferred_tool_attempt",
-                                "task_id": task_id.to_string(),
-                                "round": round,
-                                "tool": preferred_tool,
-                                "args_preview": args_preview,
-                            })),
-                        )
-                        .with_correlation(timeline_correlation),
-                    );
-                    let auto_args = vec![preferred_tool_request.clone()];
-                    let (success, res, captured_image) = execute_tool_call(
-                        exec,
-                        preferred_tool,
-                        &auto_args,
-                        process_registry.as_ref(),
-                        long_term_client.as_ref(),
-                        task_id,
-                        Some(store_path.as_path()),
-                        conv_tx.clone(),
-                        message_webhook_url.as_deref(),
-                        plugin_registry.as_ref(),
-                        device_bridge.as_ref(),
-                        workspace_store.as_ref(),
-                        browser_registry.as_ref(),
-                        store_path.parent(),
-                    )
-                    .await;
-                    let result_preview = if res.chars().count() > 320 {
-                        format!("{}…", res.chars().take(320).collect::<String>())
-                    } else {
-                        res.clone()
-                    };
-                    // UI (chat) needs full plugin JSON for rich views (e.g. maps); preview is truncated.
-                    let mut milestone = serde_json::json!({
-                        "name": "deterministic_preferred_tool_result",
-                        "task_id": task_id.to_string(),
-                        "round": round,
-                        "tool": preferred_tool,
-                        "success": success,
-                        "result_preview": result_preview,
-                    });
-                    if success
-                        && preferred_tool.starts_with("maps_")
-                        && res.len() <= MAPS_RESULT_FULL_MAX
-                    {
-                        milestone["result_full"] = serde_json::Value::String(res.clone());
-                    }
-                    let _ = bus.send(
-                        EventEnvelope::new(EventType::TimelineMilestone, Some(milestone))
-                            .with_correlation(timeline_correlation),
-                    );
-                    tool_loop_history.push((
-                        preferred_tool.clone(),
-                        if success { "success" } else { "failure" }.to_string(),
-                    ));
-                    if let Some(img) = captured_image {
-                        last_captured_image_base64 = Some(img);
-                    }
-                    deterministic_results.push(res.clone());
-                    if success {
-                        strict_successful_tool_calls = strict_successful_tool_calls.saturating_add(1);
-                        log_tool_journal_if_write(preferred_tool, &auto_args, &res).await;
-                        break;
-                    }
-                }
-                if strict_successful_tool_calls > 0 {
-                    let results_blob = deterministic_results.join("\n");
-                    last_tool_results_blob = Some(results_blob.clone());
-                    current_prompt = format!(
-                        "User request: {}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, answer the user's request now. Do NOT reply with a promise. No TOOL: lines.",
-                        user_message,
-                        results_blob
-                    );
-                    // Continue to next round so the model synthesizes from concrete tool results.
-                    continue;
-                }
-                let _ = bus.send(
-                    EventEnvelope::new(
-                        EventType::TimelineMilestone,
-                        Some(serde_json::json!({
-                            "name": "deterministic_preferred_tool_no_success",
-                            "task_id": task_id.to_string(),
-                            "round": round,
-                            "attempted_tools": enforcer.preferred_tools.iter().cloned().collect::<Vec<_>>(),
-                        })),
-                    )
-                    .with_correlation(timeline_correlation),
-                );
-            }
-        }
-
-        // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
-        if let Some(ref store) = task_usage_store {
-            let (session_tokens, session_cost) = store.get_session(&session_id).await.unwrap_or((0, 0.0));
-            if let Some(max_cost) = std::env::var("AKASHA_MAX_COST_PER_SESSION_USD").ok().and_then(|s| s.parse::<f64>().ok()) {
-                if max_cost > 0.0 && session_cost >= max_cost {
-                    reply_text = "Budget dépassé pour cette session (AKASHA_MAX_COST_PER_SESSION_USD). Démarrez une nouvelle session ou augmentez le plafond.".to_string();
-                    break 'tool_rounds;
-                }
-            }
-            if let Some(max_tokens) = std::env::var("AKASHA_MAX_TOKENS_PER_SESSION").ok().and_then(|s| s.parse::<u64>().ok()) {
-                if max_tokens > 0 && session_tokens >= max_tokens {
-                    reply_text = "Quota de tokens dépassé pour cette session (AKASHA_MAX_TOKENS_PER_SESSION). Démarrez une nouvelle session ou augmentez le plafond.".to_string();
-                    break 'tool_rounds;
-                }
-            }
-        }
-        // `task_types.image_generation` in llm_router.yaml configures the *pixel backend* for the
-        // `generate_image` tool (see image_generation.rs). Routing chat completion to that task
-        // type sends image-only models (e.g. Ollama z-image) through the text completion path, which
-        // expects a `response` string — those models return images/empty text and trigger fallback warnings.
-        // Here we always use a normal text route for the LLM turn; the tool call still uses image_generation config.
-        let router_task_type_for_llm =
-            if preferred_task_type_override.as_deref() == Some("image_generation")
-                || assigned_agent == "image_generation"
-            {
-                llm_router.resolve_task_type_for_agent("conversation")
-            } else {
-                preferred_task_type_override
-                    .clone()
-                    .unwrap_or_else(|| llm_router.resolve_task_type_for_agent(&assigned_agent))
-            };
-        let preferred_task_type = Some(router_task_type_for_llm);
-        let request = CompletionRequest {
-            prompt: if strict_mode_active {
-                format!("{}{}", current_prompt, strict_tools_instruction)
-            } else {
-                format!("{}{}", current_prompt, tool_instruction)
-            },
-            max_tokens: Some(max_tokens),
-            temperature: Some(0.7),
-            preferred_task_type,
-            system_prompt: system_prompt.clone(),
-            image_data_urls: if tool_loop_history.is_empty() {
-                image_data_urls.clone()
-            } else {
-                None
-            },
-            top_p: None,
-            top_k: None,
-            frequency_penalty: None,
-            presence_penalty: None,
-            repeat_penalty: None,
-            num_ctx: None,
-            num_gpu: None,
-            thinking_level: None,
-        };
-        // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
-        // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
-        let (stream_tx, std_rx) = std::sync::mpsc::channel::<String>();
-        let (tok_tx, mut tok_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        std::thread::Builder::new()
-            .name("akasha-stream-fwd".to_string())
-            .spawn(move || {
-                for chunk in std_rx {
-                    if tok_tx.send(chunk).is_err() {
-                        break;
-                    }
-                }
-            })
-            .ok();
-        let router = llm_router.clone();
-        let stream_join = tokio::spawn(async move { router.complete_stream(&request, stream_tx).await });
-        let mut accumulated = String::new();
-        let mut first_wait = true;
-        let overall_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(llm_timeout_secs);
-        loop {
-            // Check the overall deadline before waiting for a chunk to avoid spurious zero-duration timeouts.
-            if tokio::time::Instant::now() >= overall_deadline {
-                tracing::warn!(timeout_secs = llm_timeout_secs, "Overall LLM timeout exceeded; aborting task");
-                stream_join.abort();
-                reply_text = if accumulated.is_empty() {
-                    format!("LLM response timed out after {} seconds.", llm_timeout_secs)
-                } else {
-                    accumulated
-                };
-                break 'tool_rounds;
-            }
-            let idle = if first_wait {
-                first_wait = false;
-                std::time::Duration::from_secs(first_chunk_timeout_secs)
-            } else {
-                std::time::Duration::from_secs(idle_timeout_secs)
-            };
-            match tokio::time::timeout(idle, tok_rx.recv()).await {
-                Ok(Some(chunk)) => {
-                    if !first_meaningful_progress_sent && !chunk.trim().is_empty() {
-                        first_meaningful_progress_sent = true;
-                        cancel_progress_watchdog(&mut watchdog_cancel);
-                        if emit_timeline_once_for_task(
-                            &bus,
-                            Some(store_path.as_path()),
-                            task_id,
-                            "first_meaningful_progress",
-                            Some(serde_json::json!({ "source": "stream_chunk" })),
-                        ) {
-                            log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
-                        }
-                    }
-                    const MAX_ACCUMULATED: usize = 2 * 1024 * 1024; // 2 MiB cap to prevent unbounded allocation on long streams
-                    if accumulated.len() + chunk.len() > MAX_ACCUMULATED {
-                        accumulated.truncate(MAX_ACCUMULATED.saturating_sub(chunk.len()));
-                    }
-                    accumulated.push_str(&chunk);
-                    let _ = bus.send(
-                        EventEnvelope::new(
-                            EventType::ProgressUpdate,
-                            Some(serde_json::json!({
-                                "task_id": task_id.to_string(),
-                                "progress_pct": 50,
-                                "message": accumulated
-                            })),
-                        )
-                        .with_correlation(task_id),
-                    );
-                }
-                Ok(None) => break,
-                Err(_) => {
-                    tracing::debug!(idle_secs = idle_timeout_secs, "Stream idle timeout, waiting for final response");
-                    break;
-                }
-            }
-        }
-        // Wrap stream_join.await with remaining overall budget; guard against zero remaining.
-        let remaining = overall_deadline.saturating_duration_since(tokio::time::Instant::now());
-        let response = if remaining.is_zero() {
-            tracing::warn!(timeout_secs = llm_timeout_secs, "Overall LLM timeout on stream completion");
-            reply_text = if accumulated.is_empty() {
-                format!("LLM response timed out after {} seconds.", llm_timeout_secs)
-            } else {
-                accumulated
-            };
-            break;
-        } else {
-            match tokio::time::timeout(remaining, stream_join).await {
-                Ok(Ok(Ok(resp))) => {
-                    last_llm_model_used = Some(resp.model_used.clone());
-                    if let Some(ref store) = task_usage_store {
-                        let tokens = resp.usage.as_ref().map(|u| u.prompt_tokens + u.completion_tokens).unwrap_or(0);
-                        let cost = resp.cost_usd.unwrap_or(0.0);
-                        store.add(task_id, &session_id, tokens, cost).await;
-                    }
-                    resp.text.trim().to_string()
-                }
-                Ok(Ok(Err(e))) => {
-                    tracing::warn!(error = %e, "LLM completion failed");
-                    reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
-                    break;
-                }
-                Ok(Err(join_err)) => {
-                    tracing::warn!(error = %join_err, "Stream task join failed");
-                    reply_text = if accumulated.is_empty() {
-                        format!("LLM task error: {}", join_err)
-                    } else {
-                        accumulated
-                    };
-                    break;
-                }
-                Err(_timeout) => {
-                    tracing::warn!(timeout_secs = llm_timeout_secs, "Overall LLM timeout on stream completion");
-                    reply_text = if accumulated.is_empty() {
-                        format!("LLM response timed out after {} seconds.", llm_timeout_secs)
-                    } else {
-                        accumulated
-                    };
-                    break;
-                }
-            }
-        };
-        // Some providers return the full text only in stream chunks while `resp.text` is empty, or drop `TOOL:` lines
-        // from the final body. Parsing tools only from `resp.text` then skips execution entirely (user sees text, no disk writes).
-        // Use `parse_tool_calls` (which normalizes sloppy prefixes like `- Tool:` / `**TOOL:**`) instead of a raw
-        // `contains("TOOL:")` check so that any provider-specific formatting is handled consistently.
-        let r = response.trim();
-        let a = accumulated.trim();
-        let a_has_tools = !a.is_empty() && !parse_tool_calls(a).is_empty();
-        let r_has_tools = !r.is_empty() && !parse_tool_calls(r).is_empty();
-        let merged_for_tools = if r.is_empty() && !a.is_empty() {
-            a.to_string()
-        } else if a_has_tools && !r_has_tools {
-            a.to_string()
-        } else if !r.is_empty() {
-            r.to_string()
-        } else {
-            a.to_string()
-        };
-        let response = merged_for_tools;
-
-        if let Some(intent) = small_talk_intent {
-            if response_looks_off_topic_for_small_talk(&response) {
-                tracing::warn!(task_id = %task_id, "Small-talk guardrail triggered; suppressing off-topic/tool-heavy reply");
-                reply_text = small_talk_fast_reply(&message, intent);
-                break 'tool_rounds;
-            }
-        }
-
-        let parsed_tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
-            let calls = parse_tool_calls(&response);
-            if calls.is_empty() { None } else { Some(calls) }
-        });
-        let no_parseable_tools_this_round = parsed_tool_calls.is_none();
-        let response_plain = response
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("TOOL:"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string();
-
-        if strict_tools_first
-            && no_parseable_tools_this_round
-            && strict_successful_tool_calls == 0
-        {
-            strict_no_tool_rounds = strict_no_tool_rounds.saturating_add(1);
-            let preferred_tools_hint = runtime_tool_routing_enforcer
-                .as_ref()
-                .map(|e| {
-                    let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
-                    v.sort();
-                    v.join(", ")
-                })
-                .unwrap_or_default();
-
-            if strict_no_tool_rounds <= 1 {
-                current_prompt = format!(
-                    "User request: {}\n\nYour previous reply:\n{}\n\nDynamic plugin routing rules are active for this request. You MUST emit TOOL lines only. Preferred tools: {}. If inputs are missing, call TOOL: ask_user with one precise question. Do NOT output prose-only answers now.",
-                    user_message,
-                    response_plain,
-                    preferred_tools_hint
-                );
-                continue;
-            }
-
-            reply_text = format!(
-                "Impossible de répondre de façon fiable sans exécuter un outil autorisé. Outils attendus: {}. Vérifiez les règles de routage des plugins installés ou fournissez les paramètres manquants.",
-                preferred_tools_hint
-            );
-            break 'tool_rounds;
-        }
-
-        if no_parseable_tools_this_round
-            && meta_response_retry_count < 2
-            && (is_subagent || assigned_agent != "conversation" || orch_disk_deliverables)
-            && looks_like_meta_agent_response(&response_plain)
-        {
-            meta_response_retry_count += 1;
-            current_prompt = format!(
-                "User request: {}\n\nYour previous reply:\n{}\n\nThat reply was meta/instruction recitation, not actual progress on the assigned task. Do the work now. Do NOT describe your role, say you are ready, mention instructions, or narrate a generic Phase 2 plan. If files are required, start with TOOL: read_file / write_file on the exact workspace paths. If you are blocked, state only the concrete missing input or exact tool failure.",
-                user_message,
-                response_plain
-            );
-            continue;
-        }
-
-        if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls) {
-            round += 1;
-            let mut tool_results = Vec::new();
-            let scheduled_lanes = akasha_tools::schedule_tool_calls(&calls);
-            for (lane, lane_calls) in scheduled_lanes {
-                let lane_name = match lane {
-                    akasha_tools::ToolExecutionLane::ParallelSafe => "parallel_safe",
-                    akasha_tools::ToolExecutionLane::SerialExclusive => "serial_exclusive",
-                };
+        'tool_rounds: loop {
+            let strict_mode_active = strict_tools_first && strict_successful_tool_calls == 0;
+            if strict_mode_active {
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::ProgressUpdate,
                         Some(serde_json::json!({
                             "task_id": task_id.to_string(),
-                            "progress_pct": 50,
-                            "message": format!("Tool lane execution: {} ({} call(s))", lane_name, lane_calls.len())
+                            "progress_pct": 30,
+                            "message": "Applying dynamic plugin routing rules (tools-first)…"
                         })),
                     )
                     .with_correlation(task_id),
                 );
-                for (name, args) in &lane_calls {
-                // Phase D: resolve skill name to tool_ref (spec 33)
-                let actual_tool = match &skill_registry {
-                    Some(reg) => reg.get(name).await.map(|s| s.tool_ref).unwrap_or_else(|| name.clone()),
-                    None => name.clone(),
-                };
-                let actual_tool = canonicalize_tool_name(&actual_tool);
-                let should_forward_user_request = strict_tools_first
-                    && args.is_empty()
-                    && !actual_tool.eq_ignore_ascii_case("ask_user")
-                    && runtime_tool_routing_enforcer
-                        .as_ref()
-                        .map(|e| e.preferred_tools.contains(&actual_tool))
-                        .unwrap_or(false);
-                let forwarded_args: Vec<String> = if should_forward_user_request {
-                    vec![user_message.clone()]
-                } else {
-                    args.clone()
-                };
-                let tool_args: &[String] = &forwarded_args;
-                let effective_tool_for_routing = if actual_tool.is_empty() {
-                    name.as_str()
-                } else {
-                    actual_tool.as_str()
-                };
-                let device_routing_bypass = intent_flags.camera_or_mic
-                    && (effective_tool_for_routing.eq_ignore_ascii_case("device_discover")
-                        || effective_tool_for_routing.eq_ignore_ascii_case("device_invoke"));
-                if let Some(enforcer) = &runtime_tool_routing_enforcer {
-                    if !device_routing_bypass && !enforcer.is_tool_allowed(effective_tool_for_routing, tool_args) {
-                        let blocked = format!(
-                            "[tool_blocked_by_routing_rules] tool={} blocked by dynamic plugin routing rules",
-                            effective_tool_for_routing
-                        );
-                        let payload = serde_json::json!({
-                            "tool": effective_tool_for_routing,
-                            "args": tool_args,
-                            "result_preview": blocked,
-                            "success": false,
-                            "reason": "blocked_by_dynamic_plugin_routing_rules"
-                        });
+            }
+
+            // Deterministic first attempt in strict tools-first mode:
+            // try preferred tools with the full user request as input before asking the LLM again.
+            if strict_mode_active && (round == 0 || strict_preferred_tool_replay_input.is_some()) {
+                if let (Some(enforcer), Some(exec)) = (
+                    &runtime_tool_routing_enforcer,
+                    tools_executor_snapshot.as_ref(),
+                ) {
+                    let preferred_tool_request = strict_preferred_tool_replay_input
+                        .take()
+                        .unwrap_or_else(|| user_message.clone());
+                    let mut deterministic_results: Vec<String> = Vec::new();
+                    const MAPS_RESULT_FULL_MAX: usize = 400_000;
+                    for preferred_tool in enforcer.preferred_tools.iter().take(3) {
+                        let args_preview = if preferred_tool_request.chars().count() > 240 {
+                            format!(
+                                "{}…",
+                                preferred_tool_request.chars().take(240).collect::<String>()
+                            )
+                        } else {
+                            preferred_tool_request.clone()
+                        };
                         let _ = bus.send(
-                            EventEnvelope::new(EventType::ToolInvoked, Some(payload))
-                                .with_correlation(timeline_correlation),
+                            EventEnvelope::new(
+                                EventType::TimelineMilestone,
+                                Some(serde_json::json!({
+                                    "name": "deterministic_preferred_tool_attempt",
+                                    "task_id": task_id.to_string(),
+                                    "round": round,
+                                    "tool": preferred_tool,
+                                    "args_preview": args_preview,
+                                })),
+                            )
+                            .with_correlation(timeline_correlation),
                         );
-                        tracing::warn!(
-                            task_id = %task_id,
-                            tool = %effective_tool_for_routing,
-                            preferred = ?enforcer.preferred_tools,
-                            forbidden = ?enforcer.forbidden_tools,
-                            "Tool blocked by runtime routing enforcer"
-                        );
-                        tool_results.push(blocked);
-                        continue;
-                    }
-                }
-                let args_str = tool_args.join(" ");
-                tool_loop_history.push((actual_tool.clone(), args_str.clone()));
-                // Phase 4: loop detection — same tool+args repeated 3 times
-                if tool_loop_history.len() >= 3 {
-                    let last = tool_loop_history.last().unwrap();
-                    if tool_loop_history.iter().rev().take(3).all(|e| e.0 == last.0 && e.1 == last.1) {
-                        reply_text = "Loop detected: same tool and arguments repeated. Stopping.".to_string();
-                        break 'tool_rounds;
-                    }
-                }
-                // User-friendly progress at key step: what we are doing right now (use skill name when actual_tool is empty, e.g. bankr skill).
-                let display_tool = if actual_tool.is_empty() { name.as_str() } else { &actual_tool };
-                let progress_msg = progress_message_for_tool(display_tool, tool_args);
-                if !first_meaningful_progress_sent {
-                    first_meaningful_progress_sent = true;
-                    cancel_progress_watchdog(&mut watchdog_cancel);
-                    if emit_timeline_once_for_task(
-                        &bus,
-                        Some(store_path.as_path()),
-                        task_id,
-                        "first_meaningful_progress",
-                        Some(serde_json::json!({
-                            "source": "tool_progress",
-                            "tool": display_tool,
-                        })),
-                    ) {
-                        log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
-                    }
-                }
-                let _ = bus.send(
-                    EventEnvelope::new(
-                        EventType::ProgressUpdate,
-                        Some(serde_json::json!({
-                            "task_id": task_id.to_string(),
-                            "progress_pct": 50,
-                            "message": progress_msg
-                        })),
-                    )
-                    .with_correlation(task_id),
-                );
-                // Phase 3.1: tools in require_approval need user confirmation before execution.
-                if exec.policy.requires_approval(&actual_tool) {
-                    match &human_input_store {
-                        Some(store) => {
-                            const APPROVAL_TIMEOUT_SECS: u64 = 300;
-                            // Redact write-like tool args entirely; truncate others to avoid leaking secrets/blobs.
-                            const MAX_APPROVAL_ARG_LEN: usize = 80;
-                            let args_preview: String = if matches!(actual_tool.as_str(), "apply_patch" | "edit_file" | "write_file") {
-                                "[redacted]".to_string()
-                            } else {
-                                let truncated: Vec<String> = tool_args.iter()
-                                    .take(3)
-                                    .map(|a| if a.chars().count() > MAX_APPROVAL_ARG_LEN {
-                                        format!("{}…", a.chars().take(MAX_APPROVAL_ARG_LEN).collect::<String>())
-                                    } else {
-                                        a.clone()
-                                    })
-                                    .collect();
-                                let suffix = if tool_args.len() > 3 { format!(" … ({} args)", tool_args.len()) } else { String::new() };
-                                truncated.join(" ") + &suffix
-                            };
-                            let question = format!("Approuver l'action : {} — {} ?", actual_tool, args_preview);
-                            let choices = vec!["Approuver".to_string(), "Refuser".to_string()];
-                            let (tx, rx) = tokio::sync::oneshot::channel();
-                            let pending = PendingHumanInput {
-                                question: question.clone(),
-                                context: format!("Outil sensible (nécessite confirmation) : {}", actual_tool),
-                                choices: Some(choices.clone()),
-                                response_tx: tx,
-                            };
-                            {
-                                let mut g = store.write().await;
-                                g.insert(task_id, pending);
-                            }
-                            let payload = serde_json::json!({
-                                "task_id": task_id.to_string(),
-                                "question": question,
-                                "context": format!("Outil : {}", actual_tool),
-                                "choices": choices,
-                                "tool_approval": true
-                            });
-                            let _ = bus.send(
-                                EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload.clone())).with_correlation(task_id),
-                            );
-                            let approval_payload = serde_json::json!({
-                                "tool": actual_tool,
-                                "args_redacted": args_preview,
-                                "task_id": task_id.to_string()
-                            });
-                            let _ = bus.send(
-                                EventEnvelope::new(EventType::ToolApprovalRequest, Some(approval_payload)).with_correlation(task_id),
-                            );
-                            let granted = match tokio::time::timeout(
-                                std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS),
-                                rx,
-                            ).await {
-                                Ok(Ok(reply)) => reply.trim().eq_ignore_ascii_case("Approuver"),
-                                _ => {
-                                    // Timeout or channel error: remove stale pending entry to avoid it staying forever.
-                                    {
-                                        let mut g = store.write().await;
-                                        g.remove(&task_id);
-                                    }
-                                    let expired_payload = serde_json::json!({
-                                        "task_id": task_id.to_string(),
-                                        "tool": actual_tool,
-                                    });
-                                    let _ = bus.send(
-                                        EventEnvelope::new(EventType::ToolApprovalExpired, Some(expired_payload)).with_correlation(task_id),
-                                    );
-                                    false
-                                }
-                            };
-                            if !granted {
-                                tool_results.push("Action refusée par l'utilisateur (approbation requise).".to_string());
-                                let payload = serde_json::json!({
-                                    "tool": actual_tool,
-                                    "approved": false
-                                });
-                                let _ = bus.send(
-                                    EventEnvelope::new(EventType::ToolInvoked, Some(payload)).with_correlation(timeline_correlation),
-                                );
-                                continue;
-                            }
-                        }
-                        None => {
-                            tool_results.push("Action nécessitant approbation impossible (human_input_store indisponible).".to_string());
-                            continue;
-                        }
-                    }
-                }
-                let tool_t0 = std::time::Instant::now();
-                let call_id = Uuid::new_v4();
-                let args_preview_tc: String = {
-                    const L: usize = 100;
-                    args
-                        .iter()
-                        .take(3)
-                        .map(|a| {
-                            if a.len() > L {
-                                format!("{}…", &a[..a.floor_char_boundary(L)])
-                            } else {
-                                a.clone()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                };
-                let _ = bus.send(
-                    EventEnvelope::new(
-                        EventType::ToolCallStarted,
-                        Some(serde_json::json!({
-                            "schema_version": 1,
-                            "task_id": task_id.to_string(),
-                            "call_id": call_id.to_string(),
-                            "tool": display_tool,
-                            "args_preview": args_preview_tc,
-                        })),
-                    )
-                    .with_correlation(timeline_correlation),
-                );
-                let (success, res, captured_image): (bool, String, Option<String>) = if actual_tool == "ask_user" {
-                    // Human in the loop: register pending request, emit event, wait for user reply.
-                    match &human_input_store {
-                        Some(store) => {
-                            let body_joined_string = args.join(" ");
-                            let body = body_joined_string.trim();
-                            let body = if body.is_empty() { "{}" } else { body };
-                            let v = serde_json::from_str::<serde_json::Value>(body).ok();
-                            let (question, context, choices) = match &v {
-                                Some(v) => (
-                                    v.get("question").and_then(|q| q.as_str()).unwrap_or("").to_string(),
-                                    v.get("context").and_then(|c| c.as_str()).unwrap_or("").to_string(),
-                                    v.get("choices").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>()),
-                                ),
-                                None => (body.to_string(), String::new(), None),
-                            };
-                            if question.is_empty() {
-                                (false, format!("[ask_user] invalid JSON: question required. Got: {}", body.chars().take(100).collect::<String>()), None)
-                            } else {
-                                let (tx, rx) = tokio::sync::oneshot::channel();
-                                let pending = PendingHumanInput {
-                                    question: question.clone(),
-                                    context: context.clone(),
-                                    choices: choices.clone(),
-                                    response_tx: tx,
-                                };
-                                {
-                                    let mut g = store.write().await;
-                                    g.insert(task_id, pending);
-                                }
-                                let payload = serde_json::json!({
-                                    "task_id": task_id.to_string(),
-                                    "question": question,
-                                    "context": context,
-                                    "choices": choices
-                                });
-                                let _ = bus.send(
-                                    EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload)).with_correlation(task_id),
-                                );
-                                const HUMAN_INPUT_TIMEOUT_SECS: u64 = 3600;
-                                match tokio::time::timeout(
-                                    std::time::Duration::from_secs(HUMAN_INPUT_TIMEOUT_SECS),
-                                    rx,
-                                ).await {
-                                    Ok(Ok(reply)) => (true, format!("[ask_user] User replied: {}", reply), None),
-                                    Ok(Err(_)) => {
-                                        let mut g = store.write().await;
-                                        g.remove(&task_id);
-                                        (false, "[ask_user] Channel closed.".to_string(), None)
-                                    }
-                                    Err(_) => {
-                                        let mut g = store.write().await;
-                                        g.remove(&task_id);
-                                        (false, format!("[ask_user] Timeout after {}s; no user reply.", HUMAN_INPUT_TIMEOUT_SECS), None)
-                                    }
-                                }
-                            }
-                        }
-                        None => (false, "[ask_user] Human-in-the-loop not available.".to_string(), None),
-                    }
-                } else if actual_tool == "delegate_to_agent" {
-                    match &delegation_tx {
-                        Some(tx) => {
-                            let (reply_tx, reply_rx) = oneshot::channel();
-                            let agent_type = args.get(0).cloned().unwrap_or_else(|| "conversation".to_string());
-                            let message = args.get(1..).map(|a| a.join(" ")).unwrap_or_else(|| args.get(0).cloned().unwrap_or_default());
-                            if tx.send(DelegationRequest {
-                                requesting_task_id: task_id,
-                                agent_type,
-                                message,
-                                reply_tx,
-                            }).await.is_ok() {
-                                match tokio::time::timeout(std::time::Duration::from_secs(310), reply_rx).await {
-                                    Ok(Ok(Ok(msg))) => (true, format!("[delegate_to_agent] {}", msg), None),
-                                    Ok(Ok(Err(e))) => (false, format!("[delegate_to_agent] {}", e), None),
-                                    _ => (false, "[delegate_to_agent] timeout or channel closed".to_string(), None),
-                                }
-                            } else {
-                                (false, "[delegate_to_agent] channel closed".to_string(), None)
-                            }
-                        }
-                        None => (false, "[delegate_to_agent] not available".to_string(), None),
-                    }
-                } else if actual_tool == "install_skill" {
-                    let url = args.get(0).map(String::as_str).unwrap_or("").trim();
-                    if url.is_empty() {
-                        (false, "[install_skill] usage: install_skill <url> (ex. https://github.com/BankrBot/skills/tree/main/bankr ou toute URL HTTPS autorisée dans tools_policy allowed_skill_install_hosts)".to_string(), None)
-                    } else {
-                        let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
-                        let allowed_hosts = exec.policy.skill_install_allowed_hosts();
-                        let tools_reload = tools_executor.as_ref().and_then(|arc| {
-                            tools_policy_path.as_ref().map(|p| (arc, p.as_path()))
-                        });
-                        match &skill_registry {
-                            Some(reg) => {
-                                let (s, r) = do_install_skill(url, data_dir, &spec_dir, reg, &allowed_hosts, tools_reload).await;
-                                (s, r, None)
-                            }
-                            None => (false, "[install_skill] skill registry not available".to_string(), None),
-                        }
-                    }
-                } else if actual_tool == "uninstall_skill" {
-                    let skill_name = tool_args.get(0).map(String::as_str).unwrap_or("").trim();
-                    let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
-                    let tools_reload = tools_executor.as_ref().and_then(|arc| {
-                        tools_policy_path.as_ref().map(|p| (arc, p.as_path()))
-                    });
-                    match &skill_registry {
-                        Some(reg) => {
-                            let (s, r) = do_uninstall_skill(skill_name, data_dir, &spec_dir, reg, tools_reload).await;
-                            (s, r, None)
-                        }
-                        None => (false, "[uninstall_skill] skill registry not available".to_string(), None),
-                    }
-                } else if actual_tool == "write_todos" {
-                    let payload = args.join(" ").trim().to_string();
-                    match TaskStore::open(&store_path) {
-                        Ok(store) => {
-                            let todos = parse_todos_from_payload(&payload);
-                            if let Err(e) = store.set_todos(task_id, &todos) {
-                                (false, format!("[write_todos] error: {}", e), None)
-                            } else {
-                                let payload_json = serde_json::json!({
-                                    "task_id": task_id.to_string(),
-                                    "todos": todos.iter().map(|t| serde_json::json!({ "id": t.id, "title": t.title, "status": t.status.as_str() })).collect::<Vec<_>>()
-                                });
-                                let _ = bus.send(
-                                    EventEnvelope::new(EventType::TodoListUpdated, Some(payload_json)).with_correlation(task_id),
-                                );
-                                (true, format!("[write_todos] {} step(s) saved.", todos.len()), None)
-                            }
-                        }
-                        Err(e) => (false, format!("[write_todos] store error: {}", e), None),
-                    }
-                } else if actual_tool == "merge_todos" {
-                    let payload = args.join(" ").trim().to_string();
-                    match TaskStore::open(&store_path) {
-                        Ok(store) => match store.merge_todos_from_payload(task_id, &payload) {
-                            Ok(todos) => {
-                                let payload_json = serde_json::json!({
-                                    "task_id": task_id.to_string(),
-                                    "todos": todos.iter().map(|t| serde_json::json!({ "id": t.id, "title": t.title, "status": t.status.as_str() })).collect::<Vec<_>>()
-                                });
-                                let _ = bus.send(
-                                    EventEnvelope::new(EventType::TodoListUpdated, Some(payload_json)).with_correlation(task_id),
-                                );
-                                (true, format!("[merge_todos] list now has {} step(s).", todos.len()), None)
-                            }
-                            Err(e) => (false, format!("[merge_todos] error: {}", e), None),
-                        },
-                        Err(e) => (false, format!("[merge_todos] store error: {}", e), None),
-                    }
-                } else if actual_tool == "read_todos" {
-                    match TaskStore::open(&store_path) {
-                        Ok(store) => match store.get_todos(task_id) {
-                            Ok(todos) => {
-                                let summary: Vec<serde_json::Value> = todos.iter().enumerate().map(|(i, t)| {
-                                    serde_json::json!({ "index": i + 1, "title": t.title, "status": t.status.as_str() })
-                                }).collect();
-                                (true, format!("[read_todos] {} step(s): {}", todos.len(), serde_json::to_string(&summary).unwrap_or_default()), None)
-                            }
-                            Err(e) => (false, format!("[read_todos] error: {}", e), None),
-                        },
-                        Err(e) => (false, format!("[read_todos] store error: {}", e), None),
-                    }
-                } else if actual_tool == "update_todo" {
-                    let index_str = args.get(0).map(String::as_str).unwrap_or("").trim();
-                    let status_str = args.get(1).map(String::as_str).unwrap_or("pending").trim();
-                    let index: usize = index_str.parse().unwrap_or(0);
-                    match TaskStore::open(&store_path) {
-                        Ok(store) => match store.get_todos(task_id) {
-                            Ok(mut todos) => {
-                                if index == 0 || index > todos.len() {
-                                    (false, format!("[update_todo] invalid index (1..{}): {}", todos.len(), index_str), None)
-                                } else {
-                                    let status = match status_str.to_lowercase().as_str() {
-                                        "done" => TodoStatus::Done,
-                                        "cancelled" => TodoStatus::Cancelled,
-                                        _ => TodoStatus::Pending,
-                                    };
-                                    todos[index - 1].status = status;
-                                    if let Err(e) = store.set_todos(task_id, &todos) {
-                                        (false, format!("[update_todo] error: {}", e), None)
-                                    } else {
-                                        let payload_json = serde_json::json!({
-                                            "task_id": task_id.to_string(),
-                                            "todos": todos.iter().map(|t| serde_json::json!({ "id": t.id, "title": t.title, "status": t.status.as_str() })).collect::<Vec<_>>()
-                                        });
-                                        let _ = bus.send(
-                                            EventEnvelope::new(EventType::TodoListUpdated, Some(payload_json)).with_correlation(task_id),
-                                        );
-                                        (true, format!("[update_todo] step {} set to {}.", index, status_str), None)
-                                    }
-                                }
-                            }
-                            Err(e) => (false, format!("[update_todo] error: {}", e), None),
-                        },
-                        Err(e) => (false, format!("[update_todo] store error: {}", e), None),
-                    }
-                } else if actual_tool == "list_skills" {
-                    match &skill_registry {
-                        Some(reg) => {
-                            let list = reg.list().await;
-                            let summary: Vec<String> = list.iter().map(|s| format!("{}: {}", s.name, s.description)).collect();
-                            (true, format!("[list_skills] {} skill(s): {}", list.len(), summary.join(" ; ")), None)
-                        }
-                        None => (false, "[list_skills] skill registry not available.".to_string(), None),
-                    }
-                } else if actual_tool == "read_skill" {
-                    let skill_name = tool_args.get(0).map(String::as_str).unwrap_or("").trim();
-                    if skill_name.is_empty() {
-                        (false, "[read_skill] usage: read_skill <name>".to_string(), None)
-                    } else {
-                        match &skill_registry {
-                            Some(reg) => {
-                                if let Some(body) = reg.get_body(skill_name).await {
-                                    (true, format!("[read_skill {}] Instructions:\n{}", skill_name, body), None)
-                                } else {
-                                    (false, format!("[read_skill] skill '{}' not found or has no body.", skill_name), None)
-                                }
-                            }
-                            None => (false, "[read_skill] skill registry not available.".to_string(), None),
-                        }
-                    }
-                } else if actual_tool.is_empty() {
-                    // Skill with no tool_ref: if args provided, run as run_command(skill_name, ...args) (e.g. bankr whoami)
-                    if !tool_args.is_empty() {
-                        let run_args: Vec<String> = std::iter::once(name.clone()).chain(tool_args.iter().cloned()).collect();
-                        let (s, r, _) = execute_tool_call(
+                        let auto_args = vec![preferred_tool_request.clone()];
+                        let (success, res, captured_image) = execute_tool_call(
                             exec,
-                            "run_command",
-                            &run_args,
+                            preferred_tool,
+                            &auto_args,
                             process_registry.as_ref(),
                             long_term_client.as_ref(),
                             task_id,
@@ -6569,413 +6256,1594 @@ pub(crate) async fn run_message_via_llm(
                             store_path.parent(),
                         )
                         .await;
-                        (s, r, None)
-                    } else {
-                        // No args: inject SKILL.md body as context for next round (doc-only)
-                        match &skill_registry {
-                            Some(reg) => {
-                                if let Some(body) = reg.get_body(name).await {
-                                    (true, format!("[Skill: {}] Instructions:\n{}", name, body), None)
-                                } else {
-                                    (false, format!("[Skill: {}] No instructions body.", name), None)
-                                }
-                            }
-                            None => (false, "Skill registry not available.".to_string(), None),
-                        }
-                    }
-                } else {
-                    execute_tool_call(
-                        exec,
-                        &actual_tool,
-                        tool_args,
-                        process_registry.as_ref(),
-                        long_term_client.as_ref(),
-                        task_id,
-                        Some(store_path.as_path()),
-                        conv_tx.clone(),
-                        message_webhook_url.as_deref(),
-                        plugin_registry.as_ref(),
-                        device_bridge.as_ref(),
-                        workspace_store.as_ref(),
-                        browser_registry.as_ref(),
-                        store_path.parent(),
-                    )
-                    .await
-                };
-                if let Some(img) = captured_image {
-                    last_captured_image_base64 = Some(img);
-                }
-                if success && strict_tools_first && actual_tool.eq_ignore_ascii_case("ask_user") {
-                    if let Some(reply) = res.strip_prefix("[ask_user] User replied: ") {
-                        let reply = reply.trim();
-                        if !reply.is_empty() {
-                            strict_preferred_tool_replay_input = Some(format!(
-                                "Original user request: {}\n\nUser clarification: {}",
-                                user_message, reply
-                            ));
-                        }
-                    }
-                }
-                // Phase F: emit ToolInvoked for Actions tab (spec 33)
-                // Redact or truncate args in the event to avoid leaking large blobs or secrets.
-                let redacted_args: Vec<String> = if matches!(actual_tool.as_str(), "apply_patch" | "edit_file" | "write_file") {
-                    vec!["[redacted for write-like tool]".to_string()]
-                } else {
-                    const MAX_ARG_PREVIEW_LEN: usize = 512;
-                    tool_args.iter()
-                        .map(|arg| {
-                            if arg.len() > MAX_ARG_PREVIEW_LEN {
-                                format!("{}...[truncated {} chars]", &arg[..arg.floor_char_boundary(MAX_ARG_PREVIEW_LEN)], arg.len().saturating_sub(MAX_ARG_PREVIEW_LEN))
-                            } else {
-                                arg.clone()
-                            }
-                        })
-                        .collect()
-                };
-                let tool_display = if actual_tool.is_empty() { name.as_str() } else { actual_tool.as_str() };
-                let payload = serde_json::json!({
-                    "tool": tool_display,
-                    "skill": if &actual_tool != name { Some(name.as_str()) } else { None::<&str> },
-                    "args": redacted_args,
-                    "result_preview": if res.len() > 300 { format!("{}...", &res[..res.floor_char_boundary(300)]) } else { res.clone() },
-                    "success": success,
-                    "explanation": serde_json::Value::Null
-                });
-                let _ = bus.send(
-                    EventEnvelope::new(EventType::ToolInvoked, Some(payload)).with_correlation(timeline_correlation),
-                );
-                let _ = bus.send(
-                    EventEnvelope::new(
-                        EventType::ToolCallFinished,
-                        Some(serde_json::json!({
-                            "schema_version": 1,
+                        let result_preview = if res.chars().count() > 320 {
+                            format!("{}…", res.chars().take(320).collect::<String>())
+                        } else {
+                            res.clone()
+                        };
+                        // UI (chat) needs full plugin JSON for rich views (e.g. maps); preview is truncated.
+                        let mut milestone = serde_json::json!({
+                            "name": "deterministic_preferred_tool_result",
                             "task_id": task_id.to_string(),
-                            "call_id": call_id.to_string(),
-                            "tool": tool_display,
+                            "round": round,
+                            "tool": preferred_tool,
                             "success": success,
-                            "duration_ms": tool_t0.elapsed().as_millis() as u64,
+                            "result_preview": result_preview,
+                        });
+                        if success
+                            && preferred_tool.starts_with("maps_")
+                            && res.len() <= MAPS_RESULT_FULL_MAX
+                        {
+                            milestone["result_full"] = serde_json::Value::String(res.clone());
+                        }
+                        let _ = bus.send(
+                            EventEnvelope::new(EventType::TimelineMilestone, Some(milestone))
+                                .with_correlation(timeline_correlation),
+                        );
+                        tool_loop_history.push((
+                            preferred_tool.clone(),
+                            if success { "success" } else { "failure" }.to_string(),
+                        ));
+                        if let Some(img) = captured_image {
+                            last_captured_image_base64 = Some(img);
+                        }
+                        deterministic_results.push(res.clone());
+                        if success {
+                            strict_successful_tool_calls =
+                                strict_successful_tool_calls.saturating_add(1);
+                            log_tool_journal_if_write(preferred_tool, &auto_args, &res).await;
+                            break;
+                        }
+                    }
+                    if strict_successful_tool_calls > 0 {
+                        let results_blob = deterministic_results.join("\n");
+                        last_tool_results_blob = Some(results_blob.clone());
+                        current_prompt = format!(
+                        "User request: {}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, answer the user's request now. Do NOT reply with a promise. No TOOL: lines.",
+                        user_message,
+                        results_blob
+                    );
+                        // Continue to next round so the model synthesizes from concrete tool results.
+                        continue;
+                    }
+                    let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::TimelineMilestone,
+                        Some(serde_json::json!({
+                            "name": "deterministic_preferred_tool_no_success",
+                            "task_id": task_id.to_string(),
+                            "round": round,
+                            "attempted_tools": enforcer.preferred_tools.iter().cloned().collect::<Vec<_>>(),
                         })),
                     )
                     .with_correlation(timeline_correlation),
                 );
-                // Chat UI loads map / rich views from timeline_milestone + result_full (same as strict tools-first path).
-                if success
-                    && tool_display.starts_with("maps_")
-                    && res.len() <= 400_000usize
+                }
+            }
+
+            // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
+            if let Some(ref store) = task_usage_store {
+                let (session_tokens, session_cost) =
+                    store.get_session(&session_id).await.unwrap_or((0, 0.0));
+                if let Some(max_cost) = std::env::var("AKASHA_MAX_COST_PER_SESSION_USD")
+                    .ok()
+                    .and_then(|s| s.parse::<f64>().ok())
                 {
-                    let result_preview = if res.chars().count() > 320 {
-                        format!("{}…", res.chars().take(320).collect::<String>())
-                    } else {
-                        res.clone()
-                    };
-                    let milestone = serde_json::json!({
-                        "name": "deterministic_preferred_tool_result",
-                        "task_id": task_id.to_string(),
-                        "round": round,
-                        "tool": tool_display,
-                        "success": true,
-                        "result_preview": result_preview,
-                        "result_full": res.clone(),
-                    });
-                    let _ = bus.send(
-                        EventEnvelope::new(EventType::TimelineMilestone, Some(milestone))
-                            .with_correlation(timeline_correlation),
-                    );
-                }
-                if success {
-                    // In tools-first strict mode, ask_user is a clarification step, not
-                    // a terminal success for the primary objective. Keep strict mode active
-                    // until a non-ask_user tool actually succeeds.
-                    if !actual_tool.eq_ignore_ascii_case("ask_user") {
-                        strict_successful_tool_calls = strict_successful_tool_calls.saturating_add(1);
+                    if max_cost > 0.0 && session_cost >= max_cost {
+                        reply_text = "Budget dépassé pour cette session (AKASHA_MAX_COST_PER_SESSION_USD). Démarrez une nouvelle session ou augmentez le plafond.".to_string();
+                        break 'tool_rounds;
                     }
-                    log_tool_journal_if_write(&actual_tool, tool_args, &res).await;
                 }
-                tool_results.push(res);
+                if let Some(max_tokens) = std::env::var("AKASHA_MAX_TOKENS_PER_SESSION")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    if max_tokens > 0 && session_tokens >= max_tokens {
+                        reply_text = "Quota de tokens dépassé pour cette session (AKASHA_MAX_TOKENS_PER_SESSION). Démarrez une nouvelle session ou augmentez le plafond.".to_string();
+                        break 'tool_rounds;
+                    }
+                }
             }
+            // `task_types.image_generation` in llm_router.yaml configures the *pixel backend* for the
+            // `generate_image` tool (see image_generation.rs). Routing chat completion to that task
+            // type sends image-only models (e.g. Ollama z-image) through the text completion path, which
+            // expects a `response` string — those models return images/empty text and trigger fallback warnings.
+            // Here we always use a normal text route for the LLM turn; the tool call still uses image_generation config.
+            let router_task_type_for_llm = if preferred_task_type_override.as_deref()
+                == Some("image_generation")
+                || assigned_agent == "image_generation"
+            {
+                llm_router.resolve_task_type_for_agent("conversation")
+            } else {
+                preferred_task_type_override
+                    .clone()
+                    .unwrap_or_else(|| llm_router.resolve_task_type_for_agent(&assigned_agent))
+            };
+            let preferred_task_type = Some(router_task_type_for_llm);
+            let request = CompletionRequest {
+                prompt: if strict_mode_active {
+                    format!("{}{}", current_prompt, strict_tools_instruction)
+                } else {
+                    format!("{}{}", current_prompt, tool_instruction)
+                },
+                max_tokens: Some(max_tokens),
+                temperature: Some(0.7),
+                preferred_task_type,
+                system_prompt: system_prompt.clone(),
+                image_data_urls: if tool_loop_history.is_empty() {
+                    image_data_urls.clone()
+                } else {
+                    None
+                },
+                top_p: None,
+                top_k: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                repeat_penalty: None,
+                num_ctx: None,
+                num_gpu: None,
+                thinking_level: None,
+            };
+            // Streaming path: single forwarder thread → tokio channel (avoids spawn_blocking per chunk).
+            // Overall deadline bounds the full generation; idle timeout bounds inter-chunk wait.
+            let (stream_tx, std_rx) = std::sync::mpsc::channel::<String>();
+            let (tok_tx, mut tok_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            std::thread::Builder::new()
+                .name("akasha-stream-fwd".to_string())
+                .spawn(move || {
+                    for chunk in std_rx {
+                        if tok_tx.send(chunk).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .ok();
+            let router = llm_router.clone();
+            let stream_join =
+                tokio::spawn(async move { router.complete_stream(&request, stream_tx).await });
+            let mut accumulated = String::new();
+            let mut first_wait = true;
+            let overall_deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(llm_timeout_secs);
+            loop {
+                // Check the overall deadline before waiting for a chunk to avoid spurious zero-duration timeouts.
+                if tokio::time::Instant::now() >= overall_deadline {
+                    tracing::warn!(
+                        timeout_secs = llm_timeout_secs,
+                        "Overall LLM timeout exceeded; aborting task"
+                    );
+                    stream_join.abort();
+                    reply_text = if accumulated.is_empty() {
+                        format!("LLM response timed out after {} seconds.", llm_timeout_secs)
+                    } else {
+                        accumulated
+                    };
+                    break 'tool_rounds;
+                }
+                let idle = if first_wait {
+                    first_wait = false;
+                    std::time::Duration::from_secs(first_chunk_timeout_secs)
+                } else {
+                    std::time::Duration::from_secs(idle_timeout_secs)
+                };
+                match tokio::time::timeout(idle, tok_rx.recv()).await {
+                    Ok(Some(chunk)) => {
+                        if !first_meaningful_progress_sent && !chunk.trim().is_empty() {
+                            first_meaningful_progress_sent = true;
+                            cancel_progress_watchdog(&mut watchdog_cancel);
+                            if emit_timeline_once_for_task(
+                                &bus,
+                                Some(store_path.as_path()),
+                                task_id,
+                                "first_meaningful_progress",
+                                Some(serde_json::json!({ "source": "stream_chunk" })),
+                            ) {
+                                log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
+                            }
+                        }
+                        const MAX_ACCUMULATED: usize = 2 * 1024 * 1024; // 2 MiB cap to prevent unbounded allocation on long streams
+                        if accumulated.len() + chunk.len() > MAX_ACCUMULATED {
+                            accumulated.truncate(MAX_ACCUMULATED.saturating_sub(chunk.len()));
+                        }
+                        accumulated.push_str(&chunk);
+                        let _ = bus.send(
+                            EventEnvelope::new(
+                                EventType::ProgressUpdate,
+                                Some(serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "progress_pct": 50,
+                                    "message": accumulated
+                                })),
+                            )
+                            .with_correlation(task_id),
+                        );
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        tracing::debug!(
+                            idle_secs = idle_timeout_secs,
+                            "Stream idle timeout, waiting for final response"
+                        );
+                        break;
+                    }
+                }
             }
-            let results_blob = tool_results.join("\n");
-            last_tool_results_blob = Some(results_blob.clone());
-            if results_blob.contains("[browser] Snapshot") {
-                social_snapshot_seen = true;
+            // Wrap stream_join.await with remaining overall budget; guard against zero remaining.
+            let remaining = overall_deadline.saturating_duration_since(tokio::time::Instant::now());
+            let response = if remaining.is_zero() {
+                tracing::warn!(
+                    timeout_secs = llm_timeout_secs,
+                    "Overall LLM timeout on stream completion"
+                );
+                reply_text = if accumulated.is_empty() {
+                    format!("LLM response timed out after {} seconds.", llm_timeout_secs)
+                } else {
+                    accumulated
+                };
+                break;
+            } else {
+                match tokio::time::timeout(remaining, stream_join).await {
+                    Ok(Ok(Ok(resp))) => {
+                        last_llm_model_used = Some(resp.model_used.clone());
+                        if let Some(ref store) = task_usage_store {
+                            let tokens = resp
+                                .usage
+                                .as_ref()
+                                .map(|u| u.prompt_tokens + u.completion_tokens)
+                                .unwrap_or(0);
+                            let cost = resp.cost_usd.unwrap_or(0.0);
+                            store.add(task_id, &session_id, tokens, cost).await;
+                        }
+                        resp.text.trim().to_string()
+                    }
+                    Ok(Ok(Err(e))) => {
+                        tracing::warn!(error = %e, "LLM completion failed");
+                        reply_text = format!("Sorry, I couldn't get a response (error: {}).", e);
+                        break;
+                    }
+                    Ok(Err(join_err)) => {
+                        tracing::warn!(error = %join_err, "Stream task join failed");
+                        reply_text = if accumulated.is_empty() {
+                            format!("LLM task error: {}", join_err)
+                        } else {
+                            accumulated
+                        };
+                        break;
+                    }
+                    Err(_timeout) => {
+                        tracing::warn!(
+                            timeout_secs = llm_timeout_secs,
+                            "Overall LLM timeout on stream completion"
+                        );
+                        reply_text = if accumulated.is_empty() {
+                            format!("LLM response timed out after {} seconds.", llm_timeout_secs)
+                        } else {
+                            accumulated
+                        };
+                        break;
+                    }
+                }
+            };
+            // Some providers return the full text only in stream chunks while `resp.text` is empty, or drop `TOOL:` lines
+            // from the final body. Parsing tools only from `resp.text` then skips execution entirely (user sees text, no disk writes).
+            // Use `parse_tool_calls` (which normalizes sloppy prefixes like `- Tool:` / `**TOOL:**`) instead of a raw
+            // `contains("TOOL:")` check so that any provider-specific formatting is handled consistently.
+            let r = response.trim();
+            let a = accumulated.trim();
+            let a_has_tools = !a.is_empty() && !parse_tool_calls(a).is_empty();
+            let r_has_tools = !r.is_empty() && !parse_tool_calls(r).is_empty();
+            let merged_for_tools = if r.is_empty() && !a.is_empty() {
+                a.to_string()
+            } else if a_has_tools && !r_has_tools {
+                a.to_string()
+            } else if !r.is_empty() {
+                r.to_string()
+            } else {
+                a.to_string()
+            };
+            let response = merged_for_tools;
+
+            if let Some(intent) = small_talk_intent {
+                if response_looks_off_topic_for_small_talk(&response) {
+                    tracing::warn!(task_id = %task_id, "Small-talk guardrail triggered; suppressing off-topic/tool-heavy reply");
+                    reply_text = small_talk_fast_reply(&message, intent);
+                    break 'tool_rounds;
+                }
             }
-            let round_had_ask_user = calls.iter().any(|(name, _)| name == "ask_user");
-            let msg_social = compute_message_intent_flags(&message).social_feed_fetch;
-            let had_web_search = tool_loop_history.iter().any(|(t, _)| t == "web_search");
-            let browser_ok = tools_executor_snapshot
-                .as_ref()
-                .map(|e| e.policy.can_use_tool("browser") && e.policy.browser_enabled)
-                .unwrap_or(false);
-            let can_ws = tools_executor_snapshot
-                .as_ref()
-                .map(|e| e.policy.can_use_tool("web_search"))
-                .unwrap_or(false);
-            let can_wf = tools_executor_snapshot
-                .as_ref()
-                .map(|e| e.policy.can_use_tool("web_fetch"))
-                .unwrap_or(false);
-            let had_web_fetch = tool_loop_history.iter().any(|(t, _)| t == "web_fetch");
-            let x_profile_url = extract_x_profile_handle(&message).map(|h| format!("https://x.com/{}", h));
-            let browser_line = results_blob.contains("[browser]");
-            let navigated_ok = results_blob.contains("[browser] Navigated");
-            // Social/X: after web_search (any prior round), chain browser navigate → snapshot; ws retry if browser fails or disabled.
-            let social_pending = msg_social && had_web_search && !social_snapshot_seen;
-            let ws_count = tool_loop_history.iter().filter(|(t, _)| t == "web_search").count();
-            // Re-inject the user's request so the model always knows what to answer (avoids treating another demand or losing context).
-            current_prompt = if round_had_ask_user {
-                format!(
+
+            let parsed_tool_calls = tools_executor_snapshot.as_ref().and_then(|_| {
+                let calls = parse_tool_calls(&response);
+                if calls.is_empty() {
+                    None
+                } else {
+                    Some(calls)
+                }
+            });
+            let no_parseable_tools_this_round = parsed_tool_calls.is_none();
+            let response_plain = response
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("TOOL:"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string();
+
+            if strict_tools_first
+                && no_parseable_tools_this_round
+                && strict_successful_tool_calls == 0
+            {
+                strict_no_tool_rounds = strict_no_tool_rounds.saturating_add(1);
+                let preferred_tools_hint = runtime_tool_routing_enforcer
+                    .as_ref()
+                    .map(|e| {
+                        let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
+                        v.sort();
+                        v.join(", ")
+                    })
+                    .unwrap_or_default();
+
+                if strict_no_tool_rounds <= 1 {
+                    current_prompt = format!(
+                    "User request: {}\n\nYour previous reply:\n{}\n\nDynamic plugin routing rules are active for this request. You MUST emit TOOL lines only. Preferred tools: {}. If inputs are missing, call TOOL: ask_user with one precise question. Do NOT output prose-only answers now.",
+                    user_message,
+                    response_plain,
+                    preferred_tools_hint
+                );
+                    continue;
+                }
+
+                reply_text = format!(
+                "Impossible de répondre de façon fiable sans exécuter un outil autorisé. Outils attendus: {}. Vérifiez les règles de routage des plugins installés ou fournissez les paramètres manquants.",
+                preferred_tools_hint
+            );
+                break 'tool_rounds;
+            }
+
+            if no_parseable_tools_this_round
+                && meta_response_retry_count < 2
+                && (is_subagent || assigned_agent != "conversation" || orch_disk_deliverables)
+                && looks_like_meta_agent_response(&response_plain)
+            {
+                meta_response_retry_count += 1;
+                current_prompt = format!(
+                "User request: {}\n\nYour previous reply:\n{}\n\nThat reply was meta/instruction recitation, not actual progress on the assigned task. Do the work now. Do NOT describe your role, say you are ready, mention instructions, or narrate a generic Phase 2 plan. If files are required, start with TOOL: read_file / write_file on the exact workspace paths. If you are blocked, state only the concrete missing input or exact tool failure.",
+                user_message,
+                response_plain
+            );
+                continue;
+            }
+
+            if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls)
+            {
+                round += 1;
+                let mut tool_results = Vec::new();
+                let scheduled_lanes = akasha_tools::schedule_tool_calls(&calls);
+                for (lane, lane_calls) in scheduled_lanes {
+                    let lane_name = match lane {
+                        akasha_tools::ToolExecutionLane::ParallelSafe => "parallel_safe",
+                        akasha_tools::ToolExecutionLane::SerialExclusive => "serial_exclusive",
+                    };
+                    let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 50,
+                            "message": format!("Tool lane execution: {} ({} call(s))", lane_name, lane_calls.len())
+                        })),
+                    )
+                    .with_correlation(task_id),
+                );
+                    for (name, args) in &lane_calls {
+                        // Phase D: resolve skill name to tool_ref (spec 33)
+                        let actual_tool = match &skill_registry {
+                            Some(reg) => reg
+                                .get(name)
+                                .await
+                                .map(|s| s.tool_ref)
+                                .unwrap_or_else(|| name.clone()),
+                            None => name.clone(),
+                        };
+                        let actual_tool = canonicalize_tool_name(&actual_tool);
+                        let should_forward_user_request = strict_tools_first
+                            && args.is_empty()
+                            && !actual_tool.eq_ignore_ascii_case("ask_user")
+                            && runtime_tool_routing_enforcer
+                                .as_ref()
+                                .map(|e| e.preferred_tools.contains(&actual_tool))
+                                .unwrap_or(false);
+                        let forwarded_args: Vec<String> = if should_forward_user_request {
+                            vec![user_message.clone()]
+                        } else {
+                            args.clone()
+                        };
+                        let tool_args: &[String] = &forwarded_args;
+                        let effective_tool_for_routing = if actual_tool.is_empty() {
+                            name.as_str()
+                        } else {
+                            actual_tool.as_str()
+                        };
+                        let device_routing_bypass = intent_flags.camera_or_mic
+                            && (effective_tool_for_routing.eq_ignore_ascii_case("device_discover")
+                                || effective_tool_for_routing
+                                    .eq_ignore_ascii_case("device_invoke"));
+                        if let Some(enforcer) = &runtime_tool_routing_enforcer {
+                            if !device_routing_bypass
+                                && !enforcer.is_tool_allowed(effective_tool_for_routing, tool_args)
+                            {
+                                let blocked = format!(
+                            "[tool_blocked_by_routing_rules] tool={} blocked by dynamic plugin routing rules",
+                            effective_tool_for_routing
+                        );
+                                let payload = serde_json::json!({
+                                    "tool": effective_tool_for_routing,
+                                    "args": tool_args,
+                                    "result_preview": blocked,
+                                    "success": false,
+                                    "reason": "blocked_by_dynamic_plugin_routing_rules"
+                                });
+                                let _ = bus.send(
+                                    EventEnvelope::new(EventType::ToolInvoked, Some(payload))
+                                        .with_correlation(timeline_correlation),
+                                );
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    tool = %effective_tool_for_routing,
+                                    preferred = ?enforcer.preferred_tools,
+                                    forbidden = ?enforcer.forbidden_tools,
+                                    "Tool blocked by runtime routing enforcer"
+                                );
+                                tool_results.push(blocked);
+                                continue;
+                            }
+                        }
+                        let args_str = tool_args.join(" ");
+                        tool_loop_history.push((actual_tool.clone(), args_str.clone()));
+                        // Phase 4: loop detection — same tool+args repeated 3 times
+                        if tool_loop_history.len() >= 3 {
+                            let last = tool_loop_history.last().unwrap();
+                            if tool_loop_history
+                                .iter()
+                                .rev()
+                                .take(3)
+                                .all(|e| e.0 == last.0 && e.1 == last.1)
+                            {
+                                reply_text =
+                                    "Loop detected: same tool and arguments repeated. Stopping."
+                                        .to_string();
+                                break 'tool_rounds;
+                            }
+                        }
+                        // User-friendly progress at key step: what we are doing right now (use skill name when actual_tool is empty, e.g. bankr skill).
+                        let display_tool = if actual_tool.is_empty() {
+                            name.as_str()
+                        } else {
+                            &actual_tool
+                        };
+                        let progress_msg = progress_message_for_tool(display_tool, tool_args);
+                        if !first_meaningful_progress_sent {
+                            first_meaningful_progress_sent = true;
+                            cancel_progress_watchdog(&mut watchdog_cancel);
+                            if emit_timeline_once_for_task(
+                                &bus,
+                                Some(store_path.as_path()),
+                                task_id,
+                                "first_meaningful_progress",
+                                Some(serde_json::json!({
+                                    "source": "tool_progress",
+                                    "tool": display_tool,
+                                })),
+                            ) {
+                                log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
+                            }
+                        }
+                        let _ = bus.send(
+                            EventEnvelope::new(
+                                EventType::ProgressUpdate,
+                                Some(serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "progress_pct": 50,
+                                    "message": progress_msg
+                                })),
+                            )
+                            .with_correlation(task_id),
+                        );
+                        // Phase 3.1: tools in require_approval need user confirmation before execution.
+                        if exec.policy.requires_approval(&actual_tool) {
+                            match &human_input_store {
+                                Some(store) => {
+                                    const APPROVAL_TIMEOUT_SECS: u64 = 300;
+                                    // Redact write-like tool args entirely; truncate others to avoid leaking secrets/blobs.
+                                    const MAX_APPROVAL_ARG_LEN: usize = 80;
+                                    let args_preview: String = if matches!(
+                                        actual_tool.as_str(),
+                                        "apply_patch" | "edit_file" | "write_file"
+                                    ) {
+                                        "[redacted]".to_string()
+                                    } else {
+                                        let truncated: Vec<String> = tool_args
+                                            .iter()
+                                            .take(3)
+                                            .map(|a| {
+                                                if a.chars().count() > MAX_APPROVAL_ARG_LEN {
+                                                    format!(
+                                                        "{}…",
+                                                        a.chars()
+                                                            .take(MAX_APPROVAL_ARG_LEN)
+                                                            .collect::<String>()
+                                                    )
+                                                } else {
+                                                    a.clone()
+                                                }
+                                            })
+                                            .collect();
+                                        let suffix = if tool_args.len() > 3 {
+                                            format!(" … ({} args)", tool_args.len())
+                                        } else {
+                                            String::new()
+                                        };
+                                        truncated.join(" ") + &suffix
+                                    };
+                                    let question = format!(
+                                        "Approuver l'action : {} — {} ?",
+                                        actual_tool, args_preview
+                                    );
+                                    let choices =
+                                        vec!["Approuver".to_string(), "Refuser".to_string()];
+                                    let (tx, rx) = tokio::sync::oneshot::channel();
+                                    let pending = PendingHumanInput {
+                                        question: question.clone(),
+                                        context: format!(
+                                            "Outil sensible (nécessite confirmation) : {}",
+                                            actual_tool
+                                        ),
+                                        choices: Some(choices.clone()),
+                                        response_tx: tx,
+                                    };
+                                    {
+                                        let mut g = store.write().await;
+                                        g.insert(task_id, pending);
+                                    }
+                                    let payload = serde_json::json!({
+                                        "task_id": task_id.to_string(),
+                                        "question": question,
+                                        "context": format!("Outil : {}", actual_tool),
+                                        "choices": choices,
+                                        "tool_approval": true
+                                    });
+                                    let _ = bus.send(
+                                        EventEnvelope::new(
+                                            EventType::TaskWaitingUserInput,
+                                            Some(payload.clone()),
+                                        )
+                                        .with_correlation(task_id),
+                                    );
+                                    let approval_payload = serde_json::json!({
+                                        "tool": actual_tool,
+                                        "args_redacted": args_preview,
+                                        "task_id": task_id.to_string()
+                                    });
+                                    let _ = bus.send(
+                                        EventEnvelope::new(
+                                            EventType::ToolApprovalRequest,
+                                            Some(approval_payload),
+                                        )
+                                        .with_correlation(task_id),
+                                    );
+                                    let granted = match tokio::time::timeout(
+                                        std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS),
+                                        rx,
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(reply)) => {
+                                            reply.trim().eq_ignore_ascii_case("Approuver")
+                                        }
+                                        _ => {
+                                            // Timeout or channel error: remove stale pending entry to avoid it staying forever.
+                                            {
+                                                let mut g = store.write().await;
+                                                g.remove(&task_id);
+                                            }
+                                            let expired_payload = serde_json::json!({
+                                                "task_id": task_id.to_string(),
+                                                "tool": actual_tool,
+                                            });
+                                            let _ = bus.send(
+                                                EventEnvelope::new(
+                                                    EventType::ToolApprovalExpired,
+                                                    Some(expired_payload),
+                                                )
+                                                .with_correlation(task_id),
+                                            );
+                                            false
+                                        }
+                                    };
+                                    if !granted {
+                                        tool_results.push("Action refusée par l'utilisateur (approbation requise).".to_string());
+                                        let payload = serde_json::json!({
+                                            "tool": actual_tool,
+                                            "approved": false
+                                        });
+                                        let _ = bus.send(
+                                            EventEnvelope::new(
+                                                EventType::ToolInvoked,
+                                                Some(payload),
+                                            )
+                                            .with_correlation(timeline_correlation),
+                                        );
+                                        continue;
+                                    }
+                                }
+                                None => {
+                                    tool_results.push("Action nécessitant approbation impossible (human_input_store indisponible).".to_string());
+                                    continue;
+                                }
+                            }
+                        }
+                        let tool_t0 = std::time::Instant::now();
+                        let call_id = Uuid::new_v4();
+                        let args_preview_tc: String = {
+                            const L: usize = 100;
+                            args.iter()
+                                .take(3)
+                                .map(|a| {
+                                    if a.len() > L {
+                                        format!("{}…", &a[..a.floor_char_boundary(L)])
+                                    } else {
+                                        a.clone()
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        };
+                        let _ = bus.send(
+                            EventEnvelope::new(
+                                EventType::ToolCallStarted,
+                                Some(serde_json::json!({
+                                    "schema_version": 1,
+                                    "task_id": task_id.to_string(),
+                                    "call_id": call_id.to_string(),
+                                    "tool": display_tool,
+                                    "args_preview": args_preview_tc,
+                                })),
+                            )
+                            .with_correlation(timeline_correlation),
+                        );
+                        let (success, res, captured_image): (bool, String, Option<String>) =
+                            if actual_tool == "ask_user" {
+                                // Human in the loop: register pending request, emit event, wait for user reply.
+                                match &human_input_store {
+                                    Some(store) => {
+                                        let body_joined_string = args.join(" ");
+                                        let body = body_joined_string.trim();
+                                        let body = if body.is_empty() { "{}" } else { body };
+                                        let v =
+                                            serde_json::from_str::<serde_json::Value>(body).ok();
+                                        let (question, context, choices) = match &v {
+                                            Some(v) => (
+                                                v.get("question")
+                                                    .and_then(|q| q.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string(),
+                                                v.get("context")
+                                                    .and_then(|c| c.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string(),
+                                                v.get("choices").and_then(|c| c.as_array()).map(
+                                                    |a| {
+                                                        a.iter()
+                                                            .filter_map(|x| {
+                                                                x.as_str().map(String::from)
+                                                            })
+                                                            .collect::<Vec<_>>()
+                                                    },
+                                                ),
+                                            ),
+                                            None => (body.to_string(), String::new(), None),
+                                        };
+                                        if question.is_empty() {
+                                            (false, format!("[ask_user] invalid JSON: question required. Got: {}", body.chars().take(100).collect::<String>()), None)
+                                        } else {
+                                            let (tx, rx) = tokio::sync::oneshot::channel();
+                                            let pending = PendingHumanInput {
+                                                question: question.clone(),
+                                                context: context.clone(),
+                                                choices: choices.clone(),
+                                                response_tx: tx,
+                                            };
+                                            {
+                                                let mut g = store.write().await;
+                                                g.insert(task_id, pending);
+                                            }
+                                            let payload = serde_json::json!({
+                                                "task_id": task_id.to_string(),
+                                                "question": question,
+                                                "context": context,
+                                                "choices": choices
+                                            });
+                                            let _ = bus.send(
+                                                EventEnvelope::new(
+                                                    EventType::TaskWaitingUserInput,
+                                                    Some(payload),
+                                                )
+                                                .with_correlation(task_id),
+                                            );
+                                            const HUMAN_INPUT_TIMEOUT_SECS: u64 = 3600;
+                                            match tokio::time::timeout(
+                                                std::time::Duration::from_secs(
+                                                    HUMAN_INPUT_TIMEOUT_SECS,
+                                                ),
+                                                rx,
+                                            )
+                                            .await
+                                            {
+                                                Ok(Ok(reply)) => (
+                                                    true,
+                                                    format!("[ask_user] User replied: {}", reply),
+                                                    None,
+                                                ),
+                                                Ok(Err(_)) => {
+                                                    let mut g = store.write().await;
+                                                    g.remove(&task_id);
+                                                    (
+                                                        false,
+                                                        "[ask_user] Channel closed.".to_string(),
+                                                        None,
+                                                    )
+                                                }
+                                                Err(_) => {
+                                                    let mut g = store.write().await;
+                                                    g.remove(&task_id);
+                                                    (false, format!("[ask_user] Timeout after {}s; no user reply.", HUMAN_INPUT_TIMEOUT_SECS), None)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    None => (
+                                        false,
+                                        "[ask_user] Human-in-the-loop not available.".to_string(),
+                                        None,
+                                    ),
+                                }
+                            } else if actual_tool == "delegate_to_agent" {
+                                match &delegation_tx {
+                                    Some(tx) => {
+                                        let (reply_tx, reply_rx) = oneshot::channel();
+                                        let agent_type = args
+                                            .get(0)
+                                            .cloned()
+                                            .unwrap_or_else(|| "conversation".to_string());
+                                        let message =
+                                            args.get(1..).map(|a| a.join(" ")).unwrap_or_else(
+                                                || args.get(0).cloned().unwrap_or_default(),
+                                            );
+                                        if tx
+                                            .send(DelegationRequest {
+                                                requesting_task_id: task_id,
+                                                agent_type,
+                                                message,
+                                                reply_tx,
+                                            })
+                                            .await
+                                            .is_ok()
+                                        {
+                                            match tokio::time::timeout(
+                                                std::time::Duration::from_secs(310),
+                                                reply_rx,
+                                            )
+                                            .await
+                                            {
+                                                Ok(Ok(Ok(msg))) => (
+                                                    true,
+                                                    format!("[delegate_to_agent] {}", msg),
+                                                    None,
+                                                ),
+                                                Ok(Ok(Err(e))) => (
+                                                    false,
+                                                    format!("[delegate_to_agent] {}", e),
+                                                    None,
+                                                ),
+                                                _ => (
+                                                    false,
+                                                    "[delegate_to_agent] timeout or channel closed"
+                                                        .to_string(),
+                                                    None,
+                                                ),
+                                            }
+                                        } else {
+                                            (
+                                                false,
+                                                "[delegate_to_agent] channel closed".to_string(),
+                                                None,
+                                            )
+                                        }
+                                    }
+                                    None => (
+                                        false,
+                                        "[delegate_to_agent] not available".to_string(),
+                                        None,
+                                    ),
+                                }
+                            } else if actual_tool == "install_skill" {
+                                let url = args.get(0).map(String::as_str).unwrap_or("").trim();
+                                if url.is_empty() {
+                                    (false, "[install_skill] usage: install_skill <url> (ex. https://github.com/BankrBot/skills/tree/main/bankr ou toute URL HTTPS autorisée dans tools_policy allowed_skill_install_hosts)".to_string(), None)
+                                } else {
+                                    let data_dir =
+                                        store_path.parent().unwrap_or_else(|| store_path.as_ref());
+                                    let allowed_hosts = exec.policy.skill_install_allowed_hosts();
+                                    let tools_reload = tools_executor.as_ref().and_then(|arc| {
+                                        tools_policy_path.as_ref().map(|p| (arc, p.as_path()))
+                                    });
+                                    match &skill_registry {
+                                        Some(reg) => {
+                                            let (s, r) = do_install_skill(
+                                                url,
+                                                data_dir,
+                                                &spec_dir,
+                                                reg,
+                                                &allowed_hosts,
+                                                tools_reload,
+                                            )
+                                            .await;
+                                            (s, r, None)
+                                        }
+                                        None => (
+                                            false,
+                                            "[install_skill] skill registry not available"
+                                                .to_string(),
+                                            None,
+                                        ),
+                                    }
+                                }
+                            } else if actual_tool == "uninstall_skill" {
+                                let skill_name =
+                                    tool_args.get(0).map(String::as_str).unwrap_or("").trim();
+                                let data_dir =
+                                    store_path.parent().unwrap_or_else(|| store_path.as_ref());
+                                let tools_reload = tools_executor.as_ref().and_then(|arc| {
+                                    tools_policy_path.as_ref().map(|p| (arc, p.as_path()))
+                                });
+                                match &skill_registry {
+                                    Some(reg) => {
+                                        let (s, r) = do_uninstall_skill(
+                                            skill_name,
+                                            data_dir,
+                                            &spec_dir,
+                                            reg,
+                                            tools_reload,
+                                        )
+                                        .await;
+                                        (s, r, None)
+                                    }
+                                    None => (
+                                        false,
+                                        "[uninstall_skill] skill registry not available"
+                                            .to_string(),
+                                        None,
+                                    ),
+                                }
+                            } else if actual_tool == "write_todos" {
+                                let payload = args.join(" ").trim().to_string();
+                                match TaskStore::open(&store_path) {
+                                    Ok(store) => {
+                                        let todos = parse_todos_from_payload(&payload);
+                                        if let Err(e) = store.set_todos(task_id, &todos) {
+                                            (false, format!("[write_todos] error: {}", e), None)
+                                        } else {
+                                            let payload_json = serde_json::json!({
+                                                "task_id": task_id.to_string(),
+                                                "todos": todos.iter().map(|t| serde_json::json!({ "id": t.id, "title": t.title, "status": t.status.as_str() })).collect::<Vec<_>>()
+                                            });
+                                            let _ = bus.send(
+                                                EventEnvelope::new(
+                                                    EventType::TodoListUpdated,
+                                                    Some(payload_json),
+                                                )
+                                                .with_correlation(task_id),
+                                            );
+                                            (
+                                                true,
+                                                format!(
+                                                    "[write_todos] {} step(s) saved.",
+                                                    todos.len()
+                                                ),
+                                                None,
+                                            )
+                                        }
+                                    }
+                                    Err(e) => {
+                                        (false, format!("[write_todos] store error: {}", e), None)
+                                    }
+                                }
+                            } else if actual_tool == "merge_todos" {
+                                let payload = args.join(" ").trim().to_string();
+                                match TaskStore::open(&store_path) {
+                                    Ok(store) => {
+                                        match store.merge_todos_from_payload(task_id, &payload) {
+                                            Ok(todos) => {
+                                                let payload_json = serde_json::json!({
+                                                    "task_id": task_id.to_string(),
+                                                    "todos": todos.iter().map(|t| serde_json::json!({ "id": t.id, "title": t.title, "status": t.status.as_str() })).collect::<Vec<_>>()
+                                                });
+                                                let _ = bus.send(
+                                                    EventEnvelope::new(
+                                                        EventType::TodoListUpdated,
+                                                        Some(payload_json),
+                                                    )
+                                                    .with_correlation(task_id),
+                                                );
+                                                (
+                                                    true,
+                                                    format!(
+                                                        "[merge_todos] list now has {} step(s).",
+                                                        todos.len()
+                                                    ),
+                                                    None,
+                                                )
+                                            }
+                                            Err(e) => {
+                                                (false, format!("[merge_todos] error: {}", e), None)
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        (false, format!("[merge_todos] store error: {}", e), None)
+                                    }
+                                }
+                            } else if actual_tool == "read_todos" {
+                                match TaskStore::open(&store_path) {
+                                    Ok(store) => match store.get_todos(task_id) {
+                                        Ok(todos) => {
+                                            let summary: Vec<serde_json::Value> = todos.iter().enumerate().map(|(i, t)| {
+                                    serde_json::json!({ "index": i + 1, "title": t.title, "status": t.status.as_str() })
+                                }).collect();
+                                            (
+                                                true,
+                                                format!(
+                                                    "[read_todos] {} step(s): {}",
+                                                    todos.len(),
+                                                    serde_json::to_string(&summary)
+                                                        .unwrap_or_default()
+                                                ),
+                                                None,
+                                            )
+                                        }
+                                        Err(e) => {
+                                            (false, format!("[read_todos] error: {}", e), None)
+                                        }
+                                    },
+                                    Err(e) => {
+                                        (false, format!("[read_todos] store error: {}", e), None)
+                                    }
+                                }
+                            } else if actual_tool == "update_todo" {
+                                let index_str =
+                                    args.get(0).map(String::as_str).unwrap_or("").trim();
+                                let status_str =
+                                    args.get(1).map(String::as_str).unwrap_or("pending").trim();
+                                let index: usize = index_str.parse().unwrap_or(0);
+                                match TaskStore::open(&store_path) {
+                                    Ok(store) => {
+                                        match store.get_todos(task_id) {
+                                            Ok(mut todos) => {
+                                                if index == 0 || index > todos.len() {
+                                                    (false, format!("[update_todo] invalid index (1..{}): {}", todos.len(), index_str), None)
+                                                } else {
+                                                    let status =
+                                                        match status_str.to_lowercase().as_str() {
+                                                            "done" => TodoStatus::Done,
+                                                            "cancelled" => TodoStatus::Cancelled,
+                                                            _ => TodoStatus::Pending,
+                                                        };
+                                                    todos[index - 1].status = status;
+                                                    if let Err(e) = store.set_todos(task_id, &todos)
+                                                    {
+                                                        (
+                                                            false,
+                                                            format!("[update_todo] error: {}", e),
+                                                            None,
+                                                        )
+                                                    } else {
+                                                        let payload_json = serde_json::json!({
+                                                            "task_id": task_id.to_string(),
+                                                            "todos": todos.iter().map(|t| serde_json::json!({ "id": t.id, "title": t.title, "status": t.status.as_str() })).collect::<Vec<_>>()
+                                                        });
+                                                        let _ = bus.send(
+                                                            EventEnvelope::new(
+                                                                EventType::TodoListUpdated,
+                                                                Some(payload_json),
+                                                            )
+                                                            .with_correlation(task_id),
+                                                        );
+                                                        (
+                                                            true,
+                                                            format!(
+                                                                "[update_todo] step {} set to {}.",
+                                                                index, status_str
+                                                            ),
+                                                            None,
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                (false, format!("[update_todo] error: {}", e), None)
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        (false, format!("[update_todo] store error: {}", e), None)
+                                    }
+                                }
+                            } else if actual_tool == "list_skills" {
+                                match &skill_registry {
+                                    Some(reg) => {
+                                        let list = reg.list().await;
+                                        let summary: Vec<String> = list
+                                            .iter()
+                                            .map(|s| format!("{}: {}", s.name, s.description))
+                                            .collect();
+                                        (
+                                            true,
+                                            format!(
+                                                "[list_skills] {} skill(s): {}",
+                                                list.len(),
+                                                summary.join(" ; ")
+                                            ),
+                                            None,
+                                        )
+                                    }
+                                    None => (
+                                        false,
+                                        "[list_skills] skill registry not available.".to_string(),
+                                        None,
+                                    ),
+                                }
+                            } else if actual_tool == "read_skill" {
+                                let skill_name =
+                                    tool_args.get(0).map(String::as_str).unwrap_or("").trim();
+                                if skill_name.is_empty() {
+                                    (
+                                        false,
+                                        "[read_skill] usage: read_skill <name>".to_string(),
+                                        None,
+                                    )
+                                } else {
+                                    match &skill_registry {
+                                        Some(reg) => {
+                                            if let Some(body) = reg.get_body(skill_name).await {
+                                                (
+                                                    true,
+                                                    format!(
+                                                        "[read_skill {}] Instructions:\n{}",
+                                                        skill_name, body
+                                                    ),
+                                                    None,
+                                                )
+                                            } else {
+                                                (false, format!("[read_skill] skill '{}' not found or has no body.", skill_name), None)
+                                            }
+                                        }
+                                        None => (
+                                            false,
+                                            "[read_skill] skill registry not available."
+                                                .to_string(),
+                                            None,
+                                        ),
+                                    }
+                                }
+                            } else if actual_tool.is_empty() {
+                                // Skill with no tool_ref: if args provided, run as run_command(skill_name, ...args) (e.g. bankr whoami)
+                                if !tool_args.is_empty() {
+                                    let run_args: Vec<String> = std::iter::once(name.clone())
+                                        .chain(tool_args.iter().cloned())
+                                        .collect();
+                                    let (s, r, _) = execute_tool_call(
+                                        exec,
+                                        "run_command",
+                                        &run_args,
+                                        process_registry.as_ref(),
+                                        long_term_client.as_ref(),
+                                        task_id,
+                                        Some(store_path.as_path()),
+                                        conv_tx.clone(),
+                                        message_webhook_url.as_deref(),
+                                        plugin_registry.as_ref(),
+                                        device_bridge.as_ref(),
+                                        workspace_store.as_ref(),
+                                        browser_registry.as_ref(),
+                                        store_path.parent(),
+                                    )
+                                    .await;
+                                    (s, r, None)
+                                } else {
+                                    // No args: inject SKILL.md body as context for next round (doc-only)
+                                    match &skill_registry {
+                                        Some(reg) => {
+                                            if let Some(body) = reg.get_body(name).await {
+                                                (
+                                                    true,
+                                                    format!(
+                                                        "[Skill: {}] Instructions:\n{}",
+                                                        name, body
+                                                    ),
+                                                    None,
+                                                )
+                                            } else {
+                                                (
+                                                    false,
+                                                    format!(
+                                                        "[Skill: {}] No instructions body.",
+                                                        name
+                                                    ),
+                                                    None,
+                                                )
+                                            }
+                                        }
+                                        None => (
+                                            false,
+                                            "Skill registry not available.".to_string(),
+                                            None,
+                                        ),
+                                    }
+                                }
+                            } else {
+                                execute_tool_call(
+                                    exec,
+                                    &actual_tool,
+                                    tool_args,
+                                    process_registry.as_ref(),
+                                    long_term_client.as_ref(),
+                                    task_id,
+                                    Some(store_path.as_path()),
+                                    conv_tx.clone(),
+                                    message_webhook_url.as_deref(),
+                                    plugin_registry.as_ref(),
+                                    device_bridge.as_ref(),
+                                    workspace_store.as_ref(),
+                                    browser_registry.as_ref(),
+                                    store_path.parent(),
+                                )
+                                .await
+                            };
+                        if let Some(img) = captured_image {
+                            last_captured_image_base64 = Some(img);
+                        }
+                        if success
+                            && strict_tools_first
+                            && actual_tool.eq_ignore_ascii_case("ask_user")
+                        {
+                            if let Some(reply) = res.strip_prefix("[ask_user] User replied: ") {
+                                let reply = reply.trim();
+                                if !reply.is_empty() {
+                                    strict_preferred_tool_replay_input = Some(format!(
+                                        "Original user request: {}\n\nUser clarification: {}",
+                                        user_message, reply
+                                    ));
+                                }
+                            }
+                        }
+                        // Phase F: emit ToolInvoked for Actions tab (spec 33)
+                        // Redact or truncate args in the event to avoid leaking large blobs or secrets.
+                        let redacted_args: Vec<String> = if matches!(
+                            actual_tool.as_str(),
+                            "apply_patch" | "edit_file" | "write_file"
+                        ) {
+                            vec!["[redacted for write-like tool]".to_string()]
+                        } else {
+                            const MAX_ARG_PREVIEW_LEN: usize = 512;
+                            tool_args
+                                .iter()
+                                .map(|arg| {
+                                    if arg.len() > MAX_ARG_PREVIEW_LEN {
+                                        format!(
+                                            "{}...[truncated {} chars]",
+                                            &arg[..arg.floor_char_boundary(MAX_ARG_PREVIEW_LEN)],
+                                            arg.len().saturating_sub(MAX_ARG_PREVIEW_LEN)
+                                        )
+                                    } else {
+                                        arg.clone()
+                                    }
+                                })
+                                .collect()
+                        };
+                        let tool_display = if actual_tool.is_empty() {
+                            name.as_str()
+                        } else {
+                            actual_tool.as_str()
+                        };
+                        let payload = serde_json::json!({
+                            "tool": tool_display,
+                            "skill": if &actual_tool != name { Some(name.as_str()) } else { None::<&str> },
+                            "args": redacted_args,
+                            "result_preview": if res.len() > 300 { format!("{}...", &res[..res.floor_char_boundary(300)]) } else { res.clone() },
+                            "success": success,
+                            "explanation": serde_json::Value::Null
+                        });
+                        let _ = bus.send(
+                            EventEnvelope::new(EventType::ToolInvoked, Some(payload))
+                                .with_correlation(timeline_correlation),
+                        );
+                        let _ = bus.send(
+                            EventEnvelope::new(
+                                EventType::ToolCallFinished,
+                                Some(serde_json::json!({
+                                    "schema_version": 1,
+                                    "task_id": task_id.to_string(),
+                                    "call_id": call_id.to_string(),
+                                    "tool": tool_display,
+                                    "success": success,
+                                    "duration_ms": tool_t0.elapsed().as_millis() as u64,
+                                })),
+                            )
+                            .with_correlation(timeline_correlation),
+                        );
+                        // Chat UI loads map / rich views from timeline_milestone + result_full (same as strict tools-first path).
+                        if success && tool_display.starts_with("maps_") && res.len() <= 400_000usize
+                        {
+                            let result_preview = if res.chars().count() > 320 {
+                                format!("{}…", res.chars().take(320).collect::<String>())
+                            } else {
+                                res.clone()
+                            };
+                            let milestone = serde_json::json!({
+                                "name": "deterministic_preferred_tool_result",
+                                "task_id": task_id.to_string(),
+                                "round": round,
+                                "tool": tool_display,
+                                "success": true,
+                                "result_preview": result_preview,
+                                "result_full": res.clone(),
+                            });
+                            let _ = bus.send(
+                                EventEnvelope::new(EventType::TimelineMilestone, Some(milestone))
+                                    .with_correlation(timeline_correlation),
+                            );
+                        }
+                        if success {
+                            // In tools-first strict mode, ask_user is a clarification step, not
+                            // a terminal success for the primary objective. Keep strict mode active
+                            // until a non-ask_user tool actually succeeds.
+                            if !actual_tool.eq_ignore_ascii_case("ask_user") {
+                                strict_successful_tool_calls =
+                                    strict_successful_tool_calls.saturating_add(1);
+                            }
+                            log_tool_journal_if_write(&actual_tool, tool_args, &res).await;
+                        }
+                        tool_results.push(res);
+                    }
+                }
+                let results_blob = tool_results.join("\n");
+                last_tool_results_blob = Some(results_blob.clone());
+                if results_blob.contains("[browser] Snapshot") {
+                    social_snapshot_seen = true;
+                }
+                let round_had_ask_user = calls.iter().any(|(name, _)| name == "ask_user");
+                let msg_social = compute_message_intent_flags(&message).social_feed_fetch;
+                let had_web_search = tool_loop_history.iter().any(|(t, _)| t == "web_search");
+                let browser_ok = tools_executor_snapshot
+                    .as_ref()
+                    .map(|e| e.policy.can_use_tool("browser") && e.policy.browser_enabled)
+                    .unwrap_or(false);
+                let can_ws = tools_executor_snapshot
+                    .as_ref()
+                    .map(|e| e.policy.can_use_tool("web_search"))
+                    .unwrap_or(false);
+                let can_wf = tools_executor_snapshot
+                    .as_ref()
+                    .map(|e| e.policy.can_use_tool("web_fetch"))
+                    .unwrap_or(false);
+                let had_web_fetch = tool_loop_history.iter().any(|(t, _)| t == "web_fetch");
+                let x_profile_url =
+                    extract_x_profile_handle(&message).map(|h| format!("https://x.com/{}", h));
+                let browser_line = results_blob.contains("[browser]");
+                let navigated_ok = results_blob.contains("[browser] Navigated");
+                // Social/X: after web_search (any prior round), chain browser navigate → snapshot; ws retry if browser fails or disabled.
+                let social_pending = msg_social && had_web_search && !social_snapshot_seen;
+                let ws_count = tool_loop_history
+                    .iter()
+                    .filter(|(t, _)| t == "web_search")
+                    .count();
+                // Re-inject the user's request so the model always knows what to answer (avoids treating another demand or losing context).
+                current_prompt = if round_had_ask_user {
+                    format!(
                     "User request (PRIMARY — you must still fulfill this): {}\n\nYour previous assistant reply:\n{}\n\nask_user step result (user's choice; may be unrelated to the primary request):\n{}\n\nContinue the task. If the PRIMARY request is not satisfied yet, you MUST emit TOOL: lines next (web_search, web_fetch, browser navigate + browser snapshot, etc.). Do not reply \"blocked\" or \"no information\" without trying web_search first. When the primary request is fully answered, reply in plain text only (no TOOL: lines).",
                     user_message, response, results_blob
                 )
-            } else if social_pending && browser_ok && navigated_ok {
-                format!(
+                } else if social_pending && browser_ok && navigated_ok {
+                    format!(
                     "User request: {}\n\nYour previous reply:\n{}\n\nTool results (this round):\n{}\n\nThe profile page is open. Run TOOL: browser snapshot now, then answer in plain text with the latest posts visible in the snapshot.",
                     user_message, response, results_blob
                 )
-            } else if social_pending && browser_ok && !browser_line {
-                format!(
+                } else if social_pending && browser_ok && !browser_line {
+                    format!(
                     "User request: {}\n\nYour previous reply:\n{}\n\nTool results so far:\n{}\n\nSearch snippets may be the wrong account. Run TOOL: browser navigate https://x.com/<handle> (exact @handle from the user message) then TOOL: browser snapshot. Plain-text answer only after snapshot.",
                     user_message, response, results_blob
                 )
-            } else if social_pending && browser_ok && browser_line && !navigated_ok && can_ws {
-                format!(
+                } else if social_pending && browser_ok && browser_line && !navigated_ok && can_ws {
+                    format!(
                     "User request: {}\n\nYour previous reply:\n{}\n\nTool results:\n{}\n\nBrowser step failed or was blocked. Emit TOOL: web_search with the exact handle (e.g. site:x.com akasha_anthiam). If web_search already failed twice ({} calls), answer in plain text with limitations.",
                     user_message, response, results_blob, ws_count
                 )
-            } else if social_pending && !browser_ok && can_wf && x_profile_url.is_some() && !had_web_fetch {
-                format!(
+                } else if social_pending
+                    && !browser_ok
+                    && can_wf
+                    && x_profile_url.is_some()
+                    && !had_web_fetch
+                {
+                    format!(
                     "User request: {}\n\nYour previous reply:\n{}\n\nTool results so far:\n{}\n\nWeb search often returns the wrong X account. Fetch the exact profile HTML: TOOL: web_fetch {}\nThen, if the HTML is a login wall or has no post text, say so. Otherwise quote only text that appears in the fetch result. Emit TOOL: web_fetch now (one URL only).",
                     user_message,
                     response,
                     results_blob,
                     x_profile_url.as_deref().unwrap_or("https://x.com/")
                 )
-            } else if social_pending && !browser_ok && can_ws && ws_count < 2 {
-                format!(
+                } else if social_pending && !browser_ok && can_ws && ws_count < 2 {
+                    format!(
                     "User request: {}\n\nYour previous reply:\n{}\n\nTool results:\n{}\n\nEmit TOOL: web_search including the EXACT @handle (e.g. site:x.com handle posts). Then answer from results or explain if impossible.",
                     user_message, response, results_blob
                 )
-            } else if social_pending && !browser_ok && ws_count >= 2 {
-                format!(
+                } else if social_pending && !browser_ok && ws_count >= 2 {
+                    format!(
                     "User request: {}\n\nTool attempts (summary):\n{}\n\nSTOP: Do NOT invent or fabricate tweet/post text. Reply in plain text ONLY (no TOOL: lines):\n- State that automated retrieval did not reliably return the 3 latest posts for the handle the user asked for (X blocks many scrapers; search snippets often mismatch the account).\n- To get a real timeline in Akasha: set browser_enabled: true in tools_policy.yaml, install Playwright (npx playwright install chromium in scripts/playwright-runner), then ask again — the agent can use browser navigate + snapshot.\n- Optionally give the direct link https://x.com/{} for manual viewing.\n- You may list only URLs or titles that literally appeared in the tool output above — never make up post bodies.",
                     user_message,
                     results_blob,
                     extract_x_profile_handle(&message).as_deref().unwrap_or("handle")
                 )
-            } else {
-                format!(
+                } else {
+                    format!(
                     "User request: {}\n\nYour previous reply:\n{}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, answer the user's request now. Do NOT reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"). The task ends after this message — give the actual answer (e.g. weather forecast, search summary). No TOOL: lines.",
                     user_message, response, results_blob
                 )
-            };
-            if round >= max_tool_rounds {
-                let response_for_user = response
-                    .lines()
-                    .filter(|l| !l.trim_start().starts_with("TOOL:"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                    .trim()
-                    .to_string();
-                let limit_msg = if tool_results.iter().any(|r| r.contains("device_invoke") && (r.contains("timeout") || r.contains("refused"))) {
-                    "L'accès à l'appareil (caméra/micro) a expiré ou a été refusé. Vous pouvez réessayer en renvoyant votre demande."
-                } else if tool_results.iter().any(|r| r.contains("generate_image") && r.contains("générée")) {
-                    "Image générée."
-                } else if tool_results.iter().any(|r| r.contains("speech_synthesize") && r.contains("synthétisé")) {
-                    "Audio synthétisé."
-                } else if tool_results.iter().any(|r| r.contains("device_invoke") && r.contains("success")) {
-                    "Photo reçue."
-                } else {
-                    "Limite de tours d'outils atteinte."
                 };
-                let image_md = last_captured_image_base64.as_ref()
-                    .filter(|b| !b.is_empty())
-                    .map(|b| {
-                        let url = if b.starts_with("data:") { b.clone() } else { format!("data:image/jpeg;base64,{}", b) };
-                        let label = if url.starts_with("data:audio/") { "Audio synthétisé" } else if b.starts_with("data:") { "Image générée" } else { "Photo capturée" };
-                        build_image_markdown(&label, &url)
-                    })
-                    .unwrap_or_default();
-                let response_clean = ensure_no_open_code_block(&response_for_user);
-                let default_reply = if response_for_user.is_empty() {
-                    format!("{}{}", limit_msg, image_md)
-                } else {
-                    format!("{}\n\n[{}]{}", response_clean, limit_msg, image_md)
-                };
+                if round >= max_tool_rounds {
+                    let response_for_user = response
+                        .lines()
+                        .filter(|l| !l.trim_start().starts_with("TOOL:"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .trim()
+                        .to_string();
+                    let limit_msg = if tool_results.iter().any(|r| {
+                        r.contains("device_invoke")
+                            && (r.contains("timeout") || r.contains("refused"))
+                    }) {
+                        "L'accès à l'appareil (caméra/micro) a expiré ou a été refusé. Vous pouvez réessayer en renvoyant votre demande."
+                    } else if tool_results
+                        .iter()
+                        .any(|r| r.contains("generate_image") && r.contains("générée"))
+                    {
+                        "Image générée."
+                    } else if tool_results
+                        .iter()
+                        .any(|r| r.contains("speech_synthesize") && r.contains("synthétisé"))
+                    {
+                        "Audio synthétisé."
+                    } else if tool_results
+                        .iter()
+                        .any(|r| r.contains("device_invoke") && r.contains("success"))
+                    {
+                        "Photo reçue."
+                    } else {
+                        "Limite de tours d'outils atteinte."
+                    };
+                    let image_md = last_captured_image_base64
+                        .as_ref()
+                        .filter(|b| !b.is_empty())
+                        .map(|b| {
+                            let url = if b.starts_with("data:") {
+                                b.clone()
+                            } else {
+                                format!("data:image/jpeg;base64,{}", b)
+                            };
+                            let label = if url.starts_with("data:audio/") {
+                                "Audio synthétisé"
+                            } else if b.starts_with("data:") {
+                                "Image générée"
+                            } else {
+                                "Photo capturée"
+                            };
+                            build_image_markdown(&label, &url)
+                        })
+                        .unwrap_or_default();
+                    let response_clean = ensure_no_open_code_block(&response_for_user);
+                    let default_reply = if response_for_user.is_empty() {
+                        format!("{}{}", limit_msg, image_md)
+                    } else {
+                        format!("{}\n\n[{}]{}", response_clean, limit_msg, image_md)
+                    };
 
-                // When human_input_store is available, ask user whether to continue (+10 rounds), reset and continue, or stop.
-                let should_stop = match &human_input_store {
-                    Some(store) => {
-                        const TOOL_ROUND_LIMIT_TIMEOUT_SECS: u64 = 300;
-                        let question = "Limite de tours d'outils atteinte. Souhaitez-vous continuer la tâche ?".to_string();
-                        let context = format!(
+                    // When human_input_store is available, ask user whether to continue (+10 rounds), reset and continue, or stop.
+                    let should_stop = match &human_input_store {
+                        Some(store) => {
+                            const TOOL_ROUND_LIMIT_TIMEOUT_SECS: u64 = 300;
+                            let question = "Limite de tours d'outils atteinte. Souhaitez-vous continuer la tâche ?".to_string();
+                            let context = format!(
                             "La tâche a utilisé {} tours d'outils (max {}). Vous pouvez ajouter 10 tours, réinitialiser le compteur et ajouter 10 tours, ou arrêter.",
                             round, max_tool_rounds
                         );
-                        let choices = vec![
-                            "Continuer (+10 tours)".to_string(),
-                            "Réinitialiser et continuer (+10 tours)".to_string(),
-                            "Arrêter".to_string(),
-                        ];
-                        let (tx, rx) = tokio::sync::oneshot::channel();
-                        let pending = PendingHumanInput {
-                            question: question.clone(),
-                            context: context.clone(),
-                            choices: Some(choices.clone()),
-                            response_tx: tx,
-                        };
-                        {
-                            let mut g = store.write().await;
-                            g.insert(task_id, pending);
-                        }
-                        let payload = serde_json::json!({
-                            "task_id": task_id.to_string(),
-                            "question": question,
-                            "context": context,
-                            "choices": choices,
-                            "tool_round_limit": true,
-                            "current_round": round,
-                            "max_tool_rounds": max_tool_rounds
-                        });
-                        let _ = bus.send(
-                            EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload)).with_correlation(task_id),
-                        );
-                        let reply = tokio::time::timeout(
-                            std::time::Duration::from_secs(TOOL_ROUND_LIMIT_TIMEOUT_SECS),
-                            rx,
-                        )
-                        .await;
-                        {
-                            let mut g = store.write().await;
-                            g.remove(&task_id);
-                        }
-                        match reply {
-                            Ok(Ok(user_choice)) => {
-                                let choice = user_choice.trim();
-                                if choice == "Continuer (+10 tours)" {
-                                    max_tool_rounds += 10;
-                                    false
-                                } else if choice == "Réinitialiser et continuer (+10 tours)" {
-                                    round = 0;
-                                    max_tool_rounds += 10;
-                                    false
-                                } else {
-                                    true
-                                }
+                            let choices = vec![
+                                "Continuer (+10 tours)".to_string(),
+                                "Réinitialiser et continuer (+10 tours)".to_string(),
+                                "Arrêter".to_string(),
+                            ];
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            let pending = PendingHumanInput {
+                                question: question.clone(),
+                                context: context.clone(),
+                                choices: Some(choices.clone()),
+                                response_tx: tx,
+                            };
+                            {
+                                let mut g = store.write().await;
+                                g.insert(task_id, pending);
                             }
-                            _ => true,
+                            let payload = serde_json::json!({
+                                "task_id": task_id.to_string(),
+                                "question": question,
+                                "context": context,
+                                "choices": choices,
+                                "tool_round_limit": true,
+                                "current_round": round,
+                                "max_tool_rounds": max_tool_rounds
+                            });
+                            let _ = bus.send(
+                                EventEnvelope::new(EventType::TaskWaitingUserInput, Some(payload))
+                                    .with_correlation(task_id),
+                            );
+                            let reply = tokio::time::timeout(
+                                std::time::Duration::from_secs(TOOL_ROUND_LIMIT_TIMEOUT_SECS),
+                                rx,
+                            )
+                            .await;
+                            {
+                                let mut g = store.write().await;
+                                g.remove(&task_id);
+                            }
+                            match reply {
+                                Ok(Ok(user_choice)) => {
+                                    let choice = user_choice.trim();
+                                    if choice == "Continuer (+10 tours)" {
+                                        max_tool_rounds += 10;
+                                        false
+                                    } else if choice == "Réinitialiser et continuer (+10 tours)" {
+                                        round = 0;
+                                        max_tool_rounds += 10;
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                }
+                                _ => true,
+                            }
                         }
+                        None => true,
+                    };
+                    if should_stop {
+                        reply_text = default_reply;
+                        break;
                     }
-                    None => true,
-                };
-                if should_stop {
-                    reply_text = default_reply;
-                    break;
+                    continue;
                 }
                 continue;
             }
-            continue;
-        }
 
-        // When the model returns prose / JSON only, this loop would exit with zero tool rounds — UI shows an
-        // answer but nothing is written. For orchestrated disk deliverables, nudge additional LLM rounds until
-        // a write-like tool appears in history. Only nag when the active policy actually permits write tools;
-        // if the profile blocks them the nudge would just churn through "tool not allowed" errors.
-        const MAX_ORCH_DISK_WRITE_NAGS: u32 = 8;
-        if orch_disk_deliverables
-            && tools_executor_snapshot.is_some()
-            && no_parseable_tools_this_round
-        {
-            let policy_allows_write = tools_executor_snapshot
-                .as_ref()
-                .map(|e| e.policy.can_use_tool("write_file"))
-                .unwrap_or(false);
-            if policy_allows_write {
-                let disk_write_attempted = tool_loop_history.iter().any(|(t, _)| {
-                    matches!(
-                        t.as_str(),
-                        "write_file" | "edit_file" | "search_replace" | "apply_patch"
-                    )
-                });
-                if !disk_write_attempted && orch_disk_write_nags < MAX_ORCH_DISK_WRITE_NAGS {
-                    orch_disk_write_nags += 1;
-                    current_prompt = format!(
+            // When the model returns prose / JSON only, this loop would exit with zero tool rounds — UI shows an
+            // answer but nothing is written. For orchestrated disk deliverables, nudge additional LLM rounds until
+            // a write-like tool appears in history. Only nag when the active policy actually permits write tools;
+            // if the profile blocks them the nudge would just churn through "tool not allowed" errors.
+            const MAX_ORCH_DISK_WRITE_NAGS: u32 = 8;
+            if orch_disk_deliverables
+                && tools_executor_snapshot.is_some()
+                && no_parseable_tools_this_round
+            {
+                let policy_allows_write = tools_executor_snapshot
+                    .as_ref()
+                    .map(|e| e.policy.can_use_tool("write_file"))
+                    .unwrap_or(false);
+                if policy_allows_write {
+                    let disk_write_attempted = tool_loop_history.iter().any(|(t, _)| {
+                        matches!(
+                            t.as_str(),
+                            "write_file" | "edit_file" | "search_replace" | "apply_patch"
+                        )
+                    });
+                    if !disk_write_attempted && orch_disk_write_nags < MAX_ORCH_DISK_WRITE_NAGS {
+                        orch_disk_write_nags += 1;
+                        current_prompt = format!(
                         "{}\n\n[Orchestrator — disk deliverables] Your last assistant message did not include any executable TOOL: lines (or they were not parsed). This step MUST call tools: use TOOL: read_file on the shared plan trace if needed, then TOOL: write_file / edit_file / search_replace for every mandatory workspace path and update the plan sections **Fait (agent)** / **Reste (agent)**. Do not finish with prose-only or ```json``` — emit TOOL lines now.",
                         current_prompt
                     );
-                    continue;
+                        continue;
+                    }
                 }
             }
-        }
 
-        let response_for_user = response
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("TOOL:"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string();
-        if strict_tools_first && strict_successful_tool_calls == 0 {
-            let preferred_tools_hint = runtime_tool_routing_enforcer
-                .as_ref()
-                .map(|e| {
-                    let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
-                    v.sort();
-                    v.join(", ")
-                })
-                .unwrap_or_default();
-            reply_text = format!(
+            let response_for_user = response
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("TOOL:"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string();
+            if strict_tools_first && strict_successful_tool_calls == 0 {
+                let preferred_tools_hint = runtime_tool_routing_enforcer
+                    .as_ref()
+                    .map(|e| {
+                        let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
+                        v.sort();
+                        v.join(", ")
+                    })
+                    .unwrap_or_default();
+                reply_text = format!(
                 "Réponse bloquée: aucune exécution d'outil autorisé n'a réussi pour cette demande. Outils attendus: {}. Merci de vérifier la configuration des plugins/routing rules ou de préciser les paramètres requis.",
                 preferred_tools_hint
             );
-            break;
-        }
-        // If we already ran tools but the model returned a placeholder ("Je vais… Une seconde."), force one more round to get the actual answer.
-        if !tool_loop_history.is_empty()
-            && last_tool_results_blob.as_ref().map_or(false, |b| !b.is_empty())
-            && looks_like_placeholder_after_tools(&response_for_user)
-            && !force_synthesis_attempted
-        {
-            force_synthesis_attempted = true;
-            current_prompt = format!(
+                break;
+            }
+            // If we already ran tools but the model returned a placeholder ("Je vais… Une seconde."), force one more round to get the actual answer.
+            if !tool_loop_history.is_empty()
+                && last_tool_results_blob
+                    .as_ref()
+                    .map_or(false, |b| !b.is_empty())
+                && looks_like_placeholder_after_tools(&response_for_user)
+                && !force_synthesis_attempted
+            {
+                force_synthesis_attempted = true;
+                current_prompt = format!(
                 "User request: {}\n\nTool results:\n{}\n\nThe user is waiting for the actual answer. Your previous message was a promise — the task is about to close, so you must answer NOW. Using the tool results above, write ONLY the final answer to the user's request. No TOOL: lines, no \"action in progress\".",
                 user_message,
                 last_tool_results_blob.as_deref().unwrap_or("")
             );
-            continue;
-        }
-        // Guardrail: when a plugin/tool already succeeded, reject generic
-        // greeting responses and force one synthesis round from tool outputs.
-        if strict_tools_first
-            && strict_successful_tool_calls > 0
-            && last_tool_results_blob.as_ref().map_or(false, |b| !b.is_empty())
-            && looks_like_off_topic_greeting(&response_for_user)
-            && !force_synthesis_attempted
-        {
-            force_synthesis_attempted = true;
-            current_prompt = format!(
+                continue;
+            }
+            // Guardrail: when a plugin/tool already succeeded, reject generic
+            // greeting responses and force one synthesis round from tool outputs.
+            if strict_tools_first
+                && strict_successful_tool_calls > 0
+                && last_tool_results_blob
+                    .as_ref()
+                    .map_or(false, |b| !b.is_empty())
+                && looks_like_off_topic_greeting(&response_for_user)
+                && !force_synthesis_attempted
+            {
+                force_synthesis_attempted = true;
+                current_prompt = format!(
                 "User request: {}\n\nTool results:\n{}\n\nYour previous reply was off-topic greeting text. Answer the user's request NOW using the tool results above. Return only the concrete final answer (distance/itinerary if available). No greeting, no TOOL: lines.",
                 user_message,
                 last_tool_results_blob.as_deref().unwrap_or("")
             );
-            continue;
+                continue;
+            }
+            let image_md = last_captured_image_base64
+                .as_ref()
+                .filter(|b| !b.is_empty())
+                .map(|b| {
+                    let url = if b.starts_with("data:") {
+                        b.clone()
+                    } else {
+                        format!("data:image/jpeg;base64,{}", b)
+                    };
+                    let label = if url.starts_with("data:audio/") {
+                        "Audio synthétisé"
+                    } else if b.starts_with("data:") {
+                        "Image générée"
+                    } else {
+                        "Photo capturée"
+                    };
+                    build_image_markdown(&label, &url)
+                })
+                .unwrap_or_default();
+            let response_clean = ensure_no_open_code_block(&response_for_user);
+            reply_text = if response_for_user.is_empty() {
+                format!("{}{}", response, image_md)
+            } else {
+                format!("{}{}", response_clean, image_md)
+            };
+            break;
         }
-        let image_md = last_captured_image_base64.as_ref()
-            .filter(|b| !b.is_empty())
-            .map(|b| {
-                let url = if b.starts_with("data:") { b.clone() } else { format!("data:image/jpeg;base64,{}", b) };
-                let label = if url.starts_with("data:audio/") { "Audio synthétisé" } else if b.starts_with("data:") { "Image générée" } else { "Photo capturée" };
-                build_image_markdown(&label, &url)
-            })
-            .unwrap_or_default();
-        let response_clean = ensure_no_open_code_block(&response_for_user);
-        reply_text = if response_for_user.is_empty() {
-            format!("{}{}", response, image_md)
-        } else {
-            format!("{}{}", response_clean, image_md)
-        };
-        break;
-    }
-
     }
 
     let reply_text = if reply_text.is_empty() {
@@ -7010,82 +7878,112 @@ pub(crate) async fn run_message_via_llm(
     if !is_small_talk_fast_lane && !is_orchestrated_task_msg {
         if let Some(ref st) = short_term {
             // Store the clean user message (without any guardrail prefix) so history is human-readable.
-            st.append(&session_id, "user", clean_message.to_string()).await;
-            st.append(&session_id, "assistant", reply_text.clone()).await;
+            st.append(&session_id, "user", clean_message.to_string())
+                .await;
+            st.append(&session_id, "assistant", reply_text.clone())
+                .await;
         }
     }
 
     // Extract and promote personal facts to long-term memory (spec 06: nom, préférences, décisions).
     if !is_small_talk_fast_lane {
-    if let Some(ref long_term) = long_term_client {
-        // Heuristic: capture obvious name/intro from user message. Promote these *immediately* so they appear in Memory tab right away.
-        // Case-insensitive matching on lowercased text, but extract from original message to preserve casing.
-        let msg_lower = message.to_lowercase();
-        let mut heuristic_facts = Vec::new();
-        for (pattern, prefix) in [
-            ("je m'appelle ", "L'utilisateur s'appelle "),
-            ("mon nom est ", "L'utilisateur s'appelle "),
-            ("mon prénom est ", "L'utilisateur s'appelle "),
-            ("mon prénom c'est ", "L'utilisateur s'appelle "),
-            ("je suis ", "L'utilisateur est "),
-            ("tu peux m'appeler ", "L'utilisateur veut être appelé "),
-            ("appelle-moi ", "L'utilisateur veut être appelé "),
-            ("i'm ", "The user is "),
-            ("my name is ", "The user's name is "),
-            ("call me ", "The user wants to be called "),
-        ] {
-            if let Some(start_idx) = msg_lower.find(pattern) {
-                let value_start = start_idx + pattern.len();
-                // Extract value from the *original* message at the same position to preserve casing.
-                let original_rest = &message[value_start..];
-                let name = original_rest
-                    .trim()
-                    .split(|c: char| c == ',' || c == '.' || c == '\n' || c == '!')
-                    .next()
-                    .unwrap_or(original_rest)
-                    .trim();
-                let name = name.chars().take(80).collect::<String>();
-                if !name.is_empty() {
-                    heuristic_facts.push(format!("{}{}", prefix, name));
-                    break;
+        if let Some(ref long_term) = long_term_client {
+            // Heuristic: capture obvious name/intro from user message. Promote these *immediately* so they appear in Memory tab right away.
+            // Case-insensitive matching on lowercased text, but extract from original message to preserve casing.
+            let msg_lower = message.to_lowercase();
+            let mut heuristic_facts = Vec::new();
+            for (pattern, prefix) in [
+                ("je m'appelle ", "L'utilisateur s'appelle "),
+                ("mon nom est ", "L'utilisateur s'appelle "),
+                ("mon prénom est ", "L'utilisateur s'appelle "),
+                ("mon prénom c'est ", "L'utilisateur s'appelle "),
+                ("je suis ", "L'utilisateur est "),
+                ("tu peux m'appeler ", "L'utilisateur veut être appelé "),
+                ("appelle-moi ", "L'utilisateur veut être appelé "),
+                ("i'm ", "The user is "),
+                ("my name is ", "The user's name is "),
+                ("call me ", "The user wants to be called "),
+            ] {
+                if let Some(start_idx) = msg_lower.find(pattern) {
+                    let value_start = start_idx + pattern.len();
+                    // Extract value from the *original* message at the same position to preserve casing.
+                    let original_rest = &message[value_start..];
+                    let name = original_rest
+                        .trim()
+                        .split(|c: char| c == ',' || c == '.' || c == '\n' || c == '!')
+                        .next()
+                        .unwrap_or(original_rest)
+                        .trim();
+                    let name = name.chars().take(80).collect::<String>();
+                    if !name.is_empty() {
+                        heuristic_facts.push(format!("{}{}", prefix, name));
+                        break;
+                    }
                 }
             }
-        }
-        // Promote heuristic facts synchronously so they are stored before the user opens the Memory tab.
-        for fact in &heuristic_facts {
-            let client = long_term.clone();
-            let fact = fact.clone();
-            match tokio::task::spawn_blocking(move || {
-                let res = client.promote(fact.clone(), "user_fact".to_string(), None, None, None, Some(2), Some("global_user".to_string()), None, None, None);
-                if res.is_ok() {
-                    let _ = client.emit_event("user_preference".to_string(), fact, None, None, None, None, Some(2), Some("global_user".to_string()), Some("user_fact".to_string()));
+            // Promote heuristic facts synchronously so they are stored before the user opens the Memory tab.
+            for fact in &heuristic_facts {
+                let client = long_term.clone();
+                let fact = fact.clone();
+                match tokio::task::spawn_blocking(move || {
+                    let res = client.promote(
+                        fact.clone(),
+                        "user_fact".to_string(),
+                        None,
+                        None,
+                        None,
+                        Some(2),
+                        Some("global_user".to_string()),
+                        None,
+                        None,
+                        None,
+                    );
+                    if res.is_ok() {
+                        let _ = client.emit_event(
+                            "user_preference".to_string(),
+                            fact,
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some(2),
+                            Some("global_user".to_string()),
+                            Some("user_fact".to_string()),
+                        );
+                    }
+                    res
+                })
+                .await
+                {
+                    Ok(Ok(())) => {
+                        tracing::info!("Personal fact stored in long-term memory (heuristic)")
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "Long-term promote failed — check that embeddings/tract model loads (see daemon logs)")
+                    }
+                    Err(e) => tracing::debug!(error = %e, "Promote task join error"),
                 }
-                res
-            }).await {
-                Ok(Ok(())) => tracing::info!("Personal fact stored in long-term memory (heuristic)"),
-                Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote failed — check that embeddings/tract model loads (see daemon logs)"),
-                Err(e) => tracing::debug!(error = %e, "Promote task join error"),
             }
-        }
 
-        // Then spawn LLM extraction for projects, interests, important info, personal facts, and agent profile (async).
-        let msg = message.clone();
-        let reply = reply_text.clone();
-        let client = long_term.clone();
-        let router = llm_router.clone();
-        let heuristic_set: std::collections::HashSet<String> = heuristic_facts.iter().cloned().collect();
-        let sem = extract_semaphore();
-        let data_dir_for_extract = data_dir.to_path_buf();
-        let agent_profile_cache_for_extract = agent_profile_cache.clone();
-        tokio::spawn(async move {
-            let _permit = match sem.try_acquire() {
-                Ok(p) => p,
-                Err(_) => {
-                    tracing::debug!("Background fact extraction skipped: semaphore full");
-                    return;
-                }
-            };
-            let extract_prompt = format!(
+            // Then spawn LLM extraction for projects, interests, important info, personal facts, and agent profile (async).
+            let msg = message.clone();
+            let reply = reply_text.clone();
+            let client = long_term.clone();
+            let router = llm_router.clone();
+            let heuristic_set: std::collections::HashSet<String> =
+                heuristic_facts.iter().cloned().collect();
+            let sem = extract_semaphore();
+            let data_dir_for_extract = data_dir.to_path_buf();
+            let agent_profile_cache_for_extract = agent_profile_cache.clone();
+            tokio::spawn(async move {
+                let _permit = match sem.try_acquire() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        tracing::debug!("Background fact extraction skipped: semaphore full");
+                        return;
+                    }
+                };
+                let extract_prompt = format!(
                 "Extract items to remember. One line per item, each line starts with exactly one of these prefixes:\n\
 FACT: personal facts (name, preferences, decisions)\n\
 PROJECT: projects created or mentioned\n\
@@ -7101,108 +7999,117 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                 msg.trim(),
                 reply.trim()
             );
-            let extract_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
-                .ok()
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(2048);
-            let req = CompletionRequest {
-                prompt: extract_prompt,
-                max_tokens: Some(extract_max_tokens),
-                temperature: Some(0.1),
-                preferred_task_type: Some("system".to_string()),
-                system_prompt: None,
-                image_data_urls: None,
-                top_p: None,
-                top_k: None,
-                frequency_penalty: None,
-                presence_penalty: None,
-                repeat_penalty: None,
-                num_ctx: None,
-                num_gpu: None,
-                thinking_level: None,
-            };
-            let mut to_promote: Vec<(String, String)> = Vec::new();
-            let mut agent_updates: Vec<(String, String)> = Vec::new();
-            if let Ok(Ok(resp)) = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                router.complete(&req),
-            ).await {
-                for line in resp.text.lines() {
-                    let line = line.trim();
-                    if let Some(rest) = line.strip_prefix("AGENT_NAME:") {
-                        agent_updates.push(("AGENT_NAME".to_string(), rest.trim().to_string()));
-                    } else if let Some(rest) = line.strip_prefix("AGENT_PERSONALITY:") {
-                        agent_updates.push(("AGENT_PERSONALITY".to_string(), rest.trim().to_string()));
-                    } else if let Some(rest) = line.strip_prefix("AGENT_RULE:") {
-                        agent_updates.push(("AGENT_RULE".to_string(), rest.trim().to_string()));
-                    } else if let Some(rest) = line.strip_prefix("AGENT_CAN:") {
-                        agent_updates.push(("AGENT_CAN".to_string(), rest.trim().to_string()));
-                    } else if let Some(rest) = line.strip_prefix("AGENT_CANNOT:") {
-                        agent_updates.push(("AGENT_CANNOT".to_string(), rest.trim().to_string()));
-                    } else {
-                        let (content, source) = if let Some(rest) = line.strip_prefix("FACT:") {
-                            (rest.trim().to_string(), "user_fact".to_string())
-                        } else if let Some(rest) = line.strip_prefix("PROJECT:") {
-                            (rest.trim().to_string(), "project".to_string())
-                        } else if let Some(rest) = line.strip_prefix("INTEREST:") {
-                            (rest.trim().to_string(), "interest".to_string())
-                        } else if let Some(rest) = line.strip_prefix("IMPORTANT:") {
-                            (rest.trim().to_string(), "important".to_string())
+                let extract_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(2048);
+                let req = CompletionRequest {
+                    prompt: extract_prompt,
+                    max_tokens: Some(extract_max_tokens),
+                    temperature: Some(0.1),
+                    preferred_task_type: Some("system".to_string()),
+                    system_prompt: None,
+                    image_data_urls: None,
+                    top_p: None,
+                    top_k: None,
+                    frequency_penalty: None,
+                    presence_penalty: None,
+                    repeat_penalty: None,
+                    num_ctx: None,
+                    num_gpu: None,
+                    thinking_level: None,
+                };
+                let mut to_promote: Vec<(String, String)> = Vec::new();
+                let mut agent_updates: Vec<(String, String)> = Vec::new();
+                if let Ok(Ok(resp)) =
+                    tokio::time::timeout(std::time::Duration::from_secs(30), router.complete(&req))
+                        .await
+                {
+                    for line in resp.text.lines() {
+                        let line = line.trim();
+                        if let Some(rest) = line.strip_prefix("AGENT_NAME:") {
+                            agent_updates.push(("AGENT_NAME".to_string(), rest.trim().to_string()));
+                        } else if let Some(rest) = line.strip_prefix("AGENT_PERSONALITY:") {
+                            agent_updates
+                                .push(("AGENT_PERSONALITY".to_string(), rest.trim().to_string()));
+                        } else if let Some(rest) = line.strip_prefix("AGENT_RULE:") {
+                            agent_updates.push(("AGENT_RULE".to_string(), rest.trim().to_string()));
+                        } else if let Some(rest) = line.strip_prefix("AGENT_CAN:") {
+                            agent_updates.push(("AGENT_CAN".to_string(), rest.trim().to_string()));
+                        } else if let Some(rest) = line.strip_prefix("AGENT_CANNOT:") {
+                            agent_updates
+                                .push(("AGENT_CANNOT".to_string(), rest.trim().to_string()));
                         } else {
-                            continue;
-                        };
-                        if !content.is_empty()
-                            && !heuristic_set.contains(&content)
-                            && !should_skip_capture_content(&content)
-                        {
-                            let content_trimmed = if content.len() > CAPTURE_MAX_CHARS {
-                                content.chars().take(CAPTURE_MAX_CHARS).collect::<String>()
+                            let (content, source) = if let Some(rest) = line.strip_prefix("FACT:") {
+                                (rest.trim().to_string(), "user_fact".to_string())
+                            } else if let Some(rest) = line.strip_prefix("PROJECT:") {
+                                (rest.trim().to_string(), "project".to_string())
+                            } else if let Some(rest) = line.strip_prefix("INTEREST:") {
+                                (rest.trim().to_string(), "interest".to_string())
+                            } else if let Some(rest) = line.strip_prefix("IMPORTANT:") {
+                                (rest.trim().to_string(), "important".to_string())
                             } else {
-                                content
+                                continue;
                             };
-                            to_promote.push((content_trimmed, source));
+                            if !content.is_empty()
+                                && !heuristic_set.contains(&content)
+                                && !should_skip_capture_content(&content)
+                            {
+                                let content_trimmed = if content.len() > CAPTURE_MAX_CHARS {
+                                    content.chars().take(CAPTURE_MAX_CHARS).collect::<String>()
+                                } else {
+                                    content
+                                };
+                                to_promote.push((content_trimmed, source));
+                            }
                         }
                     }
                 }
-            }
-            // Cap number of items promoted per turn (plan court terme 7).
-            if to_promote.len() > CAPTURE_MAX_PER_TURN {
-                to_promote.truncate(CAPTURE_MAX_PER_TURN);
-            }
-            if !agent_updates.is_empty() {
-                let data_dir_extract = data_dir_for_extract.clone();
-                let cache = agent_profile_cache_for_extract.clone();
-                let mut profile = match &cache {
-                    Some(c) => get_or_load_agent_profile(&data_dir_extract, c).await,
-                    None => AgentProfile::load(&data_dir_for_extract),
-                };
-                for (kind, value) in agent_updates {
-                    profile.apply_extracted(&kind, value);
+                // Cap number of items promoted per turn (plan court terme 7).
+                if to_promote.len() > CAPTURE_MAX_PER_TURN {
+                    to_promote.truncate(CAPTURE_MAX_PER_TURN);
                 }
-                if let Err(e) = profile.save(&data_dir_for_extract) {
-                    tracing::warn!(error = %e, "Failed to save agent profile");
-                } else {
-                    if let Some(c) = &cache {
-                        set_agent_profile_cache(c, profile).await;
+                if !agent_updates.is_empty() {
+                    let data_dir_extract = data_dir_for_extract.clone();
+                    let cache = agent_profile_cache_for_extract.clone();
+                    let mut profile = match &cache {
+                        Some(c) => get_or_load_agent_profile(&data_dir_extract, c).await,
+                        None => AgentProfile::load(&data_dir_for_extract),
+                    };
+                    for (kind, value) in agent_updates {
+                        profile.apply_extracted(&kind, value);
                     }
-                    tracing::info!("Agent profile updated from conversation");
+                    if let Err(e) = profile.save(&data_dir_for_extract) {
+                        tracing::warn!(error = %e, "Failed to save agent profile");
+                    } else {
+                        if let Some(c) = &cache {
+                            set_agent_profile_cache(c, profile).await;
+                        }
+                        tracing::info!("Agent profile updated from conversation");
+                    }
                 }
-            }
-            if !to_promote.is_empty() {
-                tracing::debug!(count = to_promote.len(), "Promoting extracted items to long-term memory");
-            }
-            for (content, source) in to_promote {
-                let client = client.clone();
-                let c = content.clone();
-                let s = source.clone();
-                match tokio::task::spawn_blocking(move || client.promote(c, s, None, None, None, None, None, None, None, None)).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote failed"),
-                    Err(e) => tracing::debug!(error = %e, "Promote task join error"),
+                if !to_promote.is_empty() {
+                    tracing::debug!(
+                        count = to_promote.len(),
+                        "Promoting extracted items to long-term memory"
+                    );
                 }
-            }
-        });
-    }
+                for (content, source) in to_promote {
+                    let client = client.clone();
+                    let c = content.clone();
+                    let s = source.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        client.promote(c, s, None, None, None, None, None, None, None, None)
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote failed"),
+                        Err(e) => tracing::debug!(error = %e, "Promote task join error"),
+                    }
+                }
+            });
+        }
     }
 
     let _ = bus.send(
@@ -7245,7 +8152,10 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     // the event stream consistent with the stored status.
     let is_paused = matches!(
         store.get(task_id),
-        Ok(Some(Task { status: TaskStatus::Paused, .. }))
+        Ok(Some(Task {
+            status: TaskStatus::Paused,
+            ..
+        }))
     );
 
     if let Some(reg) = &browser_registry {
@@ -7491,7 +8401,9 @@ pub async fn handle_api(
     ollama_base_url: Option<&str>,
     spec_dir: &Path,
     restart_tx: RestartTx,
-    _tools_executor: Option<&std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>>,
+    _tools_executor: Option<
+        &std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>,
+    >,
     skill_registry: &std::sync::Arc<crate::skills::SkillRegistry>,
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
@@ -7604,10 +8516,23 @@ pub async fn handle_api(
     // POST /api/device/result — UI sends result of device action (e.g. image base64, audio base64)
     if method == "POST" && path == "/api/device/result" {
         if let Some(bridge) = device_bridge {
-            let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
-            let request_id = body_json.as_ref().and_then(|j| j.get("request_id")).and_then(|v| v.as_str());
-            let success = body_json.as_ref().and_then(|j| j.get("success")).and_then(|v| v.as_bool()).unwrap_or(false);
-            let data = body_json.as_ref().and_then(|j| j.get("data")).and_then(|v| v.as_str()).map(String::from);
+            let body_json = body
+                .as_deref()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+            let request_id = body_json
+                .as_ref()
+                .and_then(|j| j.get("request_id"))
+                .and_then(|v| v.as_str());
+            let success = body_json
+                .as_ref()
+                .and_then(|j| j.get("success"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let data = body_json
+                .as_ref()
+                .and_then(|j| j.get("data"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let data_len = data.as_ref().map(|s| s.len()).unwrap_or(0);
             let request_id = match request_id.filter(|s| !s.is_empty()) {
                 Some(id) => id,
@@ -7625,7 +8550,10 @@ pub async fn handle_api(
             let body = serde_json::json!({ "ok": fulfilled });
             return json_response("200 OK", &body.to_string());
         } else {
-            return json_response("501 Not Implemented", r#"{"error":"device_bridge_unavailable"}"#);
+            return json_response(
+                "501 Not Implemented",
+                r#"{"error":"device_bridge_unavailable"}"#,
+            );
         }
     }
 
@@ -7641,8 +8569,15 @@ pub async fn handle_api(
 
     // POST /api/voice/tts — synthesize text to audio. Body: { "text": "..." }. Returns { "data_url": "data:audio/wav;base64,...", "message": "..." }.
     if method == "POST" && path == "/api/voice/tts" {
-        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
-        let text = body_json.as_ref().and_then(|j| j.get("text")).and_then(|v| v.as_str()).unwrap_or("").trim();
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let text = body_json
+            .as_ref()
+            .and_then(|j| j.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
         if text.is_empty() {
             return json_response("400 Bad Request", r#"{"error":"text_required"}"#);
         }
@@ -7652,22 +8587,34 @@ pub async fn handle_api(
                 return json_response("200 OK", &body.to_string());
             }
             Err(e) => {
-                return json_response("502 Bad Gateway", &serde_json::json!({ "error": e }).to_string());
+                return json_response(
+                    "502 Bad Gateway",
+                    &serde_json::json!({ "error": e }).to_string(),
+                );
             }
         }
     }
 
     // POST /api/voice/stt — transcribe audio to text. Body: { "data_url": "data:audio/...;base64,..." } or { "audio_base64": "..." }.
     if method == "POST" && path == "/api/voice/stt" {
-        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
         let audio_input = body_json
             .as_ref()
             .and_then(|j| j.get("data_url").and_then(|v| v.as_str()))
-            .or_else(|| body_json.as_ref().and_then(|j| j.get("audio_base64").and_then(|v| v.as_str())))
+            .or_else(|| {
+                body_json
+                    .as_ref()
+                    .and_then(|j| j.get("audio_base64").and_then(|v| v.as_str()))
+            })
             .unwrap_or("");
         let audio_input = audio_input.trim();
         if audio_input.is_empty() {
-            return json_response("400 Bad Request", r#"{"error":"data_url_or_audio_base64_required"}"#);
+            return json_response(
+                "400 Bad Request",
+                r#"{"error":"data_url_or_audio_base64_required"}"#,
+            );
         }
         match crate::voice::speech_transcribe_impl(data_dir, audio_input).await {
             Ok(text) => {
@@ -7675,7 +8622,10 @@ pub async fn handle_api(
                 return json_response("200 OK", &body.to_string());
             }
             Err(e) => {
-                return json_response("502 Bad Gateway", &serde_json::json!({ "error": e }).to_string());
+                return json_response(
+                    "502 Bad Gateway",
+                    &serde_json::json!({ "error": e }).to_string(),
+                );
             }
         }
     }
@@ -7719,13 +8669,22 @@ pub async fn handle_api(
                     profile.avatar = v.get("avatar").and_then(|x| x.as_str()).map(String::from);
                 }
                 if let Some(arr) = v.get("rules").and_then(|x| x.as_array()) {
-                    profile.rules = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+                    profile.rules = arr
+                        .iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect();
                 }
                 if let Some(arr) = v.get("can_do").and_then(|x| x.as_array()) {
-                    profile.can_do = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+                    profile.can_do = arr
+                        .iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect();
                 }
                 if let Some(arr) = v.get("cannot_do").and_then(|x| x.as_array()) {
-                    profile.cannot_do = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+                    profile.cannot_do = arr
+                        .iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect();
                 }
                 if let Some(obj) = v.get("traits_override").and_then(|x| x.as_object()) {
                     let mut map = std::collections::HashMap::new();
@@ -7737,20 +8696,36 @@ pub async fn handle_api(
                     profile.traits_override = if map.is_empty() { None } else { Some(map) };
                 }
                 if v.get("preferred_mode").is_some() {
-                    profile.preferred_mode = v.get("preferred_mode").and_then(|x| x.as_str()).map(String::from);
+                    profile.preferred_mode = v
+                        .get("preferred_mode")
+                        .and_then(|x| x.as_str())
+                        .map(String::from);
                 }
             }
         }
         // Persist default name if none or empty so the agent always has an identity on disk
-        if profile.name.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+        if profile
+            .name
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
             profile.name = Some(AgentProfile::DEFAULT_NAME.to_string());
         }
         match profile.save(data_dir) {
             Ok(()) => {
                 set_agent_profile_cache(agent_profile_cache, profile).await;
-                return json_response("200 OK", r#"{"ok":true,"message":"Profil agent mis à jour"}"#);
+                return json_response(
+                    "200 OK",
+                    r#"{"ok":true,"message":"Profil agent mis à jour"}"#,
+                );
             }
-            Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                )
+            }
         }
     }
 
@@ -7774,28 +8749,53 @@ pub async fn handle_api(
         if let Some(body) = body.as_deref() {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
                 if v.get("first_name").is_some() {
-                    profile.first_name = v.get("first_name").and_then(|x| x.as_str()).map(String::from);
+                    profile.first_name = v
+                        .get("first_name")
+                        .and_then(|x| x.as_str())
+                        .map(String::from);
                 }
                 if v.get("last_name").is_some() {
-                    profile.last_name = v.get("last_name").and_then(|x| x.as_str()).map(String::from);
+                    profile.last_name = v
+                        .get("last_name")
+                        .and_then(|x| x.as_str())
+                        .map(String::from);
                 }
                 if v.get("how_to_call").is_some() {
-                    profile.how_to_call = v.get("how_to_call").and_then(|x| x.as_str()).map(|s| s.trim().to_string());
+                    profile.how_to_call = v
+                        .get("how_to_call")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.trim().to_string());
                 }
                 if let Some(b) = v.get("onboarding_completed").and_then(|x| x.as_bool()) {
                     profile.onboarding_completed = b;
                 }
                 if v.get("proactive_check_in_enabled").is_some() {
-                    profile.proactive_check_in_enabled = v.get("proactive_check_in_enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+                    profile.proactive_check_in_enabled = v
+                        .get("proactive_check_in_enabled")
+                        .and_then(|x| x.as_bool())
+                        .unwrap_or(false);
                 }
                 if v.get("proactive_check_in_interval_days").is_some() {
-                    profile.proactive_check_in_interval_days = v.get("proactive_check_in_interval_days").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                    profile.proactive_check_in_interval_days =
+                        v.get("proactive_check_in_interval_days")
+                            .and_then(|x| x.as_u64())
+                            .unwrap_or(0) as u32;
                 }
             }
         }
         match profile.save(data_dir) {
-            Ok(()) => return json_response("200 OK", r#"{"ok":true,"message":"Profil utilisateur mis à jour"}"#),
-            Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
+            Ok(()) => {
+                return json_response(
+                    "200 OK",
+                    r#"{"ok":true,"message":"Profil utilisateur mis à jour"}"#,
+                )
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                )
+            }
         }
     }
 
@@ -7805,9 +8805,11 @@ pub async fn handle_api(
             .split('?')
             .nth(1)
             .and_then(|q| {
-                q.split('&')
-                    .find(|p| p.starts_with("context="))
-                    .map(|p| urlencoding::decode(p.trim_start_matches("context=")).unwrap_or_default().into_owned())
+                q.split('&').find(|p| p.starts_with("context=")).map(|p| {
+                    urlencoding::decode(p.trim_start_matches("context="))
+                        .unwrap_or_default()
+                        .into_owned()
+                })
             })
             .unwrap_or_default();
         let session_id = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
@@ -7816,7 +8818,8 @@ pub async fn handle_api(
         if context == "onboarding" && !user_profile.has_how_to_call() {
             let message = "Bonjour ! Pour personnaliser nos échanges, comment dois-je vous appeler ? (prénom ou surnom)";
             if let Some(ref st) = short_term {
-                st.append(&session_id, "assistant", message.to_string()).await;
+                st.append(&session_id, "assistant", message.to_string())
+                    .await;
             }
             let body_json = serde_json::json!({ "message": message, "session_id": session_id });
             return json_response("200 OK", &body_json.to_string());
@@ -7836,7 +8839,10 @@ pub async fn handle_api(
             };
             if show {
                 let how = user_profile.how_to_call.as_deref().unwrap_or("").trim();
-                let message = format!("Ça fait un moment, {} ! Tu veux qu'on travaille sur quelque chose ?", how);
+                let message = format!(
+                    "Ça fait un moment, {} ! Tu veux qu'on travaille sur quelque chose ?",
+                    how
+                );
                 if let Some(ref st) = short_term {
                     st.append(&session_id, "assistant", message.clone()).await;
                 }
@@ -7863,7 +8869,10 @@ pub async fn handle_api(
     // POST /api/personality-memory — store a structured personality preference (Phase 3). Body: { "key": "preferred_tone"|"technical_depth_preference"|..., "value": "..." }
     if method == "POST" && path == "/api/personality-memory" {
         let Some(client) = long_term_client.clone() else {
-            return json_response("503 Service Unavailable", r#"{"error":"long_term_memory_unavailable"}"#);
+            return json_response(
+                "503 Service Unavailable",
+                r#"{"error":"long_term_memory_unavailable"}"#,
+            );
         };
         let Some(body) = body.as_deref() else {
             return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
@@ -7876,7 +8885,11 @@ pub async fn handle_api(
             Some(k) if !k.trim().is_empty() => k.trim().to_string(),
             _ => return json_response("400 Bad Request", r#"{"error":"key_required"}"#),
         };
-        let value = v.get("value").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let value = v
+            .get("value")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         let payload = serde_json::json!({ "key": key, "value": value }).to_string();
         let result = tokio::task::spawn_blocking(move || {
             client.emit_event(
@@ -7893,9 +8906,24 @@ pub async fn handle_api(
         })
         .await;
         match result {
-            Ok(Ok(id)) => return json_response("200 OK", &serde_json::json!({ "ok": true, "id": id.to_string() }).to_string()),
-            Ok(Err(e)) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e }).to_string()),
-            Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
+            Ok(Ok(id)) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "id": id.to_string() }).to_string(),
+                )
+            }
+            Ok(Err(e)) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e }).to_string(),
+                )
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                )
+            }
         }
     }
 
@@ -7907,7 +8935,11 @@ pub async fn handle_api(
             .and_then(|q| {
                 q.split('&')
                     .find(|p| p.starts_with("session_id="))
-                    .map(|p| urlencoding::decode(p.trim_start_matches("session_id=")).unwrap_or_default().into_owned())
+                    .map(|p| {
+                        urlencoding::decode(p.trim_start_matches("session_id="))
+                            .unwrap_or_default()
+                            .into_owned()
+                    })
             })
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("day-{}", chrono::Utc::now().format("%Y-%m-%d")));
@@ -7944,12 +8976,17 @@ pub async fn handle_api(
             })
             .unwrap_or_default();
         if session_id.is_empty() || !crate::memory::is_safe_session_id(&session_id) {
-            return json_response("400 Bad Request", r#"{"error":"invalid or missing session_id"}"#);
+            return json_response(
+                "400 Bad Request",
+                r#"{"error":"invalid or missing session_id"}"#,
+            );
         }
         if let Some(ref st) = short_term {
             st.delete_session(&session_id).await;
         } else {
-            let path = data_dir.join("short_term").join(format!("{}.json", session_id));
+            let path = data_dir
+                .join("short_term")
+                .join(format!("{}.json", session_id));
             let _ = tokio::fs::remove_file(path).await;
         }
         let _ = crate::session_state::delete(data_dir, &session_id);
@@ -7959,7 +8996,9 @@ pub async fn handle_api(
 
     // POST /api/chat/suggest-thread-title — short title from first user message (UI chat threads)
     if method == "POST" && path == "/api/chat/suggest-thread-title" {
-        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
         let message = body_json
             .as_ref()
             .and_then(|v| v.get("message").and_then(|v| v.as_str()))
@@ -8008,7 +9047,12 @@ pub async fn handle_api(
                 if let Some(i) = t.find('\n') {
                     t.truncate(i);
                 }
-                t = t.trim().trim_matches('"').trim_matches('\'').trim().to_string();
+                t = t
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .trim()
+                    .to_string();
                 if t.starts_with("Title:") || t.starts_with("Titre:") {
                     t = t
                         .trim_start_matches("Title:")
@@ -8041,7 +9085,8 @@ pub async fn handle_api(
                 let mut top_k = 10u32;
                 for part in query_str.split('&') {
                     if let Some(v) = part.strip_prefix("q=") {
-                        let decoded = urlencoding::decode(v).unwrap_or_else(|_| std::borrow::Cow::Borrowed(v));
+                        let decoded = urlencoding::decode(v)
+                            .unwrap_or_else(|_| std::borrow::Cow::Borrowed(v));
                         q = Some(decoded.trim().to_string());
                     } else if let Some(v) = part.strip_prefix("top_k=") {
                         if let Ok(n) = v.parse::<u32>() {
@@ -8154,9 +9199,11 @@ pub async fn handle_api(
         let result = match long_term_client {
             Some(ref client) => {
                 let client = client.clone();
-                tokio::task::spawn_blocking(move || client.rebuild_similar_relations(DEFAULT_MAX_PER_ENTRY))
-                    .await
-                    .unwrap_or_else(|e| Err(format!("task join error: {}", e)))
+                tokio::task::spawn_blocking(move || {
+                    client.rebuild_similar_relations(DEFAULT_MAX_PER_ENTRY)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("task join error: {}", e)))
             }
             None => Err("long-term memory not available".to_string()),
         };
@@ -8174,7 +9221,12 @@ pub async fn handle_api(
 
     // DELETE /api/memory/long-term/:id — delete one long-term memory entry by id
     if method == "DELETE" && path.starts_with("/api/memory/long-term/") {
-        let id = path.trim_start_matches("/api/memory/long-term/").split('?').next().unwrap_or("").trim();
+        let id = path
+            .trim_start_matches("/api/memory/long-term/")
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .trim();
         if id.is_empty() {
             return json_response("400 Bad Request", r#"{"error":"missing id"}"#);
         }
@@ -8193,7 +9245,12 @@ pub async fn handle_api(
             Err(e) if e == "not found" || e == "invalid uuid" => {
                 return json_response("404 Not Found", &format!(r#"{{"error":"{}"}}"#, e));
             }
-            Err(e) => return json_response("500 Internal Server Error", &format!(r#"{{"error":"{}"}}"#, e)),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &format!(r#"{{"error":"{}"}}"#, e),
+                )
+            }
         }
     }
 
@@ -8279,7 +9336,7 @@ pub async fn handle_api(
                 )
             })
             .collect();
-        selected.sort_by(|(_,_,_,_,a_ms), (_,_,_,_,b_ms)| a_ms.cmp(b_ms));
+        selected.sort_by(|(_, _, _, _, a_ms), (_, _, _, _, b_ms)| a_ms.cmp(b_ms));
 
         let list: Vec<serde_json::Value> = selected
             .into_iter()
@@ -8293,29 +9350,32 @@ pub async fn handle_api(
 
     // GET /api/metrics — task counts and simple metrics (Phase 5 AI OS).
     if method == "GET" && path == "/api/metrics" {
-        let (pending, running, completed, failed, paused, interrupted) = match TaskStore::open(store_path) {
-            Ok(store) => {
-                let tasks = store.get_all().unwrap_or_default();
-                let mut pending = 0;
-                let mut running = 0;
-                let mut completed = 0;
-                let mut failed = 0;
-                let mut paused = 0;
-                let mut interrupted = 0;
-                for t in &tasks {
-                    match t.status {
-                        TaskStatus::Pending | TaskStatus::Queued | TaskStatus::WaitingUserInput => pending += 1,
-                        TaskStatus::Running => running += 1,
-                        TaskStatus::Completed => completed += 1,
-                        TaskStatus::Failed | TaskStatus::Cancelled => failed += 1,
-                        TaskStatus::Paused => paused += 1,
-                        TaskStatus::Interrupted => interrupted += 1,
+        let (pending, running, completed, failed, paused, interrupted) =
+            match TaskStore::open(store_path) {
+                Ok(store) => {
+                    let tasks = store.get_all().unwrap_or_default();
+                    let mut pending = 0;
+                    let mut running = 0;
+                    let mut completed = 0;
+                    let mut failed = 0;
+                    let mut paused = 0;
+                    let mut interrupted = 0;
+                    for t in &tasks {
+                        match t.status {
+                            TaskStatus::Pending
+                            | TaskStatus::Queued
+                            | TaskStatus::WaitingUserInput => pending += 1,
+                            TaskStatus::Running => running += 1,
+                            TaskStatus::Completed => completed += 1,
+                            TaskStatus::Failed | TaskStatus::Cancelled => failed += 1,
+                            TaskStatus::Paused => paused += 1,
+                            TaskStatus::Interrupted => interrupted += 1,
+                        }
                     }
+                    (pending, running, completed, failed, paused, interrupted)
                 }
-                (pending, running, completed, failed, paused, interrupted)
-            }
-            Err(_) => (0, 0, 0, 0, 0, 0),
-        };
+                Err(_) => (0, 0, 0, 0, 0, 0),
+            };
         let body_json = serde_json::json!({
             "tasks": { "pending": pending, "running": running, "completed": completed, "failed": failed, "paused": paused, "interrupted": interrupted },
             "stability": llm_router.metrics().stability_summary(),
@@ -8327,9 +9387,25 @@ pub async fn handle_api(
     // GET /api/agents — list known agent roles (Phase 6 AI OS cockpit).
     if method == "GET" && path == "/api/agents" {
         const AGENT_ROLES: &[&str] = &[
-            "conversation", "search", "code", "financial", "documentalist", "project_manager",
-            "technical_writer", "research", "security_audit", "creative", "analyst", "architect",
-            "frontend", "backend", "database", "integration", "qa", "system", "image_generation",
+            "conversation",
+            "search",
+            "code",
+            "financial",
+            "documentalist",
+            "project_manager",
+            "technical_writer",
+            "research",
+            "security_audit",
+            "creative",
+            "analyst",
+            "architect",
+            "frontend",
+            "backend",
+            "database",
+            "integration",
+            "qa",
+            "system",
+            "image_generation",
         ];
         let list: Vec<serde_json::Value> = AGENT_ROLES
             .iter()
@@ -8345,8 +9421,12 @@ pub async fn handle_api(
     // GET /api/doctor — health checks from daemon (for slash /doctor)
     if method == "GET" && path == "/api/doctor" {
         let mut checks: Vec<serde_json::Value> = Vec::new();
-        checks.push(serde_json::json!({ "id": "daemon", "ok": true, "description": "Daemon running" }));
-        checks.push(serde_json::json!({ "id": "os", "ok": true, "description": std::env::consts::OS }));
+        checks.push(
+            serde_json::json!({ "id": "daemon", "ok": true, "description": "Daemon running" }),
+        );
+        checks.push(
+            serde_json::json!({ "id": "os", "ok": true, "description": std::env::consts::OS }),
+        );
 
         let ollama_ok = if let Some(u) = ollama_base_url {
             let test_url = format!("{}/api/tags", u.trim_end_matches('/'));
@@ -8354,7 +9434,12 @@ pub async fn handle_api(
                 .timeout(std::time::Duration::from_secs(3))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new());
-            client.get(&test_url).send().await.map(|r| r.status().is_success()).unwrap_or(false)
+            client
+                .get(&test_url)
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false)
         } else {
             false
         };
@@ -8371,11 +9456,17 @@ pub async fn handle_api(
             "description": if vault_ok { "Vault open" } else { "Vault error" }
         }));
 
-        let spec_ok = spec_dir.exists();
+        let spec_ok = packaged_spec_check_ok(spec_dir);
         checks.push(serde_json::json!({
             "id": "spec_dir",
             "ok": spec_ok,
-            "description": if spec_ok { "Spec directory present" } else { "Spec directory missing" }
+            "description": if spec_dir.exists() {
+                "Spec directory present"
+            } else if std::env::var_os("AKASHA_SPEC_DIR").is_some() {
+                "Spec directory missing"
+            } else {
+                "Spec directory not bundled (OK for installed binaries)"
+            }
         }));
 
         let embedded_available = llm_router.embedded_available();
@@ -8398,9 +9489,13 @@ pub async fn handle_api(
         let runner_path_str = runner_path.as_ref().map(|p| p.display().to_string());
         let runner_ok = runner_path.is_some();
         let playwright_pkg_path = runner_path.as_ref().and_then(|p| {
-            crate::browser::playwright_runner_dir(p).map(|d| d.join("node_modules").join("playwright"))
+            crate::browser::playwright_runner_dir(p)
+                .map(|d| d.join("node_modules").join("playwright"))
         });
-        let playwright_pkg_present = playwright_pkg_path.as_ref().map(|p| p.is_dir()).unwrap_or(false);
+        let playwright_pkg_present = playwright_pkg_path
+            .as_ref()
+            .map(|p| p.is_dir())
+            .unwrap_or(false);
         let auto_install_off = std::env::var("AKASHA_PLAYWRIGHT_AUTO_INSTALL")
             .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
             .unwrap_or(false);
@@ -8433,7 +9528,9 @@ pub async fn handle_api(
         {
             Ok(Ok(o)) if o.status.success() => (
                 true,
-                String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string()),
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string()),
             ),
             _ => (false, None),
         };
@@ -8493,8 +9590,12 @@ pub async fn handle_api(
             "npm_on_path": npm_on_path,
         });
 
-        let all_ok = checks.iter().all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
-        let body_json = serde_json::json!({ "ok": all_ok, "checks": checks, "playwright": playwright_json }).to_string();
+        let all_ok = checks
+            .iter()
+            .all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+        let body_json =
+            serde_json::json!({ "ok": all_ok, "checks": checks, "playwright": playwright_json })
+                .to_string();
         return format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body_json.len(),
@@ -8518,7 +9619,8 @@ pub async fn handle_api(
                 }
             }
         }
-        let body_json = serde_json::to_string(&serde_json::json!({ "vars": vars })).unwrap_or_else(|_| "{}".into());
+        let body_json = serde_json::to_string(&serde_json::json!({ "vars": vars }))
+            .unwrap_or_else(|_| "{}".into());
         return format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body_json.len(),
@@ -8531,13 +9633,25 @@ pub async fn handle_api(
         let body_json = body
             .as_deref()
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
-        let key = body_json.as_ref().and_then(|j| j.get("key")).and_then(|v| v.as_str()).map(String::from);
-        let value = body_json.as_ref().and_then(|j| j.get("value")).and_then(|v| v.as_str()).map(String::from);
+        let key = body_json
+            .as_ref()
+            .and_then(|j| j.get("key"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let value = body_json
+            .as_ref()
+            .and_then(|j| j.get("value"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
         match (key, value) {
             (Some(k), Some(v)) if !k.is_empty() => {
                 let env_path = data_dir.join("akasha.env");
                 let mut lines: Vec<String> = if env_path.exists() {
-                    std::fs::read_to_string(&env_path).unwrap_or_default().lines().map(String::from).collect()
+                    std::fs::read_to_string(&env_path)
+                        .unwrap_or_default()
+                        .lines()
+                        .map(String::from)
+                        .collect()
                 } else {
                     vec!["# akasha.env".to_string(), "".to_string()]
                 };
@@ -8554,7 +9668,10 @@ pub async fn handle_api(
                     lines.push(new_line);
                 }
                 if std::fs::write(&env_path, lines.join("\n")).is_ok() {
-                    return json_response("200 OK", &serde_json::json!({ "ok": true, "key": k }).to_string());
+                    return json_response(
+                        "200 OK",
+                        &serde_json::json!({ "ok": true, "key": k }).to_string(),
+                    );
                 }
             }
             _ => {}
@@ -8564,7 +9681,10 @@ pub async fn handle_api(
 
     // GET /api/vault/keys — list vault key names (no values)
     if method == "GET" && path == "/api/vault/keys" {
-        let keys = akasha_vault::open_vault(data_dir).ok().and_then(|v| v.list_keys().ok()).unwrap_or_default();
+        let keys = akasha_vault::open_vault(data_dir)
+            .ok()
+            .and_then(|v| v.list_keys().ok())
+            .unwrap_or_default();
         let body_json = serde_json::json!({ "keys": keys }).to_string();
         return format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -8578,18 +9698,40 @@ pub async fn handle_api(
         let body_json = body
             .as_deref()
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
-        let key = body_json.as_ref().and_then(|j| j.get("key")).and_then(|v| v.as_str()).map(String::from);
+        let key = body_json
+            .as_ref()
+            .and_then(|j| j.get("key"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
         match key {
-            Some(k) if !k.is_empty() => {
-                match akasha_vault::open_vault(data_dir) {
-                    Ok(v) => match v.delete(&k) {
-                        Ok(()) => return json_response("200 OK", &serde_json::json!({ "ok": true, "key": k }).to_string()),
-                        Err(akasha_vault::VaultError::NotFound(_)) => return json_response("404 Not Found", &serde_json::json!({ "error": "not_found", "key": k }).to_string()),
-                        Err(e) => return json_response("500 Internal Server Error", &serde_json::json!({ "error": e.to_string() }).to_string()),
-                    },
-                    Err(e) => return json_response("503 Service Unavailable", &serde_json::json!({ "error": e.to_string() }).to_string()),
+            Some(k) if !k.is_empty() => match akasha_vault::open_vault(data_dir) {
+                Ok(v) => match v.delete(&k) {
+                    Ok(()) => {
+                        return json_response(
+                            "200 OK",
+                            &serde_json::json!({ "ok": true, "key": k }).to_string(),
+                        )
+                    }
+                    Err(akasha_vault::VaultError::NotFound(_)) => {
+                        return json_response(
+                            "404 Not Found",
+                            &serde_json::json!({ "error": "not_found", "key": k }).to_string(),
+                        )
+                    }
+                    Err(e) => {
+                        return json_response(
+                            "500 Internal Server Error",
+                            &serde_json::json!({ "error": e.to_string() }).to_string(),
+                        )
+                    }
+                },
+                Err(e) => {
+                    return json_response(
+                        "503 Service Unavailable",
+                        &serde_json::json!({ "error": e.to_string() }).to_string(),
+                    )
                 }
-            }
+            },
             _ => return json_response("400 Bad Request", r#"{"error":"missing or empty key"}"#),
         }
     }
@@ -8600,7 +9742,10 @@ pub async fn handle_api(
             let _ = tx.send(()).await;
             return json_response("200 OK", r#"{"ok":true,"message":"Redémarrage demandé"}"#);
         }
-        return json_response("503 Service Unavailable", r#"{"error":"restart_not_available"}"#);
+        return json_response(
+            "503 Service Unavailable",
+            r#"{"error":"restart_not_available"}"#,
+        );
     }
 
     // GET /api/docs — user documentation (markdown), for TUI and web UI
@@ -8643,9 +9788,10 @@ pub async fn handle_api(
 
     // Phase 4: Microsoft Teams Bot Framework webhook
     if method == "POST" && (path == "/channels/teams" || path == "/channels/teams/message") {
-        if let (Some(ref app_id), Some(ref app_password)) =
-            (&channel_config.teams_app_id, &channel_config.teams_app_password)
-        {
+        if let (Some(ref app_id), Some(ref app_password)) = (
+            &channel_config.teams_app_id,
+            &channel_config.teams_app_password,
+        ) {
             let auth_header = headers.get("authorization").map(String::as_str);
             return crate::channels::teams::handle_teams_message(
                 body,
@@ -8661,21 +9807,31 @@ pub async fn handle_api(
     }
 
     if method == "POST" && path == "/api/message" {
-        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
         let mut message = body_json
             .as_ref()
             .and_then(|v| v.get("message").and_then(|v| v.as_str().map(String::from)))
             .unwrap_or_default();
         // Parse attachments: images -> data URLs for vision; documents -> append extracted text to message.
         let image_data_urls: Option<Vec<String>> = {
-            let arr = body_json.as_ref().and_then(|v| v.get("attachments").and_then(|a| a.as_array()));
+            let arr = body_json
+                .as_ref()
+                .and_then(|v| v.get("attachments").and_then(|a| a.as_array()));
             let mut urls = Vec::new();
             let mut doc_texts = Vec::new();
             if let Some(arr) = arr {
                 for att in arr {
                     let typ = att.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    let content_base64 = att.get("content_base64").and_then(|c| c.as_str()).unwrap_or("");
-                    let mime = att.get("mime_type").and_then(|m| m.as_str()).unwrap_or("image/png");
+                    let content_base64 = att
+                        .get("content_base64")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
+                    let mime = att
+                        .get("mime_type")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("image/png");
                     let name = att.get("name").and_then(|n| n.as_str()).unwrap_or("file");
                     if content_base64.is_empty() {
                         continue;
@@ -8683,11 +9839,20 @@ pub async fn handle_api(
                     if typ == "image" || mime.starts_with("image/") {
                         let data_url = format!("data:{};base64,{}", mime, content_base64);
                         urls.push(data_url);
-                    } else if typ == "document" || mime.starts_with("text/") || mime == "application/pdf" {
-                        if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, content_base64) {
+                    } else if typ == "document"
+                        || mime.starts_with("text/")
+                        || mime == "application/pdf"
+                    {
+                        if let Ok(decoded) = base64::Engine::decode(
+                            &base64::engine::general_purpose::STANDARD,
+                            content_base64,
+                        ) {
                             let text = if mime == "application/pdf" {
-                                pdf_extract::extract_text_from_mem(&decoded)
-                                    .unwrap_or_else(|_| String::from("[Extraction du texte PDF impossible ou PDF vide.]"))
+                                pdf_extract::extract_text_from_mem(&decoded).unwrap_or_else(|_| {
+                                    String::from(
+                                        "[Extraction du texte PDF impossible ou PDF vide.]",
+                                    )
+                                })
                             } else if let Ok(t) = String::from_utf8(decoded) {
                                 t
                             } else {
@@ -8726,8 +9891,15 @@ pub async fn handle_api(
         };
         // Session: "new_session" => new UUID; else provided non-empty session_id; else day-YYYY-MM-DD (short-term = current day, survives UI restart).
         let session_id = {
-            let new_session = body_json.as_ref().and_then(|v| v.get("new_session")).and_then(|v| v.as_bool()).unwrap_or(false);
-            let provided = body_json.as_ref().and_then(|v| v.get("session_id").and_then(|v| v.as_str().map(String::from)));
+            let new_session = body_json
+                .as_ref()
+                .and_then(|v| v.get("new_session"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let provided = body_json.as_ref().and_then(|v| {
+                v.get("session_id")
+                    .and_then(|v| v.as_str().map(String::from))
+            });
             if new_session {
                 uuid::Uuid::new_v4().to_string()
             } else if let Some(s) = provided {
@@ -8754,7 +9926,14 @@ pub async fn handle_api(
                 if let Some(name) = extracted {
                     user_profile.how_to_call = Some(name.clone());
                     user_profile.onboarding_completed = true;
-                    if user_profile.first_name.is_none() || user_profile.first_name.as_deref().unwrap_or("").trim().is_empty() {
+                    if user_profile.first_name.is_none()
+                        || user_profile
+                            .first_name
+                            .as_deref()
+                            .unwrap_or("")
+                            .trim()
+                            .is_empty()
+                    {
                         user_profile.first_name = Some(name.clone());
                     }
                     let _ = user_profile.save(data_dir);
@@ -8774,11 +9953,22 @@ pub async fn handle_api(
         let priority = body_json
             .as_ref()
             .and_then(|v| v.get("priority").and_then(|p| p.as_str()))
-            .map(|s| if s.eq_ignore_ascii_case("high") { TaskPriority::UserHigh } else { TaskPriority::UserNormal })
+            .map(|s| {
+                if s.eq_ignore_ascii_case("high") {
+                    TaskPriority::UserHigh
+                } else {
+                    TaskPriority::UserNormal
+                }
+            })
             .unwrap_or(TaskPriority::UserNormal);
         // Build acknowledgment message before moving `message` into the envelope.
         let ack_message = build_ack_message(&message);
-        let envelope = crate::gateway::MessageEnvelope::api(session_id.clone(), message, image_data_urls, priority);
+        let envelope = crate::gateway::MessageEnvelope::api(
+            session_id.clone(),
+            message,
+            image_data_urls,
+            priority,
+        );
         match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
             Ok(task_id) => {
                 let body = serde_json::json!({
@@ -8789,7 +9979,9 @@ pub async fn handle_api(
                 });
                 return json_response("200 OK", &body.to_string());
             }
-            Err(_) => return json_response("500 Internal Server Error", r#"{"error":"handle_failed"}"#),
+            Err(_) => {
+                return json_response("500 Internal Server Error", r#"{"error":"handle_failed"}"#)
+            }
         }
     }
 
@@ -8800,17 +9992,12 @@ pub async fn handle_api(
     }
 
     if method == "GET" && (path == "/api/tasks" || path.starts_with("/api/tasks?")) {
-        let status_filter = path
-            .split('?')
-            .nth(1)
-            .and_then(|q| {
-                q.split('&')
-                    .find(|p| p.starts_with("status="))
-                    .map(|p| {
-                        let raw = p.trim_start_matches("status=");
-                        decode_url_component(raw)
-                    })
-            });
+        let status_filter = path.split('?').nth(1).and_then(|q| {
+            q.split('&').find(|p| p.starts_with("status=")).map(|p| {
+                let raw = p.trim_start_matches("status=");
+                decode_url_component(raw)
+            })
+        });
         return get_task_list(store_path, status_filter).await;
     }
     // GET /api/pending-human-input — list all tasks waiting for user input (so UI can show notifications after reload or when user was away)
@@ -8868,7 +10055,8 @@ pub async fn handle_api(
                 }
                 // Human in the loop: POST user reply to unblock the agent
                 if method == "POST" && parts.get(1) == Some(&"human-reply") {
-                    let response_text = body.as_deref()
+                    let response_text = body
+                        .as_deref()
                         .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
                         .and_then(|v| v.get("response").and_then(|r| r.as_str().map(String::from)))
                         .unwrap_or_else(|| String::new());
@@ -8922,8 +10110,12 @@ pub async fn handle_api(
         let rest = path.trim_start_matches("/api/schedules/");
         let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
         if parts.get(1) == Some(&"exceptions") {
-            if let (Some(&schedule_id_str), Some(&exception_id_str)) = (parts.first(), parts.get(2)) {
-                if let (Ok(schedule_id), Ok(exception_id)) = (Uuid::parse_str(schedule_id_str), Uuid::parse_str(exception_id_str)) {
+            if let (Some(&schedule_id_str), Some(&exception_id_str)) = (parts.first(), parts.get(2))
+            {
+                if let (Ok(schedule_id), Ok(exception_id)) = (
+                    Uuid::parse_str(schedule_id_str),
+                    Uuid::parse_str(exception_id_str),
+                ) {
                     return delete_schedule_exception(store_path, schedule_id, exception_id).await;
                 }
             }
@@ -9176,13 +10368,16 @@ pub async fn handle_api(
                 return json_response("200 OK", &body);
             }
             Err(e) => {
-                let body = serde_json::json!({ "error": "reload_failed", "detail": e.to_string() }).to_string();
+                let body = serde_json::json!({ "error": "reload_failed", "detail": e.to_string() })
+                    .to_string();
                 return json_response("500 Internal Server Error", &body);
             }
         }
     }
     if method == "POST" && path == "/api/skills/uninstall" {
-        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
         let name = body_json
             .as_ref()
             .and_then(|j| j.get("name"))
@@ -9206,7 +10401,8 @@ pub async fn handle_api(
                     let body = serde_json::json!({ "uninstalled": true, "name": skill_name, "message": msg }).to_string();
                     return json_response("200 OK", &body);
                 }
-                let body = serde_json::json!({ "error": "uninstall_failed", "detail": msg }).to_string();
+                let body =
+                    serde_json::json!({ "error": "uninstall_failed", "detail": msg }).to_string();
                 return json_response("400 Bad Request", &body);
             }
             None => {
@@ -9219,7 +10415,9 @@ pub async fn handle_api(
     // POST /api/skills/install — install a skill from a URL (GitHub or any allowed HTTPS host).
     // Body: { "url": "<skill_url>" }
     if method == "POST" && path == "/api/skills/install" {
-        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
         let url = body_json
             .as_ref()
             .and_then(|j| j.get("url"))
@@ -9255,7 +10453,8 @@ pub async fn handle_api(
                     let body = serde_json::json!({ "installed": true, "message": msg }).to_string();
                     return json_response("200 OK", &body);
                 }
-                let body = serde_json::json!({ "error": "install_failed", "detail": msg }).to_string();
+                let body =
+                    serde_json::json!({ "error": "install_failed", "detail": msg }).to_string();
                 return json_response("400 Bad Request", &body);
             }
             None => {
@@ -9271,7 +10470,8 @@ pub async fn handle_api(
             .iter()
             .map(|(name, desc)| serde_json::json!({ "name": name, "description": desc }))
             .collect();
-        let body = serde_json::to_string(&serde_json::json!({ "tools": list })).unwrap_or_else(|_| "{}".to_string());
+        let body = serde_json::to_string(&serde_json::json!({ "tools": list }))
+            .unwrap_or_else(|_| "{}".to_string());
         return json_response("200 OK", &body);
     }
 
@@ -9280,7 +10480,8 @@ pub async fn handle_api(
         let store = user_rag_store.lock().await;
         match store.list_documents() {
             Ok(docs) => {
-                let body = serde_json::to_string(&serde_json::json!({ "documents": docs })).unwrap_or_else(|_| "[]".to_string());
+                let body = serde_json::to_string(&serde_json::json!({ "documents": docs }))
+                    .unwrap_or_else(|_| "[]".to_string());
                 return json_response("200 OK", &body);
             }
             Err(e) => {
@@ -9292,22 +10493,40 @@ pub async fn handle_api(
 
     // User RAG: upload document (body: { name, content_base64, mime_type? })
     if method == "POST" && path == "/api/user-rag/documents" {
-        let body_json = body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
-        let name = body_json.as_ref().and_then(|j| j.get("name")).and_then(|v| v.as_str()).map(String::from);
-        let content_base64 = body_json.as_ref().and_then(|j| j.get("content_base64")).and_then(|v| v.as_str()).map(String::from);
-        let mime_type = body_json.as_ref().and_then(|j| j.get("mime_type")).and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| "application/octet-stream".to_string());
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let name = body_json
+            .as_ref()
+            .and_then(|j| j.get("name"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let content_base64 = body_json
+            .as_ref()
+            .and_then(|j| j.get("content_base64"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let mime_type = body_json
+            .as_ref()
+            .and_then(|j| j.get("mime_type"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| "application/octet-stream".to_string());
         let name = match name.filter(|n| !n.is_empty()) {
             Some(n) => n,
             None => return json_response("400 Bad Request", r#"{"error":"name_required"}"#),
         };
         let content_base64 = match content_base64.filter(|c| !c.is_empty()) {
             Some(c) => c,
-            None => return json_response("400 Bad Request", r#"{"error":"content_base64_required"}"#),
+            None => {
+                return json_response("400 Bad Request", r#"{"error":"content_base64_required"}"#)
+            }
         };
         let store = user_rag_store.lock().await;
         match store.add_document(&content_base64, &name, &mime_type) {
             Ok(id) => {
-                let body = serde_json::json!({ "id": id, "name": name, "message": "Document ajouté." });
+                let body =
+                    serde_json::json!({ "id": id, "name": name, "message": "Document ajouté." });
                 return json_response("200 OK", &body.to_string());
             }
             Err(e) => {
@@ -9319,14 +10538,23 @@ pub async fn handle_api(
 
     // User RAG: delete document by id
     if method == "DELETE" && path.starts_with("/api/user-rag/documents/") {
-        let id = path.trim_start_matches("/api/user-rag/documents/").split('?').next().unwrap_or("").trim();
+        let id = path
+            .trim_start_matches("/api/user-rag/documents/")
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .trim();
         if id.is_empty() {
             return json_response("400 Bad Request", r#"{"error":"id_required"}"#);
         }
         let store = user_rag_store.lock().await;
         match store.delete_document(id) {
-            Ok(true) => return json_response("200 OK", r#"{"ok":true,"message":"Document supprimé."}"#),
-            Ok(false) => return json_response("404 Not Found", r#"{"error":"document_not_found"}"#),
+            Ok(true) => {
+                return json_response("200 OK", r#"{"ok":true,"message":"Document supprimé."}"#)
+            }
+            Ok(false) => {
+                return json_response("404 Not Found", r#"{"error":"document_not_found"}"#)
+            }
             Err(e) => {
                 let body = serde_json::json!({ "error": "delete_failed", "detail": e.to_string() });
                 return json_response("500 Internal Server Error", &body.to_string());
@@ -9336,7 +10564,10 @@ pub async fn handle_api(
 
     // Phase 6: LLM completion via router
     if method == "POST" && path == "/api/complete" {
-        let body = match body.as_deref().and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+        let body = match body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+        {
             Some(b) => b,
             None => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
         };
@@ -9348,8 +10579,14 @@ pub async fn handle_api(
             .to_string();
         let req = akasha_llm::CompletionRequest {
             prompt,
-            max_tokens: body.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32),
-            temperature: body.get("temperature").and_then(|v| v.as_f64()).map(|f| f as f32),
+            max_tokens: body
+                .get("max_tokens")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32),
+            temperature: body
+                .get("temperature")
+                .and_then(|v| v.as_f64())
+                .map(|f| f as f32),
             preferred_task_type: None,
             system_prompt: None,
             image_data_urls: None,
@@ -9379,59 +10616,71 @@ pub async fn handle_api(
     }
 
     if method == "GET" && path.starts_with("/api/router/metrics") {
-        let period = path.split('?').nth(1)
+        let period = path
+            .split('?')
+            .nth(1)
             .and_then(|q| q.split('&').find(|p| p.starts_with("period=")))
             .and_then(|p| p.strip_prefix("period="));
-        let list: std::collections::HashMap<String, akasha_llm::ModelMetrics> = if let Some(period) = period {
-            let (from_ts, to_ts) = match period {
-                "day" => {
-                    let now = chrono::Utc::now();
-                    let start = now - chrono::Duration::days(1);
-                    (Some(start), Some(now))
-                }
-                "week" => {
-                    let now = chrono::Utc::now();
-                    let start = now - chrono::Duration::days(7);
-                    (Some(start), Some(now))
-                }
-                "month" => {
-                    let now = chrono::Utc::now();
-                    let start = now - chrono::Duration::days(30);
-                    (Some(start), Some(now))
-                }
-                "year" => {
-                    let now = chrono::Utc::now();
-                    let start = now - chrono::Duration::days(365);
-                    (Some(start), Some(now))
-                }
-                _ => (None, None),
-            };
-            match (from_ts, to_ts) {
-                (Some(from), Some(to)) => {
-                    match akasha_store::MetricsStore::open(store_path) {
-                        Ok(store) => store.aggregate(Some(from), Some(to)).ok()
-                            .map(|rows| rows.into_iter().map(|(k, v)| (k, akasha_llm::ModelMetrics {
-                                total_requests: v.total_requests,
-                                successful_requests: v.successful_requests,
-                                failed_requests: v.failed_requests,
-                                total_latency_ms: v.total_latency_ms,
-                                total_tokens: v.total_tokens,
-                                total_cost_usd: v.total_cost_usd,
-                                fallback_triggered: v.fallback_triggered,
-                                fallback_success: v.fallback_success,
-                                last_success: v.last_success,
-                                last_failure: v.last_failure,
-                                latency_samples: std::collections::VecDeque::new(),
-                            })).collect())
+        let list: std::collections::HashMap<String, akasha_llm::ModelMetrics> =
+            if let Some(period) = period {
+                let (from_ts, to_ts) = match period {
+                    "day" => {
+                        let now = chrono::Utc::now();
+                        let start = now - chrono::Duration::days(1);
+                        (Some(start), Some(now))
+                    }
+                    "week" => {
+                        let now = chrono::Utc::now();
+                        let start = now - chrono::Duration::days(7);
+                        (Some(start), Some(now))
+                    }
+                    "month" => {
+                        let now = chrono::Utc::now();
+                        let start = now - chrono::Duration::days(30);
+                        (Some(start), Some(now))
+                    }
+                    "year" => {
+                        let now = chrono::Utc::now();
+                        let start = now - chrono::Duration::days(365);
+                        (Some(start), Some(now))
+                    }
+                    _ => (None, None),
+                };
+                match (from_ts, to_ts) {
+                    (Some(from), Some(to)) => match akasha_store::MetricsStore::open(store_path) {
+                        Ok(store) => store
+                            .aggregate(Some(from), Some(to))
+                            .ok()
+                            .map(|rows| {
+                                rows.into_iter()
+                                    .map(|(k, v)| {
+                                        (
+                                            k,
+                                            akasha_llm::ModelMetrics {
+                                                total_requests: v.total_requests,
+                                                successful_requests: v.successful_requests,
+                                                failed_requests: v.failed_requests,
+                                                total_latency_ms: v.total_latency_ms,
+                                                total_tokens: v.total_tokens,
+                                                total_cost_usd: v.total_cost_usd,
+                                                fallback_triggered: v.fallback_triggered,
+                                                fallback_success: v.fallback_success,
+                                                last_success: v.last_success,
+                                                last_failure: v.last_failure,
+                                                latency_samples: std::collections::VecDeque::new(),
+                                            },
+                                        )
+                                    })
+                                    .collect()
+                            })
                             .unwrap_or_default(),
                         Err(_) => llm_router.metrics().list(),
-                    }
+                    },
+                    _ => llm_router.metrics().list(),
                 }
-                _ => llm_router.metrics().list(),
-            }
-        } else {
-            llm_router.metrics().list()
-        };
+            } else {
+                llm_router.metrics().list()
+            };
         let body = serde_json::to_string(&list).unwrap_or_else(|_| "{}".to_string());
         return json_response("200 OK", &body);
     }
@@ -9478,11 +10727,25 @@ pub async fn handle_api(
         let body_json = body
             .as_deref()
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
-        let category = body_json.as_ref().and_then(|j| j.get("category")).and_then(|v| v.as_str()).map(String::from);
-        let provider = body_json.as_ref().and_then(|j| j.get("provider")).and_then(|v| v.as_str()).map(String::from);
-        let model = body_json.as_ref().and_then(|j| j.get("model")).and_then(|v| v.as_str()).map(String::from);
+        let category = body_json
+            .as_ref()
+            .and_then(|j| j.get("category"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let provider = body_json
+            .as_ref()
+            .and_then(|j| j.get("provider"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let model = body_json
+            .as_ref()
+            .and_then(|j| j.get("model"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
         match (category, provider, model) {
-            (Some(cat), Some(prov), Some(modl)) if !cat.is_empty() && !prov.is_empty() && !modl.is_empty() => {
+            (Some(cat), Some(prov), Some(modl))
+                if !cat.is_empty() && !prov.is_empty() && !modl.is_empty() =>
+            {
                 if !llm_router.is_provider_registered(&prov) {
                     let body_err = serde_json::json!({ "ok": false, "error": format!("unknown provider '{}'", prov) });
                     return json_response("400 Bad Request", &body_err.to_string());
@@ -9498,7 +10761,8 @@ pub async fn handle_api(
                     .unwrap_or_else(|_| akasha_llm::config::RoutingConfig::default_config());
                 config.set_primary_route(&cat, entry);
                 if let Err(e) = config.save_to_path(&router_path) {
-                    let body_err = serde_json::json!({ "ok": false, "error": format!("save failed: {}", e) });
+                    let body_err =
+                        serde_json::json!({ "ok": false, "error": format!("save failed: {}", e) });
                     return json_response("500 Internal Server Error", &body_err.to_string());
                 }
                 let body_ok = serde_json::json!({
@@ -9511,7 +10775,8 @@ pub async fn handle_api(
                 return json_response("200 OK", &body_ok.to_string());
             }
             _ => {
-                let body_err = serde_json::json!({ "error": "missing or empty category, provider, or model" });
+                let body_err =
+                    serde_json::json!({ "error": "missing or empty category, provider, or model" });
                 return json_response("400 Bad Request", &body_err.to_string());
             }
         }
@@ -9548,8 +10813,14 @@ pub async fn handle_api(
                                 .filter_map(|m| {
                                     m.as_str()
                                         .map(String::from)
-                                        .or_else(|| m.get("name").and_then(|n| n.as_str()).map(String::from))
-                                        .or_else(|| m.get("model").and_then(|n| n.as_str()).map(String::from))
+                                        .or_else(|| {
+                                            m.get("name").and_then(|n| n.as_str()).map(String::from)
+                                        })
+                                        .or_else(|| {
+                                            m.get("model")
+                                                .and_then(|n| n.as_str())
+                                                .map(String::from)
+                                        })
                                 })
                                 .collect();
                             if !models.is_empty() {
@@ -9629,14 +10900,22 @@ pub async fn handle_api(
             })
             .unwrap_or_else(|| "".to_string());
         if model.is_empty() {
-            return json_response("400 Bad Request", r#"{"error":"missing query: model=<name>"}"#);
+            return json_response(
+                "400 Bad Request",
+                r#"{"error":"missing query: model=<name>"}"#,
+            );
         }
         let url = format!("{}/api/show", base_url);
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        match client.post(&url).json(&serde_json::json!({ "model": model })).send().await {
+        match client
+            .post(&url)
+            .json(&serde_json::json!({ "model": model }))
+            .send()
+            .await
+        {
             Ok(resp) if resp.status().is_success() => {
                 if let Ok(json) = resp.json::<serde_json::Value>().await {
                     // Extract context_length from model_info (e.g. "gemma3.context_length": 131072)
@@ -9647,11 +10926,20 @@ pub async fn handle_api(
                             .and_then(|(_, v)| v.as_u64())
                     });
                     // num_ctx from parameters string (e.g. "num_ctx 2048")
-                    let parameters = json.get("parameters").and_then(|p| p.as_str()).unwrap_or("");
+                    let parameters = json
+                        .get("parameters")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("");
                     let num_ctx = parameters
                         .lines()
                         .find(|l| l.trim().starts_with("num_ctx"))
-                        .and_then(|l| l.trim().trim_start_matches("num_ctx").trim().split_whitespace().next())
+                        .and_then(|l| {
+                            l.trim()
+                                .trim_start_matches("num_ctx")
+                                .trim()
+                                .split_whitespace()
+                                .next()
+                        })
                         .and_then(|s| s.parse::<u64>().ok());
                     let body = serde_json::json!({
                         "model": model,
@@ -9686,7 +10974,10 @@ pub async fn handle_api(
                 health_json
                     .get("checks")
                     .and_then(|c| c.as_array())
-                    .map(|a| a.iter().all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)))
+                    .map(|a| {
+                        a.iter()
+                            .all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false))
+                    })
                     .unwrap_or(false)
             });
         let summary = if all_ok {
@@ -9738,7 +11029,8 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
         let advice_timeout = std::time::Duration::from_secs(120);
         match tokio::time::timeout(advice_timeout, llm_router.complete(&req)).await {
             Ok(Ok(resp)) => {
-                let body = serde_json::json!({ "advice": resp.text, "model_used": resp.model_used });
+                let body =
+                    serde_json::json!({ "advice": resp.text, "model_used": resp.model_used });
                 return json_response("200 OK", &body.to_string());
             }
             Ok(Err(e)) => {
@@ -9758,11 +11050,7 @@ Reply in the same language as the user (or French if ambiguous). Be concise."#,
     json_response("404 Not Found", r#"{"error":"not_found"}"#)
 }
 
-async fn cancel_task(
-    store_path: &Path,
-    id: Uuid,
-    main_agent: &crate::agents::MainAgent,
-) -> String {
+async fn cancel_task(store_path: &Path, id: Uuid, main_agent: &crate::agents::MainAgent) -> String {
     let store = match TaskStore::open(store_path) {
         Ok(s) => s,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
@@ -9813,11 +11101,7 @@ pub(crate) fn is_resumable(status: &TaskStatus) -> bool {
     )
 }
 
-async fn pause_task(
-    store_path: &Path,
-    id: Uuid,
-    main_agent: &crate::agents::MainAgent,
-) -> String {
+async fn pause_task(store_path: &Path, id: Uuid, main_agent: &crate::agents::MainAgent) -> String {
     let store = match TaskStore::open(store_path) {
         Ok(s) => s,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
@@ -9849,11 +11133,7 @@ async fn pause_task(
     json_response("200 OK", &body.to_string())
 }
 
-async fn resume_task(
-    store_path: &Path,
-    id: Uuid,
-    main_agent: &crate::agents::MainAgent,
-) -> String {
+async fn resume_task(store_path: &Path, id: Uuid, main_agent: &crate::agents::MainAgent) -> String {
     let store = match TaskStore::open(store_path) {
         Ok(s) => s,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
@@ -9883,7 +11163,12 @@ async fn resume_task(
     }
 }
 
-async fn get_task_status(store_path: &Path, progress: &ProgressCache, task_usage_store: &TaskUsageStore, id: Uuid) -> String {
+async fn get_task_status(
+    store_path: &Path,
+    progress: &ProgressCache,
+    task_usage_store: &TaskUsageStore,
+    id: Uuid,
+) -> String {
     let store = match TaskStore::open(store_path) {
         Ok(s) => s,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
@@ -9895,7 +11180,14 @@ async fn get_task_status(store_path: &Path, progress: &ProgressCache, task_usage
     };
     let mut progress_list: Vec<ProgressEntry> = store
         .get_progress(id)
-        .map(|v| v.into_iter().map(|(pct, msg)| ProgressEntry { progress_pct: pct, message: msg }).collect())
+        .map(|v| {
+            v.into_iter()
+                .map(|(pct, msg)| ProgressEntry {
+                    progress_pct: pct,
+                    message: msg,
+                })
+                .collect()
+        })
         .unwrap_or_default();
     // Prefer persisted progress when available; fall back to in-memory progress if none is stored.
     if progress_list.is_empty() {
@@ -10024,22 +11316,35 @@ async fn get_schedule_exceptions(store_path: &Path, schedule_id: Uuid) -> String
     json_response("200 OK", &body.to_string())
 }
 
-async fn post_schedule_exception(store_path: &Path, schedule_id: Uuid, body: Option<Vec<u8>>) -> String {
-    let json: serde_json::Value = match body.as_deref().and_then(|b| serde_json::from_slice(b).ok()) {
+async fn post_schedule_exception(
+    store_path: &Path,
+    schedule_id: Uuid,
+    body: Option<Vec<u8>>,
+) -> String {
+    let json: serde_json::Value = match body.as_deref().and_then(|b| serde_json::from_slice(b).ok())
+    {
         Some(j) => j,
         None => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
     };
     let date_str = json.get("date").and_then(|v| v.as_str()).unwrap_or("");
     let date = match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
         Ok(d) => d,
-        Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_date","expected":"YYYY-MM-DD"}"#),
+        Err(_) => {
+            return json_response(
+                "400 Bad Request",
+                r#"{"error":"invalid_date","expected":"YYYY-MM-DD"}"#,
+            )
+        }
     };
     let type_str = json.get("type").and_then(|v| v.as_str()).unwrap_or("skip");
     let type_ = match type_str {
         "override" => ScheduleExceptionType::Override,
         _ => ScheduleExceptionType::Skip,
     };
-    let override_payload = json.get("override_payload").and_then(|v| v.as_str()).map(String::from);
+    let override_payload = json
+        .get("override_payload")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let store = match ScheduleStore::open(store_path) {
         Ok(s) => s,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
@@ -10063,14 +11368,19 @@ async fn post_schedule_exception(store_path: &Path, schedule_id: Uuid, body: Opt
     json_response("200 OK", &body.to_string())
 }
 
-async fn delete_schedule_exception(store_path: &Path, schedule_id: Uuid, exception_id: Uuid) -> String {
+async fn delete_schedule_exception(
+    store_path: &Path,
+    schedule_id: Uuid,
+    exception_id: Uuid,
+) -> String {
     let store = match ScheduleStore::open(store_path) {
         Ok(s) => s,
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
     match store.delete_exception(schedule_id, exception_id) {
         Ok(true) => {
-            let body = serde_json::json!({ "deleted": true, "exception_id": exception_id.to_string() });
+            let body =
+                serde_json::json!({ "deleted": true, "exception_id": exception_id.to_string() });
             json_response("200 OK", &body.to_string())
         }
         Ok(false) => json_response("404 Not Found", r#"{"error":"exception_not_found"}"#),
@@ -10106,7 +11416,8 @@ async fn get_schedule_by_id(store_path: &Path, id: Uuid) -> String {
 }
 
 async fn post_schedule(store_path: &Path, body: Option<Vec<u8>>) -> String {
-    let json: serde_json::Value = match body.as_deref().and_then(|b| serde_json::from_slice(b).ok()) {
+    let json: serde_json::Value = match body.as_deref().and_then(|b| serde_json::from_slice(b).ok())
+    {
         Some(j) => j,
         None => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
     };
@@ -10114,11 +11425,30 @@ async fn post_schedule(store_path: &Path, body: Option<Vec<u8>>) -> String {
     let id = Uuid::new_v4();
     let schedule = Schedule {
         id,
-        name: json.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        description: json.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        enabled: json.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
-        timezone: json.get("timezone").and_then(|v| v.as_str()).unwrap_or("UTC").to_string(),
-        rrule: json.get("rrule").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        name: json
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        description: json
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        enabled: json
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        timezone: json
+            .get("timezone")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UTC")
+            .to_string(),
+        rrule: json
+            .get("rrule")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         interval_seconds: json.get("interval_seconds").and_then(|v| v.as_u64()),
         start_at: json
             .get("start_at")
@@ -10131,7 +11461,10 @@ async fn post_schedule(store_path: &Path, body: Option<Vec<u8>>) -> String {
             .and_then(|v| v.as_str())
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|t| t.with_timezone(&chrono::Utc)),
-        channel_context: json.get("channel_context").and_then(|v| v.as_str()).map(String::from),
+        channel_context: json
+            .get("channel_context")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         created_at: now,
         updated_at: now,
     };
@@ -10168,7 +11501,8 @@ async fn put_schedule(store_path: &Path, id: Uuid, body: Option<Vec<u8>>) -> Str
         Ok(None) => return json_response("404 Not Found", r#"{"error":"schedule_not_found"}"#),
         Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
     };
-    let json: serde_json::Value = match body.as_deref().and_then(|b| serde_json::from_slice(b).ok()) {
+    let json: serde_json::Value = match body.as_deref().and_then(|b| serde_json::from_slice(b).ok())
+    {
         Some(j) => j,
         None => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
     };
@@ -10196,13 +11530,19 @@ async fn put_schedule(store_path: &Path, id: Uuid, body: Option<Vec<u8>>) -> Str
         } else if let Some(s_val) = v.as_str() {
             s.channel_context = Some(s_val.to_string());
         } else {
-            return json_response("400 Bad Request", r#"{"error":"invalid_field_type","field":"channel_context"}"#);
+            return json_response(
+                "400 Bad Request",
+                r#"{"error":"invalid_field_type","field":"channel_context"}"#,
+            );
         }
     }
     if store.update_schedule(&s).is_err() {
         return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
     }
-    json_response("200 OK", &serde_json::json!({ "id": id.to_string() }).to_string())
+    json_response(
+        "200 OK",
+        &serde_json::json!({ "id": id.to_string() }).to_string(),
+    )
 }
 
 async fn delete_schedule(store_path: &Path, id: Uuid) -> String {
@@ -10213,7 +11553,10 @@ async fn delete_schedule(store_path: &Path, id: Uuid) -> String {
     if store.delete_schedule(id).is_err() {
         return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
     }
-    json_response("200 OK", &serde_json::json!({ "deleted": id.to_string() }).to_string())
+    json_response(
+        "200 OK",
+        &serde_json::json!({ "deleted": id.to_string() }).to_string(),
+    )
 }
 
 fn task_label(initial_message: Option<&String>, task_id: &Uuid) -> String {
@@ -10229,7 +11572,11 @@ fn task_label(initial_message: Option<&String>, task_id: &Uuid) -> String {
         }
         _ => {
             let s = task_id.to_string();
-            let suffix = if s.len() >= 8 { &s[s.len() - 8..] } else { s.as_str() };
+            let suffix = if s.len() >= 8 {
+                &s[s.len() - 8..]
+            } else {
+                s.as_str()
+            };
             format!("Tâche …{suffix}")
         }
     }
@@ -10433,6 +11780,10 @@ async fn get_schedule_run_reports(store_path: &Path) -> String {
     json_response("200 OK", &body.to_string())
 }
 
+fn packaged_spec_check_ok(spec_dir: &Path) -> bool {
+    spec_dir.exists() || std::env::var_os("AKASHA_SPEC_DIR").is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -10440,14 +11791,13 @@ mod tests {
         canonicalize_tool_name, classify_small_talk_message, detect_session_recall_intent,
         ensure_no_open_code_block, extract_how_to_call_from_message, is_pausable, is_resumable,
         looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
-        normalize_tool_path_hint, parse_content_length, parse_device_invoke_params,
-        parse_generate_image_tool_args, parse_plugin_reputation_reset_body,
-        parse_run_command_args, parse_skill_install_url, parse_tool_calls, parse_write_file_request,
-        resolve_run_command_working_dir,
-        PluginReputationResetBody,
+        normalize_tool_path_hint, packaged_spec_check_ok, parse_content_length,
+        parse_device_invoke_params, parse_generate_image_tool_args,
+        parse_plugin_reputation_reset_body, parse_run_command_args, parse_skill_install_url,
+        parse_tool_calls, parse_write_file_request, resolve_run_command_working_dir,
         response_looks_off_topic_for_small_talk, rewrite_workspace_plan_key_to_lineage_root,
-        rewrite_workspace_plan_path_str, small_talk_fast_lane, SessionRecallIntent,
-        SessionRecallRange, SmallTalkLanguage,
+        rewrite_workspace_plan_path_str, small_talk_fast_lane, PluginReputationResetBody,
+        SessionRecallIntent, SessionRecallRange, SmallTalkLanguage,
     };
     use akasha_store::TaskStatus;
     use uuid::Uuid;
@@ -10475,7 +11825,9 @@ mod tests {
 
     // --- parse_device_invoke_params ---
 
-    fn s(v: &str) -> String { v.to_string() }
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
 
     #[test]
     fn device_invoke_params_no_extra_args_returns_empty_object() {
@@ -10486,21 +11838,37 @@ mod tests {
 
     #[test]
     fn device_invoke_params_single_valid_json_arg() {
-        let args = vec![s("synthetic_input"), s("keyboard"), s("shortcut"), s(r#"{"keys":["Control","C"]}"#)];
+        let args = vec![
+            s("synthetic_input"),
+            s("keyboard"),
+            s("shortcut"),
+            s(r#"{"keys":["Control","C"]}"#),
+        ];
         let p = parse_device_invoke_params(&args);
         assert_eq!(p, serde_json::json!({"keys": ["Control", "C"]}));
     }
 
     #[test]
     fn device_invoke_params_single_invalid_json_falls_back_to_empty_object() {
-        let args = vec![s("local_media"), s("microphone"), s("record"), s("not-json")];
+        let args = vec![
+            s("local_media"),
+            s("microphone"),
+            s("record"),
+            s("not-json"),
+        ];
         let p = parse_device_invoke_params(&args);
         assert_eq!(p, serde_json::json!({}));
     }
 
     #[test]
     fn device_invoke_params_multiple_args_become_json_array() {
-        let args = vec![s("synthetic_input"), s("keyboard"), s("type"), s("hello"), s("world")];
+        let args = vec![
+            s("synthetic_input"),
+            s("keyboard"),
+            s("type"),
+            s("hello"),
+            s("world"),
+        ];
         let p = parse_device_invoke_params(&args);
         assert_eq!(p, serde_json::json!(["hello", "world"]));
     }
@@ -10509,13 +11877,7 @@ mod tests {
 
     #[test]
     fn generate_image_args_join_words_into_prompt() {
-        let args = vec![
-            s("A"),
-            s("cute"),
-            s("cat"),
-            s("playing"),
-            s("guitar"),
-        ];
+        let args = vec![s("A"), s("cute"), s("cat"), s("playing"), s("guitar")];
         let (prompt, size) = parse_generate_image_tool_args(&args);
         assert_eq!(prompt, "A cute cat playing guitar");
         assert!(size.is_none());
@@ -10533,35 +11895,51 @@ mod tests {
 
     #[test]
     fn tool_only_action_true_for_camera() {
-        assert!(message_suggests_tool_only_action("Prends une photo avec la caméra"));
-        assert!(message_suggests_tool_only_action("Take a photo from the webcam"));
+        assert!(message_suggests_tool_only_action(
+            "Prends une photo avec la caméra"
+        ));
+        assert!(message_suggests_tool_only_action(
+            "Take a photo from the webcam"
+        ));
     }
 
     #[test]
     fn tool_only_action_true_for_weather() {
-        assert!(message_suggests_tool_only_action("Quelle est la météo à Paris ?"));
+        assert!(message_suggests_tool_only_action(
+            "Quelle est la météo à Paris ?"
+        ));
     }
 
     #[test]
     fn tool_only_action_true_for_save_file() {
-        assert!(message_suggests_tool_only_action("Sauvegarde ce code dans /tmp/foo.py"));
+        assert!(message_suggests_tool_only_action(
+            "Sauvegarde ce code dans /tmp/foo.py"
+        ));
     }
 
     #[test]
     fn tool_only_action_true_for_image_generation() {
-        assert!(message_suggests_tool_only_action("Génère une image d'un lapin"));
+        assert!(message_suggests_tool_only_action(
+            "Génère une image d'un lapin"
+        ));
     }
 
     #[test]
     fn tool_only_action_false_for_code_generation() {
-        assert!(!message_suggests_tool_only_action("Écris un script Python qui lit un fichier"));
-        assert!(!message_suggests_tool_only_action("Génère du code pour trier une liste"));
+        assert!(!message_suggests_tool_only_action(
+            "Écris un script Python qui lit un fichier"
+        ));
+        assert!(!message_suggests_tool_only_action(
+            "Génère du code pour trier une liste"
+        ));
     }
 
     #[test]
     fn tool_only_action_false_when_code_intent_dominates() {
         // Explicit code request even if it mentions photo → do not override to conversation
-        assert!(!message_suggests_tool_only_action("écris un script qui prend une photo"));
+        assert!(!message_suggests_tool_only_action(
+            "écris un script qui prend une photo"
+        ));
     }
 
     #[test]
@@ -10609,7 +11987,10 @@ mod tests {
     fn classify_small_talk_rejects_small_talk_with_real_request() {
         // "ça va merci, tu peux me rappeler ce qu'on a fait hier ?"
         // Should be rejected because it contains "peux me" + "rappeler" + "hier"
-        assert!(classify_small_talk_message("ça va merci, tu peux me rappeler ce qu'on a fait hier ?").is_none());
+        assert!(classify_small_talk_message(
+            "ça va merci, tu peux me rappeler ce qu'on a fait hier ?"
+        )
+        .is_none());
 
         // "ça va, peux-tu lire ce fichier ?" should be rejected
         assert!(classify_small_talk_message("ça va, peux-tu lire ce fichier ?").is_none());
@@ -10695,7 +12076,10 @@ mod tests {
     fn parse_tool_calls_rejects_nested_tool_keyword_as_name() {
         let s = "TOOL: TOOL: install_skill https://github.com/bankr/cli";
         let c = parse_tool_calls(s);
-        assert!(c.is_empty(), "nested TOOL: should not become a tool named TOOL:");
+        assert!(
+            c.is_empty(),
+            "nested TOOL: should not become a tool named TOOL:"
+        );
     }
 
     #[test]
@@ -10827,7 +12211,6 @@ mod tests {
         assert_eq!(c[1].0, "read_file");
     }
 
-
     #[test]
     fn parse_tool_calls_sloppy_provider_all_headers_after_multiline_tool() {
         // Providers that always emit sloppy "- Tool: …" headers must not lose tool calls
@@ -10839,7 +12222,12 @@ mod tests {
             "- Tool: list_dir workspace:/\n",
         );
         let c = parse_tool_calls(s);
-        assert_eq!(c.len(), 3, "expected write_file + read_file + list_dir, got {:?}", c);
+        assert_eq!(
+            c.len(),
+            3,
+            "expected write_file + read_file + list_dir, got {:?}",
+            c
+        );
         assert_eq!(c[0].0, "write_file");
         assert_eq!(c[1].0, "read_file");
         assert_eq!(c[2].0, "list_dir");
@@ -10930,10 +12318,8 @@ mod tests {
     fn rewrite_plan_key_stale_uuid_rewritten_to_lineage_root() {
         let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
         let stale = Uuid::parse_str("216364b2-9308-47a7-9c2b-1c3b84c55c8c").unwrap();
-        let (k, bad) = rewrite_workspace_plan_key_to_lineage_root(
-            &format!(".akasha/plan_{stale}.md"),
-            root,
-        );
+        let (k, bad) =
+            rewrite_workspace_plan_key_to_lineage_root(&format!(".akasha/plan_{stale}.md"), root);
         assert_eq!(bad, Some(stale));
         assert_eq!(k, format!(".akasha/plan_{root}.md"));
     }
@@ -10941,7 +12327,8 @@ mod tests {
     #[test]
     fn rewrite_plan_key_matching_root_unchanged() {
         let root = Uuid::parse_str("a80fec14-d91a-4d91-a09e-77ea286c21fd").unwrap();
-        let (k, bad) = rewrite_workspace_plan_key_to_lineage_root(&format!(".akasha/plan_{root}.md"), root);
+        let (k, bad) =
+            rewrite_workspace_plan_key_to_lineage_root(&format!(".akasha/plan_{root}.md"), root);
         assert!(bad.is_none());
         assert_eq!(k, format!(".akasha/plan_{root}.md"));
     }
@@ -10949,7 +12336,8 @@ mod tests {
     #[test]
     fn rewrite_plan_key_non_plan_paths_passthrough() {
         let root = Uuid::nil();
-        let (k, bad) = rewrite_workspace_plan_key_to_lineage_root("certification_ai/exo/x.md", root);
+        let (k, bad) =
+            rewrite_workspace_plan_key_to_lineage_root("certification_ai/exo/x.md", root);
         assert!(bad.is_none());
         assert_eq!(k, "certification_ai/exo/x.md");
     }
@@ -10992,14 +12380,33 @@ mod tests {
     #[test]
     fn agent_role_prompt_some_for_recognized_types() {
         let with_role = [
-            "code", "search", "financial", "documentalist", "project_manager",
-            "technical_writer", "research", "security_audit", "creative",
-            "analyst", "architect", "frontend", "backend", "database", "integration", "qa", "system", "image_generation",
+            "code",
+            "search",
+            "financial",
+            "documentalist",
+            "project_manager",
+            "technical_writer",
+            "research",
+            "security_audit",
+            "creative",
+            "analyst",
+            "architect",
+            "frontend",
+            "backend",
+            "database",
+            "integration",
+            "qa",
+            "system",
+            "image_generation",
         ];
         for t in &with_role {
             let s = agent_role_system_prompt(t);
             assert!(s.is_some(), "agent_type {:?} should have a role prompt", t);
-            assert!(!s.unwrap().is_empty(), "agent_type {:?} role prompt must be non-empty", t);
+            assert!(
+                !s.unwrap().is_empty(),
+                "agent_type {:?} role prompt must be non-empty",
+                t
+            );
         }
     }
 
@@ -11037,7 +12444,11 @@ mod tests {
     fn build_image_markdown_data_url() {
         let url = "data:image/jpeg;base64,ABC";
         let out = build_image_markdown("Photo", url);
-        assert!(out.contains("](<data:image/"), "output should contain ](<data:image/: {:?}", out);
+        assert!(
+            out.contains("](<data:image/"),
+            "output should contain ](<data:image/: {:?}",
+            out
+        );
         assert!(out.ends_with(">)"), "output should end with >): {:?}", out);
         assert_eq!(out, "\n\n![Photo](<data:image/jpeg;base64,ABC>)");
     }
@@ -11091,6 +12502,14 @@ mod tests {
         assert_eq!(TaskStatus::Cancelled.as_str(), "cancelled");
         assert_eq!(TaskStatus::Interrupted.as_str(), "interrupted");
         assert_eq!(TaskStatus::WaitingUserInput.as_str(), "waiting_user_input");
+    }
+
+    #[test]
+    fn packaged_spec_check_is_ok_without_override_for_installed_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::remove_var("AKASHA_SPEC_DIR");
+
+        assert!(packaged_spec_check_ok(dir.path()));
     }
 
     #[test]
