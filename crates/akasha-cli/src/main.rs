@@ -36,7 +36,7 @@ enum Commands {
         /// Fetch diagnostic advice from daemon (RAG + Core Model, requires daemon running)
         #[arg(long)]
         advice: bool,
-        /// Fix missing or minimal config: create llm_router.yaml, tools_policy.yaml, connectors.env, akasha.env in data_dir if absent
+        /// Fix missing or minimal config: create missing files in data_dir (llm_router.yaml, tools_policy.yaml, connectors.env, akasha.env, agent_profile.json)
         #[arg(long)]
         fix: bool,
     },
@@ -612,7 +612,9 @@ fn akasha_data_dir() -> PathBuf {
 }
 
 fn is_source_workspace_dir(path: &Path) -> bool {
-    path.join("Cargo.toml").exists() && path.join("crates").is_dir()
+    path.join("Cargo.toml").exists()
+        && path.join("crates").is_dir()
+        && path.join("crates").join("akasha-cli").join("Cargo.toml").exists()
 }
 
 /// Detect whether the CLI is running from a source checkout.
@@ -624,15 +626,12 @@ fn running_from_source_workspace() -> bool {
         }
     }
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            if is_source_workspace_dir(parent) {
+        let mut dir = exe.parent().map(Path::to_path_buf);
+        while let Some(current) = dir {
+            if is_source_workspace_dir(&current) {
                 return true;
             }
-            if let Some(grandparent) = parent.parent() {
-                if is_source_workspace_dir(grandparent) {
-                    return true;
-                }
-            }
+            dir = current.parent().map(Path::to_path_buf);
         }
     }
     false
