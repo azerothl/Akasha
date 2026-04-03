@@ -1,6 +1,6 @@
 [package]
 name = "akasha-daemon"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Akasha 24/7 daemon runtime with supervision"
 

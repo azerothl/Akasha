@@ -1,6 +1,6 @@
 [package]
 name = "akasha-tui"
-version = "0.6.0"
+version.workspace = true
 edition = "2021"
 description = "Terminal UI for Akasha (ratatui)"
 

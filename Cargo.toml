@@ -20,3 +20,8 @@ members = [
 exclude = [
     "apps/akasha-ui/src-tauri",
 ]
+
+# Single release version for all workspace crates (CLI, daemon, TUI, libs).
+# Keep apps/akasha-ui/package.json + src-tauri/Cargo.toml + tauri.conf.json in sync (crate is excluded from workspace).
+[workspace.package]
+version = "0.7.0"

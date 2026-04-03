@@ -12,6 +12,7 @@ const CRASH_LOOP_WINDOW_SECS: u64 = 300; // 5 minutes
 
 #[derive(Parser)]
 #[command(name = "akasha")]
+#[command(version)]
 #[command(about = "Akasha - Local-first AI assistant", long_about = None)]
 struct Cli {
     #[command(subcommand)]

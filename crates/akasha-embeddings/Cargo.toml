@@ -1,6 +1,6 @@
 [package]
 name = "akasha-embeddings"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Local text embeddings for Akasha (in-process, no third-party service)"
 

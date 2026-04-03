@@ -1,6 +1,6 @@
 [package]
 name = "akasha-store"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "SQLite task store and append-only immutable log"
 

@@ -1,6 +1,6 @@
 [package]
 name = "akasha-plugin-api"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Plugin API traits and types (channel, tool, skill, memory, model, security)"
 
