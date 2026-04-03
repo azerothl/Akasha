@@ -17,6 +17,7 @@ akasha-vault = { path = "../akasha-vault" }
 clap = { version = "4.4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 serde_json = "1.0"
+serde_yaml = "0.9"
 anyhow = "1.0"
 which = "6.0"
 dirs = "5.0"

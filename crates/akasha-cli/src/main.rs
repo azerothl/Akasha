@@ -1,5 +1,8 @@
 //! Akasha CLI - start, stop, doctor
 
+mod embedded_spec;
+
+use akasha_core::parse_env_file_content;
 use akasha_vault::Vault;
 use clap::{Parser, Subcommand};
 use std::ffi::OsStr;
@@ -2743,35 +2746,6 @@ fn cmd_stop() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Parse an env file (KEY=value per line). Returns (key->value map, list of (line_number, line) for invalid lines).
-fn parse_env_file(
-    content: &str,
-) -> (
-    std::collections::HashMap<String, String>,
-    Vec<(usize, String)>,
-) {
-    let mut map = std::collections::HashMap::new();
-    let mut errors = Vec::new();
-    for (i, line) in content.lines().enumerate() {
-        let line_no = i + 1;
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = trimmed.split_once('=') {
-            let key = k.trim();
-            if key.is_empty() {
-                errors.push((line_no, line.to_string()));
-            } else {
-                map.insert(key.to_string(), v.trim().to_string());
-            }
-        } else {
-            errors.push((line_no, line.to_string()));
-        }
-    }
-    (map, errors)
-}
-
 /// Fix an existing env file: report invalid lines, add missing recommended keys with default values.
 fn doctor_fix_env_file(
     path: &Path,
@@ -2781,7 +2755,7 @@ fn doctor_fix_env_file(
     fixes: &mut Vec<String>,
 ) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
-    let (map, errors) = parse_env_file(&content);
+    let (map, errors) = parse_env_file_content(&content);
     for (line_no, line) in &errors {
         fixes.push(format!(
             "{} ligne {}: format invalide (attendu KEY=value ou ligne vide/commentaire #). Ligne: \"{}\"",
@@ -2791,17 +2765,19 @@ fn doctor_fix_env_file(
     let mut to_append: Vec<String> = Vec::new();
     for key in recommended_keys {
         if !map.contains_key(*key) {
-            let default = match *key {
-                "AKASHA_PORT" => "3876",
-                "AKASHA_LOG" => "info",
-                "AKASHA_TELEGRAM_ENABLED" | "AKASHA_SLACK_ENABLED" | "AKASHA_DISCORD_ENABLED" => "",
-                _ => "",
+            let line = match *key {
+                "AKASHA_PORT" => "AKASHA_PORT=3876".to_string(),
+                "AKASHA_LOG" => "AKASHA_LOG=info".to_string(),
+                "OLLAMA_HOST" => "OLLAMA_HOST=http://localhost:11434".to_string(),
+                "AKASHA_TELEGRAM_ENABLED" | "AKASHA_SLACK_ENABLED" | "AKASHA_DISCORD_ENABLED" => {
+                    format!("# {}=1", key)
+                }
+                "AKASHA_LOG_PATH" | "NATS_URL" | "AKASHA_SPEC_DIR" | "AKASHA_DATA_DIR" => {
+                    format!("# {}=", key)
+                }
+                _ => format!("# {}=", key),
             };
-            if default.is_empty() {
-                to_append.push(format!("# {}=1", key));
-            } else {
-                to_append.push(format!("{}={}", key, default));
-            }
+            to_append.push(line);
         }
     }
     if !to_append.is_empty() {
@@ -2830,7 +2806,20 @@ fn doctor_fix_env_file(
     Ok(())
 }
 
+fn embedded_tools_policy_example_value(data_dir: &Path) -> anyhow::Result<serde_yaml::Value> {
+    let data_dir_str = data_dir.display().to_string();
+    let data_dir_yaml = format!("'{}'", data_dir_str.replace('\'', "''"));
+    let replacement = format!("  - {}", data_dir_yaml);
+    let mut s = embedded_spec::TOOLS_POLICY_EXAMPLE_YAML.to_string();
+    s = s
+        .replace("  - \".\"", &replacement)
+        .replace("  - '.'", &replacement);
+    s = replace_bare_dot_yaml(&s, &replacement);
+    Ok(serde_yaml::from_str(&s)?)
+}
+
 /// Apply fixes for missing or minimal config when `akasha doctor --fix` is run.
+/// Templates are embedded at compile time (`embedded_spec`); user values are preserved via merge.
 /// Returns a list of messages describing what was fixed.
 fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
     let mut fixes = Vec::new();
@@ -2840,111 +2829,88 @@ fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
         fixes.push(format!("Created data_dir: {}", data_dir.display()));
     }
 
-    let llm_router_path = data_dir.join("llm_router.yaml");
-    if !llm_router_path.exists() {
-        let mut config = akasha_llm::RoutingConfig::default_config();
-        let ollama_url =
-            std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
-        config.providers.insert(
-            "ollama".to_string(),
-            akasha_llm::config::ProviderConfig {
-                api_key_ref: None,
-                base_url: Some(ollama_url.clone()),
-                organization: None,
-                version: None,
-                always_available: None,
-                site_url: None,
-                app_title: None,
-            },
-        );
-        config.save_to_path(&llm_router_path)?;
-        fixes.push(format!(
-            "Created llm_router.yaml with default task_types and providers.ollama.base_url = {}",
-            ollama_url
-        ));
-    } else {
-        match akasha_llm::RoutingConfig::load_from_path(&llm_router_path) {
-            Ok(config) => {
-                if let Err(e) = config.save_to_path(&llm_router_path) {
-                    fixes.push(format!("llm_router.yaml: impossible d'écrire après mise à jour — {}. Vérifiez les permissions.", e));
-                } else {
-                    fixes.push(
-                        "llm_router.yaml: entrées de schéma manquantes ajoutées.".to_string(),
-                    );
-                }
-            }
-            Err(e) => {
-                fixes.push(format!(
-                    "llm_router.yaml: fichier invalide — {}. Corrigez la syntaxe YAML et la structure (voir spec/35_configuration_reference.md et spec/llm_router.example.yaml).",
+    // llm_router.yaml — merge embedded example with existing file (if any).
+    {
+        let path = data_dir.join("llm_router.yaml");
+        let existed = path.exists();
+        let ex: serde_yaml::Value = serde_yaml::from_str(embedded_spec::LLM_ROUTER_EXAMPLE_YAML)?;
+        let user_v: serde_yaml::Value = if existed {
+            let s = std::fs::read_to_string(&path)?;
+            serde_yaml::from_str(&s).map_err(|e| {
+                anyhow::anyhow!(
+                    "llm_router.yaml: fichier invalide — {}. Corrigez le YAML (voir spec/35_configuration_reference.md).",
                     e
-                ));
-            }
-        }
+                )
+            })?
+        } else {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        };
+        let merged = akasha_core::merge_yaml_fill_missing(ex, user_v);
+        let merged_str = serde_yaml::to_string(&merged)?;
+        akasha_llm::RoutingConfig::from_yaml_str(&merged_str).map_err(|e| {
+            anyhow::anyhow!(
+                "llm_router.yaml: après fusion, structure invalide — {}.",
+                e
+            )
+        })?;
+        std::fs::write(&path, merged_str)?;
+        fixes.push(if existed {
+            "llm_router.yaml: aligné sur l'exemple embarqué (valeurs existantes conservées).".to_string()
+        } else {
+            "llm_router.yaml: créé depuis l'exemple embarqué.".to_string()
+        });
     }
 
-    let tools_policy_path = data_dir.join("tools_policy.yaml");
-    if !tools_policy_path.exists() {
-        let data_dir_str = data_dir.display().to_string();
-        let data_dir_yaml = format!("'{}'", data_dir_str.replace('\'', "''"));
-        let spec_dir = std::env::var("AKASHA_SPEC_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join("spec")
-            });
-        let example = spec_dir.join("tools_policy.example.yaml");
-        if example.exists() {
-            std::fs::copy(&example, &tools_policy_path)?;
-            let content = std::fs::read_to_string(&tools_policy_path)?;
-            // Replace quoted and unquoted "." entries in allowed_*_paths with data_dir.
-            // Only replace "." (standalone dot), not paths like ".gitignore" or ".config".
-            let replacement = format!("  - {}", data_dir_yaml);
-            let content = content
-                .replace("  - \".\"", &replacement)
-                .replace("  - '.'", &replacement);
-            let content = replace_bare_dot_yaml(&content, &replacement);
-            std::fs::write(&tools_policy_path, content)?;
-            fixes.push(format!(
-                "Created tools_policy.yaml from {} (default paths = data_dir).",
-                example.display()
-            ));
-        } else {
-            let minimal = format!(
-                r#"# tools_policy.yaml - edit allowed_read_paths / allowed_write_paths as needed
-allowed_read_paths:
-  - {}
-allowed_write_paths:
-  - {}
-allowed_commands: []
-command_timeout_secs: 60
-"#,
-                data_dir_yaml, data_dir_yaml
-            );
-            std::fs::write(&tools_policy_path, minimal)?;
-            fixes.push(
-                "Created minimal tools_policy.yaml (default paths = data_dir; edit to add more)."
-                    .to_string(),
-            );
-        }
-    } else {
-        match akasha_tools::ToolsPolicy::load_from_path(&tools_policy_path) {
-            Ok(policy) => {
-                if let Err(e) = policy.save_to_path(&tools_policy_path) {
-                    fixes.push(format!("tools_policy.yaml: impossible d'écrire après mise à jour — {}. Vérifiez les permissions.", e));
-                } else {
-                    fixes.push(
-                        "tools_policy.yaml: entrées de schéma manquantes ajoutées.".to_string(),
-                    );
-                }
-            }
-            Err(e) => {
-                fixes.push(format!(
-                    "tools_policy.yaml: fichier invalide — {}. Corrigez la syntaxe YAML (voir spec/tools_policy.example.yaml et spec/35_configuration_reference.md).",
+    // tools_policy.yaml
+    {
+        let path = data_dir.join("tools_policy.yaml");
+        let existed = path.exists();
+        let ex = embedded_tools_policy_example_value(data_dir)?;
+        let user_v: serde_yaml::Value = if existed {
+            let s = std::fs::read_to_string(&path)?;
+            serde_yaml::from_str(&s).map_err(|e| {
+                anyhow::anyhow!(
+                    "tools_policy.yaml: fichier invalide — {}. Corrigez le YAML.",
                     e
-                ));
-            }
-        }
+                )
+            })?
+        } else {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        };
+        let merged = akasha_core::merge_yaml_fill_missing(ex, user_v);
+        let merged_str = serde_yaml::to_string(&merged)?;
+        let _: akasha_tools::ToolsPolicy = serde_yaml::from_str(&merged_str).map_err(|e| {
+            anyhow::anyhow!("tools_policy.yaml: après fusion, structure invalide — {}.", e)
+        })?;
+        std::fs::write(&path, merged_str)?;
+        fixes.push(if existed {
+            "tools_policy.yaml: aligné sur l'exemple embarqué (valeurs existantes conservées).".to_string()
+        } else {
+            "tools_policy.yaml: créé depuis l'exemple embarqué (chemins = data_dir).".to_string()
+        });
+    }
+
+    // voice_router.yaml
+    {
+        let path = data_dir.join("voice_router.yaml");
+        let existed = path.exists();
+        let ex: serde_yaml::Value = serde_yaml::from_str(embedded_spec::VOICE_ROUTER_EXAMPLE_YAML)?;
+        let user_v: serde_yaml::Value = if existed {
+            let s = std::fs::read_to_string(&path)?;
+            serde_yaml::from_str(&s).map_err(|e| {
+                anyhow::anyhow!("voice_router.yaml: fichier invalide — {}.", e)
+            })?
+        } else {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        };
+        let merged = akasha_core::merge_yaml_fill_missing(ex, user_v);
+        let merged_str = serde_yaml::to_string(&merged)?;
+        std::fs::write(&path, merged_str)?;
+        fixes.push(if existed {
+            "voice_router.yaml: aligné sur l'exemple embarqué (valeurs existantes conservées).".to_string()
+        } else {
+            "voice_router.yaml: créé depuis l'exemple embarqué.".to_string()
+        });
     }
 
     let connectors_path = data_dir.join("connectors.env");
@@ -2976,6 +2942,10 @@ command_timeout_secs: 60
         let content = r#"# Runtime variables for akasha daemon (generated by akasha doctor --fix)
 AKASHA_PORT=3876
 AKASHA_LOG=info
+# AKASHA_LOG_PATH=
+OLLAMA_HOST=http://localhost:11434
+# NATS_URL=
+# AKASHA_SPEC_DIR=
 "#;
         std::fs::write(&akasha_env_path, content)?;
         fixes.push("Created akasha.env (defaults: AKASHA_PORT=3876, AKASHA_LOG=info).".to_string());
@@ -2983,19 +2953,39 @@ AKASHA_LOG=info
         doctor_fix_env_file(
             &akasha_env_path,
             "akasha.env",
-            &["AKASHA_PORT", "AKASHA_LOG"],
-            "# Variables principales (défauts: 3876, info)",
+            &[
+                "AKASHA_PORT",
+                "AKASHA_LOG",
+                "AKASHA_LOG_PATH",
+                "OLLAMA_HOST",
+                "NATS_URL",
+                "AKASHA_SPEC_DIR",
+            ],
+            "# Variables principales et optionnelles (défauts port/log ; autres commentés si absents)",
             &mut fixes,
         )?;
     }
 
     let agent_profile_path = data_dir.join("agent_profile.json");
-    if !agent_profile_path.exists() {
-        let templates = agent_profile_templates();
-        let profile = &templates[0].1;
-        let json = serde_json::to_string_pretty(profile).unwrap_or_else(|_| "{}".to_string());
+    {
+        let existed = agent_profile_path.exists();
+        let ex: serde_json::Value = serde_json::from_str(embedded_spec::AGENT_PROFILE_EXAMPLE_JSON)?;
+        let user_v: serde_json::Value = if existed {
+            let s = std::fs::read_to_string(&agent_profile_path)?;
+            serde_json::from_str(&s).map_err(|e| {
+                anyhow::anyhow!("agent_profile.json: fichier invalide — {}.", e)
+            })?
+        } else {
+            serde_json::json!({})
+        };
+        let merged = akasha_core::merge_json_fill_missing(ex, user_v);
+        let json = serde_json::to_string_pretty(&merged)?;
         std::fs::write(&agent_profile_path, json)?;
-        fixes.push("Created agent_profile.json (default template).".to_string());
+        fixes.push(if existed {
+            "agent_profile.json: aligné sur le gabarit embarqué (valeurs existantes conservées).".to_string()
+        } else {
+            "agent_profile.json: créé depuis le gabarit embarqué.".to_string()
+        });
     }
 
     Ok(fixes)
@@ -3049,7 +3039,7 @@ fn run_config_checks(data_dir: &Path) -> Vec<(String, bool, String)> {
     } else {
         match std::fs::read_to_string(&p) {
             Ok(s) => {
-                let (_, errors) = parse_env_file(&s);
+                let (_, errors) = parse_env_file_content(&s);
                 if errors.is_empty() {
                     (true, "akasha.env: OK".to_string())
                 } else {
@@ -3436,7 +3426,26 @@ mod tests {
         assert!(fixes.iter().any(|msg| msg.contains("Created akasha.env")));
         assert!(akasha_env.contains("AKASHA_PORT=3876"));
         assert!(akasha_env.contains("AKASHA_LOG=info"));
+        assert!(akasha_env.contains("OLLAMA_HOST="));
         assert!(akasha_env_check.1);
+
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn doctor_fix_merges_minimal_llm_router() {
+        let data_dir = make_temp_dir("doctor-llm-merge");
+        std::fs::write(
+            data_dir.join("llm_router.yaml"),
+            "global:\n  enable_metrics: false\n",
+        )
+        .unwrap();
+
+        let fixes = run_doctor_fixes(&data_dir).expect("doctor --fix");
+        assert!(fixes.iter().any(|m| m.contains("llm_router.yaml")));
+        let cfg =
+            akasha_llm::RoutingConfig::load_from_path(&data_dir.join("llm_router.yaml")).unwrap();
+        assert!(cfg.task_types.contains_key("conversation"));
 
         std::fs::remove_dir_all(data_dir).unwrap();
     }
