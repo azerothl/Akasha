@@ -319,14 +319,33 @@ fn find_tui_binary() -> Option<PathBuf> {
     which::which("akasha-tui").ok().map(PathBuf::from)
 }
 
+fn valid_spec_dir_override(spec_dir_override: Option<&OsStr>) -> Option<PathBuf> {
+    let override_path = spec_dir_override?;
+    if override_path.is_empty() {
+        return None;
+    }
+
+    let path = PathBuf::from(override_path);
+    if path.is_dir() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn doctor_is_source_checkout(cwd: &Path) -> bool {
+    cwd.join("Cargo.toml").exists() || cwd.join(".git").exists() || cwd.join("spec").is_dir()
+}
+
 fn doctor_uses_source_checkout_checks(spec_dir_override: Option<&OsStr>, cwd: &Path) -> bool {
-    spec_dir_override.is_some() || cwd.join("spec").exists()
+    let _ = spec_dir_override;
+    doctor_is_source_checkout(cwd)
 }
 
 fn doctor_spec_check(spec_dir_override: Option<&OsStr>, cwd: &Path) -> (bool, String) {
-    let spec_dir = spec_dir_override.map(PathBuf::from).or_else(|| {
+    let spec_dir = valid_spec_dir_override(spec_dir_override).or_else(|| {
         let candidate = cwd.join("spec");
-        if candidate.exists() {
+        if candidate.is_dir() {
             Some(candidate)
         } else {
             None
@@ -3305,17 +3324,27 @@ mod tests {
     use super::*;
 
     fn make_temp_dir(label: &str) -> PathBuf {
-        let mut dir = std::env::temp_dir();
+        let base = std::env::temp_dir();
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        dir.push(format!(
-            "akasha-cli-{label}-{}-{unique}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+
+        for attempt in 0..1024 {
+            let mut dir = base.clone();
+            dir.push(format!(
+                "akasha-cli-{label}-{}-{unique}-{attempt}",
+                std::process::id()
+            ));
+
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return dir,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => panic!("failed to create temp dir {}: {err}", dir.display()),
+            }
+        }
+
+        panic!("failed to create unique temp dir for label {label}");
     }
 
     #[test]
