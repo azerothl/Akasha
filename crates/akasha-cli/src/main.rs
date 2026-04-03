@@ -2,6 +2,7 @@
 
 use akasha_vault::Vault;
 use clap::{Parser, Subcommand};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -229,10 +230,7 @@ enum ConfigEnvSub {
     /// Get one var
     Get { key: String },
     /// Set var (value optional, read from stdin if omitted)
-    Set {
-        key: String,
-        value: Option<String>,
-    },
+    Set { key: String, value: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -321,6 +319,41 @@ fn find_tui_binary() -> Option<PathBuf> {
     which::which("akasha-tui").ok().map(PathBuf::from)
 }
 
+fn doctor_uses_source_checkout_checks(spec_dir_override: Option<&OsStr>, cwd: &Path) -> bool {
+    spec_dir_override.is_some() || cwd.join("spec").exists()
+}
+
+fn doctor_spec_check(spec_dir_override: Option<&OsStr>, cwd: &Path) -> (bool, String) {
+    let spec_dir = spec_dir_override.map(PathBuf::from).or_else(|| {
+        let candidate = cwd.join("spec");
+        if candidate.exists() {
+            Some(candidate)
+        } else {
+            None
+        }
+    });
+
+    let Some(spec_dir) = spec_dir else {
+        return (
+            true,
+            "Spec YAML files not bundled (OK for installed binaries)".to_string(),
+        );
+    };
+
+    let event_model = spec_dir.join("09_event_model.yaml");
+    let data_model = spec_dir.join("10_data_model.yaml");
+    let spec_files_ok = event_model.exists() && data_model.exists();
+    let desc = if spec_files_ok {
+        format!("Spec YAML files (09, 10) in {}", spec_dir.display())
+    } else {
+        format!(
+            "Spec YAML files missing in {} (expected 09_event_model.yaml and 10_data_model.yaml)",
+            spec_dir.display()
+        )
+    };
+    (spec_files_ok, desc)
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -369,7 +402,10 @@ fn cmd_router(sub: RouterSub) -> anyhow::Result<()> {
             } else {
                 println!("Ollama trouvé ({} instance(s)):", list.len());
                 for (i, url) in list.iter().enumerate() {
-                    let kind = if url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]") {
+                    let kind = if url.contains("127.0.0.1")
+                        || url.contains("localhost")
+                        || url.contains("[::1]")
+                    {
                         "local"
                     } else {
                         "réseau"
@@ -381,13 +417,23 @@ fn cmd_router(sub: RouterSub) -> anyhow::Result<()> {
         RouterSub::Show { model } => {
             let model_param = model.replace(':', "%3A").replace(' ', "%20");
             let resp = client
-                .get(format!("{}/api/router/ollama/show?model={}", base, model_param))
+                .get(format!(
+                    "{}/api/router/ollama/show?model={}",
+                    base, model_param
+                ))
                 .timeout(std::time::Duration::from_secs(15))
                 .send()?;
             if !resp.status().is_success() {
                 let status = resp.status();
-                let err: serde_json::Value = resp.json().unwrap_or_else(|_| serde_json::json!({ "error": status.to_string() }));
-                anyhow::bail!("Daemon/Ollama error: {}", err.get("error").and_then(|v| v.as_str()).unwrap_or("unknown"));
+                let err: serde_json::Value = resp
+                    .json()
+                    .unwrap_or_else(|_| serde_json::json!({ "error": status.to_string() }));
+                anyhow::bail!(
+                    "Daemon/Ollama error: {}",
+                    err.get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                );
             }
             let info: serde_json::Value = resp.json()?;
             let model_name = info.get("model").and_then(|v| v.as_str()).unwrap_or("?");
@@ -402,7 +448,10 @@ fn cmd_router(sub: RouterSub) -> anyhow::Result<()> {
                 println!("  Contexte max (tokens) : (non exposé par ce modèle)");
             }
             if let Some(n) = num_ctx {
-                println!("  num_ctx (actuel)      : {} (limite utilisée par Ollama)", n);
+                println!(
+                    "  num_ctx (actuel)      : {} (limite utilisée par Ollama)",
+                    n
+                );
             } else {
                 println!("  num_ctx (actuel)      : (non trouvé dans parameters)");
             }
@@ -412,7 +461,10 @@ fn cmd_router(sub: RouterSub) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn copy_dir_all(src: impl AsRef<std::path::Path>, dst: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+fn copy_dir_all(
+    src: impl AsRef<std::path::Path>,
+    dst: impl AsRef<std::path::Path>,
+) -> std::io::Result<()> {
     std::fs::create_dir_all(&dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -461,7 +513,10 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
                 let enabled = p.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
                 let score = p.get("score").and_then(|v| v.as_u64()).unwrap_or(100);
                 let status = if enabled { "enabled" } else { "disabled" };
-                println!("  {}  {} {}  kind={}  {}  score={}", id, name, version, kind, status, score);
+                println!(
+                    "  {}  {} {}  kind={}  {}  score={}",
+                    id, name, version, kind, status, score
+                );
             }
         }
         PluginSub::Reload => {
@@ -476,15 +531,16 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
         }
         PluginSub::Install { path } => {
             if !path.is_dir() {
-                anyhow::bail!("Install path must be a directory containing manifest.toml and plugin.wasm");
+                anyhow::bail!(
+                    "Install path must be a directory containing manifest.toml and plugin.wasm"
+                );
             }
-            let manifest_path = [
-                path.join("manifest.toml"),
-                path.join("manifest.json"),
-            ]
-            .into_iter()
-            .find(|p| p.exists())
-            .ok_or_else(|| anyhow::anyhow!("No manifest.toml or manifest.json in {}", path.display()))?;
+            let manifest_path = [path.join("manifest.toml"), path.join("manifest.json")]
+                .into_iter()
+                .find(|p| p.exists())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("No manifest.toml or manifest.json in {}", path.display())
+                })?;
             let manifest = akasha_plugin_api::PluginManifest::load_from_path(&manifest_path)
                 .map_err(|e| anyhow::anyhow!("Invalid manifest: {}", e))?;
             if !is_safe_plugin_id(&manifest.id) {
@@ -543,7 +599,11 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
                 let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                 let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("?");
                 let version = p.get("version").and_then(|v| v.as_str()).unwrap_or("?");
-                let path_or_url = p.get("path").or(p.get("url")).and_then(|v| v.as_str()).unwrap_or("—");
+                let path_or_url = p
+                    .get("path")
+                    .or(p.get("url"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("—");
                 println!("  {}  {} {}  path={}", id, name, version, path_or_url);
             }
         }
@@ -621,18 +681,34 @@ fn cmd_paths() -> anyhow::Result<()> {
     if let Ok(dir) = std::env::var("AKASHA_DATA_DIR") {
         println!("  AKASHA_DATA_DIR (env)  : {}", dir);
     } else {
-        println!(
-            "  AKASHA_DATA_DIR (env)  : (non défini — utilisation du répertoire home/akasha)"
-        );
+        println!("  AKASHA_DATA_DIR (env)  : (non défini — utilisation du répertoire home/akasha)");
     }
     println!("  Répertoire de données  : {}", data_dir.display());
     println!("  Fichiers principaux    :");
-    println!("    llm_router.yaml      : {}", data_dir.join("llm_router.yaml").display());
-    println!("    connectors.env       : {}", data_dir.join("connectors.env").display());
-    println!("    akasha.env           : {}", data_dir.join("akasha.env").display());
-    println!("    tools_policy.yaml    : {}", data_dir.join("tools_policy.yaml").display());
-    println!("    akasha.db            : {}", data_dir.join("akasha.db").display());
-    println!("    memory.db            : {}", data_dir.join("memory.db").display());
+    println!(
+        "    llm_router.yaml      : {}",
+        data_dir.join("llm_router.yaml").display()
+    );
+    println!(
+        "    connectors.env       : {}",
+        data_dir.join("connectors.env").display()
+    );
+    println!(
+        "    akasha.env           : {}",
+        data_dir.join("akasha.env").display()
+    );
+    println!(
+        "    tools_policy.yaml    : {}",
+        data_dir.join("tools_policy.yaml").display()
+    );
+    println!(
+        "    akasha.db            : {}",
+        data_dir.join("akasha.db").display()
+    );
+    println!(
+        "    memory.db            : {}",
+        data_dir.join("memory.db").display()
+    );
     println!();
     println!("  Daemon (au lancement) :");
     println!(
@@ -642,7 +718,9 @@ fn cmd_paths() -> anyhow::Result<()> {
     println!("    llm_router.yaml      : cherché d'abord dans data_dir, puis dans <spec_dir>/../llm_router.yaml");
     println!();
     println!("  Sous WSL/Linux : data_dir = ${{XDG_DATA_HOME:-~/.local/share}}/akasha sauf si AKASHA_DATA_DIR est défini.");
-    println!("  Sous Windows  : data_dir = %%LOCALAPPDATA%%\\akasha sauf si AKASHA_DATA_DIR est défini.");
+    println!(
+        "  Sous Windows  : data_dir = %%LOCALAPPDATA%%\\akasha sauf si AKASHA_DATA_DIR est défini."
+    );
     println!();
     println!("  Pour utiliser la même config sous WSL que sous Windows, définir par exemple :");
     println!("    export AKASHA_DATA_DIR=/mnt/c/Users/VOTRE_USER/AppData/Local/akasha");
@@ -683,7 +761,13 @@ fn find_models_compose_dir(compose_dir_override: Option<&PathBuf>) -> Option<Pat
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            for candidate in [parent.join("akasha-models"), parent.parent().map(|p| p.join("akasha-models")).unwrap_or_default()] {
+            for candidate in [
+                parent.join("akasha-models"),
+                parent
+                    .parent()
+                    .map(|p| p.join("akasha-models"))
+                    .unwrap_or_default(),
+            ] {
                 if candidate.join("docker-compose.yml").exists() {
                     return Some(candidate);
                 }
@@ -729,7 +813,9 @@ fn apply_services_config(
                 app_title: None,
             },
         );
-        updated.push("llm_router.yaml: providers.ollama.base_url = http://localhost:11434".to_string());
+        updated.push(
+            "llm_router.yaml: providers.ollama.base_url = http://localhost:11434".to_string(),
+        );
     }
     if bitnet {
         config.providers.insert(
@@ -744,7 +830,8 @@ fn apply_services_config(
                 app_title: None,
             },
         );
-        updated.push("llm_router.yaml: providers.bitnet.base_url = http://localhost:8080".to_string());
+        updated
+            .push("llm_router.yaml: providers.bitnet.base_url = http://localhost:8080".to_string());
     }
     if ollama || bitnet {
         config.save_to_path(&llm_path)?;
@@ -790,7 +877,12 @@ fn detect_docker_compose() -> anyhow::Result<(String, Vec<String>)> {
 }
 
 /// Run docker compose in compose_dir. cmd: "up" | "down" | "ps". profiles: e.g. ["ollama", "voice"].
-fn run_docker_compose(compose_dir: &Path, cmd: &str, profiles: &[&str], build: bool) -> anyhow::Result<()> {
+fn run_docker_compose(
+    compose_dir: &Path,
+    cmd: &str,
+    profiles: &[&str],
+    build: bool,
+) -> anyhow::Result<()> {
     let compose_file = compose_dir.join("docker-compose.yml");
     if !compose_file.exists() {
         anyhow::bail!("docker-compose.yml not found in {}", compose_dir.display());
@@ -879,7 +971,10 @@ fn cmd_services(sub: ServicesSub) -> anyhow::Result<()> {
             // run_docker_compose will use the detected binary automatically.
             detect_docker_compose()?;
 
-            println!("Lancement des services (profiles: {})…", profiles.join(", "));
+            println!(
+                "Lancement des services (profiles: {})…",
+                profiles.join(", ")
+            );
             run_docker_compose(&compose_dir, "up", &profiles, true)?;
             println!("Services démarrés.");
 
@@ -927,7 +1022,11 @@ fn version_gt(remote: &str, current: &str) -> bool {
             .split('.')
             .map(|p| p.parse::<u32>().unwrap_or(0))
             .collect();
-        (parts.get(0).copied().unwrap_or(0), parts.get(1).copied().unwrap_or(0), parts.get(2).copied().unwrap_or(0))
+        (
+            parts.get(0).copied().unwrap_or(0),
+            parts.get(1).copied().unwrap_or(0),
+            parts.get(2).copied().unwrap_or(0),
+        )
     };
     let (rmaj, rmin, rpatch) = parse(remote);
     let (cmaj, cmin, cpatch) = parse(current);
@@ -955,7 +1054,10 @@ fn cmd_update_check(base: String) -> anyhow::Result<()> {
         .unwrap_or("");
     let current = env!("CARGO_PKG_VERSION");
     if version_gt(remote_version, current) {
-        println!("A new version is available: {} (you have {}).", remote_version, current);
+        println!(
+            "A new version is available: {} (you have {}).",
+            remote_version, current
+        );
         if !download_url.is_empty() {
             println!("Download: {}", download_url);
         }
@@ -991,7 +1093,9 @@ fn cmd_update_install(base: String) -> anyhow::Result<()> {
     };
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd").args(["/C", "start", "", &open_url]).spawn()?;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &open_url])
+            .spawn()?;
     }
     #[cfg(target_os = "macos")]
     {
@@ -999,11 +1103,15 @@ fn cmd_update_install(base: String) -> anyhow::Result<()> {
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let _ = std::process::Command::new("xdg-open").arg(&open_url).spawn()
+        let _ = std::process::Command::new("xdg-open")
+            .arg(&open_url)
+            .spawn()
             .or_else(|_| std::process::Command::new("open").arg(&open_url).spawn());
     }
     println!("Opened: {}", open_url);
-    println!("Download the archive for your OS, extract it, then run akasha init and akasha start.");
+    println!(
+        "Download the archive for your OS, extract it, then run akasha init and akasha start."
+    );
     Ok(())
 }
 
@@ -1200,7 +1308,10 @@ fn ollama_list_models(base_url: &str) -> Vec<String> {
         Ok(j) => j,
         Err(_) => return vec![],
     };
-    let models: &[serde_json::Value] = json.get("models").and_then(|m| m.as_array()).map_or(&[], |v| v.as_slice());
+    let models: &[serde_json::Value] = json
+        .get("models")
+        .and_then(|m| m.as_array())
+        .map_or(&[], |v| v.as_slice());
     models
         .iter()
         .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
@@ -1227,7 +1338,10 @@ fn fetch_ollama_model_option(base_url: &str, model: &str) -> Option<akasha_llm::
             .find(|(k, _)| k.ends_with("context_length"))
             .and_then(|(_, v)| v.as_u64())
     });
-    let parameters = json.get("parameters").and_then(|p| p.as_str()).unwrap_or("");
+    let parameters = json
+        .get("parameters")
+        .and_then(|p| p.as_str())
+        .unwrap_or("");
     let num_ctx = parameters
         .lines()
         .find(|l| l.trim().starts_with("num_ctx"))
@@ -1240,16 +1354,26 @@ fn fetch_ollama_model_option(base_url: &str, model: &str) -> Option<akasha_llm::
         })
         .and_then(|s| s.parse::<u64>().ok());
     let details = json.get("details").and_then(|d| d.as_object());
-    let family = details.and_then(|d| d.get("family")).and_then(|v| v.as_str()).map(String::from);
+    let family = details
+        .and_then(|d| d.get("family"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let parameter_size = details
         .and_then(|d| d.get("parameter_size"))
         .and_then(|v| v.as_str())
         .map(String::from);
-    let modified_at = json.get("modified_at").and_then(|v| v.as_str()).map(String::from);
+    let modified_at = json
+        .get("modified_at")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let capabilities = json
         .get("capabilities")
         .and_then(|c| c.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        });
     // Store full response in extra for future use (minus huge blobs if any)
     let extra = Some(serde_json::json!({
         "parameters_preview": if parameters.len() > 500 { format!("{}...", &parameters[..500]) } else { parameters.to_string() }
@@ -1292,7 +1416,9 @@ fn llm_router_path() -> PathBuf {
     if p.exists() {
         return p;
     }
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("llm_router.yaml")
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("llm_router.yaml")
 }
 
 fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
@@ -1334,7 +1460,10 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                                 println!("  {}: context_length_max/num_ctx updated.", name);
                             }
                             None => {
-                                println!("  {}: skip (Ollama unreachable or model not found).", name);
+                                println!(
+                                    "  {}: skip (Ollama unreachable or model not found).",
+                                    name
+                                );
                             }
                         }
                     }
@@ -1352,10 +1481,9 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                 }
                 ConfigModelsSub::Get { category } => {
                     if let Some(ref cat) = category {
-                        let tt = config
-                            .task_types
-                            .get(cat.as_str())
-                            .ok_or_else(|| anyhow::anyhow!("Category '{}' not found in llm_router.yaml", cat))?;
+                        let tt = config.task_types.get(cat.as_str()).ok_or_else(|| {
+                            anyhow::anyhow!("Category '{}' not found in llm_router.yaml", cat)
+                        })?;
                         println!("Category: {}", cat);
                         if let Some(ref p) = tt.primary {
                             println!("  primary: {} / {}", p.provider, p.model);
@@ -1428,7 +1556,10 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                         config: None,
                     };
                     config.set_primary_route(&category, entry);
-                    println!("{}: primary set to {} / {} (previous primary moved to fallback if any).", category, provider, model);
+                    println!(
+                        "{}: primary set to {} / {} (previous primary moved to fallback if any).",
+                        category, provider, model
+                    );
                 }
             }
             config.save_to_path(&path)?;
@@ -1489,7 +1620,8 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                             .collect()
                     } else {
                         vec![
-                            "# akasha.env — variables chargées avant le daemon (akasha start)".to_string(),
+                            "# akasha.env — variables chargées avant le daemon (akasha start)"
+                                .to_string(),
                             "".to_string(),
                         ]
                     };
@@ -1526,7 +1658,8 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
             }
             let mut config = akasha_llm::RoutingConfig::load_from_path(&path)
                 .map_err(|e| anyhow::anyhow!("Load llm_router.yaml: {}", e))?;
-            let vault = akasha_vault::open_vault(&data_dir).map_err(|e| anyhow::anyhow!("Vault: {}", e))?;
+            let vault =
+                akasha_vault::open_vault(&data_dir).map_err(|e| anyhow::anyhow!("Vault: {}", e))?;
 
             match provider_sub {
                 ConfigProviderSub::List => {
@@ -1544,9 +1677,18 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                         println!("  {}: base_url={}, api_key_ref={}", name, url, key_ref);
                     }
                 }
-                ConfigProviderSub::SetOllama { url, category, model } => {
+                ConfigProviderSub::SetOllama {
+                    url,
+                    category,
+                    model,
+                } => {
                     let url = url
-                        .or_else(|| config.providers.get("ollama").and_then(|p| p.base_url.clone()))
+                        .or_else(|| {
+                            config
+                                .providers
+                                .get("ollama")
+                                .and_then(|p| p.base_url.clone())
+                        })
                         .unwrap_or_else(|| init_prompt("Ollama URL [http://localhost:11434]:\n> "));
                     let url = if url.trim().is_empty() {
                         "http://localhost:11434".to_string()
@@ -1572,12 +1714,19 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                             config: None,
                         };
                         config.set_primary_route(&cat, entry);
-                        println!("Ollama URL set to {}; {} primary set to ollama / {}", url, cat, modl);
+                        println!(
+                            "Ollama URL set to {}; {} primary set to ollama / {}",
+                            url, cat, modl
+                        );
                     } else {
                         println!("Ollama base_url set to {}", url);
                     }
                 }
-                ConfigProviderSub::AddOpenai { api_key, category, model } => {
+                ConfigProviderSub::AddOpenai {
+                    api_key,
+                    category,
+                    model,
+                } => {
                     let key = api_key
                         .or_else(|| Some(init_prompt("OpenAI API key (sk-...):\n> ")))
                         .unwrap_or_default();
@@ -1605,12 +1754,19 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                             config: None,
                         };
                         config.set_primary_route(&cat, entry);
-                        println!("OpenAI provider added; {} primary set to openai / {}", cat, modl);
+                        println!(
+                            "OpenAI provider added; {} primary set to openai / {}",
+                            cat, modl
+                        );
                     } else {
                         println!("OpenAI provider added (api_key_ref: vault://openai_api_key). Use 'akasha config models set <category> openai <model>' to set primary.");
                     }
                 }
-                ConfigProviderSub::AddOpenrouter { api_key, category, model } => {
+                ConfigProviderSub::AddOpenrouter {
+                    api_key,
+                    category,
+                    model,
+                } => {
                     let key = api_key
                         .or_else(|| Some(init_prompt("OpenRouter API key:\n> ")))
                         .unwrap_or_default();
@@ -1638,7 +1794,10 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
                             config: None,
                         };
                         config.set_primary_route(&cat, entry);
-                        println!("OpenRouter provider added; {} primary set to openrouter / {}", cat, modl);
+                        println!(
+                            "OpenRouter provider added; {} primary set to openrouter / {}",
+                            cat, modl
+                        );
                     } else {
                         println!("OpenRouter provider added (api_key_ref: vault://openrouter_api_key). Use 'akasha config models set <category> openrouter <model>' to set primary.");
                     }
@@ -1685,7 +1844,9 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
     if existing_config && use_defaults {
         println!("=== Akasha — Init ===\n");
         println!("Répertoire de données : {}", data_dir_str);
-        println!("\nUne configuration existe déjà. Utilisez sans --defaults pour vérifier ou réparer.\n");
+        println!(
+            "\nUne configuration existe déjà. Utilisez sans --defaults pour vérifier ou réparer.\n"
+        );
         return Ok(());
     }
 
@@ -1717,8 +1878,13 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
                 }
             }
             if has_fail {
-                let apply = init_prompt("\nCréer les fichiers manquants (comme doctor --fix) ? [O/n] :\n> ");
-                if apply.trim().is_empty() || apply.eq_ignore_ascii_case("o") || apply.eq_ignore_ascii_case("y") {
+                let apply = init_prompt(
+                    "\nCréer les fichiers manquants (comme doctor --fix) ? [O/n] :\n> ",
+                );
+                if apply.trim().is_empty()
+                    || apply.eq_ignore_ascii_case("o")
+                    || apply.eq_ignore_ascii_case("y")
+                {
                     let fixes = run_doctor_fixes(&data_dir)?;
                     if !fixes.is_empty() {
                         println!("\nFichiers créés ou réparés :");
@@ -1754,7 +1920,9 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
     if !use_defaults {
         println!("--- Provider LLM ---");
         println!("  1) Ollama (recommandé si déjà installé : GPU, nombreux modèles)");
-        println!("  2) Modèles locaux Akasha (Qwen3 0.6B / Baguettotron intégrés, sans installation)");
+        println!(
+            "  2) Modèles locaux Akasha (Qwen3 0.6B / Baguettotron intégrés, sans installation)"
+        );
         println!("  3) OpenAI (cloud)");
         println!("  4) OpenRouter (cloud, multi-modèles)");
         println!("  5) Ollama + OpenAI");
@@ -1799,7 +1967,10 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
             if !use_defaults {
                 println!("Ollama détecté ({} instance(s)) :", discovered.len());
                 for (i, url) in discovered.iter().enumerate() {
-                    let kind = if url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]") {
+                    let kind = if url.contains("127.0.0.1")
+                        || url.contains("localhost")
+                        || url.contains("[::1]")
+                    {
                         "local"
                     } else {
                         "réseau"
@@ -1829,9 +2000,16 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
     // If user chose Ollama (1, 5 or 6): detect Ollama; if not detected, offer to open download page
     let ollama_available = ollama_chosen && ollama_detected(&ollama_url);
     if ollama_chosen && !ollama_available && !use_defaults {
-        println!("\n  Ollama n'est pas détecté à {} (non installé ou non démarré).", ollama_url);
-        let open_dl = init_prompt("Ouvrir la page de téléchargement Ollama dans le navigateur ? [O/n] :\n> ");
-        if open_dl.trim().is_empty() || open_dl.trim().eq_ignore_ascii_case("o") || open_dl.trim().eq_ignore_ascii_case("y") {
+        println!(
+            "\n  Ollama n'est pas détecté à {} (non installé ou non démarré).",
+            ollama_url
+        );
+        let open_dl =
+            init_prompt("Ouvrir la page de téléchargement Ollama dans le navigateur ? [O/n] :\n> ");
+        if open_dl.trim().is_empty()
+            || open_dl.trim().eq_ignore_ascii_case("o")
+            || open_dl.trim().eq_ignore_ascii_case("y")
+        {
             open_url_in_browser(OLLAMA_DOWNLOAD_URL);
             println!("  Ouverture de {} dans le navigateur.", OLLAMA_DOWNLOAD_URL);
         }
@@ -1840,11 +2018,19 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
 
     // --- 2. Vault (store API keys and connector tokens) ---
     let vault = akasha_vault::open_vault(&data_dir).map_err(|e| anyhow::anyhow!("Vault: {}", e))?;
-    if openai_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false) {
+    if openai_key
+        .as_deref()
+        .map(|k| !k.is_empty())
+        .unwrap_or(false)
+    {
         let _ = vault.set("openai_api_key", openai_key.as_deref().unwrap());
         println!("  Vault : openai_api_key enregistré.");
     }
-    if openrouter_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false) {
+    if openrouter_key
+        .as_deref()
+        .map(|k| !k.is_empty())
+        .unwrap_or(false)
+    {
         let _ = vault.set("openrouter_api_key", openrouter_key.as_deref().unwrap());
         println!("  Vault : openrouter_api_key enregistré.");
     }
@@ -1870,7 +2056,9 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
 
     // --- 3. llm_router.yaml --- (primary from provider choice; with --defaults: Ollama if available else akasha_embedded)
     // Build RoutingConfig and serialize with serde_yaml so the daemon can parse it correctly.
-    use akasha_llm::config::{GlobalConfig, ProviderConfig, RouteEntry, RoutingConfig, TaskTypeConfig};
+    use akasha_llm::config::{
+        GlobalConfig, ProviderConfig, RouteEntry, RoutingConfig, TaskTypeConfig,
+    };
     use std::collections::HashMap;
 
     let (primary_provider, primary_model) = if use_defaults {
@@ -1943,11 +2131,12 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
         model: "core".to_string(),
         config: None,
     };
-    let fallback_list = if primary_provider == "akasha_embedded" || primary_provider == "akasha_core" {
-        vec![]
-    } else {
-        vec![fallback_entry]
-    };
+    let fallback_list =
+        if primary_provider == "akasha_embedded" || primary_provider == "akasha_core" {
+            vec![]
+        } else {
+            vec![fallback_entry]
+        };
 
     let task_type = TaskTypeConfig {
         primary: Some(primary_entry.clone()),
@@ -1955,7 +2144,13 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
         constraints: None,
     };
     let mut task_types: HashMap<String, TaskTypeConfig> = HashMap::new();
-    for name in ["conversation", "code_generation", "creative_writing", "system_diagnostic", "system"] {
+    for name in [
+        "conversation",
+        "code_generation",
+        "creative_writing",
+        "system_diagnostic",
+        "system",
+    ] {
         task_types.insert(name.to_string(), task_type.clone());
     }
 
@@ -1980,9 +2175,14 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
         let base_url = ollama_url.trim_end_matches('/');
         let existing = ollama_list_models(base_url);
         let model_to_use = primary_model;
-        let need_pull = !existing.iter().any(|n| n == model_to_use || n.starts_with(&format!("{}:", model_to_use)));
+        let need_pull = !existing
+            .iter()
+            .any(|n| n == model_to_use || n.starts_with(&format!("{}:", model_to_use)));
         if need_pull {
-            println!("  Téléchargement du modèle par défaut ({})… (peut prendre plusieurs minutes)", model_to_use);
+            println!(
+                "  Téléchargement du modèle par défaut ({})… (peut prendre plusieurs minutes)",
+                model_to_use
+            );
             if let Err(e) = ollama_pull_model(base_url, model_to_use) {
                 eprintln!("  Attention : impossible de télécharger le modèle {} : {}. Vous pouvez lancer plus tard : ollama pull {}", model_to_use, e, model_to_use);
             } else {
@@ -2006,7 +2206,10 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
                     config.model_options.insert(name.clone(), opt);
                     println!("    {} : contexte max / num_ctx enregistrés.", name);
                 } else {
-                    println!("    {} : ignoré (Ollama injoignable ou modèle absent).", name);
+                    println!(
+                        "    {} : ignoré (Ollama injoignable ou modèle absent).",
+                        name
+                    );
                 }
             }
             if let Err(e) = config.save_to_path(&router_path) {
@@ -2025,7 +2228,9 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
         let tg = init_prompt("Activer Telegram ? (o/N) :\n> ");
         telegram_enabled = tg.eq_ignore_ascii_case("o") || tg.eq_ignore_ascii_case("y");
         if telegram_enabled {
-            let chat_id = init_prompt("Chat ID pour notification « bot connecté » (optionnel, Entrée pour ignorer) :\n> ");
+            let chat_id = init_prompt(
+                "Chat ID pour notification « bot connecté » (optionnel, Entrée pour ignorer) :\n> ",
+            );
             if !chat_id.is_empty() {
                 telegram_notify_chat_id = chat_id;
             }
@@ -2053,7 +2258,10 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
         },
     ];
     if telegram_enabled && !telegram_notify_chat_id.is_empty() {
-        env_lines.push(format!("AKASHA_TELEGRAM_NOTIFY_CHAT_ID={}", telegram_notify_chat_id));
+        env_lines.push(format!(
+            "AKASHA_TELEGRAM_NOTIFY_CHAT_ID={}",
+            telegram_notify_chat_id
+        ));
     }
     let env_lines = env_lines.join("\n");
     let env_path = data_dir.join("connectors.env");
@@ -2083,17 +2291,31 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
             std::fs::write(&agent_profile_path, json)?;
             let label = templates[idx - 1].0;
             let short: String = label.chars().take(50).collect::<String>();
-            let short = if label.chars().count() > 50 { format!("{}…", short) } else { short };
-            println!("  Fichier écrit : {} (template « {} »)", agent_profile_path.display(), short);
+            let short = if label.chars().count() > 50 {
+                format!("{}…", short)
+            } else {
+                short
+            };
+            println!(
+                "  Fichier écrit : {} (template « {} »)",
+                agent_profile_path.display(),
+                short
+            );
         } else {
-            println!("  Aucun template appliqué. Tu pourras éditer {} plus tard.", agent_profile_path.display());
+            println!(
+                "  Aucun template appliqué. Tu pourras éditer {} plus tard.",
+                agent_profile_path.display()
+            );
         }
     } else {
         // --defaults : appliquer le premier template (neutre)
         let profile = &templates[0].1;
         let json = serde_json::to_string_pretty(profile).unwrap_or_else(|_| "{}".to_string());
         std::fs::write(&agent_profile_path, json)?;
-        println!("\n  Profil agent : template « Neutral / versatile » écrit dans {}", agent_profile_path.display());
+        println!(
+            "\n  Profil agent : template « Neutral / versatile » écrit dans {}",
+            agent_profile_path.display()
+        );
     }
 
     // --- 4c. tools_policy.yaml (outils machine) ---
@@ -2103,7 +2325,11 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
         let data_dir_yaml = format!("'{}'", data_dir_str.replace('\'', "''"));
         let spec_dir = std::env::var("AKASHA_SPEC_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("spec"));
+            .unwrap_or_else(|_| {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("spec")
+            });
         let example = spec_dir.join("tools_policy.example.yaml");
         if example.exists() {
             std::fs::copy(&example, &tools_policy_path)?;
@@ -2132,7 +2358,10 @@ command_timeout_secs: 60
                 data_dir_yaml, data_dir_yaml
             );
             std::fs::write(&tools_policy_path, minimal)?;
-            println!("  Fichier écrit : {} (minimal ; chemins par défaut = data_dir)", tools_policy_path.display());
+            println!(
+                "  Fichier écrit : {} (minimal ; chemins par défaut = data_dir)",
+                tools_policy_path.display()
+            );
         }
     }
 
@@ -2144,7 +2373,9 @@ command_timeout_secs: 60
     // --- 5b. Services Docker (optionnel) ---
     if !use_defaults {
         let install_services = init_prompt("\nSouhaitez-vous installer les services Docker (Ollama, TTS/STT, BitNet) ? [o/N] :\n> ");
-        if install_services.trim().eq_ignore_ascii_case("o") || install_services.trim().eq_ignore_ascii_case("y") {
+        if install_services.trim().eq_ignore_ascii_case("o")
+            || install_services.trim().eq_ignore_ascii_case("y")
+        {
             println!("\n  1) Ollama (LLM, port 11434)");
             println!("  2) Voice (TTS + STT, ports 8765/8766)");
             println!("  3) BitNet (LLM, port 8080)");
@@ -2175,7 +2406,9 @@ command_timeout_secs: 60
                             eprintln!("  Attention : docker compose a échoué : {}. Vous pourrez lancer plus tard : akasha services install --ollama --voice --bitnet", e);
                         } else {
                             println!("  Services Docker démarrés.");
-                            if let Ok(updated) = apply_services_config(&data_dir, ollama, voice, bitnet) {
+                            if let Ok(updated) =
+                                apply_services_config(&data_dir, ollama, voice, bitnet)
+                            {
                                 for u in &updated {
                                     println!("  • {}", u);
                                 }
@@ -2244,7 +2477,10 @@ fn record_restart() {
     if let Some(parent) = crash_loop_state_path().parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let path = crash_loop_state_path();
     let content = format!("restart:{}\n", now);
     let _ = std::fs::OpenOptions::new()
@@ -2342,9 +2578,7 @@ fn run_supervisor_loop(daemon_path: &PathBuf) -> anyhow::Result<()> {
 
 fn cmd_start(foreground: bool) -> anyhow::Result<()> {
     let daemon_path = find_daemon_binary().ok_or_else(|| {
-        anyhow::anyhow!(
-            "akasha-daemon not found. Build with: cargo build -p akasha-daemon"
-        )
+        anyhow::anyhow!("akasha-daemon not found. Build with: cargo build -p akasha-daemon")
     })?;
 
     let env_log = std::env::var("AKASHA_LOG").unwrap_or_else(|_| "info".into());
@@ -2363,8 +2597,7 @@ fn cmd_start(foreground: bool) -> anyhow::Result<()> {
     } else {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("akasha"));
         let mut cmd = Command::new(&exe);
-        cmd.arg("start")
-            .env("AKASHA_SUPERVISOR", "1");
+        cmd.arg("start").env("AKASHA_SUPERVISOR", "1");
         daemon_env(&mut cmd, &env_log);
         let child = cmd
             .stdout(Stdio::null())
@@ -2383,7 +2616,9 @@ fn cmd_stop() -> anyhow::Result<()> {
         if let Ok(pid) = pid_str.trim().parse::<u32>() {
             #[cfg(windows)]
             {
-                let _ = Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).status();
+                let _ = Command::new("taskkill")
+                    .args(["/F", "/PID", &pid.to_string()])
+                    .status();
             }
             #[cfg(not(windows))]
             {
@@ -2410,9 +2645,14 @@ fn cmd_stop() -> anyhow::Result<()> {
 
     #[cfg(not(windows))]
     {
-        let output = Command::new("pgrep").args(["-f", "akasha-daemon"]).output()?;
+        let output = Command::new("pgrep")
+            .args(["-f", "akasha-daemon"])
+            .output()?;
         if output.status.success() {
-            let pids: Vec<&str> = std::str::from_utf8(&output.stdout)?.trim().split_whitespace().collect();
+            let pids: Vec<&str> = std::str::from_utf8(&output.stdout)?
+                .trim()
+                .split_whitespace()
+                .collect();
             for pid in pids {
                 let _ = Command::new("kill").arg(pid).status();
             }
@@ -2430,7 +2670,12 @@ fn cmd_stop() -> anyhow::Result<()> {
 }
 
 /// Parse an env file (KEY=value per line). Returns (key->value map, list of (line_number, line) for invalid lines).
-fn parse_env_file(content: &str) -> (std::collections::HashMap<String, String>, Vec<(usize, String)>) {
+fn parse_env_file(
+    content: &str,
+) -> (
+    std::collections::HashMap<String, String>,
+    Vec<(usize, String)>,
+) {
     let mut map = std::collections::HashMap::new();
     let mut errors = Vec::new();
     for (i, line) in content.lines().enumerate() {
@@ -2502,7 +2747,11 @@ fn doctor_fix_env_file(
             .filter(|k| !map.contains_key(**k))
             .copied()
             .collect();
-        fixes.push(format!("{}: entrées recommandées ajoutées ({}).", name, keys_added.join(", ")));
+        fixes.push(format!(
+            "{}: entrées recommandées ajoutées ({}).",
+            name,
+            keys_added.join(", ")
+        ));
     }
     Ok(())
 }
@@ -2520,7 +2769,8 @@ fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
     let llm_router_path = data_dir.join("llm_router.yaml");
     if !llm_router_path.exists() {
         let mut config = akasha_llm::RoutingConfig::default_config();
-        let ollama_url = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
+        let ollama_url =
+            std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
         config.providers.insert(
             "ollama".to_string(),
             akasha_llm::config::ProviderConfig {
@@ -2534,14 +2784,19 @@ fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
             },
         );
         config.save_to_path(&llm_router_path)?;
-        fixes.push(format!("Created llm_router.yaml with default task_types and providers.ollama.base_url = {}", ollama_url));
+        fixes.push(format!(
+            "Created llm_router.yaml with default task_types and providers.ollama.base_url = {}",
+            ollama_url
+        ));
     } else {
         match akasha_llm::RoutingConfig::load_from_path(&llm_router_path) {
             Ok(config) => {
                 if let Err(e) = config.save_to_path(&llm_router_path) {
                     fixes.push(format!("llm_router.yaml: impossible d'écrire après mise à jour — {}. Vérifiez les permissions.", e));
                 } else {
-                    fixes.push("llm_router.yaml: entrées de schéma manquantes ajoutées.".to_string());
+                    fixes.push(
+                        "llm_router.yaml: entrées de schéma manquantes ajoutées.".to_string(),
+                    );
                 }
             }
             Err(e) => {
@@ -2559,7 +2814,11 @@ fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
         let data_dir_yaml = format!("'{}'", data_dir_str.replace('\'', "''"));
         let spec_dir = std::env::var("AKASHA_SPEC_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("spec"));
+            .unwrap_or_else(|_| {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("spec")
+            });
         let example = spec_dir.join("tools_policy.example.yaml");
         if example.exists() {
             std::fs::copy(&example, &tools_policy_path)?;
@@ -2572,7 +2831,10 @@ fn run_doctor_fixes(data_dir: &Path) -> anyhow::Result<Vec<String>> {
                 .replace("  - '.'", &replacement);
             let content = replace_bare_dot_yaml(&content, &replacement);
             std::fs::write(&tools_policy_path, content)?;
-            fixes.push(format!("Created tools_policy.yaml from {} (default paths = data_dir).", example.display()));
+            fixes.push(format!(
+                "Created tools_policy.yaml from {} (default paths = data_dir).",
+                example.display()
+            ));
         } else {
             let minimal = format!(
                 r#"# tools_policy.yaml - edit allowed_read_paths / allowed_write_paths as needed
@@ -2586,7 +2848,10 @@ command_timeout_secs: 60
                 data_dir_yaml, data_dir_yaml
             );
             std::fs::write(&tools_policy_path, minimal)?;
-            fixes.push("Created minimal tools_policy.yaml (default paths = data_dir; edit to add more).".to_string());
+            fixes.push(
+                "Created minimal tools_policy.yaml (default paths = data_dir; edit to add more)."
+                    .to_string(),
+            );
         }
     } else {
         match akasha_tools::ToolsPolicy::load_from_path(&tools_policy_path) {
@@ -2594,7 +2859,9 @@ command_timeout_secs: 60
                 if let Err(e) = policy.save_to_path(&tools_policy_path) {
                     fixes.push(format!("tools_policy.yaml: impossible d'écrire après mise à jour — {}. Vérifiez les permissions.", e));
                 } else {
-                    fixes.push("tools_policy.yaml: entrées de schéma manquantes ajoutées.".to_string());
+                    fixes.push(
+                        "tools_policy.yaml: entrées de schéma manquantes ajoutées.".to_string(),
+                    );
                 }
             }
             Err(e) => {
@@ -2612,19 +2879,33 @@ command_timeout_secs: 60
 # Set to 1 to enable: AKASHA_TELEGRAM_ENABLED=1, AKASHA_SLACK_ENABLED=1, AKASHA_DISCORD_ENABLED=1
 "#;
         std::fs::write(&connectors_path, content)?;
-        fixes.push("Created connectors.env (empty; set vars to 1 to enable Telegram/Slack/Discord).".to_string());
+        fixes.push(
+            "Created connectors.env (empty; set vars to 1 to enable Telegram/Slack/Discord)."
+                .to_string(),
+        );
     } else {
         doctor_fix_env_file(
             &connectors_path,
             "connectors.env",
-            &["AKASHA_TELEGRAM_ENABLED", "AKASHA_SLACK_ENABLED", "AKASHA_DISCORD_ENABLED"],
+            &[
+                "AKASHA_TELEGRAM_ENABLED",
+                "AKASHA_SLACK_ENABLED",
+                "AKASHA_DISCORD_ENABLED",
+            ],
             "# Set to 1 to enable",
             &mut fixes,
         )?;
     }
 
     let akasha_env_path = data_dir.join("akasha.env");
-    if akasha_env_path.exists() {
+    if !akasha_env_path.exists() {
+        let content = r#"# Persistent Akasha environment (generated by akasha doctor --fix)
+AKASHA_PORT=3876
+AKASHA_LOG=info
+"#;
+        std::fs::write(&akasha_env_path, content)?;
+        fixes.push("Created akasha.env with default AKASHA_PORT and AKASHA_LOG.".to_string());
+    } else {
         doctor_fix_env_file(
             &akasha_env_path,
             "akasha.env",
@@ -2657,7 +2938,9 @@ fn run_config_checks(data_dir: &Path) -> Vec<(String, bool, String)> {
         (false, "llm_router.yaml: file missing".to_string())
     } else {
         match akasha_llm::RoutingConfig::load_from_path(&p) {
-            Ok(c) if c.providers.is_empty() => (false, "llm_router.yaml: providers empty".to_string()),
+            Ok(c) if c.providers.is_empty() => {
+                (false, "llm_router.yaml: providers empty".to_string())
+            }
             Ok(_) => (true, "llm_router.yaml: OK".to_string()),
             Err(e) => (false, format!("llm_router.yaml: invalid — {}", e)),
         }
@@ -2690,7 +2973,10 @@ fn run_config_checks(data_dir: &Path) -> Vec<(String, bool, String)> {
     let (ok, msg) = if p.exists() {
         (true, "akasha.env: OK".to_string())
     } else {
-        (false, "akasha.env: file missing (optional)".to_string())
+        (
+            true,
+            "akasha.env: file missing (optional; defaults apply)".to_string(),
+        )
     };
     out.push(("akasha_env".to_string(), ok, msg));
 
@@ -2700,12 +2986,10 @@ fn run_config_checks(data_dir: &Path) -> Vec<(String, bool, String)> {
         (false, "agent_profile.json: file missing".to_string())
     } else {
         match std::fs::read_to_string(&p) {
-            Ok(s) => {
-                match serde_json::from_str::<serde_json::Value>(&s) {
-                    Ok(_) => (true, "agent_profile.json: OK".to_string()),
-                    Err(e) => (false, format!("agent_profile.json: invalid — {}", e)),
-                }
-            }
+            Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+                Ok(_) => (true, "agent_profile.json: OK".to_string()),
+                Err(e) => (false, format!("agent_profile.json: invalid — {}", e)),
+            },
             Err(e) => (false, format!("agent_profile.json: unreadable — {}", e)),
         }
     };
@@ -2719,6 +3003,10 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_PORT);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let spec_dir_override = std::env::var_os("AKASHA_SPEC_DIR");
+    let source_checkout_checks =
+        doctor_uses_source_checkout_checks(spec_dir_override.as_deref(), &cwd);
 
     let data_dir = akasha_data_dir();
     if fix {
@@ -2736,23 +3024,41 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
     let mut checks: Vec<CheckItem> = Vec::new();
 
     // Check Rust
-    let rust_ok = Command::new("rustc").arg("--version").output().is_ok();
-    checks.push(("rust".to_string(), rust_ok, "Rust compiler".to_string()));
+    let rust_installed = Command::new("rustc").arg("--version").output().is_ok();
+    let (rust_ok, rust_desc) = if rust_installed || source_checkout_checks {
+        (rust_installed, "Rust compiler".to_string())
+    } else {
+        (
+            true,
+            "Rust compiler not installed (OK for packaged binary users)".to_string(),
+        )
+    };
+    checks.push(("rust".to_string(), rust_ok, rust_desc));
 
     // Check Node
-    let node_ok = Command::new("node").arg("--version").output().is_ok();
-    checks.push(("node".to_string(), node_ok, "Node.js runtime".to_string()));
+    let node_installed = Command::new("node").arg("--version").output().is_ok();
+    let (node_ok, node_desc) = if node_installed || source_checkout_checks {
+        (node_installed, "Node.js runtime".to_string())
+    } else {
+        (
+            true,
+            "Node.js runtime not installed (optional outside local build/browser tooling)"
+                .to_string(),
+        )
+    };
+    checks.push(("node".to_string(), node_ok, node_desc));
 
     // Check daemon binary
     let daemon_ok = find_daemon_binary().is_some();
-    checks.push(("daemon_binary".to_string(), daemon_ok, "akasha-daemon binary".to_string()));
+    checks.push((
+        "daemon_binary".to_string(),
+        daemon_ok,
+        "akasha-daemon binary".to_string(),
+    ));
 
     // Check spec directory
-    let spec_dir = std::env::current_dir().unwrap_or_default().join("spec");
-    let event_model = spec_dir.join("09_event_model.yaml");
-    let data_model = spec_dir.join("10_data_model.yaml");
-    let spec_files_ok = event_model.exists() && data_model.exists();
-    checks.push(("spec_files".to_string(), spec_files_ok, "Spec YAML files (09, 10)".to_string()));
+    let (spec_files_ok, spec_desc) = doctor_spec_check(spec_dir_override.as_deref(), &cwd);
+    checks.push(("spec_files".to_string(), spec_files_ok, spec_desc));
 
     // Check daemon health (if running)
     let daemon_healthy = reqwest::blocking::Client::new()
@@ -2763,7 +3069,11 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
         .ok()
         .map(|body| body.contains("\"status\":\"ok\"") || body.contains("ok"))
         .unwrap_or(false);
-    checks.push(("daemon_health".to_string(), daemon_healthy, "Daemon health endpoint".to_string()));
+    checks.push((
+        "daemon_health".to_string(),
+        daemon_healthy,
+        "Daemon health endpoint".to_string(),
+    ));
 
     // Config file checks (existence + valid format)
     checks.extend(run_config_checks(&data_dir));
@@ -2796,7 +3106,11 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
                 .ok()
                 .and_then(|r| r.json::<serde_json::Value>().ok())
                 .map(|j| {
-                    let checks = j.get("checks").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+                    let checks = j
+                        .get("checks")
+                        .and_then(|c| c.as_array())
+                        .cloned()
+                        .unwrap_or_default();
                     let pw = j.get("playwright").cloned();
                     (checks, pw)
                 })
@@ -2807,12 +3121,17 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
 
     if json {
         if !daemon_checks.is_empty() {
-            let daemon_all_ok_json = daemon_checks.iter().all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+            let daemon_all_ok_json = daemon_checks
+                .iter()
+                .all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
             let combined_ok = all_ok && daemon_all_ok_json;
             let mut payload = health_payload.clone();
             if let Some(obj) = payload.as_object_mut() {
                 obj.insert("ok".to_string(), serde_json::json!(combined_ok));
-                obj.insert("daemon_checks".to_string(), serde_json::json!(daemon_checks));
+                obj.insert(
+                    "daemon_checks".to_string(),
+                    serde_json::json!(daemon_checks),
+                );
                 if let Some(pw) = daemon_playwright {
                     obj.insert("playwright".to_string(), pw);
                 }
@@ -2840,13 +3159,31 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
             }
         }
         println!();
-        println!("Chemins de configuration (data_dir = {}):", data_dir.display());
-        println!("  llm_router.yaml   : {}", data_dir.join("llm_router.yaml").display());
-        println!("  connectors.env    : {}", data_dir.join("connectors.env").display());
-        println!("  akasha.env        : {}", data_dir.join("akasha.env").display());
-        println!("  tools_policy.yaml : {}", data_dir.join("tools_policy.yaml").display());
+        println!(
+            "Chemins de configuration (data_dir = {}):",
+            data_dir.display()
+        );
+        println!(
+            "  llm_router.yaml   : {}",
+            data_dir.join("llm_router.yaml").display()
+        );
+        println!(
+            "  connectors.env    : {}",
+            data_dir.join("connectors.env").display()
+        );
+        println!(
+            "  akasha.env        : {}",
+            data_dir.join("akasha.env").display()
+        );
+        println!(
+            "  tools_policy.yaml : {}",
+            data_dir.join("tools_policy.yaml").display()
+        );
         println!();
-        let daemon_all_ok = daemon_checks.is_empty() || daemon_checks.iter().all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+        let daemon_all_ok = daemon_checks.is_empty()
+            || daemon_checks
+                .iter()
+                .all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
         if all_ok && daemon_all_ok {
             println!("All checks passed.");
         } else {
@@ -2871,24 +3208,47 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
                         if json {
                             println!("{}", serde_json::to_string_pretty(&adv)?);
                         } else {
-                            let text = adv.get("advice").and_then(|v| v.as_str()).unwrap_or("").trim();
-                            let model = adv.get("model_used").and_then(|v| v.as_str()).unwrap_or("?");
+                            let text = adv
+                                .get("advice")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .trim();
+                            let model = adv
+                                .get("model_used")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?");
                             println!("\n--- Diagnostic advice (Akasha Core / RAG) ---");
                             if text.is_empty() {
                                 eprintln!("(No advice text returned. Model used: {}.)", model);
                                 // Fetch available Ollama models from daemon to help user fix llm_router.yaml
                                 if let Ok(models_res) = reqwest::blocking::Client::new()
-                                    .get(format!("http://127.0.0.1:{}/api/router/ollama/models", port))
+                                    .get(format!(
+                                        "http://127.0.0.1:{}/api/router/ollama/models",
+                                        port
+                                    ))
                                     .timeout(std::time::Duration::from_secs(5))
                                     .send()
                                 {
                                     if models_res.status().is_success() {
-                                        if let Ok(models_json) = models_res.json::<serde_json::Value>() {
-                                            let models = models_json.get("models").and_then(|m| m.as_array()).map(|a| {
-                                                a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>()
-                                            }).unwrap_or_default();
+                                        if let Ok(models_json) =
+                                            models_res.json::<serde_json::Value>()
+                                        {
+                                            let models = models_json
+                                                .get("models")
+                                                .and_then(|m| m.as_array())
+                                                .map(|a| {
+                                                    a.iter()
+                                                        .filter_map(|v| {
+                                                            v.as_str().map(String::from)
+                                                        })
+                                                        .collect::<Vec<_>>()
+                                                })
+                                                .unwrap_or_default();
                                             if !models.is_empty() {
-                                                eprintln!("Available Ollama models on this daemon: {}", models.join(", "));
+                                                eprintln!(
+                                                    "Available Ollama models on this daemon: {}",
+                                                    models.join(", ")
+                                                );
                                                 eprintln!("Update llm_router.yaml to use one of these model names.");
                                             } else {
                                                 eprintln!("Ollama configured but no models listed. Run: ollama pull <model>");
@@ -2907,19 +3267,100 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
                     if !json {
                         let err_msg = serde_json::from_str::<serde_json::Value>(&body_res)
                             .ok()
-                            .and_then(|v| v.get("detail").or(v.get("error")).and_then(|v| v.as_str().map(String::from)))
-                            .unwrap_or_else(|| if body_res.len() > 150 { format!("{}...", &body_res[..150]) } else { body_res.clone() });
-                        eprintln!("Daemon could not generate advice: {} (HTTP {})", err_msg, status);
+                            .and_then(|v| {
+                                v.get("detail")
+                                    .or(v.get("error"))
+                                    .and_then(|v| v.as_str().map(String::from))
+                            })
+                            .unwrap_or_else(|| {
+                                if body_res.len() > 150 {
+                                    format!("{}...", &body_res[..150])
+                                } else {
+                                    body_res.clone()
+                                }
+                            });
+                        eprintln!(
+                            "Daemon could not generate advice: {} (HTTP {})",
+                            err_msg, status
+                        );
                     }
                 }
             }
             Err(e) => {
                 if !json {
-                    eprintln!("Could not reach daemon for advice: {}. Is it running? (akasha start)", e);
+                    eprintln!(
+                        "Could not reach daemon for advice: {}. Is it running? (akasha start)",
+                        e
+                    );
                 }
             }
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_temp_dir(label: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.push(format!(
+            "akasha-cli-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn doctor_fix_creates_missing_akasha_env() {
+        let data_dir = make_temp_dir("doctor-fix-env");
+
+        let fixes = run_doctor_fixes(&data_dir).unwrap();
+        let akasha_env_path = data_dir.join("akasha.env");
+        let akasha_env = std::fs::read_to_string(&akasha_env_path).unwrap();
+        let akasha_env_check = run_config_checks(&data_dir)
+            .into_iter()
+            .find(|(id, _, _)| id == "akasha_env")
+            .unwrap();
+
+        assert!(fixes.iter().any(|msg| msg.contains("Created akasha.env")));
+        assert!(akasha_env.contains("AKASHA_PORT=3876"));
+        assert!(akasha_env.contains("AKASHA_LOG=info"));
+        assert!(akasha_env_check.1);
+
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn doctor_spec_check_is_optional_for_installed_binaries() {
+        let cwd = make_temp_dir("doctor-spec-release");
+        let (ok, desc) = doctor_spec_check(None, &cwd);
+
+        assert!(ok);
+        assert!(desc.contains("installed binaries"));
+
+        std::fs::remove_dir_all(cwd).unwrap();
+    }
+
+    #[test]
+    fn doctor_spec_check_requires_expected_files_when_spec_dir_is_configured() {
+        let cwd = make_temp_dir("doctor-spec-dev");
+        let spec_dir = cwd.join("spec");
+        std::fs::create_dir_all(&spec_dir).unwrap();
+        std::fs::write(spec_dir.join("09_event_model.yaml"), "events: []\n").unwrap();
+
+        let (ok, desc) = doctor_spec_check(None, &cwd);
+
+        assert!(!ok);
+        assert!(desc.contains("10_data_model.yaml"));
+
+        std::fs::remove_dir_all(cwd).unwrap();
+    }
 }
