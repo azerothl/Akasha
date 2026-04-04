@@ -136,6 +136,10 @@ jobs:
           rm -rf staging/playwright-runner/node_modules
           chmod +x staging/* staging/scripts/install.sh staging/scripts/setup.sh
 
+      - name: Smoke test staging layout
+        if: matrix.os != 'windows-latest'
+        run: bash scripts/smoke-release-staging.sh staging
+
       - name: Prepare artifact (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
@@ -150,6 +154,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path staging\playwright-runner | Out-Null
           Copy-Item -Path scripts\playwright-runner\* -Destination staging\playwright-runner\ -Recurse -Force
           Remove-Item -Recurse -Force staging\playwright-runner\node_modules -ErrorAction SilentlyContinue
+
+      - name: Smoke test staging layout
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/smoke-release-staging.ps1 staging
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -36,13 +36,25 @@ Exemples : `cargo test -p akasha-daemon`, `cargo test -p akasha-llm`, `cargo tes
 | **Orchestrateur** | `agents/orchestrator.rs` | Override de décomposition : un step `code` pour une action outil (ex. « Prends une photo ») → réécrit en `conversation` ; step `code` pour une vraie demande de code ou step `search` → inchangé | `cargo test -p akasha-daemon --lib agents::orchestrator::tests` |
 | **Planificateur** | `scheduler.rs` | `sync_terminal_task_run_statuses` : marquage des runs terminés pour les tâches récurrentes | `cargo test -p akasha-daemon --lib scheduler::tests` |
 | **RAG utilisateur** | `user_rag.rs` | `UserRagStore` : ajout, liste, recherche par requête, suppression de documents ; requête vide retourne des chunks | `cargo test -p akasha-daemon --lib user_rag::tests` |
-| **E2E santé** | `tests/e2e_health.rs` | Démarrage du daemon avec répertoire temporaire, appel GET / jusqu’à réponse 200 (ignoré par défaut) | `cargo test -p akasha-daemon --test e2e_health -- --ignored` avec `RUN_E2E=1` |
+| **E2E santé** | `tests/e2e_health.rs` | Démarrage du daemon avec répertoire temporaire, appel GET `/` jusqu’à réponse 200 (ignoré par défaut) | `cargo test -p akasha-daemon --test e2e_health -- --ignored` avec `RUN_E2E=1` |
+| **E2E API** | `tests/e2e_api_smoke.rs` | `GET /`, `GET /api/status` (`{"status":"ok"}`), `GET /api/docs` (clé `content` non vide), `GET /api/update/status` (JSON stable) | idem avec `--test e2e_api_smoke` |
+| **Helpers E2E** | `tests/common.rs` | Port libre + spawn `akasha-daemon` + attente prêt | utilisé par `e2e_health` et `e2e_api_smoke` |
 
 **Remarque** : Sur certains environnements (ex. Windows avec dépendances ONNX/ort), la compilation ou le lien du daemon avec les features par défaut peut échouer. On peut lancer les tests avec des features minimales :
 
 ```bash
 cargo test -p akasha-daemon --no-default-features --features "embedded" --lib
 ```
+
+#### Intégration binaire `akasha` (CLI)
+
+**Emplacement** : `crates/akasha-cli/tests/cli_smoke.rs`.
+
+| Domaine | Ce qui est testé | Commande |
+|--------|-------------------|----------|
+| **paths** | `akasha paths` avec `AKASHA_DATA_DIR` pointant vers un répertoire temporaire ; la sortie contient ce chemin | `RUN_E2E=1 cargo test -p akasha-cli --test cli_smoke -- --ignored` |
+| **--version** | `akasha --version` se termine avec succès | idem |
+| **doctor --json** | JSON avec `checks` (tableau non vide, champs `id` / `ok`) et `config_paths.data_dir` cohérent avec `AKASHA_DATA_DIR` | idem |
 
 ---
 
@@ -200,7 +212,10 @@ cargo bench -p akasha-daemon --no-default-features --features "embedded"
 | Tests UI (Vitest) | `cd apps/akasha-ui && npm run test` |
 | Tests du routeur LLM (sans embedded) | `cargo test -p akasha-llm --no-default-features` |
 | Tests du modèle embedded | `cargo test -p akasha-embedded-llm --lib` |
-| Tests E2E santé daemon | `cargo test -p akasha-daemon --test e2e_health -- --ignored` (avec `RUN_E2E=1`) |
+| CI (GitHub Actions) | Voir `.github/workflows/ci.yml` : tests workspace + E2E avec `RUN_E2E=1` ; UI E2E Playwright (`apps/akasha-ui`) |
+| Tests E2E daemon (santé + API) | `RUN_E2E=1 cargo test -p akasha-daemon --test e2e_health --test e2e_api_smoke -- --ignored --test-threads=1` |
+| Tests E2E CLI | `RUN_E2E=1 cargo test -p akasha-cli --test cli_smoke -- --ignored` |
+| Tests E2E UI (Playwright) | `cd apps/akasha-ui && npm run test:e2e` (voir script ; nécessite build UI + daemon) |
 | Test complétion réelle embedded (téléchargement + inférence) | `cargo test -p akasha-embedded-llm --lib -- --ignored` |
 | Benchmarks prompts daemon | `cargo bench -p akasha-daemon` |
 
@@ -210,7 +225,8 @@ cargo bench -p akasha-daemon --no-default-features --features "embedded"
 
 Certains tests sont marqués `#[ignore]` pour ne pas ralentir la CI ni imposer de dépendances externes :
 
-- **e2e_health** : lance le binaire du daemon et attend une réponse HTTP (nécessite un build préalable et `RUN_E2E=1`).
+- **e2e_health**, **e2e_api_smoke** : lancent le binaire `akasha-daemon` et appellent l’API HTTP (nécessitent un build préalable et `RUN_E2E=1`). Préférer `--test-threads=1` pour limiter les courses sur le réseau local.
+- **cli_smoke** : exécute le binaire `akasha` (`paths`, `--version`, `doctor --json`) avec `AKASHA_DATA_DIR` temporaire (`RUN_E2E=1`).
 - **embedded_llm_complete_e2e** : télécharge le modèle et fait une vraie inférence (réseau + disque + CPU/GPU).
 
 Pour les exécuter :

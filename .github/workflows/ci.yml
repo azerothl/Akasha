@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, "0.*"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ci-
+
+      - name: Cargo test (workspace)
+        run: cargo test --workspace
+
+      - name: E2E tests (daemon + CLI binaries)
+        env:
+          RUN_E2E: "1"
+        run: |
+          cargo test -p akasha-daemon --test e2e_health --test e2e_api_smoke -- --ignored --test-threads=1
+          cargo test -p akasha-cli --test cli_smoke -- --ignored
+
+  ui-e2e:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-ui-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ui-e2e-
+
+      - name: Build daemon for Playwright
+        run: cargo build -p akasha-daemon
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+          cache: npm
+          cache-dependency-path: apps/akasha-ui/package-lock.json
+
+      - name: Install UI deps and Playwright browser
+        working-directory: apps/akasha-ui
+        run: |
+          npm ci
+          npm run test:e2e:install
+
+      - name: Playwright E2E (build --mode e2e + tests)
+        working-directory: apps/akasha-ui
+        run: npm run test:e2e

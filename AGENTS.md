@@ -19,6 +19,7 @@ Akasha is a Rust workspace (15 crates) with a Tauri desktop UI (React/TypeScript
 - **Test (Rust):** `CXX=g++ cargo test`
 - **Lint:** `CXX=g++ cargo clippy`
 - **Test (UI):** `cd apps/akasha-ui && npm run test`
+- **Test (UI E2E / Playwright):** `cargo build -p akasha-daemon` then `cd apps/akasha-ui && npm run test:e2e:install && npm run test:e2e` (writes screenshots under `docs/screenshots/`)
 - **Benchmarks:** `CXX=g++ cargo bench -p akasha-daemon`
 
 See `docs/tests_and_benchmarks.md` for the full test inventory by crate.

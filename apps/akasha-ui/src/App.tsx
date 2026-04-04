@@ -12,6 +12,8 @@ import { GeoMapView } from "./GeoMapView";
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
 const DAEMON_PORT = 3876;
+/** Browser E2E (Playwright): talk to daemon over HTTP instead of Tauri. */
+const E2E_WEB = import.meta.env.VITE_E2E === "true";
 const THEME_STORAGE_KEY = "akasha_theme";
 const UI_MODE_STORAGE_KEY = "akasha_ui_mode";
 const AKASHA_SESSION_ID_KEY = "akasha_session_id";
@@ -2024,6 +2026,26 @@ function App() {
   ]);
 
   const checkHealth = useCallback(async () => {
+    if (E2E_WEB) {
+      try {
+        const r = await fetch(`http://127.0.0.1:${DAEMON_PORT}/`);
+        const ok = r.ok && ((await r.json()) as { status?: string })?.status === "ok";
+        setHealth((prev) => {
+          const next = { ok, port: DAEMON_PORT };
+          const unchanged = prev != null && prev.ok === next.ok && prev.port === next.port;
+          if (unchanged) return prev;
+          return next;
+        });
+      } catch {
+        setHealth((prev) => {
+          const next = { ok: false, port: DAEMON_PORT };
+          const unchanged = prev != null && prev.ok === next.ok && prev.port === next.port;
+          if (unchanged) return prev;
+          return next;
+        });
+      }
+      return;
+    }
     try {
       const result = await invoke<{ ok: boolean; port?: number }>("check_health", {
         port: DAEMON_PORT,
@@ -2547,9 +2569,18 @@ function App() {
     setDocLoading(true);
     setDocError(null);
     try {
-      const content = await invoke<string>("get_docs", { port: DAEMON_PORT });
-      setDocContent(content);
-      setCached("docs", content);
+      if (E2E_WEB) {
+        const r = await fetch(`http://127.0.0.1:${DAEMON_PORT}/api/docs`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = (await r.json()) as { content?: string };
+        const content = j.content ?? "";
+        setDocContent(content);
+        setCached("docs", content);
+      } else {
+        const content = await invoke<string>("get_docs", { port: DAEMON_PORT });
+        setDocContent(content);
+        setCached("docs", content);
+      }
     } catch (e) {
       setDocError(String(e));
       setDocContent(null);

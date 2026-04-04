@@ -60,6 +60,8 @@ Pour afficher l'interface en terminal : `akasha tui` (ou `.\akasha.exe tui` sous
 
 **Important** : lancez `akasha start` depuis le dossier d'installation (ou après avoir ajouté ce dossier au PATH) afin que l'onglet **Doc** des interfaces affiche cette documentation.
 
+Des **captures d’écran** de l’interface (chat, onglet Doc) peuvent être incluses sous `docs/screenshots/` dans les archives de développement ; elles sont générées par la suite Playwright du dépôt source (`apps/akasha-ui`, `npm run test:e2e`) et servent aussi au site public Akasha_app.
+
 ---
 
 ## 2. Où se trouve la configuration
