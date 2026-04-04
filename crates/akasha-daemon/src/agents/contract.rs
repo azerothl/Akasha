@@ -95,7 +95,7 @@ pub fn parse_contract_from_response(response: &str) -> Option<AgentOutputContrac
 /// An `AgentOutputContract` parsed from arbitrary JSON will have all `None` fields when
 /// the source has no recognised contract keys; we treat that as *not* a contract.
 fn is_meaningful_contract(c: &AgentOutputContract) -> bool {
-    c.status.is_some() || c.summary.as_ref().map_or(false, |s| !s.trim().is_empty())
+    c.status.is_some() || c.summary.as_ref().is_some_and(|s| !s.trim().is_empty())
 }
 
 /// Strips the trailing JSON contract block (```json ... ``` or last {...}) from the response.
