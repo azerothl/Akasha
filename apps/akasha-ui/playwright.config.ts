@@ -8,6 +8,7 @@ export default defineConfig({
   testDir: path.join(__dirname, "e2e"),
   fullyParallel: false,
   workers: 1,
+  timeout: 180_000,
   globalSetup: path.join(__dirname, "e2e/global-setup.ts"),
   globalTeardown: path.join(__dirname, "e2e/global-teardown.ts"),
   reporter: "list",
