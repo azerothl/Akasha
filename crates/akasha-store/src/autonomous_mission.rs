@@ -169,12 +169,12 @@ impl AutonomousMissionStore {
             "#,
             rusqlite::params![
                 if s.enabled { 1i32 } else { 0 },
-                s.global_context,
+                &s.global_context,
                 s.horizon.as_str(),
-                s.objective,
+                &s.objective,
                 s.heartbeat_interval_minutes as i64,
-                s.report_dir,
-                s.session_id,
+                &s.report_dir,
+                &s.session_id,
                 s.status.as_str(),
                 s.updated_at.to_rfc3339(),
             ],
@@ -192,12 +192,15 @@ impl AutonomousMissionStore {
         if let Some(row) = rows.next()? {
             let horizon_s: String = row.get(2)?;
             let status_s: String = row.get(7)?;
+            let heartbeat_interval_minutes_i64: i64 = row.get(4)?;
+            let heartbeat_interval_minutes =
+                u64::try_from(heartbeat_interval_minutes_i64).unwrap_or(0);
             return Ok(Some(AutonomousMissionSnapshot {
                 enabled: row.get::<_, i32>(0)? != 0,
                 global_context: row.get(1)?,
                 horizon: MissionHorizon::from_str(&horizon_s).unwrap_or_default(),
                 objective: row.get(3)?,
-                heartbeat_interval_minutes: row.get::<_, i64>(4)? as u64,
+                heartbeat_interval_minutes,
                 report_dir: row.get(5)?,
                 session_id: row.get(6)?,
                 status: MissionStatus::from_str(&status_s).unwrap_or_default(),
@@ -271,7 +274,7 @@ impl AutonomousMissionStore {
         let out: Vec<AutonomousMissionEvent> = if let Some(s) = since {
             let mut stmt = self.conn.prepare(
                 "SELECT id, at, event_type, payload_json FROM autonomous_mission_events \
-                 WHERE datetime(at) >= datetime(?1) ORDER BY id ASC LIMIT ?2",
+                 WHERE at >= ?1 ORDER BY id ASC LIMIT ?2",
             )?;
             let rows = stmt.query_map(rusqlite::params![s.to_rfc3339(), limit], |row| {
                 Self::map_event_row(row)

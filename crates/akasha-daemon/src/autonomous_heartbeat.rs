@@ -133,8 +133,13 @@ async fn tick(
         preferred_task_type: Some("project_manager".to_string()),
     };
 
+    // Drop am_store before .await so the future remains Send
+    // (rusqlite::Connection is not Send).
+    drop(am_store);
+
     orch_tx.send(task_msg).await.map_err(|_| anyhow::anyhow!("orchestrator channel closed"))?;
 
+    let am_store = AutonomousMissionStore::open(store_path)?;
     am_store.upsert_meta(Some(Utc::now()), Some(task_id))?;
     am_store.insert_event(
         "heartbeat_fired",

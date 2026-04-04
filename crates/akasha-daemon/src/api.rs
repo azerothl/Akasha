@@ -8480,13 +8480,13 @@ async fn get_autonomous_mission_state(
     let next_hb = last_hb.map(|t| t + chrono::Duration::minutes(cfg.heartbeat_interval_minutes as i64));
     let body = serde_json::json!({
         "enabled": cfg.enabled,
-        "global_context": cfg.global_context,
+        "global_context": cfg.global_context.as_str(),
         "horizon": horizon_s,
-        "objective": cfg.objective,
+        "objective": cfg.objective.as_str(),
         "heartbeat_interval_minutes": cfg.heartbeat_interval_minutes,
-        "report_dir": cfg.report_dir,
+        "report_dir": cfg.report_dir.as_str(),
         "report_path_absolute": report_abs.display().to_string(),
-        "session_id": cfg.session_id,
+        "session_id": cfg.session_id.as_str(),
         "status": status_s,
         "last_heartbeat_at": last_hb.map(|t| t.to_rfc3339()),
         "last_task_id": last_tid.map(|u| u.to_string()),

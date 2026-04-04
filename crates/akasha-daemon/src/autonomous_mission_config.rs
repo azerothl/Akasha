@@ -205,7 +205,16 @@ pub fn merge_from_json_partial(cfg: &mut AutonomousMissionConfig, v: &serde_json
         cfg.heartbeat_interval_minutes = n.max(1);
     }
     if let Some(s) = v.get("report_dir").and_then(|x| x.as_str()) {
-        cfg.report_dir = s.to_string();
+        // Reject absolute paths and any path containing '..' components to prevent
+        // escaping the data directory when the daemon later does data_dir.join(report_dir).
+        let candidate = std::path::Path::new(s);
+        let has_parent_dir = candidate
+            .components()
+            .any(|c| c == std::path::Component::ParentDir);
+        let is_absolute = candidate.is_absolute();
+        if !is_absolute && !has_parent_dir {
+            cfg.report_dir = s.to_string();
+        }
     }
     if let Some(s) = v.get("session_id").and_then(|x| x.as_str()) {
         if !s.trim().is_empty() {

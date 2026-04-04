@@ -2536,7 +2536,7 @@ function App() {
     return () => document.removeEventListener("click", onDocClick);
   }, [pendingNotifOpen]);
 
-  // Global keyboard shortcuts: 1–7 = switch tab (when not in a modal or input)
+  // Global keyboard shortcuts: 1–9 = switch tab (when not in a modal or input)
   const tabsByIndex: Tab[] = ["chat", "scheduled", "router", "docs", "tasks", "calendar", "memory", "mission", "settings"];
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
