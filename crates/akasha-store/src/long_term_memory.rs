@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn decode_embedding_bytes_roundtrip() {
-        let v = [1.0f32, -0.5, 0.0, 3.14];
+        let v = [1.0f32, -0.5, 0.0, 2.5];
         let bytes = embedding_f32_to_bytes(&v);
         let decoded = decode_embedding_bytes(&bytes);
         assert_eq!(decoded.len(), v.len());

@@ -107,6 +107,8 @@ fn strip_trailing_contract(response: &str) -> String {
             if !rest.is_empty() {
                 return rest.to_string();
             }
+            // Fenced JSON only: strip the whole block so callers can surface `summary`.
+            return String::new();
         }
     }
     // Remove last {...} that parses as contract (search from end, try parsing)
