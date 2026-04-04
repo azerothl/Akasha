@@ -16,6 +16,16 @@ function screenshotsDir(): string {
 }
 
 test.describe("Akasha UI (E2E build)", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      try {
+        localStorage.setItem("akasha_onboarding_dismissed", "1");
+      } catch {
+        /* ignore */
+      }
+    });
+  });
+
   test("daemon health and chat shell", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator(".daemon-status-ok")).toBeVisible({ timeout: 120_000 });

@@ -1,5 +1,6 @@
 //! Akasha Store - SQLite tasks + append-only hash chain log + long-term memory + episodic memory + LLM metrics
 
+pub mod autonomous_mission;
 pub mod episodic_memory;
 pub mod facts;
 pub mod log;
@@ -12,6 +13,10 @@ pub mod todos;
 
 pub use log::ImmutableLog;
 pub use metrics::{MetricsEvent, MetricsStore, ModelMetricsRow};
+pub use autonomous_mission::{
+    AutonomousMissionEvent, AutonomousMissionSnapshot, AutonomousMissionStore, MissionHorizon,
+    MissionStatus,
+};
 pub use episodic_memory::{EpisodicEvent, EpisodicFilter, EpisodicStore};
 pub use facts::{extract_facts_simple, Fact, FactsStore};
 pub use long_term_memory::{

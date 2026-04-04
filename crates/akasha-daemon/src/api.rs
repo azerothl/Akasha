@@ -9,13 +9,18 @@ use crate::latency::{
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use crate::protocol_adapter::unknown_external_message_count;
+use crate::autonomous_mission_config::{
+    merge_from_json_partial, persist_config_and_snapshot, AutonomousMissionConfig, Horizon,
+    MissionStatusYaml,
+};
 use crate::user_profile::UserProfile;
 use akasha_core::{EventEnvelope, EventType};
 use akasha_llm::CompletionRequest;
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use akasha_store::{
-    format_todos_plan_block, parse_todos_from_payload, Schedule, ScheduleException,
-    ScheduleExceptionType, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore, TodoStatus,
+    format_todos_plan_block, parse_todos_from_payload, AutonomousMissionStore, Schedule,
+    ScheduleException, ScheduleExceptionType, ScheduleStore, Task, TaskRunStatus, TaskStatus,
+    TaskStore, TodoStatus,
 };
 use akasha_vault::Vault;
 use std::cmp::Ordering;
@@ -5488,6 +5493,7 @@ pub(crate) async fn run_message_via_llm(
     device_bridge: Option<std::sync::Arc<crate::device_bridge::DeviceBridge>>,
     workspace_store: Option<TaskWorkspaceStore>,
     browser_registry: Option<crate::browser::BrowserSessionRegistry>,
+    autonomous_mission: Option<Arc<RwLock<AutonomousMissionConfig>>>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -5805,6 +5811,16 @@ pub(crate) async fn run_message_via_llm(
     user_prefix.push_str(
         "Reply in the same language as the user message below (French, English, etc.).\n\n",
     );
+    if let Some(ref am) = autonomous_mission {
+        let g = am.read().await;
+        if g.enabled && g.status == MissionStatusYaml::Active && session_id == g.session_id {
+            user_prefix.push_str(
+                "\n\n[Autonomous mission mode — do not ask the user questions]\n\
+                - Do NOT ask clarifying questions unless a hard blocker remains (missing vault credentials, or tools_policy denies the action).\n\
+                - Prefer tools (read_file, write_file, memory_store, web_search, run_command) and record decisions in markdown under the mission report directory.\n\n",
+            );
+        }
+    }
     let turns_empty = match &short_term {
         Some(st) => st.get_turns(&session_id).await.is_empty(),
         None => true,
@@ -8412,6 +8428,157 @@ where
     Ok(())
 }
 
+fn split_path_query(path: &str) -> (&str, &str) {
+    path.split_once('?').map(|(p, q)| (p, q)).unwrap_or((path, ""))
+}
+
+fn parse_query_param(query: &str, key: &str) -> Option<String> {
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == key {
+                return Some(
+                    urlencoding::decode(v)
+                        .map(|c| c.into_owned())
+                        .unwrap_or_else(|_| v.to_string()),
+                );
+            }
+        }
+    }
+    None
+}
+
+async fn get_autonomous_mission_state(
+    data_dir: &Path,
+    store_path: &Path,
+    am: &Arc<RwLock<AutonomousMissionConfig>>,
+) -> String {
+    let cfg = am.read().await;
+    let am_store = match AutonomousMissionStore::open(store_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return json_response(
+                "500 Internal Server Error",
+                &serde_json::json!({ "error": e.to_string() }).to_string(),
+            );
+        }
+    };
+    let (last_hb, last_tid) = am_store.get_meta().unwrap_or((None, None));
+    let report_abs = data_dir.join(&cfg.report_dir);
+    let horizon_s = match cfg.horizon {
+        Horizon::Short => "short",
+        Horizon::Medium => "medium",
+        Horizon::Long => "long",
+    };
+    let status_s = match cfg.status {
+        MissionStatusYaml::Active => "active",
+        MissionStatusYaml::Paused => "paused",
+        MissionStatusYaml::Completed => "completed",
+    };
+    let next_hb = last_hb.map(|t| t + chrono::Duration::minutes(cfg.heartbeat_interval_minutes as i64));
+    let body = serde_json::json!({
+        "enabled": cfg.enabled,
+        "global_context": cfg.global_context.as_str(),
+        "horizon": horizon_s,
+        "objective": cfg.objective.as_str(),
+        "heartbeat_interval_minutes": cfg.heartbeat_interval_minutes,
+        "report_dir": cfg.report_dir.as_str(),
+        "report_path_absolute": report_abs.display().to_string(),
+        "session_id": cfg.session_id.as_str(),
+        "status": status_s,
+        "last_heartbeat_at": last_hb.map(|t| t.to_rfc3339()),
+        "last_task_id": last_tid.map(|u| u.to_string()),
+        "next_heartbeat_approx_at": next_hb.map(|t| t.to_rfc3339()),
+    });
+    json_response("200 OK", &body.to_string())
+}
+
+async fn put_autonomous_mission_state(
+    data_dir: &Path,
+    store_path: &Path,
+    am: &Arc<RwLock<AutonomousMissionConfig>>,
+    body: &[u8],
+) -> String {
+    let v: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(x) => x,
+        Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
+    };
+    {
+        let mut w = am.write().await;
+        let _ = merge_from_json_partial(&mut *w, &v);
+        if let Err(e) = persist_config_and_snapshot(data_dir, store_path, &*w) {
+            return json_response(
+                "500 Internal Server Error",
+                &serde_json::json!({ "error": e.to_string() }).to_string(),
+            );
+        }
+    }
+    get_autonomous_mission_state(data_dir, store_path, am).await
+}
+
+async fn get_autonomous_mission_events_list(store_path: &Path, query: &str) -> String {
+    let limit = parse_query_param(query, "limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(100)
+        .min(1000);
+    let since = parse_query_param(query, "since").and_then(|s| {
+        chrono::DateTime::parse_from_rfc3339(s.trim())
+            .ok()
+            .map(|d| d.with_timezone(&chrono::Utc))
+    });
+    let am_store = match AutonomousMissionStore::open(store_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return json_response(
+                "500 Internal Server Error",
+                &serde_json::json!({ "error": e.to_string() }).to_string(),
+            );
+        }
+    };
+    let events = match am_store.list_events_since(since, limit) {
+        Ok(e) => e,
+        Err(e) => {
+            return json_response(
+                "500 Internal Server Error",
+                &serde_json::json!({ "error": e.to_string() }).to_string(),
+            );
+        }
+    };
+    let arr: Vec<_> = events
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "at": e.at.to_rfc3339(),
+                "event_type": e.event_type,
+                "payload": e.payload,
+            })
+        })
+        .collect();
+    json_response("200 OK", &serde_json::json!({ "events": arr }).to_string())
+}
+
+async fn post_autonomous_mission_status(
+    data_dir: &Path,
+    store_path: &Path,
+    am: &Arc<RwLock<AutonomousMissionConfig>>,
+    status: MissionStatusYaml,
+) -> String {
+    {
+        let mut w = am.write().await;
+        w.status = status;
+        if let Err(e) = persist_config_and_snapshot(data_dir, store_path, &*w) {
+            return json_response(
+                "500 Internal Server Error",
+                &serde_json::json!({ "error": e.to_string() }).to_string(),
+            );
+        }
+    }
+    get_autonomous_mission_state(data_dir, store_path, am).await
+}
+
 pub async fn handle_api(
     method: &str,
     path: &str,
@@ -8440,6 +8607,7 @@ pub async fn handle_api(
     update_cache: &UpdateCheckCache,
     task_usage_store: &TaskUsageStore,
     device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
+    autonomous_mission: Option<Arc<RwLock<AutonomousMissionConfig>>>,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
@@ -8462,6 +8630,54 @@ pub async fn handle_api(
                 return json_response("403 Forbidden", r#"{"error":"origin_not_allowed"}"#);
             }
         }
+    }
+
+    let (path_only, query_str) = split_path_query(path);
+
+    if path_only == "/api/autonomous-mission" {
+        let Some(ref am) = autonomous_mission else {
+            return json_response(
+                "503 Service Unavailable",
+                r#"{"error":"autonomous_mission_unavailable"}"#,
+            );
+        };
+        if method == "GET" {
+            return get_autonomous_mission_state(data_dir, store_path, am).await;
+        }
+        if method == "PUT" {
+            let Some(ref b) = body else {
+                return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
+            };
+            return put_autonomous_mission_state(data_dir, store_path, am, b).await;
+        }
+        return json_response("405 Method Not Allowed", r#"{"error":"method_not_allowed"}"#);
+    }
+    if path_only == "/api/autonomous-mission/events" && method == "GET" {
+        if autonomous_mission.is_none() {
+            return json_response(
+                "503 Service Unavailable",
+                r#"{"error":"autonomous_mission_unavailable"}"#,
+            );
+        }
+        return get_autonomous_mission_events_list(store_path, query_str).await;
+    }
+    if path_only == "/api/autonomous-mission/pause" && method == "POST" {
+        let Some(ref am) = autonomous_mission else {
+            return json_response(
+                "503 Service Unavailable",
+                r#"{"error":"autonomous_mission_unavailable"}"#,
+            );
+        };
+        return post_autonomous_mission_status(data_dir, store_path, am, MissionStatusYaml::Paused).await;
+    }
+    if path_only == "/api/autonomous-mission/resume" && method == "POST" {
+        let Some(ref am) = autonomous_mission else {
+            return json_response(
+                "503 Service Unavailable",
+                r#"{"error":"autonomous_mission_unavailable"}"#,
+            );
+        };
+        return post_autonomous_mission_status(data_dir, store_path, am, MissionStatusYaml::Active).await;
     }
 
     if method == "GET" && (path == "/" || path.is_empty()) {
