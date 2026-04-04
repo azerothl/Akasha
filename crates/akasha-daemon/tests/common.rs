@@ -21,6 +21,8 @@ pub fn pick_free_port() -> u16 {
 
 pub struct DaemonChild {
     pub child: Child,
+    /// Bound port (same as `AKASHA_PORT` passed to the daemon); kept for tests/debug.
+    #[allow(dead_code)]
     pub port: u16,
 }
 

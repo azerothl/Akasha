@@ -752,7 +752,7 @@ fn doctor_spec_dir() -> (Option<PathBuf>, bool) {
 fn cmd_paths() -> anyhow::Result<()> {
     let data_dir = akasha_data_dir();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let spec_dir = cwd.join("spec");
+    let (resolved_spec, spec_from_env) = doctor_spec_dir();
 
     println!("Chemins utilisés par Akasha (CLI et daemon)\n");
     if let Ok(dir) = std::env::var("AKASHA_DATA_DIR") {
@@ -788,10 +788,22 @@ fn cmd_paths() -> anyhow::Result<()> {
     );
     println!();
     println!("  Daemon (au lancement) :");
-    println!(
-        "    spec_dir              : {}  (répertoire de travail au moment de 'akasha start' + /spec)",
-        spec_dir.display()
-    );
+    match resolved_spec {
+        Some(ref p) => {
+            let note = if spec_from_env {
+                "  (AKASHA_SPEC_DIR)"
+            } else {
+                "  (détecté — cwd/spec ou à côté du binaire)"
+            };
+            println!("    spec_dir              : {}{}", p.display(), note);
+        }
+        None => {
+            println!(
+                "    spec_dir              : {}  (non résolu — typiquement cwd + /spec au lancement)",
+                cwd.join("spec").display()
+            );
+        }
+    }
     println!("    llm_router.yaml      : cherché d'abord dans data_dir, puis dans <spec_dir>/../llm_router.yaml");
     println!();
     println!("  Sous WSL/Linux : data_dir = ${{XDG_DATA_HOME:-~/.local/share}}/akasha sauf si AKASHA_DATA_DIR est défini.");

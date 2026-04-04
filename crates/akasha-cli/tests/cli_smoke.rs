@@ -27,7 +27,7 @@ fn e2e_cli_paths_prints_data_dir() {
     );
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(
-        s.contains(&temp.path().to_string_lossy()),
+        s.contains(temp.path().to_string_lossy().as_ref()),
         "expected data_dir in output: {}",
         s
     );
@@ -81,7 +81,7 @@ fn e2e_cli_doctor_json_shape() {
         .and_then(|d| d.as_str())
         .expect("config_paths.data_dir");
     assert!(
-        data_dir.contains(&temp.path().to_string_lossy()),
+        data_dir.contains(temp.path().to_string_lossy().as_ref()),
         "data_dir {:?} should mention temp {:?}",
         data_dir,
         temp.path()
