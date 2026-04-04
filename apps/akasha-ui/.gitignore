@@ -1,5 +1,7 @@
 playwright-report/
 test-results/
 blob-report/
+# TypeScript compilation outputs from tsconfig.node.json (composite build)
 playwright.config.js
 playwright.config.d.ts
+tsconfig.node.tsbuildinfo
