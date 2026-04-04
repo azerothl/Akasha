@@ -5,7 +5,11 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "allowSyntheticDefaultImports": true,
-    "noEmit": true
+    "declaration": true,
+    "declarationMap": true,
+    "emitDeclarationOnly": true,
+    "outDir": "./.ts-node-build",
+    "rootDir": "."
   },
   "include": ["vite.config.ts", "playwright.config.ts"]
 }
