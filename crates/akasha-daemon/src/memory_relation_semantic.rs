@@ -39,7 +39,7 @@ fn heuristic_edge_kind_from_content(content: &str) -> Option<&'static str> {
         || lower.contains("obsolete")
         || lower.contains("mis à jour")
         || lower.contains("updated version")
-        || lower.contains(" erratum")
+        || lower.contains("erratum")
     {
         return Some("updates");
     }

@@ -1,3 +1,5 @@
 playwright-report/
 test-results/
 blob-report/
+playwright.config.js
+playwright.config.d.ts

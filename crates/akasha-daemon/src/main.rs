@@ -14,7 +14,8 @@ static LOG_WORKER_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> =
 
 fn init_tracing(data_dir: &Path) -> anyhow::Result<()> {
     let resolved = akasha_core::resolve_tracing_from_akasha_env(data_dir);
-    let filter = tracing_subscriber::EnvFilter::new(&resolved.filter_directive);
+    let filter = tracing_subscriber::EnvFilter::try_new(&resolved.filter_directive)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let stderr_layer = tracing_subscriber::fmt::layer()
         .with_target(true)
         .with_writer(std::io::stderr);

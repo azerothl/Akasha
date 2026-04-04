@@ -1039,7 +1039,7 @@ pub fn parse_request(
 
 pub fn json_response(status: &str, body: &str) -> String {
     format!(
-        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
         status,
         body.len(),
         body
@@ -3793,7 +3793,7 @@ async fn execute_tool_call(
             let content = args.get(0).map(|a| a.as_str()).unwrap_or("");
             let source = args.get(1).map(|a| a.as_str()).unwrap_or("agent");
             if content.is_empty() {
-                return (false, "[memory_store] usage: memory_store <content> <source> [link_to: uuid|+kind,...] [link_kind: default_for_plain_uuids]".to_string(), None);
+                return (false, "[memory_store] usage: memory_store <content> <source> [link_to: uuid+kind,...|uuid,...] [link_kind: default_for_plain_uuids]".to_string(), None);
             }
             let explicit_links = parse_memory_store_explicit_links(args.get(2..).unwrap_or(&[]));
             match long_term_client {

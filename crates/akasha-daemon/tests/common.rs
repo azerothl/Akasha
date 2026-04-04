@@ -51,7 +51,11 @@ pub async fn spawn_daemon_ready(data_dir: &Path, port: u16) -> Option<DaemonChil
     for _ in 0..60 {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let url = format!("http://127.0.0.1:{}/", port);
-        if let Ok(resp) = reqwest::get(&url).await {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap_or_default();
+        if let Ok(resp) = client.get(&url).send().await {
             if resp.status().is_success() {
                 return Some(DaemonChild { child, port });
             }

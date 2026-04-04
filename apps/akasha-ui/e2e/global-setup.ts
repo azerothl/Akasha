@@ -17,12 +17,17 @@ function daemonExe(): string {
 }
 
 async function waitForHttpOk(url: string, attempts = 60): Promise<void> {
+  const requestTimeoutMs = 2_000;
   for (let i = 0; i < attempts; i++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
     try {
-      const r = await fetch(url);
+      const r = await fetch(url, { signal: controller.signal });
       if (r.ok) return;
     } catch {
       /* retry */
+    } finally {
+      clearTimeout(timeout);
     }
     await new Promise((r) => setTimeout(r, 500));
   }
