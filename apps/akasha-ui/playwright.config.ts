@@ -18,9 +18,15 @@ export default defineConfig({
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
-    command: "vite preview --host 127.0.0.1 --port 4173 --strictPort",
+    /** Custom server: proxies /__e2e_daemon before SPA (vite preview was serving index.html for that path). */
+    command: "node scripts/e2e-preview.mjs",
     cwd: __dirname,
+    env: {
+      ...process.env,
+      HOST: "127.0.0.1",
+      PORT: "4173",
+    },
     url: "http://127.0.0.1:4173",
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
   },
 });
