@@ -15,8 +15,10 @@ pub use metrics::{MetricsEvent, MetricsStore, ModelMetricsRow};
 pub use episodic_memory::{EpisodicEvent, EpisodicFilter, EpisodicStore};
 pub use facts::{extract_facts_simple, Fact, FactsStore};
 pub use long_term_memory::{
-    cosine_similarity, decode_embedding_bytes, importance_score, recency_score, LongTermStore,
-    MemoryEntry, MemoryImportance, MemorySearchFilter,
+    cosine_similarity, decode_embedding_bytes, importance_score, recency_score,
+    relation_kind_from_embedding_similarity, LongTermStore, MemoryEntry, MemoryImportance,
+    MemorySearchFilter, AUTO_RELATION_MIN_COSINE, AUTO_RELATION_RELATES_THRESHOLD,
+    AUTO_RELATION_SIMILAR_THRESHOLD,
 };
 pub use pipeline::{PipelineContext, PipelineState, PipelineStore};
 pub use schedules::{

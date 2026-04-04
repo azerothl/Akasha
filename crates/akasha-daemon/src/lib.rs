@@ -22,6 +22,7 @@ pub mod voice;
 pub mod memory;
 pub mod memory_actor;
 pub mod memory_relation_inference;
+pub mod memory_relation_semantic;
 pub mod memory_orchestrator;
 pub mod plugins;
 pub mod scheduler;

@@ -148,6 +148,54 @@ fn parse_write_file_request(args: &[String]) -> Option<(String, String)> {
     Some((path, content))
 }
 
+/// Parse `memory_store` optional `link_to:` / `link_kind:` into `(target_uuid, relation_kind)` pairs.
+/// Supports `link_to: uuid1+excludes,uuid2+relates_to` (per-target kind after `+`) or
+/// `link_to: uuid1,uuid2` with `link_kind: relates_to` (one kind for all UUIDs; default `related`).
+/// Repeated `link_to:` arguments append segments.
+fn parse_memory_store_explicit_links(extra_args: &[String]) -> Option<Vec<(String, String)>> {
+    let mut segments: Vec<String> = Vec::new();
+    let mut global_kind: Option<String> = None;
+    for arg in extra_args {
+        if let Some(rest) = arg.strip_prefix("link_to:") {
+            for part in rest.split(',') {
+                let p = part.trim();
+                if !p.is_empty() {
+                    segments.push(p.to_string());
+                }
+            }
+        } else if let Some(rest) = arg.strip_prefix("link_kind:") {
+            let k = rest.trim();
+            if !k.is_empty() {
+                global_kind = Some(k.to_string());
+            }
+        }
+    }
+    if segments.is_empty() {
+        return None;
+    }
+    let default_kind = global_kind.unwrap_or_else(|| "related".to_string());
+    let mut out: Vec<(String, String)> = Vec::new();
+    for seg in segments {
+        let seg = seg.trim();
+        if let Some(idx) = seg.rfind('+') {
+            let uuid_part = seg[..idx].trim();
+            let kind_part = seg[idx + 1..].trim();
+            if Uuid::parse_str(uuid_part).is_ok() && !kind_part.is_empty() {
+                out.push((uuid_part.to_string(), kind_part.to_string()));
+                continue;
+            }
+        }
+        if Uuid::parse_str(seg).is_ok() {
+            out.push((seg.to_string(), default_kind.clone()));
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 enum PluginReputationResetBody {
     Empty,
     Parsed(serde_json::Value),
@@ -1025,7 +1073,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("web_search", "web_search <query> [max_results] — rechercher sur le web (Brave API; BRAVE_API_KEY, web_search_enabled)"),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
     ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
-    ("memory_store", "memory_store <content> <source> [link_to: id1,id2...] [link_kind: spouse|child|birth_date|residence|same_person|...] — stocker en mémoire long terme ; optionnellement lier à des entrées (UUIDs) avec un type de relation."),
+    ("memory_store", "memory_store <content> <source> [link_to: uuid1+kind1,uuid2+kind2,...] [link_kind: default_kind] — mémoire long terme. Types recommandés : similar, relates_to, related, updates, supersedes, excludes, contradicts, supports, derived_from, same_as, spouse, child, birth_date, … ; par cible utiliser uuid+kind, ou uuid seuls avec link_kind (défaut related)."),
     ("memory_delete", "memory_delete <id> — supprimer une entrée de la mémoire long terme par son id (UUID)"),
     ("memory_forget", "memory_forget <query> — supprimer les entrées dont le contenu correspond aux mots-clés (plan moyen terme 9)"),
     ("memory_stats", "memory_stats — nombre d'entrées et taille approximative de la mémoire long terme"),
@@ -3745,34 +3793,15 @@ async fn execute_tool_call(
             let content = args.get(0).map(|a| a.as_str()).unwrap_or("");
             let source = args.get(1).map(|a| a.as_str()).unwrap_or("agent");
             if content.is_empty() {
-                return (false, "[memory_store] usage: memory_store <content> <source> [link_to: id1,id2...] [link_kind: spouse|child|birth_date|residence|...]".to_string(), None);
+                return (false, "[memory_store] usage: memory_store <content> <source> [link_to: uuid|+kind,...] [link_kind: default_for_plain_uuids]".to_string(), None);
             }
-            let mut link_to_ids: Option<Vec<String>> = None;
-            let mut link_kind: Option<String> = None;
-            for arg in args.get(2..).unwrap_or(&[]).iter().map(|a| a.as_str()) {
-                if let Some(rest) = arg.strip_prefix("link_to:") {
-                    let ids: Vec<String> = rest
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(String::from)
-                        .collect();
-                    if !ids.is_empty() {
-                        link_to_ids = Some(ids);
-                    }
-                } else if let Some(rest) = arg.strip_prefix("link_kind:") {
-                    let k = rest.trim();
-                    if !k.is_empty() {
-                        link_kind = Some(k.to_string());
-                    }
-                }
-            }
+            let explicit_links = parse_memory_store_explicit_links(args.get(2..).unwrap_or(&[]));
             match long_term_client {
                 Some(client) => {
                     let client = client.clone();
                     let content = content.to_string();
                     let source = source.to_string();
-                    let out = tokio::task::spawn_blocking(move || client.promote(content, source, None, None, None, None, None, None, link_to_ids, link_kind))
+                    let out = tokio::task::spawn_blocking(move || client.promote(content, source, None, None, None, None, None, None, explicit_links))
                         .await
                         .ok()
                         .and_then(|r| r.ok());
@@ -4950,7 +4979,7 @@ async fn compact_short_term_if_needed(
                     let session_id_attr = session_id.to_string();
                     let client = client.clone();
                     tokio::task::spawn_blocking(move || {
-                        if let Err(e) = client.promote(summary.clone(), "compaction".to_string(), None, None, Some(session_id_attr.clone()), Some(1), Some("session".to_string()), None, None, None) {
+                        if let Err(e) = client.promote(summary.clone(), "compaction".to_string(), None, None, Some(session_id_attr.clone()), Some(1), Some("session".to_string()), None, None) {
                             tracing::warn!(error = %e, "Long-term promote after compaction failed");
                         } else if let Err(e) = client.emit_event("memory_promoted".to_string(), summary, None, None, Some(session_id_attr), None, Some(1), Some("session".to_string()), Some("compaction".to_string())) {
                             tracing::debug!(error = %e, "Episodic emit after compaction promote failed");
@@ -5037,7 +5066,6 @@ Factual response in English.\n\n{}",
                         None,
                         None,
                         Some(1),
-                        None,
                         None,
                         None,
                         None,
@@ -7936,7 +7964,6 @@ pub(crate) async fn run_message_via_llm(
                         Some("global_user".to_string()),
                         None,
                         None,
-                        None,
                     );
                     if res.is_ok() {
                         let _ = client.emit_event(
@@ -8099,7 +8126,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                     let c = content.clone();
                     let s = source.clone();
                     match tokio::task::spawn_blocking(move || {
-                        client.promote(c, s, None, None, None, None, None, None, None, None)
+                        client.promote(c, s, None, None, None, None, None, None, None)
                     })
                     .await
                     {
@@ -9193,7 +9220,7 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
-    // POST /api/memory/rebuild-relations — recompute "similar" relations for all existing entries
+    // POST /api/memory/rebuild-relations — recompute embedding-based relations (similar / relates_to tiers)
     if method == "POST" && path == "/api/memory/rebuild-relations" {
         const DEFAULT_MAX_PER_ENTRY: usize = 5;
         let result = match long_term_client {
@@ -11794,8 +11821,9 @@ mod tests {
         looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
         normalize_tool_path_hint, packaged_spec_check_ok, parse_content_length,
         parse_device_invoke_params, parse_generate_image_tool_args,
-        parse_plugin_reputation_reset_body, parse_run_command_args, parse_skill_install_url,
-        parse_tool_calls, parse_write_file_request, resolve_run_command_working_dir,
+        parse_memory_store_explicit_links, parse_plugin_reputation_reset_body, parse_run_command_args,
+        parse_skill_install_url, parse_tool_calls, parse_write_file_request,
+        resolve_run_command_working_dir,
         response_looks_off_topic_for_small_talk, rewrite_workspace_plan_key_to_lineage_root,
         rewrite_workspace_plan_path_str, small_talk_fast_lane, PluginReputationResetBody,
         SessionRecallIntent, SessionRecallRange, SmallTalkLanguage,
@@ -12113,6 +12141,31 @@ mod tests {
         let (path, content) = parse_write_file_request(&args).expect("json payload should parse");
         assert_eq!(path, "workspace:/project_plan.md");
         assert!(content.contains("# Plan"));
+    }
+
+    #[test]
+    fn parse_memory_store_explicit_links_uuid_plus_kind() {
+        let u = "550e8400-e29b-41d4-a716-446655440000";
+        let args = vec![format!("link_to:{u}+excludes")];
+        let p = parse_memory_store_explicit_links(&args).expect("links");
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].0, u);
+        assert_eq!(p[0].1, "excludes");
+    }
+
+    #[test]
+    fn parse_memory_store_explicit_links_plain_uuids_and_global_kind() {
+        let a = "550e8400-e29b-41d4-a716-446655440001";
+        let b = "550e8400-e29b-41d4-a716-446655440002";
+        let args = vec![
+            format!("link_to:{a},{b}"),
+            "link_kind:relates_to".to_string(),
+        ];
+        let p = parse_memory_store_explicit_links(&args).expect("links");
+        assert_eq!(p, vec![
+            (a.to_string(), "relates_to".to_string()),
+            (b.to_string(), "relates_to".to_string()),
+        ]);
     }
 
     #[test]

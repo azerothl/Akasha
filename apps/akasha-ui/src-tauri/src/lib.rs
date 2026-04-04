@@ -1094,7 +1094,7 @@ async fn delete_memory_long_term(id: String, port: Option<u16>) -> Result<(), St
     Ok(())
 }
 
-/// Memory long-term: POST /api/memory/rebuild-relations — recompute "similar" relations for all entries
+/// Memory long-term: POST /api/memory/rebuild-relations — recompute embedding-tier relations (similar / relates_to)
 #[tauri::command]
 async fn rebuild_memory_relations(port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
