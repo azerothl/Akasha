@@ -6214,6 +6214,11 @@ pub(crate) async fn run_message_via_llm(
         let mut strict_no_tool_rounds = 0u32;
         let mut strict_successful_tool_calls = 0u32;
         let mut strict_preferred_tool_replay_input: Option<String> = None;
+        // In strict tools-first mode, deterministic preferred-tool attempts must run only once before
+        // the first LLM call. `round` stays 0 until the model emits parseable TOOL lines, so without
+        // this flag we would re-run deterministic maps (etc.) on every strict re-prompt and burn a
+        // full LLM timeout budget on a duplicate hung stream.
+        let mut deterministic_preferred_attempted = false;
         // Orchestrated deliverables: re-prompts when the model returns no parseable TOOL lines.
         let mut orch_disk_write_nags = 0u32;
         let mut last_captured_image_base64: Option<String> = None;
@@ -6250,7 +6255,10 @@ pub(crate) async fn run_message_via_llm(
 
             // Deterministic first attempt in strict tools-first mode:
             // try preferred tools with the full user request as input before asking the LLM again.
-            if strict_mode_active && (round == 0 || strict_preferred_tool_replay_input.is_some()) {
+            let run_deterministic_preferred = strict_mode_active
+                && (strict_preferred_tool_replay_input.is_some()
+                    || (!deterministic_preferred_attempted && round == 0));
+            if run_deterministic_preferred {
                 if let (Some(enforcer), Some(exec)) = (
                     &runtime_tool_routing_enforcer,
                     tools_executor_snapshot.as_ref(),
@@ -6363,6 +6371,7 @@ pub(crate) async fn run_message_via_llm(
                     .with_correlation(timeline_correlation),
                 );
                 }
+                deterministic_preferred_attempted = true;
             }
 
             // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
