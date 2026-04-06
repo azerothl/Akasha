@@ -742,6 +742,87 @@ async fn get_docs(port: Option<u16>) -> Result<String, String> {
     Ok(content)
 }
 
+/// GET /api/autonomous-mission — full mission state (same JSON as HTTP API).
+#[tauri::command]
+async fn get_autonomous_mission(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/autonomous-mission", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        return Err("unavailable".to_string());
+    }
+    if !resp.status().is_success() {
+        return Err(format!("Daemon returned {}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// GET /api/autonomous-mission/events?limit=N
+#[tauri::command]
+async fn get_autonomous_mission_events(limit: Option<u32>, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let lim = limit.unwrap_or(200).min(1000);
+    let url = format!(
+        "{}/api/autonomous-mission/events?limit={}",
+        daemon_base_url(port),
+        lim
+    );
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("Daemon returned {}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// PUT /api/autonomous-mission — partial JSON body (merge on daemon side).
+#[tauri::command]
+async fn put_autonomous_mission(body: serde_json::Value, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/autonomous-mission", daemon_base_url(port));
+    let client = http_client();
+    let resp = client
+        .put(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("Daemon returned {}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+#[tauri::command]
+async fn post_autonomous_mission_pause(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/autonomous-mission/pause", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("Daemon returned {}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+#[tauri::command]
+async fn post_autonomous_mission_resume(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/autonomous-mission/resume", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("Daemon returned {}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 #[tauri::command]
 async fn get_task_status(task_id: String, port: Option<u16>) -> Result<String, String> {
     let port = port.unwrap_or(DAEMON_PORT);
@@ -1518,6 +1599,11 @@ pub fn run() {
             get_first_message,
             execute_synthetic_input,
             get_docs,
+            get_autonomous_mission,
+            get_autonomous_mission_events,
+            put_autonomous_mission,
+            post_autonomous_mission_pause,
+            post_autonomous_mission_resume,
             get_config,
             set_config,
             get_vault_keys,

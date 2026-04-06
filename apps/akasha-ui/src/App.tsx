@@ -134,19 +134,19 @@ const GRAPH_THEME_COLORS: Record<
   }
 > = {
   dark_akasha: {
-    backgroundColor: "#0b0f17",
-    defaultNodeColor: "#1a2233",
-    defaultNodeFontColor: "#e4e4e7",
-    defaultNodeBorderColor: "#2a3448",
-    defaultLineColor: "#6b7280",
+    backgroundColor: "#0d0d14",
+    defaultNodeColor: "#1a1a2e",
+    defaultNodeFontColor: "#f1f5f9",
+    defaultNodeBorderColor: "#3d3666",
+    defaultLineColor: "#64748b",
     defaultLineWidth: 2,
-    defaultLineFontColor: "#a1a1aa",
+    defaultLineFontColor: "#94a3b8",
     defaultShowLineLabel: true,
-    checkedLineColor: "#7c8cff",
+    checkedLineColor: "#8b5cf6",
     nodeType: {
-      entry: { color: "#1e3a5f", fontColor: "#e4e4e7" },
-      related: { color: "#334155", fontColor: "#cbd5e1" },
-      selected: { color: "#312e81", fontColor: "#e4e4e7", borderColor: "#7c8cff" },
+      entry: { color: "#2d1f4e", fontColor: "#f1f5f9" },
+      related: { color: "#252538", fontColor: "#94a3b8" },
+      selected: { color: "#312e4a", fontColor: "#f1f5f9", borderColor: "#a78bfa" },
     },
   },
   dark: {
@@ -795,7 +795,7 @@ function renderAdvancedViewToCanvas(visual: EventAdvancedView, width: number, he
   const ctx = canvas.getContext("2d");
   if (!ctx) return canvas;
 
-  ctx.fillStyle = "#0b0f17";
+  ctx.fillStyle = "#0d0d14";
   ctx.fillRect(0, 0, width, height);
 
   if (visual.kind === "map") {
@@ -826,7 +826,7 @@ function renderAdvancedViewToCanvas(visual: EventAdvancedView, width: number, he
     return canvas;
   }
 
-  const palette = ["#7c8cff", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
+  const palette = ["#8b5cf6", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
   visual.series.forEach((s, idx) => {
     const scaled = scalePoints(s.points, width, height);
     if (scaled.length < 2) return;
@@ -2625,26 +2625,53 @@ function App() {
     setMissionLoading(true);
     setMissionError(null);
     try {
-      const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission"));
-      if (r.status === 503) {
-        setMissionError("unavailable");
-        setMission(null);
-        setMissionDraft(null);
-        setMissionEvents([]);
-        return;
-      }
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const j = normalizeMissionApi((await r.json()) as MissionApi);
-      setMission(j);
-      setMissionDraft(cloneMission(j));
-      const ev = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission/events?limit=200"));
-      if (ev.ok) {
-        const ej = (await ev.json()) as {
-          events?: Array<{ id: number; at: string; event_type: string; payload?: unknown }>;
-        };
-        setMissionEvents(ej.events ?? []);
+      if (E2E_WEB) {
+        const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission"));
+        if (r.status === 503) {
+          setMissionError("unavailable");
+          setMission(null);
+          setMissionDraft(null);
+          setMissionEvents([]);
+          return;
+        }
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = normalizeMissionApi((await r.json()) as MissionApi);
+        setMission(j);
+        setMissionDraft(cloneMission(j));
+        const ev = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission/events?limit=200"));
+        if (ev.ok) {
+          const ej = (await ev.json()) as {
+            events?: Array<{ id: number; at: string; event_type: string; payload?: unknown }>;
+          };
+          setMissionEvents(ej.events ?? []);
+        } else {
+          setMissionEvents([]);
+        }
       } else {
-        setMissionEvents([]);
+        try {
+          const raw = await invoke<MissionApi>("get_autonomous_mission", { port: DAEMON_PORT });
+          const j = normalizeMissionApi(raw);
+          setMission(j);
+          setMissionDraft(cloneMission(j));
+        } catch (err) {
+          const msg = String(err);
+          if (msg === "unavailable" || msg.includes("unavailable")) {
+            setMissionError("unavailable");
+            setMission(null);
+            setMissionDraft(null);
+            setMissionEvents([]);
+            return;
+          }
+          throw err;
+        }
+        try {
+          const ej = await invoke<{
+            events?: Array<{ id: number; at: string; event_type: string; payload?: unknown }>;
+          }>("get_autonomous_mission_events", { limit: 200, port: DAEMON_PORT });
+          setMissionEvents(ej.events ?? []);
+        } catch {
+          setMissionEvents([]);
+        }
       }
     } catch (e) {
       setMissionError(String(e));
@@ -6577,7 +6604,7 @@ function App() {
 
                                 const width = 460;
                                 const height = 190;
-                                const palette = ["#7c8cff", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
+                                const palette = ["#8b5cf6", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
                                 const totalPoints = visual.series.reduce((acc, s) => acc + s.points.length, 0);
                                 return (
                                   <div className="event-advanced-view event-advanced-view-chart">
@@ -7753,7 +7780,7 @@ function App() {
                   (() => {
                     const width = 1200;
                     const height = 560;
-                    const palette = ["#7c8cff", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
+                    const palette = ["#8b5cf6", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
                     const totalPoints = eventVisualFullscreen.visual.series.reduce((acc, s) => acc + s.points.length, 0);
                     return (
                       <div className="event-advanced-view event-advanced-view-chart event-advanced-view-fullscreen">
@@ -7825,7 +7852,7 @@ function App() {
               </p>
             )}
             {!missionLoading && mission && missionDraft && (
-              <div className="memory-content-wrap" style={{ marginTop: "1rem" }}>
+              <div className="memory-content-wrap mission-panel-body">
                 <nav className="settings-tabs" role="tablist" aria-label={t("mission.title")} style={{ marginBottom: "0.75rem" }}>
                   <button
                     type="button"
@@ -8074,13 +8101,23 @@ function App() {
                             heartbeat_preferred_task_type:
                               missionDraft.heartbeat_preferred_task_type ?? "project_manager",
                           };
-                          const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission"), {
-                            method: "PUT",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify(payload),
-                          });
-                          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                          const j = normalizeMissionApi((await r.json()) as MissionApi);
+                          let j: MissionApi;
+                          if (E2E_WEB) {
+                            const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission"), {
+                              method: "PUT",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify(payload),
+                            });
+                            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                            j = normalizeMissionApi((await r.json()) as MissionApi);
+                          } else {
+                            j = normalizeMissionApi(
+                              (await invoke<MissionApi>("put_autonomous_mission", {
+                                body: payload,
+                                port: DAEMON_PORT,
+                              })) as MissionApi
+                            );
+                          }
                           setMission(j);
                           setMissionDraft(cloneMission(j));
                         } catch (e) {
@@ -8133,11 +8170,20 @@ function App() {
                         disabled={missionSaving}
                         onClick={async () => {
                           try {
-                            const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission/pause"), {
-                              method: "POST",
-                            });
-                            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                            const j = normalizeMissionApi((await r.json()) as MissionApi);
+                            let j: MissionApi;
+                            if (E2E_WEB) {
+                              const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission/pause"), {
+                                method: "POST",
+                              });
+                              if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                              j = normalizeMissionApi((await r.json()) as MissionApi);
+                            } else {
+                              j = normalizeMissionApi(
+                                (await invoke<MissionApi>("post_autonomous_mission_pause", {
+                                  port: DAEMON_PORT,
+                                })) as MissionApi
+                              );
+                            }
                             setMission(j);
                             setMissionDraft(cloneMission(j));
                           } catch (e) {
@@ -8153,11 +8199,20 @@ function App() {
                         disabled={missionSaving}
                         onClick={async () => {
                           try {
-                            const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission/resume"), {
-                              method: "POST",
-                            });
-                            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                            const j = normalizeMissionApi((await r.json()) as MissionApi);
+                            let j: MissionApi;
+                            if (E2E_WEB) {
+                              const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission/resume"), {
+                                method: "POST",
+                              });
+                              if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                              j = normalizeMissionApi((await r.json()) as MissionApi);
+                            } else {
+                              j = normalizeMissionApi(
+                                (await invoke<MissionApi>("post_autonomous_mission_resume", {
+                                  port: DAEMON_PORT,
+                                })) as MissionApi
+                              );
+                            }
                             setMission(j);
                             setMissionDraft(cloneMission(j));
                           } catch (e) {
