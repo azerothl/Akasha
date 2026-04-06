@@ -15,7 +15,7 @@ pub use log::ImmutableLog;
 pub use metrics::{MetricsEvent, MetricsStore, ModelMetricsRow};
 pub use autonomous_mission::{
     AutonomousMissionEvent, AutonomousMissionSnapshot, AutonomousMissionStore, MissionHorizon,
-    MissionStatus,
+    MissionRoleDefinition, MissionStatus,
 };
 pub use episodic_memory::{EpisodicEvent, EpisodicFilter, EpisodicStore};
 pub use facts::{extract_facts_simple, Fact, FactsStore};

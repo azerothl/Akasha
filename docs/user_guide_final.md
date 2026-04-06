@@ -86,6 +86,7 @@ Vous pouvez modifier les fichiers suivants dans ce répertoire (avec un éditeur
 | `akasha.env` | Variables d'environnement persistantes (éditables aussi via `akasha config env`). |
 | `connectors.env` | Activation des canaux (Telegram, Slack, Discord). |
 | `agent_profile.json` | Profil de l'agent : nom, rôle, personnalité, règles. Éditable dans Paramètres → Profil de l'agent (interface web) ou en modifiant le fichier puis en redémarrant le daemon. |
+| `autonomous_mission.yaml` | (Optionnel) **Mission autonome** : objectif, contexte, règles de fonctionnement, rôles, intervalle de heartbeat, répertoire des rapports, `session_id`, type d’agent pour le premier pas de chaque heartbeat. Éditable dans l’onglet **Mission** de l’interface web ou via `GET` / `PUT /api/autonomous-mission`. |
 
 Le répertoire de données est créé automatiquement par `akasha init` ou `akasha doctor --fix` s'il est absent.
 
@@ -215,17 +216,18 @@ Les variables définies via `akasha config env set` sont enregistrées dans le f
 
 ### Interface terminal (TUI)
 
-- **Onglets** : Chat, **Retours planifiés** (réponses des tâches récurrentes), Routeur (métriques), Doc (cette documentation), Tâches, Calendrier, Mémoire.
+- **Onglets** : Chat, **Retours planifiés** (réponses des tâches récurrentes), Routeur (métriques), Doc (cette documentation), Tâches, Calendrier, Mémoire. L’onglet **Mission autonome** et les **Paramètres** complets sont disponibles dans l’interface web / desktop uniquement ; la mission peut toutefois être configurée via **`autonomous_mission.yaml`** ou l’API.
 - **Chat** : uniquement la conversation avec l’agent (messages envoyés et réponses). **Retours planifiés** : uniquement les réponses de l’agent pour les rappels / tâches planifiées (schedules), sans les mélanger au fil du chat.
 - **Raccourcis** : Tab (changer d'onglet), Entrée (envoyer un message), R (rafraîchir Routeur, Retours planifiés ou liste des tâches), ↑/↓ PgUp/PgDn Home/End (défilement), Échap ou Ctrl+Q (quitter). **Onglet Tâches** : ↑/↓ (sélectionner une tâche), D (filtrer racines uniquement). **Onglet Mémoire** : / ou S (recherche), G (basculer vue graphe), D ou Suppr (supprimer l'entrée long terme sélectionnée).
 
 ### Interface web / desktop (si installée)
 
-- **Onglets** : Chat, **Retours planifiés**, Routeur, Documentation, Tâches, Calendrier, Mémoire, Paramètres. **Chat** = conversation uniquement ; **Retours planifiés** = réponses de l’agent pour les tâches planifiées (rappels récurrents), dans un onglet dédié.
-- **Raccourcis** : touches **1 à 8** pour basculer vers l'onglet correspondant (inactif si le focus est dans un champ de saisie ou une modale).
+- **Onglets** : Chat, **Retours planifiés**, Routeur, Documentation, Tâches, Calendrier, Mémoire, **Mission**, Paramètres. **Chat** = conversation uniquement ; **Retours planifiés** = réponses de l’agent pour les tâches planifiées (rappels récurrents), dans un onglet dédié.
+- **Raccourcis** : touches **1 à 9** pour basculer vers l'onglet correspondant (Mission = **8**, Paramètres = **9** ; inactif si le focus est dans un champ de saisie ou une modale).
 - **Pièces jointes** : dans le Chat, vous pouvez joindre des images ou des documents (texte, PDF) ; l'agent les reçoit pour analyse.
 - **RAG utilisateur** : dans Paramètres, section « Mes documents (RAG utilisateur) », vous pouvez ajouter ou supprimer des documents ; les extraits pertinents sont utilisés par l'agent lors des réponses.
 - **Profil de l'agent** : dans Paramètres → Profil de l'agent, vous pouvez définir le nom, le rôle, la personnalité, les règles et les comportements autorisés/interdits ; des modèles (Neutre, Bienveillant, Concis/technique, etc.) sont proposés.
+- **Mission autonome** : onglet **Mission** pour définir un objectif de fond, le contexte, des règles, des rôles (organisation) et la fréquence des **heartbeats**. Tant que la mission est activée et **active**, le daemon lance périodiquement une tâche orchestrée (type d’agent du premier pas configurable, souvent *chef de projet*) ; l’orchestrateur peut déléguer à d’autres agents. Les rapports Markdown vont dans le répertoire configuré (relatif au data_dir). Fichier **`autonomous_mission.yaml`** ; API **`GET` / `PUT /api/autonomous-mission`**, pause/reprise **`POST`** sur `/api/autonomous-mission/pause` et `/resume`. Pour appliquer aussi au **chat** le mode « sans questions » lié à la mission, utilisez le même **`session_id`** que dans la fiche mission. *Exemple* : maintenir un fichier `CHANGELOG_HEBDO.md` à jour dans un dépôt — renseignez l’objectif et le contexte (chemin du dépôt), horizon moyen, heartbeat 120 min, consultez les rapports sous le dossier indiqué après quelques cycles.
 - **Plugins** : la vue plugins affiche l’état d’activation, les règles de routage dynamiques et permet de réinitialiser la réputation d’un plugin (ou de tous les plugins) si nécessaire.
 
 Le daemon écoute par défaut sur le port **3876**. Pour que l'onglet Doc affiche ce guide, lancez `akasha start` depuis le dossier où vous avez extrait l'archive (contenant le dossier `docs`).

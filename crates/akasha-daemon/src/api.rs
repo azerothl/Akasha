@@ -5817,8 +5817,17 @@ pub(crate) async fn run_message_via_llm(
             user_prefix.push_str(
                 "\n\n[Autonomous mission mode — do not ask the user questions]\n\
                 - Do NOT ask clarifying questions unless a hard blocker remains (missing vault credentials, or tools_policy denies the action).\n\
-                - Prefer tools (read_file, write_file, memory_store, web_search, run_command) and record decisions in markdown under the mission report directory.\n\n",
+                - Prefer tools (read_file, write_file, memory_store, web_search, run_command) and record decisions in markdown under the mission report directory.\n",
             );
+            if !g.operating_rules.trim().is_empty() {
+                user_prefix.push_str("- Mission operating rules:\n");
+                for line in g.operating_rules.lines().take(32) {
+                    user_prefix.push_str("  ");
+                    user_prefix.push_str(line);
+                    user_prefix.push('\n');
+                }
+                user_prefix.push('\n');
+            }
         }
     }
     let turns_empty = match &short_term {
@@ -8487,6 +8496,17 @@ async fn get_autonomous_mission_state(
         MissionStatusYaml::Completed => "completed",
     };
     let next_hb = last_hb.map(|t| t + chrono::Duration::minutes(cfg.heartbeat_interval_minutes as i64));
+    let role_definitions: Vec<serde_json::Value> = cfg
+        .role_definitions
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "name": r.name,
+                "responsibility": r.responsibility,
+                "preferred_agent_type": r.preferred_agent_type,
+            })
+        })
+        .collect();
     let body = serde_json::json!({
         "enabled": cfg.enabled,
         "global_context": cfg.global_context.as_str(),
@@ -8497,6 +8517,9 @@ async fn get_autonomous_mission_state(
         "report_path_absolute": report_abs.display().to_string(),
         "session_id": cfg.session_id.as_str(),
         "status": status_s,
+        "operating_rules": cfg.operating_rules.as_str(),
+        "role_definitions": role_definitions,
+        "heartbeat_preferred_task_type": cfg.heartbeat_preferred_task_type.as_str(),
         "last_heartbeat_at": last_hb.map(|t| t.to_rfc3339()),
         "last_task_id": last_tid.map(|u| u.to_string()),
         "next_heartbeat_approx_at": next_hb.map(|t| t.to_rfc3339()),

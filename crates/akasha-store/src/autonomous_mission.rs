@@ -72,6 +72,25 @@ impl MissionStatus {
     }
 }
 
+/// Role in the mission “organization” (orchestrator uses this to delegate).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MissionRoleDefinition {
+    pub name: String,
+    pub responsibility: String,
+    #[serde(default)]
+    pub preferred_agent_type: Option<String>,
+}
+
+impl Default for MissionRoleDefinition {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            responsibility: String::new(),
+            preferred_agent_type: None,
+        }
+    }
+}
+
 /// Persisted mirror of YAML config + runtime meta (single mission).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutonomousMissionSnapshot {
@@ -83,7 +102,17 @@ pub struct AutonomousMissionSnapshot {
     pub report_dir: String,
     pub session_id: String,
     pub status: MissionStatus,
+    #[serde(default)]
+    pub operating_rules: String,
+    #[serde(default)]
+    pub role_definitions: Vec<MissionRoleDefinition>,
+    #[serde(default = "default_heartbeat_preferred_task_type")]
+    pub heartbeat_preferred_task_type: String,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_heartbeat_preferred_task_type() -> String {
+    "project_manager".to_string()
 }
 
 impl Default for AutonomousMissionSnapshot {
@@ -97,6 +126,9 @@ impl Default for AutonomousMissionSnapshot {
             report_dir: "autonomous_mission/reports".to_string(),
             session_id: "autonomous:default".to_string(),
             status: MissionStatus::Paused,
+            operating_rules: String::new(),
+            role_definitions: Vec::new(),
+            heartbeat_preferred_task_type: default_heartbeat_preferred_task_type(),
             updated_at: Utc::now(),
         }
     }
@@ -112,6 +144,32 @@ pub struct AutonomousMissionEvent {
 
 pub struct AutonomousMissionStore {
     conn: Connection,
+}
+
+fn migrate_autonomous_mission_snapshot_columns(conn: &Connection) -> anyhow::Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(autonomous_mission_snapshot)")?;
+    let cols: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !cols.iter().any(|c| c == "operating_rules") {
+        conn.execute(
+            "ALTER TABLE autonomous_mission_snapshot ADD COLUMN operating_rules TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !cols.iter().any(|c| c == "role_definitions_json") {
+        conn.execute(
+            "ALTER TABLE autonomous_mission_snapshot ADD COLUMN role_definitions_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
+    if !cols.iter().any(|c| c == "heartbeat_preferred_task_type") {
+        conn.execute(
+            "ALTER TABLE autonomous_mission_snapshot ADD COLUMN heartbeat_preferred_task_type TEXT NOT NULL DEFAULT 'project_manager'",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 impl AutonomousMissionStore {
@@ -146,16 +204,19 @@ impl AutonomousMissionStore {
             CREATE INDEX IF NOT EXISTS idx_autonomous_mission_events_at ON autonomous_mission_events(at);
             "#,
         )?;
+        migrate_autonomous_mission_snapshot_columns(&conn)?;
         Ok(Self { conn })
     }
 
     pub fn upsert_snapshot(&self, s: &AutonomousMissionSnapshot) -> anyhow::Result<()> {
+        let role_json = serde_json::to_string(&s.role_definitions)?;
         self.conn.execute(
             r#"
             INSERT INTO autonomous_mission_snapshot (
                 id, enabled, global_context, horizon, objective, heartbeat_interval_minutes,
-                report_dir, session_id, status, updated_at
-            ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                report_dir, session_id, status, updated_at,
+                operating_rules, role_definitions_json, heartbeat_preferred_task_type
+            ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ON CONFLICT(id) DO UPDATE SET
                 enabled = excluded.enabled,
                 global_context = excluded.global_context,
@@ -165,7 +226,10 @@ impl AutonomousMissionStore {
                 report_dir = excluded.report_dir,
                 session_id = excluded.session_id,
                 status = excluded.status,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                operating_rules = excluded.operating_rules,
+                role_definitions_json = excluded.role_definitions_json,
+                heartbeat_preferred_task_type = excluded.heartbeat_preferred_task_type
             "#,
             rusqlite::params![
                 if s.enabled { 1i32 } else { 0 },
@@ -177,6 +241,9 @@ impl AutonomousMissionStore {
                 &s.session_id,
                 s.status.as_str(),
                 s.updated_at.to_rfc3339(),
+                &s.operating_rules,
+                role_json,
+                &s.heartbeat_preferred_task_type,
             ],
         )?;
         Ok(())
@@ -185,7 +252,8 @@ impl AutonomousMissionStore {
     pub fn get_snapshot(&self) -> anyhow::Result<Option<AutonomousMissionSnapshot>> {
         let mut stmt = self.conn.prepare(
             r#"SELECT enabled, global_context, horizon, objective, heartbeat_interval_minutes,
-                      report_dir, session_id, status, updated_at
+                      report_dir, session_id, status, updated_at,
+                      operating_rules, role_definitions_json, heartbeat_preferred_task_type
                FROM autonomous_mission_snapshot WHERE id = 1"#,
         )?;
         let mut rows = stmt.query([])?;
@@ -195,6 +263,11 @@ impl AutonomousMissionStore {
             let heartbeat_interval_minutes_i64: i64 = row.get(4)?;
             let heartbeat_interval_minutes =
                 u64::try_from(heartbeat_interval_minutes_i64).unwrap_or(0);
+            let operating_rules: String = row.get(9)?;
+            let role_definitions_json: String = row.get(10)?;
+            let role_definitions: Vec<MissionRoleDefinition> =
+                serde_json::from_str(&role_definitions_json).unwrap_or_default();
+            let heartbeat_preferred_task_type: String = row.get(11)?;
             return Ok(Some(AutonomousMissionSnapshot {
                 enabled: row.get::<_, i32>(0)? != 0,
                 global_context: row.get(1)?,
@@ -207,6 +280,9 @@ impl AutonomousMissionStore {
                 updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
                     .map(|d| d.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now()),
+                operating_rules,
+                role_definitions,
+                heartbeat_preferred_task_type,
             }));
         }
         Ok(None)

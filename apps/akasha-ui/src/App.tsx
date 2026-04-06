@@ -1794,18 +1794,79 @@ function App() {
     report_dir: string;
     session_id: string;
     status: string;
+    operating_rules?: string;
+    role_definitions?: Array<{
+      name: string;
+      responsibility: string;
+      preferred_agent_type?: string | null;
+    }>;
+    heartbeat_preferred_task_type?: string;
     report_path_absolute?: string;
     last_heartbeat_at?: string | null;
     next_heartbeat_approx_at?: string | null;
     last_task_id?: string | null;
   };
+  type MissionSubTab = "goals" | "settings" | "status";
+  const MISSION_HEARTBEAT_AGENT_TYPES = [
+    "conversation",
+    "search",
+    "code",
+    "schedule",
+    "financial",
+    "documentalist",
+    "project_manager",
+    "technical_writer",
+    "research",
+    "security_audit",
+    "creative",
+    "analyst",
+    "architect",
+    "frontend",
+    "backend",
+    "database",
+    "integration",
+    "qa",
+    "system",
+    "image_generation",
+  ] as const;
+  function normalizeMissionApi(j: MissionApi): MissionApi {
+    return {
+      ...j,
+      operating_rules: j.operating_rules ?? "",
+      role_definitions: Array.isArray(j.role_definitions) ? j.role_definitions : [],
+      heartbeat_preferred_task_type: j.heartbeat_preferred_task_type ?? "project_manager",
+    };
+  }
+  function cloneMission(m: MissionApi): MissionApi {
+    return JSON.parse(JSON.stringify(m)) as MissionApi;
+  }
+  function missionEditableEqual(a: MissionApi, b: MissionApi): boolean {
+    const ra = JSON.stringify(a.role_definitions ?? []);
+    const rb = JSON.stringify(b.role_definitions ?? []);
+    return (
+      a.enabled === b.enabled &&
+      a.global_context === b.global_context &&
+      a.horizon === b.horizon &&
+      a.objective === b.objective &&
+      a.heartbeat_interval_minutes === b.heartbeat_interval_minutes &&
+      a.report_dir === b.report_dir &&
+      a.session_id === b.session_id &&
+      (a.operating_rules ?? "") === (b.operating_rules ?? "") &&
+      (a.heartbeat_preferred_task_type ?? "project_manager") === (b.heartbeat_preferred_task_type ?? "project_manager") &&
+      ra === rb
+    );
+  }
   const [mission, setMission] = useState<MissionApi | null>(null);
+  const [missionDraft, setMissionDraft] = useState<MissionApi | null>(null);
+  const [missionSubTab, setMissionSubTab] = useState<MissionSubTab>("goals");
   const [missionEvents, setMissionEvents] = useState<
     Array<{ id: number; at: string; event_type: string; payload?: unknown }>
   >([]);
   const [missionLoading, setMissionLoading] = useState(false);
   const [missionError, setMissionError] = useState<string | null>(null);
   const [missionSaving, setMissionSaving] = useState(false);
+  const missionDirty =
+    mission != null && missionDraft != null && !missionEditableEqual(missionDraft, mission);
 
   function buildMemoryGraphData(
     entries: MemoryLongTermEntry[],
@@ -2568,12 +2629,14 @@ function App() {
       if (r.status === 503) {
         setMissionError("unavailable");
         setMission(null);
+        setMissionDraft(null);
         setMissionEvents([]);
         return;
       }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const j = (await r.json()) as MissionApi;
+      const j = normalizeMissionApi((await r.json()) as MissionApi);
       setMission(j);
+      setMissionDraft(cloneMission(j));
       const ev = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission/events?limit=200"));
       if (ev.ok) {
         const ej = (await ev.json()) as {
@@ -2586,6 +2649,7 @@ function App() {
     } catch (e) {
       setMissionError(String(e));
       setMission(null);
+      setMissionDraft(null);
     } finally {
       setMissionLoading(false);
     }
@@ -7744,6 +7808,9 @@ function App() {
           >
             <h2 className="panel-title">{t("mission.title")}</h2>
             <p className="muted">{t("mission.description")}</p>
+            <p className="muted" style={{ marginTop: "0.35rem" }}>
+              {t("mission.intro_detail")}
+            </p>
             <button type="button" className="refresh-btn" onClick={() => void fetchMission()} disabled={missionLoading}>
               {missionLoading ? t("common.loading") : t("mission.refresh")}
             </button>
@@ -7757,206 +7824,402 @@ function App() {
                 {missionError}
               </p>
             )}
-            {!missionLoading && mission && (
+            {!missionLoading && mission && missionDraft && (
               <div className="memory-content-wrap" style={{ marginTop: "1rem" }}>
-                <label className="settings-field">
-                  <input
-                    type="checkbox"
-                    checked={mission.enabled}
-                    onChange={(e) => setMission({ ...mission, enabled: e.target.checked })}
-                  />{" "}
-                  {t("mission.enabled")}
-                </label>
-                <label className="settings-field">
-                  {t("mission.horizon")}
-                  <select
-                    value={mission.horizon}
-                    onChange={(e) => setMission({ ...mission, horizon: e.target.value })}
+                <nav className="settings-tabs" role="tablist" aria-label={t("mission.title")} style={{ marginBottom: "0.75rem" }}>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={missionSubTab === "goals"}
+                    className={missionSubTab === "goals" ? "active" : ""}
+                    onClick={() => setMissionSubTab("goals")}
                   >
-                    <option value="short">{t("mission.horizon_short")}</option>
-                    <option value="medium">{t("mission.horizon_medium")}</option>
-                    <option value="long">{t("mission.horizon_long")}</option>
-                  </select>
-                </label>
-                <label className="settings-field">
-                  {t("mission.context")}
-                  <textarea
-                    rows={4}
-                    value={mission.global_context}
-                    onChange={(e) => setMission({ ...mission, global_context: e.target.value })}
-                  />
-                </label>
-                <label className="settings-field">
-                  {t("mission.objective")}
-                  <textarea
-                    rows={4}
-                    value={mission.objective}
-                    onChange={(e) => setMission({ ...mission, objective: e.target.value })}
-                  />
-                </label>
-                <label className="settings-field">
-                  {t("mission.heartbeat_minutes")}
-                  <input
-                    type="number"
-                    min={1}
-                    value={mission.heartbeat_interval_minutes}
-                    onChange={(e) =>
-                      setMission({ ...mission, heartbeat_interval_minutes: Math.max(1, parseInt(e.target.value, 10) || 1) })
-                    }
-                  />
-                </label>
-                <label className="settings-field">
-                  {t("mission.report_dir")}
-                  <input
-                    type="text"
-                    value={mission.report_dir}
-                    onChange={(e) => setMission({ ...mission, report_dir: e.target.value })}
-                  />
-                </label>
-                <label className="settings-field">
-                  {t("mission.session_id")}
-                  <input
-                    type="text"
-                    value={mission.session_id}
-                    onChange={(e) => setMission({ ...mission, session_id: e.target.value })}
-                  />
-                </label>
-                <p>
-                  <strong>{t("mission.status")}:</strong> {mission.status}
-                </p>
-                {mission.report_path_absolute && (
-                  <p className="muted">
-                    <strong>{t("mission.report_path")}:</strong> {mission.report_path_absolute}
+                    {t("mission.section_goals")}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={missionSubTab === "settings"}
+                    className={missionSubTab === "settings" ? "active" : ""}
+                    onClick={() => setMissionSubTab("settings")}
+                  >
+                    {t("mission.section_settings")}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={missionSubTab === "status"}
+                    className={missionSubTab === "status" ? "active" : ""}
+                    onClick={() => setMissionSubTab("status")}
+                  >
+                    {t("mission.section_status")}
+                  </button>
+                </nav>
+                {missionDirty && (
+                  <p className="muted" role="status">
+                    {t("mission.unsaved")}
                   </p>
                 )}
-                {(mission.last_heartbeat_at || mission.next_heartbeat_approx_at) && (
-                  <p className="muted">
-                    {mission.last_heartbeat_at && (
-                      <>
-                        {t("mission.last_heartbeat")}: {mission.last_heartbeat_at}{" "}
-                      </>
-                    )}
-                    {mission.next_heartbeat_approx_at && (
-                      <>
-                        · {t("mission.next_heartbeat")}: {mission.next_heartbeat_approx_at}
-                      </>
-                    )}
-                  </p>
-                )}
-                <div className="schedule-detail-actions" style={{ marginTop: "0.75rem" }}>
-                  <button
-                    type="button"
-                    className="btn-primary"
-                    disabled={missionSaving}
-                    onClick={async () => {
-                      setMissionSaving(true);
-                      try {
-                        const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission"), {
-                          method: "PUT",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify(mission),
-                        });
-                        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                        const j = (await r.json()) as MissionApi;
-                        setMission(j);
-                      } catch (e) {
-                        setMissionError(String(e));
-                      } finally {
-                        setMissionSaving(false);
-                      }
-                    }}
-                  >
-                    {missionSaving ? "…" : t("mission.save")}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    disabled={missionSaving}
-                    onClick={async () => {
-                      try {
-                        const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission/pause"), {
-                          method: "POST",
-                        });
-                        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                        const j = (await r.json()) as MissionApi;
-                        setMission(j);
-                      } catch (e) {
-                        setMissionError(String(e));
-                      }
-                    }}
-                  >
-                    {t("mission.pause")}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    disabled={missionSaving}
-                    onClick={async () => {
-                      try {
-                        const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission/resume"), {
-                          method: "POST",
-                        });
-                        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                        const j = (await r.json()) as MissionApi;
-                        setMission(j);
-                      } catch (e) {
-                        setMissionError(String(e));
-                      }
-                    }}
-                  >
-                    {t("mission.resume")}
-                  </button>
-                </div>
-                <h3 className="panel-subtitle" style={{ marginTop: "1.5rem" }}>
-                  {t("mission.activity_title")}
-                </h3>
-                {(() => {
-                  const buckets = Array.from({ length: 7 }, () => 0);
-                  const now = Date.now();
-                  const dayMs = 86400000;
-                  for (const ev of missionEvents) {
-                    const t0 = new Date(ev.at).getTime();
-                    const dayIdx = Math.floor((now - t0) / dayMs);
-                    if (dayIdx >= 0 && dayIdx < 7) buckets[6 - dayIdx] += 1;
-                  }
-                  const max = Math.max(1, ...buckets);
-                  const w = 280;
-                  const h = 80;
-                  const bw = w / 7;
-                  return (
-                    <svg
-                      viewBox={`0 0 ${w} ${h}`}
-                      className="event-advanced-chart"
-                      width={w}
-                      height={h}
-                      aria-label={t("mission.chart_label")}
-                    >
-                      <rect x="0" y="0" width={w} height={h} rx="8" className="event-advanced-chart-bg" />
-                      {buckets.map((n, i) => (
-                        <rect
-                          key={i}
-                          x={i * bw + 2}
-                          y={h - 4 - (n / max) * (h - 12)}
-                          width={bw - 4}
-                          height={Math.max(1, (n / max) * (h - 12))}
-                          fill="currentColor"
-                          opacity={0.55}
-                        />
-                      ))}
-                    </svg>
-                  );
-                })()}
-                <ul className="memory-turns-list" style={{ marginTop: "1rem" }}>
-                  {missionEvents.slice(-20).map((ev) => (
-                    <li key={ev.id} className="memory-turn memory-turn-assistant">
-                      <span className="memory-turn-role">{ev.event_type}</span>
-                      <div className="memory-turn-content">
-                        <time dateTime={ev.at}>{ev.at}</time>
-                        {ev.payload != null ? ` — ${JSON.stringify(ev.payload)}` : ""}
+                {missionSubTab === "goals" && (
+                  <>
+                    <label className="settings-field">
+                      <input
+                        type="checkbox"
+                        checked={missionDraft.enabled}
+                        onChange={(e) => setMissionDraft({ ...missionDraft, enabled: e.target.checked })}
+                      />{" "}
+                      {t("mission.enabled")}
+                    </label>
+                    <label className="settings-field">
+                      {t("mission.context")}
+                      <textarea
+                        rows={5}
+                        value={missionDraft.global_context}
+                        onChange={(e) => setMissionDraft({ ...missionDraft, global_context: e.target.value })}
+                      />
+                    </label>
+                    <label className="settings-field">
+                      {t("mission.objective")}
+                      <textarea
+                        rows={5}
+                        value={missionDraft.objective}
+                        onChange={(e) => setMissionDraft({ ...missionDraft, objective: e.target.value })}
+                      />
+                    </label>
+                    <label className="settings-field">
+                      {t("mission.operating_rules")}
+                      <span className="muted" style={{ display: "block", fontWeight: "normal", marginBottom: "0.25rem" }}>
+                        {t("mission.operating_rules_hint")}
+                      </span>
+                      <textarea
+                        rows={5}
+                        value={missionDraft.operating_rules ?? ""}
+                        onChange={(e) => setMissionDraft({ ...missionDraft, operating_rules: e.target.value })}
+                      />
+                    </label>
+                    <h3 className="panel-subtitle" style={{ marginTop: "1rem" }}>
+                      {t("mission.roles_title")}
+                    </h3>
+                    <p className="muted">{t("mission.roles_hint")}</p>
+                    {(missionDraft.role_definitions ?? []).map((row, idx) => (
+                      <div
+                        key={idx}
+                        className="settings-field"
+                        style={{
+                          border: "1px solid color-mix(in srgb, currentColor 18%, transparent)",
+                          borderRadius: 8,
+                          padding: "0.75rem",
+                          marginBottom: "0.5rem",
+                        }}
+                      >
+                        <label className="settings-field" style={{ marginBottom: "0.5rem" }}>
+                          {t("mission.role_name")}
+                          <input
+                            type="text"
+                            value={row.name}
+                            onChange={(e) => {
+                              const next = [...(missionDraft.role_definitions ?? [])];
+                              next[idx] = { ...next[idx], name: e.target.value };
+                              setMissionDraft({ ...missionDraft, role_definitions: next });
+                            }}
+                          />
+                        </label>
+                        <label className="settings-field" style={{ marginBottom: "0.5rem" }}>
+                          {t("mission.role_responsibility")}
+                          <textarea
+                            rows={2}
+                            value={row.responsibility}
+                            onChange={(e) => {
+                              const next = [...(missionDraft.role_definitions ?? [])];
+                              next[idx] = { ...next[idx], responsibility: e.target.value };
+                              setMissionDraft({ ...missionDraft, role_definitions: next });
+                            }}
+                          />
+                        </label>
+                        <label className="settings-field">
+                          {t("mission.role_agent")}
+                          <select
+                            value={row.preferred_agent_type ?? ""}
+                            onChange={(e) => {
+                              const next = [...(missionDraft.role_definitions ?? [])];
+                              const v = e.target.value;
+                              next[idx] = {
+                                ...next[idx],
+                                preferred_agent_type: v === "" ? null : v,
+                              };
+                              setMissionDraft({ ...missionDraft, role_definitions: next });
+                            }}
+                          >
+                            <option value="">{t("mission.role_agent_default")}</option>
+                            {MISSION_HEARTBEAT_AGENT_TYPES.map((ag) => (
+                              <option key={ag} value={ag}>
+                                {ag}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          style={{ marginTop: "0.5rem" }}
+                          onClick={() => {
+                            const next = [...(missionDraft.role_definitions ?? [])];
+                            next.splice(idx, 1);
+                            setMissionDraft({ ...missionDraft, role_definitions: next });
+                          }}
+                        >
+                          {t("mission.remove_role")}
+                        </button>
                       </div>
-                    </li>
-                  ))}
-                </ul>
+                    ))}
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() =>
+                        setMissionDraft({
+                          ...missionDraft,
+                          role_definitions: [
+                            ...(missionDraft.role_definitions ?? []),
+                            { name: "", responsibility: "", preferred_agent_type: null },
+                          ],
+                        })
+                      }
+                    >
+                      {t("mission.add_role")}
+                    </button>
+                  </>
+                )}
+                {missionSubTab === "settings" && (
+                  <>
+                    <label className="settings-field">
+                      {t("mission.horizon")}
+                      <select
+                        value={missionDraft.horizon}
+                        onChange={(e) => setMissionDraft({ ...missionDraft, horizon: e.target.value })}
+                      >
+                        <option value="short">{t("mission.horizon_short")}</option>
+                        <option value="medium">{t("mission.horizon_medium")}</option>
+                        <option value="long">{t("mission.horizon_long")}</option>
+                      </select>
+                    </label>
+                    <label className="settings-field">
+                      {t("mission.heartbeat_minutes")}
+                      <input
+                        type="number"
+                        min={1}
+                        value={missionDraft.heartbeat_interval_minutes}
+                        onChange={(e) =>
+                          setMissionDraft({
+                            ...missionDraft,
+                            heartbeat_interval_minutes: Math.max(1, parseInt(e.target.value, 10) || 1),
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="settings-field">
+                      {t("mission.heartbeat_task_type")}
+                      <span className="muted" style={{ display: "block", fontWeight: "normal", marginBottom: "0.25rem" }}>
+                        {t("mission.heartbeat_task_type_hint")}
+                      </span>
+                      <select
+                        value={missionDraft.heartbeat_preferred_task_type ?? "project_manager"}
+                        onChange={(e) =>
+                          setMissionDraft({ ...missionDraft, heartbeat_preferred_task_type: e.target.value })
+                        }
+                      >
+                        {MISSION_HEARTBEAT_AGENT_TYPES.map((ag) => (
+                          <option key={ag} value={ag}>
+                            {ag}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="settings-field">
+                      {t("mission.report_dir")}
+                      <input
+                        type="text"
+                        value={missionDraft.report_dir}
+                        onChange={(e) => setMissionDraft({ ...missionDraft, report_dir: e.target.value })}
+                      />
+                    </label>
+                    <label className="settings-field">
+                      {t("mission.session_id")}
+                      <input
+                        type="text"
+                        value={missionDraft.session_id}
+                        onChange={(e) => setMissionDraft({ ...missionDraft, session_id: e.target.value })}
+                      />
+                    </label>
+                  </>
+                )}
+                {(missionSubTab === "goals" || missionSubTab === "settings") && (
+                  <div className="schedule-detail-actions" style={{ marginTop: "1rem" }}>
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={missionSaving || !missionDirty}
+                      onClick={async () => {
+                        setMissionSaving(true);
+                        try {
+                          const payload = {
+                            enabled: missionDraft.enabled,
+                            global_context: missionDraft.global_context,
+                            horizon: missionDraft.horizon,
+                            objective: missionDraft.objective,
+                            heartbeat_interval_minutes: missionDraft.heartbeat_interval_minutes,
+                            report_dir: missionDraft.report_dir,
+                            session_id: missionDraft.session_id,
+                            operating_rules: missionDraft.operating_rules ?? "",
+                            role_definitions: missionDraft.role_definitions ?? [],
+                            heartbeat_preferred_task_type:
+                              missionDraft.heartbeat_preferred_task_type ?? "project_manager",
+                          };
+                          const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission"), {
+                            method: "PUT",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(payload),
+                          });
+                          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                          const j = normalizeMissionApi((await r.json()) as MissionApi);
+                          setMission(j);
+                          setMissionDraft(cloneMission(j));
+                        } catch (e) {
+                          setMissionError(String(e));
+                        } finally {
+                          setMissionSaving(false);
+                        }
+                      }}
+                    >
+                      {missionSaving ? "…" : t("mission.save")}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={missionSaving || !missionDirty}
+                      onClick={() => mission && setMissionDraft(cloneMission(mission))}
+                    >
+                      {t("mission.discard")}
+                    </button>
+                  </div>
+                )}
+                {missionSubTab === "status" && (
+                  <>
+                    <p>
+                      <strong>{t("mission.status")}:</strong> {mission.status}
+                    </p>
+                    {mission.report_path_absolute && (
+                      <p className="muted">
+                        <strong>{t("mission.report_path")}:</strong> {mission.report_path_absolute}
+                      </p>
+                    )}
+                    {(mission.last_heartbeat_at || mission.next_heartbeat_approx_at) && (
+                      <p className="muted">
+                        {mission.last_heartbeat_at && (
+                          <>
+                            {t("mission.last_heartbeat")}: {mission.last_heartbeat_at}{" "}
+                          </>
+                        )}
+                        {mission.next_heartbeat_approx_at && (
+                          <>
+                            · {t("mission.next_heartbeat")}: {mission.next_heartbeat_approx_at}
+                          </>
+                        )}
+                      </p>
+                    )}
+                    <div className="schedule-detail-actions" style={{ marginTop: "0.75rem" }}>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={missionSaving}
+                        onClick={async () => {
+                          try {
+                            const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission/pause"), {
+                              method: "POST",
+                            });
+                            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                            const j = normalizeMissionApi((await r.json()) as MissionApi);
+                            setMission(j);
+                            setMissionDraft(cloneMission(j));
+                          } catch (e) {
+                            setMissionError(String(e));
+                          }
+                        }}
+                      >
+                        {t("mission.pause")}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={missionSaving}
+                        onClick={async () => {
+                          try {
+                            const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission/resume"), {
+                              method: "POST",
+                            });
+                            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                            const j = normalizeMissionApi((await r.json()) as MissionApi);
+                            setMission(j);
+                            setMissionDraft(cloneMission(j));
+                          } catch (e) {
+                            setMissionError(String(e));
+                          }
+                        }}
+                      >
+                        {t("mission.resume")}
+                      </button>
+                    </div>
+                    <h3 className="panel-subtitle" style={{ marginTop: "1.5rem" }}>
+                      {t("mission.activity_title")}
+                    </h3>
+                    {(() => {
+                      const buckets = Array.from({ length: 7 }, () => 0);
+                      const now = Date.now();
+                      const dayMs = 86400000;
+                      for (const ev of missionEvents) {
+                        const t0 = new Date(ev.at).getTime();
+                        const dayIdx = Math.floor((now - t0) / dayMs);
+                        if (dayIdx >= 0 && dayIdx < 7) buckets[6 - dayIdx] += 1;
+                      }
+                      const max = Math.max(1, ...buckets);
+                      const w = 280;
+                      const h = 80;
+                      const bw = w / 7;
+                      return (
+                        <svg
+                          viewBox={`0 0 ${w} ${h}`}
+                          className="event-advanced-chart"
+                          width={w}
+                          height={h}
+                          aria-label={t("mission.chart_label")}
+                        >
+                          <rect x="0" y="0" width={w} height={h} rx="8" className="event-advanced-chart-bg" />
+                          {buckets.map((n, i) => (
+                            <rect
+                              key={i}
+                              x={i * bw + 2}
+                              y={h - 4 - (n / max) * (h - 12)}
+                              width={bw - 4}
+                              height={Math.max(1, (n / max) * (h - 12))}
+                              fill="currentColor"
+                              opacity={0.55}
+                            />
+                          ))}
+                        </svg>
+                      );
+                    })()}
+                    <ul className="memory-turns-list" style={{ marginTop: "1rem" }}>
+                      {missionEvents.slice(-20).map((ev) => (
+                        <li key={ev.id} className="memory-turn memory-turn-assistant">
+                          <span className="memory-turn-role">{ev.event_type}</span>
+                          <div className="memory-turn-content">
+                            <time dateTime={ev.at}>{ev.at}</time>
+                            {ev.payload != null ? ` — ${JSON.stringify(ev.payload)}` : ""}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
               </div>
             )}
           </section>

@@ -1,7 +1,8 @@
 //! YAML config for autonomous mission mode (`autonomous_mission.yaml` in data directory).
 
 use akasha_store::{
-    AutonomousMissionSnapshot, AutonomousMissionStore, MissionHorizon, MissionStatus,
+    AutonomousMissionSnapshot, AutonomousMissionStore, MissionHorizon, MissionRoleDefinition,
+    MissionStatus,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,43 @@ use tokio::sync::RwLock;
 
 const DEFAULT_SESSION_ID: &str = "autonomous:default";
 const DEFAULT_REPORT_DIR: &str = "autonomous_mission/reports";
+
+/// Task types accepted for `heartbeat_preferred_task_type` and role `preferred_agent_type`.
+pub const ALLOWED_HEARTBEAT_TASK_TYPES: &[&str] = &[
+    "conversation",
+    "search",
+    "code",
+    "schedule",
+    "financial",
+    "documentalist",
+    "project_manager",
+    "technical_writer",
+    "research",
+    "security_audit",
+    "creative",
+    "analyst",
+    "architect",
+    "frontend",
+    "backend",
+    "database",
+    "integration",
+    "qa",
+    "system",
+    "image_generation",
+];
+
+pub fn normalize_task_type(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let lower = t.to_lowercase();
+    if ALLOWED_HEARTBEAT_TASK_TYPES.contains(&lower.as_str()) {
+        Some(lower)
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutonomousMissionConfig {
@@ -30,6 +68,14 @@ pub struct AutonomousMissionConfig {
     pub session_id: String,
     #[serde(default)]
     pub status: MissionStatusYaml,
+    /// Free-form constraints (tone, deliverables, tools) injected into heartbeat + mission-mode chat.
+    #[serde(default)]
+    pub operating_rules: String,
+    /// Named “roles” the orchestrator should reflect when delegating.
+    #[serde(default)]
+    pub role_definitions: Vec<MissionRoleDefinition>,
+    #[serde(default = "default_heartbeat_preferred_task_type")]
+    pub heartbeat_preferred_task_type: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,6 +152,10 @@ fn default_session_id() -> String {
     DEFAULT_SESSION_ID.to_string()
 }
 
+fn default_heartbeat_preferred_task_type() -> String {
+    "project_manager".to_string()
+}
+
 impl Default for AutonomousMissionConfig {
     fn default() -> Self {
         Self {
@@ -117,6 +167,9 @@ impl Default for AutonomousMissionConfig {
             report_dir: default_report_dir(),
             session_id: default_session_id(),
             status: MissionStatusYaml::default(),
+            operating_rules: String::new(),
+            role_definitions: Vec::new(),
+            heartbeat_preferred_task_type: default_heartbeat_preferred_task_type(),
         }
     }
 }
@@ -147,6 +200,13 @@ impl AutonomousMissionConfig {
     }
 
     pub fn to_snapshot(&self) -> AutonomousMissionSnapshot {
+        let mut heartbeat_preferred_task_type = self.heartbeat_preferred_task_type.trim().to_string();
+        if heartbeat_preferred_task_type.is_empty() {
+            heartbeat_preferred_task_type = default_heartbeat_preferred_task_type();
+        }
+        if normalize_task_type(&heartbeat_preferred_task_type).is_none() {
+            heartbeat_preferred_task_type = default_heartbeat_preferred_task_type();
+        }
         AutonomousMissionSnapshot {
             enabled: self.enabled,
             global_context: self.global_context.clone(),
@@ -156,6 +216,9 @@ impl AutonomousMissionConfig {
             report_dir: self.report_dir.clone(),
             session_id: self.session_id.clone(),
             status: self.status.into(),
+            operating_rules: self.operating_rules.clone(),
+            role_definitions: self.role_definitions.clone(),
+            heartbeat_preferred_task_type,
             updated_at: Utc::now(),
         }
     }
@@ -169,6 +232,9 @@ impl AutonomousMissionConfig {
         self.report_dir = s.report_dir.clone();
         self.session_id = s.session_id.clone();
         self.status = s.status.into();
+        self.operating_rules = s.operating_rules.clone();
+        self.role_definitions = s.role_definitions.clone();
+        self.heartbeat_preferred_task_type = s.heartbeat_preferred_task_type.clone();
     }
 }
 
@@ -229,6 +295,39 @@ pub fn merge_from_json_partial(cfg: &mut AutonomousMissionConfig, v: &serde_json
             "completed" => MissionStatusYaml::Completed,
             _ => cfg.status,
         };
+    }
+    if let Some(s) = v.get("operating_rules").and_then(|x| x.as_str()) {
+        cfg.operating_rules = s.to_string();
+    }
+    if let Some(arr) = v.get("role_definitions").and_then(|x| x.as_array()) {
+        let mut out: Vec<MissionRoleDefinition> = Vec::new();
+        for item in arr {
+            let name = item
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let responsibility = item
+                .get("responsibility")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let preferred_agent_type = item
+                .get("preferred_agent_type")
+                .and_then(|x| x.as_str())
+                .and_then(normalize_task_type);
+            out.push(MissionRoleDefinition {
+                name,
+                responsibility,
+                preferred_agent_type,
+            });
+        }
+        cfg.role_definitions = out;
+    }
+    if let Some(s) = v.get("heartbeat_preferred_task_type").and_then(|x| x.as_str()) {
+        if let Some(t) = normalize_task_type(s) {
+            cfg.heartbeat_preferred_task_type = t;
+        }
     }
     Ok(())
 }
