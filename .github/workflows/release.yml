@@ -125,11 +125,12 @@ jobs:
       - name: Prepare artifact (Linux / macOS)
         if: matrix.os != 'windows-latest'
         run: |
-          mkdir -p staging/docs staging/scripts
+          mkdir -p staging/docs staging/scripts staging/spec
           cp target/${{ matrix.target }}/release/akasha${{ matrix.ext }} staging/
           cp target/${{ matrix.target }}/release/akasha-daemon${{ matrix.ext }} staging/
           cp target/${{ matrix.target }}/release/akasha-tui${{ matrix.ext }} staging/
           cp docs/user_guide_final.md staging/docs/user_guide.md
+          cp spec/tools_policy.example.yaml spec/voice_router.example.yaml spec/llm_router.example.yaml staging/spec/
           cp scripts/install.sh scripts/setup.sh staging/scripts/
           mkdir -p staging/playwright-runner
           cp -R scripts/playwright-runner/. staging/playwright-runner/
@@ -144,11 +145,12 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path staging, staging\docs, staging\scripts | Out-Null
+          New-Item -ItemType Directory -Force -Path staging, staging\docs, staging\scripts, staging\spec | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/akasha.exe" -Destination staging/
           Copy-Item "target/${{ matrix.target }}/release/akasha-daemon.exe" -Destination staging/
           Copy-Item "target/${{ matrix.target }}/release/akasha-tui.exe" -Destination staging/
           Copy-Item docs/user_guide_final.md -Destination staging/docs/user_guide.md
+          Copy-Item spec\tools_policy.example.yaml, spec\voice_router.example.yaml, spec\llm_router.example.yaml -Destination staging\spec\
           Copy-Item scripts/install.ps1 -Destination staging/scripts/
           Copy-Item scripts/setup.ps1 -Destination staging/scripts/
           New-Item -ItemType Directory -Force -Path staging\playwright-runner | Out-Null

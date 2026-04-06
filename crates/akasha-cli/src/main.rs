@@ -345,9 +345,9 @@ fn doctor_uses_source_checkout_checks(cwd: &Path) -> bool {
     doctor_is_source_checkout(cwd)
 }
 
-fn doctor_spec_check(spec_dir_override: Option<&OsStr>, cwd: &Path) -> (bool, String) {
+fn doctor_spec_check(spec_dir_override: Option<&OsStr>, data_dir: &Path) -> (bool, String) {
     let spec_dir = valid_spec_dir_override(spec_dir_override).or_else(|| {
-        let candidate = cwd.join("spec");
+        let candidate = akasha_core::resolve_spec_dir(data_dir);
         if candidate.is_dir() {
             Some(candidate)
         } else {
@@ -719,40 +719,22 @@ fn running_from_source_workspace() -> bool {
     false
 }
 
-/// Resolve a spec directory for diagnostics.
-/// Returns (spec_dir, forced_by_env).
-fn doctor_spec_dir() -> (Option<PathBuf>, bool) {
-    if let Ok(dir) = std::env::var("AKASHA_SPEC_DIR") {
-        return (Some(PathBuf::from(dir)), true);
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        let candidate = cwd.join("spec");
-        if candidate.exists() {
-            return (Some(candidate), false);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let candidate = parent.join("spec");
-            if candidate.exists() {
-                return (Some(candidate), false);
-            }
-            if let Some(grandparent) = parent.parent() {
-                let candidate = grandparent.join("spec");
-                if candidate.exists() {
-                    return (Some(candidate), false);
-                }
-            }
-        }
-    }
-    (None, false)
-}
-
 /// Print paths used for config and data (so users know where to put llm_router.yaml, etc.).
 fn cmd_paths() -> anyhow::Result<()> {
     let data_dir = akasha_data_dir();
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let (resolved_spec, spec_from_env) = doctor_spec_dir();
+    let (spec_path, source) = akasha_core::resolve_spec_dir_with_source(&data_dir);
+    let note = match source {
+        akasha_core::SpecDirSource::Env => "  (AKASHA_SPEC_DIR)",
+        akasha_core::SpecDirSource::ExecutableDir => "  (répertoire du binaire …/spec)",
+        akasha_core::SpecDirSource::DataDir => "  (data_dir/spec)",
+        akasha_core::SpecDirSource::FallbackRelative => {
+            if spec_path.is_dir() {
+                "  (dossier spec/ relatif au répertoire de travail du processus)"
+            } else {
+                "  (aucun dossier spec — la doc utilisateur peut être servie via docs/user_guide.md à côté des binaires)"
+            }
+        }
+    };
 
     println!("Chemins utilisés par Akasha (CLI et daemon)\n");
     if let Ok(dir) = std::env::var("AKASHA_DATA_DIR") {
@@ -788,22 +770,7 @@ fn cmd_paths() -> anyhow::Result<()> {
     );
     println!();
     println!("  Daemon (au lancement) :");
-    match resolved_spec {
-        Some(ref p) => {
-            let note = if spec_from_env {
-                "  (AKASHA_SPEC_DIR)"
-            } else {
-                "  (détecté — cwd/spec ou à côté du binaire)"
-            };
-            println!("    spec_dir              : {}{}", p.display(), note);
-        }
-        None => {
-            println!(
-                "    spec_dir              : {}  (non résolu — typiquement cwd + /spec au lancement)",
-                cwd.join("spec").display()
-            );
-        }
-    }
+    println!("    spec_dir              : {}{}", spec_path.display(), note);
     println!("    llm_router.yaml      : cherché d'abord dans data_dir, puis dans <spec_dir>/../llm_router.yaml");
     println!();
     println!("  Sous WSL/Linux : data_dir = ${{XDG_DATA_HOME:-~/.local/share}}/akasha sauf si AKASHA_DATA_DIR est défini.");
@@ -2412,13 +2379,7 @@ fn cmd_init(use_defaults: bool) -> anyhow::Result<()> {
     if !tools_policy_path.exists() {
         let data_dir_str = data_dir.display().to_string();
         let data_dir_yaml = format!("'{}'", data_dir_str.replace('\'', "''"));
-        let spec_dir = std::env::var("AKASHA_SPEC_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join("spec")
-            });
+        let spec_dir = akasha_core::resolve_spec_dir(data_dir.as_path());
         let example = spec_dir.join("tools_policy.example.yaml");
         if example.exists() {
             std::fs::copy(&example, &tools_policy_path)?;
@@ -3152,7 +3113,7 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
     ));
 
     // Check spec directory
-    let (spec_files_ok, spec_desc) = doctor_spec_check(spec_dir_override.as_deref(), &cwd);
+    let (spec_files_ok, spec_desc) = doctor_spec_check(spec_dir_override.as_deref(), &data_dir);
     checks.push(("spec_files".to_string(), spec_files_ok, spec_desc));
 
     // Check daemon health (if running)
@@ -3464,27 +3425,33 @@ mod tests {
 
     #[test]
     fn doctor_spec_check_is_optional_for_installed_binaries() {
-        let cwd = make_temp_dir("doctor-spec-release");
-        let (ok, desc) = doctor_spec_check(None, &cwd);
+        let data_dir = make_temp_dir("doctor-spec-release");
+        let orig_cwd = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&data_dir).expect("chdir");
+        std::env::set_var("AKASHA_DATA_DIR", &data_dir);
+        let (ok, desc) = doctor_spec_check(None, &data_dir);
+        std::env::set_current_dir(orig_cwd).expect("chdir back");
+        std::env::remove_var("AKASHA_DATA_DIR");
 
         assert!(ok);
         assert!(desc.contains("installed binaries"));
 
-        std::fs::remove_dir_all(cwd).unwrap();
+        std::fs::remove_dir_all(&data_dir).unwrap();
     }
 
     #[test]
     fn doctor_spec_check_requires_expected_files_when_spec_dir_is_configured() {
-        let cwd = make_temp_dir("doctor-spec-dev");
-        let spec_dir = cwd.join("spec");
+        let data_dir = make_temp_dir("doctor-spec-dev");
+        let spec_dir = data_dir.join("spec");
         std::fs::create_dir_all(&spec_dir).unwrap();
         std::fs::write(spec_dir.join("09_event_model.yaml"), "events: []\n").unwrap();
-
-        let (ok, desc) = doctor_spec_check(None, &cwd);
+        std::env::set_var("AKASHA_DATA_DIR", &data_dir);
+        let (ok, desc) = doctor_spec_check(None, &data_dir);
+        std::env::remove_var("AKASHA_DATA_DIR");
 
         assert!(!ok);
         assert!(desc.contains("10_data_model.yaml"));
 
-        std::fs::remove_dir_all(cwd).unwrap();
+        std::fs::remove_dir_all(&data_dir).unwrap();
     }
 }

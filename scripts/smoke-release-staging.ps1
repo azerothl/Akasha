@@ -18,7 +18,7 @@ if (-not (Test-Path $Daemon)) {
     exit 1
 }
 
-foreach ($rel in @("docs\user_guide.md", "scripts")) {
+foreach ($rel in @("docs\user_guide.md", "scripts", "spec\tools_policy.example.yaml")) {
     if (-not (Test-Path (Join-Path $Staging $rel))) {
         Write-Host "::error::Expected $Staging\$rel missing"
         exit 1

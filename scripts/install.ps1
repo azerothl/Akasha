@@ -35,7 +35,7 @@ Copy-Item (Join-Path $BinDir "akasha.exe") $InstallDir -Force
 Copy-Item (Join-Path $BinDir "akasha-daemon.exe") $InstallDir -Force
 Copy-Item (Join-Path $BinDir "akasha-tui.exe") $InstallDir -Force
 # Full docs/ and playwright-runner/ beside the binaries (daemon resolves Playwright next to the exe)
-foreach ($folder in @("docs", "playwright-runner")) {
+foreach ($folder in @("docs", "playwright-runner", "spec")) {
     $src = Join-Path $BinDir $folder
     if (Test-Path $src) {
         Copy-Item -Path $src -Destination $InstallDir -Recurse -Force

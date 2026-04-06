@@ -71,10 +71,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Akasha daemon starting");
 
-    let spec_dir = std::env::current_dir()?
-        .join("spec")
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::PathBuf::from("spec"));
+    let spec_dir = akasha_core::resolve_spec_dir(data_path.as_path());
 
     let daemon = Daemon::new(spec_dir, data_path);
     let outcome = daemon.run().await?;

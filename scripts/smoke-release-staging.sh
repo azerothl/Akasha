@@ -21,7 +21,7 @@ else
   exit 1
 fi
 
-for f in docs/user_guide.md scripts; do
+for f in docs/user_guide.md scripts spec/tools_policy.example.yaml; do
   if [[ ! -e "$STAGING/$f" ]]; then
     echo "::error::Expected $STAGING/$f missing"
     exit 1

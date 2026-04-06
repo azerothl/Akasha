@@ -14,7 +14,7 @@ Ce guide s'adresse aux utilisateurs qui ont téléchargé les **binaires précom
 2. Pour une installation complète en une étape, téléchargez l'archive **« Akasha full »** correspondant à votre système (ex. `akasha-full-windows-x86_64.zip`, `akasha-full-linux-x86_64.zip`, `akasha-full-macos-x86_64.zip`). Sinon, téléchargez l'archive CLI (akasha, daemon, TUI) et, si besoin, l'archive de l'application desktop (Tauri) séparément.
 3. Décompressez l'archive dans un dossier (ex. `C:\Akasha` ou `~/Akasha`).
 
-Vous obtenez les exécutables **akasha** (ou akasha.exe), **akasha-daemon** et **akasha-tui**, le dossier **scripts** (install et setup), **docs**, et dans le zip « full » un sous-dossier **ui** contenant l'installateur de l'application desktop.
+Vous obtenez les exécutables **akasha** (ou akasha.exe), **akasha-daemon** et **akasha-tui**, le dossier **scripts** (install et setup), **docs**, un sous-dossier **spec/** (fichiers d'exemple pour la configuration), et dans le zip « full » un sous-dossier **ui** contenant l'installateur de l'application desktop.
 
 ### Installation recommandée (installeur unifié)
 
@@ -88,6 +88,12 @@ Vous pouvez modifier les fichiers suivants dans ce répertoire (avec un éditeur
 | `agent_profile.json` | Profil de l'agent : nom, rôle, personnalité, règles. Éditable dans Paramètres → Profil de l'agent (interface web) ou en modifiant le fichier puis en redémarrant le daemon. |
 
 Le répertoire de données est créé automatiquement par `akasha init` ou `akasha doctor --fix` s'il est absent.
+
+### Dossier `spec` à côté des binaires
+
+Les archives de release incluent un sous-dossier **`spec/`** avec des **fichiers d'exemple** (politique d'outils, routeur vocal, routeur LLM) utilisés par `akasha init` pour générer la configuration par défaut lorsque ces fichiers sont présents. Le daemon résout le dossier `spec` utilisé à l'exécution dans cet ordre : variable d'environnement **`AKASHA_SPEC_DIR`** (si elle pointe vers un répertoire existant) → **`spec/` à côté du binaire `akasha-daemon`** → **`data_dir/spec`** s'il existe → sinon le chemin relatif **`spec`** (cas habituel du dépôt source lancé depuis la racine du projet). La commande **`akasha paths`** affiche le chemin retenu et la source (variable, binaire, données, ou relatif).
+
+L'onglet **Doc** des interfaces charge le guide depuis `spec/user_guide.md`, ou à défaut depuis **`docs/user_guide.md`** à côté des binaires (puis éventuellement `data_dir/docs/user_guide.md`). Les spécifications et documents d'architecture complets du dépôt Git ne sont pas tous inclus dans le zip utilisateur ; ils restent disponibles dans le dépôt source sous **`spec/`**.
 
 ---
 
