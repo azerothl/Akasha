@@ -35,5 +35,5 @@ pub use todos::{
     format_todos_plan_block, merge_todos_from_payload, parse_todos_from_payload, TodoItem, TodoStatus,
 };
 pub use workspace_graph::{
-    EdgeOrigin, WgBuildInfo, WgEdge, WgNode, WorkspaceGraphStore,
+    EdgeOrigin, WgBuildInfo, WgEdge, WgNode, WgWorkspace, WorkspaceGraphStore,
 };

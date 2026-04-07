@@ -147,9 +147,10 @@ fn render_graph_html(ex: &GraphExport) -> anyhow::Result<String> {
   <title>Akasha workspace graph</title>
   <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
   <style>
-    body {{ font-family: system-ui, sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; }}
-    #header {{ padding: 8px 12px; background: #1e1e1e; color: #eee; font-size: 14px; }}
-    #net {{ flex: 1; border-top: 1px solid #333; }}
+    html {{ height: 100%; }}
+    body {{ font-family: system-ui, sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; min-height: 0; }}
+    #header {{ flex-shrink: 0; padding: 8px 12px; background: #1e1e1e; color: #eee; font-size: 14px; }}
+    #net {{ flex: 1 1 auto; min-height: 0; width: 100%; overflow: hidden; border-top: 1px solid #333; }}
     .err {{ color: #f88; padding: 12px; }}
   </style>
 </head>
@@ -158,8 +159,14 @@ fn render_graph_html(ex: &GraphExport) -> anyhow::Result<String> {
   <div id="net"></div>
   <script>
     document.getElementById("meta").textContent = "{built}";
-    fetch("graph.json").then(function(r) {{
-      if (!r.ok) throw new Error("graph.json introuvable (ouvrir via http:// ou depuis le daemon)");
+    var exportUrl = (function() {{
+      var p = window.location.pathname || "";
+      if (p.endsWith("/html")) return p.slice(0, -5) + "/export";
+      if (p.endsWith("graph.html")) return p.replace(/graph\.html$/i, "graph.json");
+      return "graph.json";
+    }})();
+    fetch(exportUrl).then(function(r) {{
+      if (!r.ok) throw new Error("graph export introuvable (ouvrir via /api/.../html ou depuis le daemon)");
       return r.json();
     }}).then(function(payload) {{
       document.getElementById("counts").textContent = payload.nodes.length + " nœuds, " + payload.edges.length + " arêtes";

@@ -1,6 +1,4 @@
 //! Index a workspace directory into the Akasha SQLite workspace graph (Graphify-style, pass 1: AST + markdown).
-//!
-//! Does not send code to any LLM. Optional LLM pass (inferred edges) can be added later.
 
 mod export;
 mod markdown;
@@ -8,7 +6,7 @@ mod rust;
 
 use akasha_store::{WgEdge, WgNode, WorkspaceGraphStore};
 use anyhow::{anyhow, Context};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,10 +14,9 @@ use walkdir::WalkDir;
 
 pub use export::{write_graph_artifacts, GraphExport};
 
-/// Config file: `data_dir/workspace_graph.yaml`
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Legacy single-root YAML (imported once when DB has no workspaces).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct WorkspaceGraphConfig {
-    /// Absolute or relative path (relative to `data_dir`) of the project root to index.
     #[serde(default)]
     pub root: Option<String>,
 }
@@ -40,7 +37,7 @@ impl WorkspaceGraphConfig {
         }
         let c: WorkspaceGraphConfig = serde_yaml::from_str(&s).with_context(|| {
             format!(
-                "invalid YAML in {} (Windows paths: use forward slashes or quoted strings, e.g. root: 'C:/proj' or root: \"C:\\\\proj\")",
+                "invalid YAML in {} (Windows paths: use forward slashes or quoted strings)",
                 p.display()
             )
         })?;
@@ -55,26 +52,6 @@ impl WorkspaceGraphConfig {
         let s = serde_yaml::to_string(self)?;
         fs::write(&p, s)?;
         Ok(())
-    }
-
-    /// Resolve configured root to an absolute path.
-    pub fn resolved_root(&self, data_dir: &Path) -> anyhow::Result<PathBuf> {
-        let Some(ref r) = self.root else {
-            return Err(anyhow!("workspace_graph.yaml: set `root` to a project directory"));
-        };
-        let p = Path::new(r);
-        let abs = if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            data_dir.join(p)
-        };
-        let canon = abs
-            .canonicalize()
-            .with_context(|| format!("workspace root not found: {}", abs.display()))?;
-        if !canon.is_dir() {
-            return Err(anyhow!("workspace root is not a directory: {}", canon.display()));
-        }
-        Ok(canon)
     }
 }
 
@@ -102,7 +79,6 @@ pub fn normalize_path(p: &str) -> String {
     p.replace('\\', "/")
 }
 
-/// Stable symbol id from path + kind + label.
 pub fn symbol_id(rel_path: &str, kind: &str, label: &str) -> String {
     let mut h = Sha256::new();
     h.update(rel_path.as_bytes());
@@ -116,6 +92,7 @@ pub fn symbol_id(rel_path: &str, kind: &str, label: &str) -> String {
 
 #[derive(Debug, Serialize)]
 pub struct RebuildStats {
+    pub workspace_id: String,
     pub root_display: String,
     pub files_indexed: usize,
     pub nodes: usize,
@@ -136,16 +113,57 @@ fn should_skip_dir(name: &str) -> bool {
     SKIP_DIR_NAMES.iter().any(|s| *s == name)
 }
 
-/// Rebuild the workspace graph from disk into `store` and write JSON + report + HTML under `data_dir/workspace_graph/out/`.
-pub fn rebuild(data_dir: &Path, store: &WorkspaceGraphStore, root_override: Option<PathBuf>) -> anyhow::Result<RebuildStats> {
-    let cfg = WorkspaceGraphConfig::load(data_dir)?;
-    let root = if let Some(p) = root_override {
-        p.canonicalize()
-            .with_context(|| format!("root override not found: {}", p.display()))?
+fn resolve_root_path(workspace_root: &str, root_override: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    if let Some(p) = root_override {
+        return p
+            .canonicalize()
+            .with_context(|| format!("root override not found: {}", p.display()));
+    }
+    let p = Path::new(workspace_root.trim());
+    if p.as_os_str().is_empty() {
+        return Err(anyhow!("workspace has empty root_path; set path in settings"));
+    }
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
     } else {
-        cfg.resolved_root(data_dir)?
+        return Err(anyhow!("workspace root_path must be absolute: {}", workspace_root));
     };
-    let root_s = root.to_string_lossy().to_string();
+    let canon = abs
+        .canonicalize()
+        .with_context(|| format!("workspace root not found: {}", abs.display()))?;
+    if !canon.is_dir() {
+        return Err(anyhow!("workspace root is not a directory: {}", canon.display()));
+    }
+    Ok(canon)
+}
+
+#[cfg(windows)]
+fn display_path_without_verbatim_prefix(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if s.starts_with(r"\\?\") {
+        s.replacen(r"\\?\", "", 1)
+    } else {
+        s.to_string()
+    }
+}
+
+#[cfg(not(windows))]
+fn display_path_without_verbatim_prefix(p: &Path) -> String {
+    p.to_string_lossy().to_string()
+}
+
+/// Rebuild one workspace: clears its graph rows, indexes `root` on disk, writes `out/<workspace_id>/`.
+pub fn rebuild(
+    data_dir: &Path,
+    store: &WorkspaceGraphStore,
+    workspace_id: &str,
+    root_override: Option<PathBuf>,
+) -> anyhow::Result<RebuildStats> {
+    let ws = store
+        .get_workspace(workspace_id)?
+        .ok_or_else(|| anyhow!("unknown workspace_id {}", workspace_id))?;
+    let root = resolve_root_path(&ws.root_path, root_override)?;
+    let root_s = display_path_without_verbatim_prefix(&root);
 
     let mut sink = GraphSink::default();
     let mut file_count = 0usize;
@@ -164,7 +182,6 @@ pub fn rebuild(data_dir: &Path, store: &WorkspaceGraphStore, root_override: Opti
         let path = entry.path();
         let name = entry.file_name().to_string_lossy();
         if name.starts_with('.') && name != ".gitignore" {
-            // skip dotfiles except we might want .rs in hidden - skip all dotfiles for simplicity
             continue;
         }
         let rel = path
@@ -186,7 +203,6 @@ pub fn rebuild(data_dir: &Path, store: &WorkspaceGraphStore, root_override: Opti
                 markdown::index_markdown(&rel_str, &src, &fid, &mut sink)?;
                 file_count += 1;
             }
-            // Other text: single file node only
             "txt" | "toml" | "yaml" | "yml" | "json" => {
                 let _ = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
                 let fid = file_node_id(&rel_str);
@@ -203,22 +219,26 @@ pub fn rebuild(data_dir: &Path, store: &WorkspaceGraphStore, root_override: Opti
         }
     }
 
-    store.clear()?;
+    store.clear_workspace_graph(workspace_id)?;
     let built_at = chrono::Utc::now().to_rfc3339();
-    store.set_build_info(&root_s, &built_at, file_count as i64)?;
+    store.set_build_info(workspace_id, &root_s, &built_at, file_count as i64)?;
 
     for n in &sink.nodes {
-        store.insert_node(n)?;
+        store.insert_node(workspace_id, n)?;
     }
     for e in &sink.edges {
-        store.insert_edge(e)?;
+        store.insert_edge(workspace_id, e)?;
     }
 
     let export = GraphExport::from_store_parts(&root_s, &built_at, &sink.nodes, &sink.edges);
-    let out_dir = data_dir.join("workspace_graph").join("out");
+    let out_dir = data_dir
+        .join("workspace_graph")
+        .join("out")
+        .join(workspace_id);
     write_graph_artifacts(&out_dir, &export)?;
 
     Ok(RebuildStats {
+        workspace_id: workspace_id.to_string(),
         root_display: root_s,
         files_indexed: file_count,
         nodes: sink.nodes.len(),
@@ -252,12 +272,17 @@ mod tests {
 
         let db = data_dir.join("test.db");
         let store = WorkspaceGraphStore::open(&db).unwrap();
-        let stats = rebuild(data_dir, &store, Some(proj.clone())).unwrap();
+        let canon = proj.canonicalize().unwrap();
+        let wid = store.create_workspace("TestWS", &canon.to_string_lossy()).unwrap();
+        let stats = rebuild(data_dir, &store, &wid, None).unwrap();
         assert!(stats.files_indexed >= 2);
         assert!(stats.nodes >= 2);
         assert!(stats.edges >= 1);
 
-        let out = data_dir.join("workspace_graph").join("out");
+        let out = data_dir
+            .join("workspace_graph")
+            .join("out")
+            .join(&wid);
         assert!(out.join("graph.json").is_file());
         assert!(out.join("GRAPH_REPORT.md").is_file());
         assert!(out.join("graph.html").is_file());
