@@ -22,7 +22,32 @@ pub fn infer_typed_relations(
         None => return Ok(()),
     };
 
-    let mut to_insert: Vec<(String, &str)> = Vec::new();
+    let mut to_insert: Vec<(String, String)> = Vec::new();
+
+    // Explicit graph edges: "memory_edges": [ { "to": "<uuid>", "kind": "excludes" }, ... ]
+    if let Some(arr) = obj.get("memory_edges").and_then(|v| v.as_array()) {
+        for item in arr.iter().take(MAX_INFERRED_RELATIONS) {
+            let to_s = item
+                .get("to")
+                .or_else(|| item.get("target"))
+                .or_else(|| item.get("target_id"))
+                .and_then(|v| v.as_str())
+                .map(str::trim);
+            let kind_s = item
+                .get("kind")
+                .or_else(|| item.get("relation"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("related")
+                .to_string();
+            if let Some(t) = to_s {
+                if !t.is_empty() {
+                    to_insert.push((t.to_string(), kind_s));
+                }
+            }
+        }
+    }
 
     // relation == "mariage" && partenaires: [names] -> spouse for each
     if obj.get("relation").and_then(|v| v.as_str()) == Some("mariage") {
@@ -30,7 +55,7 @@ pub fn infer_typed_relations(
             for name in arr.iter().filter_map(|v| v.as_str()) {
                 let s = name.trim();
                 if !s.is_empty() {
-                    to_insert.push((s.to_string(), "spouse"));
+                    to_insert.push((s.to_string(), "spouse".to_string()));
                 }
             }
         }
@@ -50,7 +75,7 @@ pub fn infer_typed_relations(
                 })
                 .unwrap_or_default();
             if !person.is_empty() {
-                to_insert.push((person, "birth_date"));
+                to_insert.push((person, "birth_date".to_string()));
             }
         }
     }
@@ -61,14 +86,14 @@ pub fn infer_typed_relations(
             if let Some(conjoint) = extract_after_prefix(content_str, "Conjoint:") {
                 let name = conjoint.split(';').next().unwrap_or(conjoint).trim();
                 if !name.is_empty() {
-                    to_insert.push((name.to_string(), "spouse"));
+                    to_insert.push((name.to_string(), "spouse".to_string()));
                 }
             }
             if let Some(enfants) = extract_after_prefix(content_str, "Enfants:") {
                 let part = enfants.split(';').next().unwrap_or(enfants).trim();
                 for name in parse_children_list(part) {
                     if !name.is_empty() {
-                        to_insert.push((name.to_string(), "child"));
+                        to_insert.push((name, "child".to_string()));
                     }
                 }
             }
@@ -95,7 +120,7 @@ pub fn infer_typed_relations(
         if to_id == from_id {
             continue;
         }
-        store.insert_relation(from_id, to_id, kind)?;
+        store.insert_relation(from_id, to_id, kind.as_str())?;
         inserted += 1;
     }
     Ok(())

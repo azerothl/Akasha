@@ -10,21 +10,25 @@
     "tauri": "tauri",
     "gen-icons": "node scripts/gen-icon-ico.mjs",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "tsc -b && vite build --mode e2e && npx playwright test",
+    "test:e2e:install": "npx playwright install chromium --with-deps"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
+    "leaflet": "^1.9.4",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-markdown": "^9.0.1",
     "rehype-raw": "^7.0.0",
     "rehype-sanitize": "^6.0.0",
     "relation-graph": "^2.2.11",
-    "remark-gfm": "^4.0.0",
-    "leaflet": "^1.9.4"
+    "remark-gfm": "^4.0.0"
   },
   "devDependencies": {
     "@ctjs/png2icons": "^3.0.3",
+    "@playwright/test": "^1.59.1",
+    "playwright": "^1.59.1",
     "@tauri-apps/cli": "^2.0.0",
     "@types/leaflet": "^1.9.12",
     "@types/node": "^20.0.0",

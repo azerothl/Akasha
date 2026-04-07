@@ -30,10 +30,12 @@ akasha-llm = { path = "../akasha-llm" }
 akasha-rag = { path = "../akasha-rag" }
 akasha-tools = { path = "../akasha-tools", features = ["web", "container"] }
 akasha-cluster = { path = "../akasha-cluster" }
+akasha-workspace-graph = { path = "../akasha-workspace-graph" }
 async-nats = "0.36"
 futures-util = "0.3"
 tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1"
+tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 thiserror = "1.0"
@@ -59,8 +61,9 @@ pdf-extract = "0.10"
 [dev-dependencies]
 criterion = "0.5"
 tempfile = "3"
+serde_json = "1.0"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
-tokio = { version = "1.0", features = ["rt", "time"] }
+tokio = { version = "1.0", features = ["rt", "time", "macros"] }
 
 [[bench]]
 name = "prompt_bench"

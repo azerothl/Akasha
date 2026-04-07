@@ -91,6 +91,13 @@ pub fn parse_contract_from_response(response: &str) -> Option<AgentOutputContrac
     serde_json::from_str::<AgentOutputContract>(json_str).ok()
 }
 
+/// Returns true if the contract carries at least one meaningful field (`status` or `summary`).
+/// An `AgentOutputContract` parsed from arbitrary JSON will have all `None` fields when
+/// the source has no recognised contract keys; we treat that as *not* a contract.
+fn is_meaningful_contract(c: &AgentOutputContract) -> bool {
+    c.status.is_some() || c.summary.as_ref().is_some_and(|s| !s.trim().is_empty())
+}
+
 /// Strips the trailing JSON contract block (```json ... ``` or last {...}) from the response.
 /// Returns the preceding text trimmed, or the original string if no contract block found.
 fn strip_trailing_contract(response: &str) -> String {
@@ -102,10 +109,18 @@ fn strip_trailing_contract(response: &str) -> String {
     if let Some(start) = trimmed.rfind("```json") {
         let after_open = &trimmed[start + "```json".len()..];
         let block = after_open.trim_start_matches(&['\r', '\n'][..]);
-        if block.find("```").is_some() {
+        if let Some(close_rel) = block.find("```") {
+            let json_str = block[..close_rel].trim();
             let rest = trimmed[..start].trim_end();
             if !rest.is_empty() {
                 return rest.to_string();
+            }
+            // Fenced JSON only: strip the block only when it is a valid, meaningful contract
+            // so that non-contract fenced content is not silently discarded.
+            if serde_json::from_str::<AgentOutputContract>(json_str)
+                .map_or(false, |c| is_meaningful_contract(&c))
+            {
+                return String::new();
             }
         }
     }
@@ -114,7 +129,9 @@ fn strip_trailing_contract(response: &str) -> String {
     let tail = &trimmed[tail_start..];
     if let Some(open_rel) = tail.rfind('{') {
         let json_candidate = &tail[open_rel..];
-        if serde_json::from_str::<AgentOutputContract>(json_candidate).is_ok() {
+        if serde_json::from_str::<AgentOutputContract>(json_candidate)
+            .map_or(false, |c| is_meaningful_contract(&c))
+        {
             let abs_start = trimmed.len() - tail.len() + open_rel;
             let rest = trimmed[..abs_start].trim_end();
             if !rest.is_empty() {
@@ -196,6 +213,15 @@ mod tests {
         let r = "```json\n{\"status\": \"done\", \"summary\": \"Résumé lisible.\"}\n```";
         let out = user_facing_message(r);
         assert_eq!(out, "Résumé lisible.");
+    }
+
+    #[test]
+    fn user_facing_message_non_contract_fenced_json_preserved() {
+        // A fenced JSON block that is NOT a valid AgentOutputContract must not be discarded.
+        let r = "```json\n{\"foo\": \"bar\"}\n```";
+        let out = user_facing_message(r);
+        // Content must be preserved (not silently replaced with empty string).
+        assert!(!out.is_empty(), "non-contract fenced JSON must not be discarded");
     }
 
     /// `len - 2000` can land inside a multi-byte UTF-8 char (e.g. `└`); slicing must not panic.
