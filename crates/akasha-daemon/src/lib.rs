@@ -9,6 +9,7 @@ pub mod policy_engine;
 pub mod protocol_adapter;
 pub mod agent_contracts;
 pub mod api;
+pub mod api_workspace_graph;
 pub mod autonomous_heartbeat;
 pub mod autonomous_mission_config;
 pub mod session_state;

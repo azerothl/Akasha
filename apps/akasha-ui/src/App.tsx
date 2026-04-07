@@ -1959,6 +1959,12 @@ function App() {
   const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string }>>([]);
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
+  const [workspaceGraphRootInput, setWorkspaceGraphRootInput] = useState("");
+  const [workspaceGraphStatus, setWorkspaceGraphStatus] = useState<Record<string, unknown> | null>(null);
+  const [workspaceGraphLoading, setWorkspaceGraphLoading] = useState(false);
+  const [workspaceGraphRebuildLoading, setWorkspaceGraphRebuildLoading] = useState(false);
+  const [workspaceGraphError, setWorkspaceGraphError] = useState<string | null>(null);
+  const [workspaceGraphSuccess, setWorkspaceGraphSuccess] = useState<string | null>(null);
   const userRagFileInputRef = useRef<HTMLInputElement>(null);
   const agentAvatarFileInputRef = useRef<HTMLInputElement>(null);
   const userAvatarFileInputRef = useRef<HTMLInputElement>(null);
@@ -3735,6 +3741,22 @@ function App() {
     }
   }, []);
 
+  const fetchWorkspaceGraphStatus = useCallback(async (opts?: { clearError?: boolean }) => {
+    setWorkspaceGraphLoading(true);
+    if (opts?.clearError !== false) setWorkspaceGraphError(null);
+    try {
+      const st = await invoke<Record<string, unknown>>("get_workspace_graph_status", { port: DAEMON_PORT });
+      setWorkspaceGraphStatus(st);
+      const root = st?.root;
+      if (typeof root === "string") setWorkspaceGraphRootInput(root);
+    } catch (e) {
+      setWorkspaceGraphError(String(e));
+      setWorkspaceGraphStatus(null);
+    } finally {
+      setWorkspaceGraphLoading(false);
+    }
+  }, []);
+
   const fetchAgentProfile = useCallback(async () => {
     setAgentProfileLoading(true);
     setAgentProfileError(null);
@@ -3823,6 +3845,12 @@ function App() {
       fetchPluginStatus();
     }
   }, [tab, settingsSection, fetchPluginStatus]);
+
+  useEffect(() => {
+    if (tab === "settings" && settingsSection === "data") {
+      void fetchWorkspaceGraphStatus();
+    }
+  }, [tab, settingsSection, fetchWorkspaceGraphStatus]);
 
   useEffect(() => {
     if (!calendarSelectedTaskId) {
@@ -8973,6 +9001,118 @@ function App() {
                 ))}
               </ul>
             )}
+            <h3 className="settings-subtitle">{t("settings.workspace_graph_title")}</h3>
+            <p className="settings-doc muted">{t("settings.workspace_graph_desc")}</p>
+            {workspaceGraphError && (
+              <p className="error-inline" role="alert">{workspaceGraphError}</p>
+            )}
+            {workspaceGraphSuccess && (
+              <p className="settings-doc" role="status">{workspaceGraphSuccess}</p>
+            )}
+            <dl className="settings-list">
+              <dt>{t("settings.workspace_graph_root")}</dt>
+              <dd>
+                <input
+                  type="text"
+                  className="settings-input"
+                  aria-label={t("settings.workspace_graph_root")}
+                  value={workspaceGraphRootInput}
+                  onChange={(e) => setWorkspaceGraphRootInput(e.target.value)}
+                  placeholder="C:\path\to\project"
+                />
+              </dd>
+            </dl>
+            <div className="settings-row-actions">
+              <button
+                type="button"
+                className="refresh-btn"
+                disabled={workspaceGraphLoading || workspaceGraphRebuildLoading}
+                onClick={async () => {
+                  setWorkspaceGraphError(null);
+                  setWorkspaceGraphSuccess(null);
+                  const rootTrim = workspaceGraphRootInput.trim();
+                  setWorkspaceGraphLoading(true);
+                  try {
+                    await invoke("put_workspace_graph_config", {
+                      root: rootTrim || null,
+                      port: DAEMON_PORT,
+                    });
+                    if (rootTrim) {
+                      const out = await invoke<{
+                        files_indexed?: number;
+                        nodes?: number;
+                        edges?: number;
+                      }>("post_workspace_graph_rebuild", {
+                        root: null,
+                        port: DAEMON_PORT,
+                      });
+                      const fi = typeof out?.files_indexed === "number" ? out.files_indexed : 0;
+                      const nn = typeof out?.nodes === "number" ? out.nodes : 0;
+                      const ee = typeof out?.edges === "number" ? out.edges : 0;
+                      setWorkspaceGraphSuccess(
+                        t("settings.workspace_graph_ok")
+                          .replace("{{files}}", String(fi))
+                          .replace("{{nodes}}", String(nn))
+                          .replace("{{edges}}", String(ee)),
+                      );
+                    } else {
+                      setWorkspaceGraphSuccess(t("settings.workspace_graph_cleared"));
+                    }
+                    await fetchWorkspaceGraphStatus({ clearError: false });
+                  } catch (err) {
+                    setWorkspaceGraphSuccess(null);
+                    setWorkspaceGraphError(String(err));
+                  } finally {
+                    setWorkspaceGraphLoading(false);
+                  }
+                }}
+              >
+                {workspaceGraphLoading ? t("common.loading") : t("settings.workspace_graph_save_root")}
+              </button>
+              <button
+                type="button"
+                className="refresh-btn"
+                disabled={workspaceGraphRebuildLoading || workspaceGraphLoading}
+                onClick={async () => {
+                  setWorkspaceGraphRebuildLoading(true);
+                  setWorkspaceGraphError(null);
+                  try {
+                    await invoke("post_workspace_graph_rebuild", {
+                      root: workspaceGraphRootInput.trim() || null,
+                      port: DAEMON_PORT,
+                    });
+                    await fetchWorkspaceGraphStatus();
+                  } catch (err) {
+                    setWorkspaceGraphError(String(err));
+                  } finally {
+                    setWorkspaceGraphRebuildLoading(false);
+                  }
+                }}
+              >
+                {workspaceGraphRebuildLoading ? t("common.loading") : t("settings.workspace_graph_rebuild")}
+              </button>
+            </div>
+            {workspaceGraphLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
+            {!workspaceGraphLoading && workspaceGraphStatus && (
+              <p className="settings-doc">
+                {typeof workspaceGraphStatus.node_count === "number" && typeof workspaceGraphStatus.edge_count === "number"
+                  ? t("settings.workspace_graph_stats")
+                      .replace("{{nodes}}", String(workspaceGraphStatus.node_count))
+                      .replace("{{edges}}", String(workspaceGraphStatus.edge_count))
+                  : null}
+                {workspaceGraphStatus.built_at != null && (
+                  <>
+                    {" "}
+                    {t("settings.workspace_graph_built").replace("{{time}}", String(workspaceGraphStatus.built_at))}
+                  </>
+                )}
+              </p>
+            )}
+            <p className="settings-doc">
+              <a href={e2eDaemonHttpUrl("/api/workspace-graph/html")} target="_blank" rel="noreferrer">
+                {t("settings.workspace_graph_open_html")}
+              </a>
+            </p>
             <p className="settings-doc">{t("settings.config_note")}</p>
               </div>
             )}

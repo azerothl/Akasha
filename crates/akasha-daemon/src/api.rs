@@ -8655,8 +8655,9 @@ pub async fn handle_api(
                 || origin.starts_with("http://127.0.0.1")
                 || origin.starts_with("https://localhost")
                 || origin.starts_with("https://127.0.0.1")
-                || origin.starts_with("tauri://")
-                || origin.starts_with("https://tauri.localhost");
+                || origin.starts_with("http://tauri.localhost")
+                || origin.starts_with("https://tauri.localhost")
+                || origin.starts_with("tauri://");
             if !is_local {
                 tracing::warn!(origin = %origin, method = %method, path = %path, "CSRF: rejected request from non-local origin");
                 return json_response("403 Forbidden", r#"{"error":"origin_not_allowed"}"#);
@@ -8665,6 +8666,18 @@ pub async fn handle_api(
     }
 
     let (path_only, query_str) = split_path_query(path);
+
+    if let Some(resp) = crate::api_workspace_graph::handle_workspace_graph(
+        method,
+        path_only,
+        body.as_deref(),
+        data_dir,
+        store_path,
+    )
+    .await
+    {
+        return resp;
+    }
 
     if path_only == "/api/autonomous-mission" {
         let Some(ref am) = autonomous_mission else {

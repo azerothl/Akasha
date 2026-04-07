@@ -10,6 +10,7 @@ pub mod pipeline;
 pub mod schedules;
 pub mod tasks;
 pub mod todos;
+pub mod workspace_graph;
 
 pub use log::ImmutableLog;
 pub use metrics::{MetricsEvent, MetricsStore, ModelMetricsRow};
@@ -32,4 +33,7 @@ pub use schedules::{
 pub use tasks::{Task, TaskStatus, TaskStore, MAX_PROGRESS_PER_TASK};
 pub use todos::{
     format_todos_plan_block, merge_todos_from_payload, parse_todos_from_payload, TodoItem, TodoStatus,
+};
+pub use workspace_graph::{
+    EdgeOrigin, WgBuildInfo, WgEdge, WgNode, WorkspaceGraphStore,
 };
