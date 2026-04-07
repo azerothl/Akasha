@@ -1258,6 +1258,179 @@ async fn delete_user_rag_document(id: String, port: Option<u16>) -> Result<(), S
     Ok(())
 }
 
+/// Workspace knowledge graph: GET /api/workspace-graph
+#[tauri::command]
+async fn get_workspace_graph_status(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/workspace-graph", daemon_base_url(port));
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Workspace graph: PUT /api/workspace-graph/config — body `{ "root": "C:\\path" | null }`
+#[tauri::command]
+async fn put_workspace_graph_config(
+    root: Option<String>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/workspace-graph/config", daemon_base_url(port));
+    let client = http_client();
+    let body = serde_json::json!({ "root": root });
+    let resp = client
+        .put(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{} {}", status, text));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Workspace graph: POST /api/workspace-graph/rebuild — optional `{ "root": "..." }` (long-running).
+#[tauri::command]
+async fn post_workspace_graph_rebuild(
+    root: Option<String>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!("{}/api/workspace-graph/rebuild", daemon_base_url(port));
+    let client = http_client();
+    let body = match root {
+        Some(r) if !r.trim().is_empty() => serde_json::json!({ "root": r.trim() }),
+        _ => serde_json::json!({}),
+    };
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(600))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{} {}", status, text));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// Project knowledge graphs: GET /api/workspace-graph/workspaces
+#[tauri::command]
+async fn list_project_workspaces(port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!(
+        "{}/api/workspace-graph/workspaces",
+        daemon_base_url(port)
+    );
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// POST /api/workspace-graph/workspaces — `{ name, root_path, rebuild? }`
+#[tauri::command]
+async fn create_project_workspace(
+    name: String,
+    root_path: String,
+    rebuild: Option<bool>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!(
+        "{}/api/workspace-graph/workspaces",
+        daemon_base_url(port)
+    );
+    let client = http_client();
+    let body = serde_json::json!({
+        "name": name,
+        "root_path": root_path,
+        "rebuild": rebuild.unwrap_or(true),
+    });
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(600))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{} {}", status, text));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+/// DELETE /api/workspace-graph/workspaces/:id
+#[tauri::command]
+async fn delete_project_workspace(id: String, port: Option<u16>) -> Result<(), String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!(
+        "{}/api/workspace-graph/workspaces/{}",
+        daemon_base_url(port),
+        urlencoding::encode(&id)
+    );
+    let client = http_client();
+    let resp = client.delete(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{} {}", status, text));
+    }
+    Ok(())
+}
+
+/// POST /api/workspace-graph/workspaces/:id/rebuild — optional `{ root_path }`
+#[tauri::command]
+async fn rebuild_project_workspace(
+    id: String,
+    root_path: Option<String>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let url = format!(
+        "{}/api/workspace-graph/workspaces/{}/rebuild",
+        daemon_base_url(port),
+        urlencoding::encode(&id)
+    );
+    let client = http_client();
+    let body = match root_path {
+        Some(r) if !r.trim().is_empty() => serde_json::json!({ "root_path": r.trim() }),
+        _ => serde_json::json!({}),
+    };
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(600))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{} {}", status, text));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 /// Device bridge: get oldest pending device request (for UI to fulfill camera, mic, etc.).
 #[tauri::command]
 async fn get_device_pending(port: Option<u16>) -> Result<serde_json::Value, String> {
@@ -1590,6 +1763,13 @@ pub fn run() {
             get_user_rag_documents,
             add_user_rag_document,
             delete_user_rag_document,
+            get_workspace_graph_status,
+            put_workspace_graph_config,
+            post_workspace_graph_rebuild,
+            list_project_workspaces,
+            create_project_workspace,
+            delete_project_workspace,
+            rebuild_project_workspace,
             get_device_pending,
             post_device_result,
             get_agent_profile,

@@ -20,7 +20,7 @@ pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use akasha_store::{
     format_todos_plan_block, parse_todos_from_payload, AutonomousMissionStore, Schedule,
     ScheduleException, ScheduleExceptionType, ScheduleStore, Task, TaskRunStatus, TaskStatus,
-    TaskStore, TodoStatus,
+    TaskStore, TodoStatus, WorkspaceGraphStore,
 };
 use akasha_vault::Vault;
 use std::cmp::Ordering;
@@ -1078,6 +1078,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("web_search", "web_search <query> [max_results] — rechercher sur le web (Brave API; BRAVE_API_KEY, web_search_enabled)"),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
     ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
+    ("workspace_graph_search", "workspace_graph_search <query> [--workspace <uuid>] — rechercher dans les graphes projet indexés (nœuds label/chemin) ; limite ~20 lignes ; --workspace pour un espace enregistré uniquement"),
     ("memory_store", "memory_store <content> <source> [link_to: uuid1+kind1,uuid2+kind2,...] [link_kind: default_kind] — mémoire long terme. Types recommandés : similar, relates_to, related, updates, supersedes, excludes, contradicts, supports, derived_from, same_as, spouse, child, birth_date, … ; par cible utiliser uuid+kind, ou uuid seuls avec link_kind (défaut related)."),
     ("memory_delete", "memory_delete <id> — supprimer une entrée de la mémoire long terme par son id (UUID)"),
     ("memory_forget", "memory_forget <query> — supprimer les entrées dont le contenu correspond aux mots-clés (plan moyen terme 9)"),
@@ -2967,6 +2968,7 @@ const ORCH_INLINE_TOOL_FIRST_WORDS: &[&str] = &[
     "install_playwright",
     "read_skill",
     "memory_store",
+    "workspace_graph_search",
     "device_invoke",
     "ask_user",
     "generate_image",
@@ -3492,6 +3494,69 @@ async fn execute_tool_call(
         }
     };
     let result = match tool_name {
+        "workspace_graph_search" => {
+            let Some(sp) = store_path else {
+                return (
+                    false,
+                    "[workspace_graph_search] no task store path".to_string(),
+                    None,
+                );
+            };
+            let sp = sp.to_path_buf();
+            let mut ws_id: Option<String> = None;
+            let mut rest: Vec<String> = Vec::new();
+            let mut it = args.iter().peekable();
+            while let Some(a) = it.next() {
+                if a == "--workspace" {
+                    ws_id = it
+                        .next()
+                        .cloned()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                } else {
+                    rest.push(a.clone());
+                }
+            }
+            let query = rest.join(" ").trim().to_string();
+            if query.is_empty() {
+                (
+                    false,
+                    "[workspace_graph_search] usage: workspace_graph_search <query> [--workspace <uuid>]"
+                        .to_string(),
+                    None,
+                )
+            } else {
+                let limit = 20usize;
+                match tokio::task::spawn_blocking(move || {
+                    let store = WorkspaceGraphStore::open(&sp)?;
+                    store.search_graph_context(&query, limit, ws_id.as_deref())
+                })
+                .await
+                {
+                    Ok(Ok(lines)) => {
+                        if lines.is_empty() {
+                            (
+                                true,
+                                "[workspace_graph_search] no matching nodes".to_string(),
+                                None,
+                            )
+                        } else {
+                            (
+                                true,
+                                format!("[workspace_graph_search]\n{}", lines.join("\n")),
+                                None,
+                            )
+                        }
+                    }
+                    Ok(Err(e)) => (false, format!("[workspace_graph_search] {}", e), None),
+                    Err(e) => (
+                        false,
+                        format!("[workspace_graph_search] join: {}", e),
+                        None,
+                    ),
+                }
+            }
+        }
         "read_file" => {
             let path_str = normalize_tool_path_hint(&path_arg_joined(args));
             if path_str.is_empty() {
@@ -5238,6 +5303,7 @@ struct MemoryProfile {
     episodic_limit: usize,
     facts_limit: usize,
     user_rag_top_k: usize,
+    workspace_graph_top_k: usize,
     expand_by_graph: bool,
     compact_before_prompt: bool,
     allow_project_recall: bool,
@@ -5265,6 +5331,7 @@ fn memory_profile_for_task(
             episodic_limit: 0,
             facts_limit: 0,
             user_rag_top_k: 0,
+            workspace_graph_top_k: 0,
             expand_by_graph: false,
             compact_before_prompt: false,
             allow_project_recall: false,
@@ -5286,6 +5353,7 @@ fn memory_profile_for_task(
             episodic_limit: 5,
             facts_limit: 10,
             user_rag_top_k: 5,
+            workspace_graph_top_k: 5,
             expand_by_graph: std::env::var("AKASHA_GRAPH_EXPAND").ok().as_deref() == Some("1"),
             compact_before_prompt: true,
             allow_project_recall: true,
@@ -5299,6 +5367,7 @@ fn memory_profile_for_task(
             episodic_limit: 1,
             facts_limit: 0,
             user_rag_top_k: 0,
+            workspace_graph_top_k: 0,
             expand_by_graph: false,
             compact_before_prompt: false,
             allow_project_recall: false,
@@ -5580,6 +5649,7 @@ pub(crate) async fn run_message_via_llm(
             episodic_limit: 0,
             facts_limit: 0,
             user_rag_top_k: 0,
+            workspace_graph_top_k: 0,
             expand_by_graph: false,
             compact_before_prompt: false,
             allow_project_recall: false,
@@ -5884,6 +5954,30 @@ pub(crate) async fn run_message_via_llm(
             for c in &chunks {
                 user_prefix.push_str("- ");
                 user_prefix.push_str(&c.replace('\n', " "));
+                user_prefix.push_str("\n");
+            }
+            user_prefix.push_str("\n");
+        }
+    }
+    if memory_profile.workspace_graph_top_k > 0 {
+        let graph_query = message.clone();
+        let graph_k = memory_profile.workspace_graph_top_k;
+        let sp = store_path.clone();
+        let graph_lines = tokio::task::spawn_blocking(move || {
+            let store = WorkspaceGraphStore::open(&sp)?;
+            store.search_graph_context(&graph_query, graph_k, None)
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
+        if !graph_lines.is_empty() {
+            user_prefix.push_str(
+                "[Project knowledge graphs — indexed project folders; use if relevant]\n",
+            );
+            for line in &graph_lines {
+                user_prefix.push_str("- ");
+                user_prefix.push_str(line);
                 user_prefix.push_str("\n");
             }
             user_prefix.push_str("\n");
@@ -8655,8 +8749,9 @@ pub async fn handle_api(
                 || origin.starts_with("http://127.0.0.1")
                 || origin.starts_with("https://localhost")
                 || origin.starts_with("https://127.0.0.1")
-                || origin.starts_with("tauri://")
-                || origin.starts_with("https://tauri.localhost");
+                || origin.starts_with("http://tauri.localhost")
+                || origin.starts_with("https://tauri.localhost")
+                || origin.starts_with("tauri://");
             if !is_local {
                 tracing::warn!(origin = %origin, method = %method, path = %path, "CSRF: rejected request from non-local origin");
                 return json_response("403 Forbidden", r#"{"error":"origin_not_allowed"}"#);
@@ -8665,6 +8760,18 @@ pub async fn handle_api(
     }
 
     let (path_only, query_str) = split_path_query(path);
+
+    if let Some(resp) = crate::api_workspace_graph::handle_workspace_graph(
+        method,
+        path_only,
+        body.as_deref(),
+        data_dir,
+        store_path,
+    )
+    .await
+    {
+        return resp;
+    }
 
     if path_only == "/api/autonomous-mission" {
         let Some(ref am) = autonomous_mission else {
@@ -12224,6 +12331,7 @@ mod tests {
         let profile = memory_profile_for_task("Bonjour, ça va ?", "conversation", false, false);
         assert_eq!(profile.semantic_top_k, 2);
         assert_eq!(profile.user_rag_top_k, 0);
+        assert_eq!(profile.workspace_graph_top_k, 0);
         assert!(!profile.expand_by_graph);
         assert!(!profile.compact_before_prompt);
     }
@@ -12239,6 +12347,7 @@ mod tests {
         assert_eq!(profile.semantic_top_k, 0);
         assert_eq!(profile.episodic_limit, 0);
         assert_eq!(profile.user_rag_top_k, 0);
+        assert_eq!(profile.workspace_graph_top_k, 0);
         assert!(!profile.compact_before_prompt);
     }
 

@@ -195,6 +195,9 @@ impl AutonomousMissionConfig {
         let s = serde_yaml::to_string(self)?;
         let tmp = path.with_extension("yaml.tmp");
         std::fs::write(&tmp, s)?;
+        // std::fs::rename fails on Windows when the destination already exists;
+        // remove it first to ensure a cross-platform atomic replace.
+        let _ = std::fs::remove_file(path);
         std::fs::rename(&tmp, path)?;
         Ok(())
     }

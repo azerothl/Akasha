@@ -1959,6 +1959,26 @@ function App() {
   const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string }>>([]);
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
+  const [dataSourcesSubTab, setDataSourcesSubTab] = useState<"rag" | "project_graph">("rag");
+  type ProjectWorkspaceRow = {
+    id: string;
+    name: string;
+    root_path: string;
+    created_at?: string;
+    node_count?: number;
+    edge_count?: number;
+    built_at?: string | null;
+    file_count?: number;
+    indexed_root?: string | null;
+  };
+  const [projectWorkspaces, setProjectWorkspaces] = useState<ProjectWorkspaceRow[]>([]);
+  const [projectWorkspacesLoading, setProjectWorkspacesLoading] = useState(false);
+  const [projectGraphError, setProjectGraphError] = useState<string | null>(null);
+  const [projectGraphSuccess, setProjectGraphSuccess] = useState<string | null>(null);
+  const [newProjectWsName, setNewProjectWsName] = useState("");
+  const [newProjectWsPath, setNewProjectWsPath] = useState("");
+  const [projectWsBusyId, setProjectWsBusyId] = useState<string | null>(null);
+  const [newProjectWsSubmitting, setNewProjectWsSubmitting] = useState(false);
   const userRagFileInputRef = useRef<HTMLInputElement>(null);
   const agentAvatarFileInputRef = useRef<HTMLInputElement>(null);
   const userAvatarFileInputRef = useRef<HTMLInputElement>(null);
@@ -3735,6 +3755,37 @@ function App() {
     }
   }, []);
 
+  const fetchProjectWorkspaces = useCallback(async (opts?: { clearError?: boolean }) => {
+    setProjectWorkspacesLoading(true);
+    if (opts?.clearError !== false) setProjectGraphError(null);
+    try {
+      const raw = await invoke<{
+        workspaces?: ProjectWorkspaceRow[];
+        total_node_count?: number;
+        total_edge_count?: number;
+      }>("list_project_workspaces", { port: DAEMON_PORT });
+      const list = Array.isArray(raw?.workspaces) ? raw.workspaces : [];
+      setProjectWorkspaces(
+        list.map((w) => ({
+          id: String(w.id ?? ""),
+          name: String(w.name ?? ""),
+          root_path: String(w.root_path ?? ""),
+          created_at: typeof w.created_at === "string" ? w.created_at : undefined,
+          node_count: typeof w.node_count === "number" ? w.node_count : undefined,
+          edge_count: typeof w.edge_count === "number" ? w.edge_count : undefined,
+          built_at: w.built_at === null || typeof w.built_at === "string" ? w.built_at : undefined,
+          file_count: typeof w.file_count === "number" ? w.file_count : undefined,
+          indexed_root: w.indexed_root === null || typeof w.indexed_root === "string" ? w.indexed_root : undefined,
+        })),
+      );
+    } catch (e) {
+      setProjectGraphError(String(e));
+      setProjectWorkspaces([]);
+    } finally {
+      setProjectWorkspacesLoading(false);
+    }
+  }, []);
+
   const fetchAgentProfile = useCallback(async () => {
     setAgentProfileLoading(true);
     setAgentProfileError(null);
@@ -3823,6 +3874,12 @@ function App() {
       fetchPluginStatus();
     }
   }, [tab, settingsSection, fetchPluginStatus]);
+
+  useEffect(() => {
+    if (tab === "settings" && settingsSection === "data" && dataSourcesSubTab === "project_graph") {
+      void fetchProjectWorkspaces();
+    }
+  }, [tab, settingsSection, dataSourcesSubTab, fetchProjectWorkspaces]);
 
   useEffect(() => {
     if (!calendarSelectedTaskId) {
@@ -7494,20 +7551,22 @@ function App() {
                             {t("memory.search_back")}
                           </button>
                         </div>
-                        {memorySearchResults.length === 0 ? (
-                          <p className="muted">Saisir une requête puis Rechercher. Aucun résultat pour l’instant.</p>
-                        ) : (
-                          <ul className="memory-long-term-list">
-                            {memorySearchResults.map((r, i) => (
-                              <li key={r.id ?? i} className="memory-long-term-item">
-                                <div className="memory-long-term-body">
-                                  <div className="memory-long-term-content">{r.content}</div>
-                                  <div className="memory-long-term-meta">id: {r.id}</div>
-                                </div>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
+                        <div className="memory-list-scroll memory-search-results-scroll">
+                          {memorySearchResults.length === 0 ? (
+                            <p className="muted">Saisir une requête puis Rechercher. Aucun résultat pour l’instant.</p>
+                          ) : (
+                            <ul className="memory-long-term-list">
+                              {memorySearchResults.map((r, i) => (
+                                <li key={r.id ?? i} className="memory-long-term-item">
+                                  <div className="memory-long-term-body">
+                                    <div className="memory-long-term-content">{r.content}</div>
+                                    <div className="memory-long-term-meta">id: {r.id}</div>
+                                  </div>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
                       </div>
                     ) : memoryViewGraph ? (
                       <div className="memory-graph-wrap" role="region" aria-label={t("memory.view_graph")}>
@@ -8905,75 +8964,274 @@ function App() {
             )}
             {settingsSection === "data" && (
               <div className="settings-section-content">
-                <h3 className="settings-subtitle">{t("settings.user_rag_title")}</h3>
-                <p className="settings-doc muted">
-              {t("settings.user_rag_desc")}
-            </p>
-            {userRagError && (
-              <p className="error-inline" role="alert">{userRagError}</p>
-            )}
-            <input
-              ref={userRagFileInputRef}
-              type="file"
-              accept=".txt,.md,.csv,.json,text/*"
-              className="sr-only"
-              aria-hidden
-              onChange={async (e) => {
-                const file = e.target.files?.[0];
-                if (!file) return;
-                try {
-                  const { content_base64, mime_type } = await readFileAsBase64(file);
-                  await invoke("add_user_rag_document", {
-                    name: file.name,
-                    content_base64: content_base64,
-                    mime_type: mime_type,
-                    port: DAEMON_PORT,
-                  });
-                  fetchUserRagDocuments();
-                } catch (err) {
-                  setUserRagError(String(err));
-                }
-                e.target.value = "";
-              }}
-            />
-            <button
-              type="button"
-              className="refresh-btn"
-              onClick={() => userRagFileInputRef.current?.click()}
-              disabled={userRagLoading}
-            >
-              {t("settings.add_document")}
-            </button>
-            {userRagLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
-            {!userRagLoading && userRagDocuments.length === 0 && (
-              <p className="empty-state">{t("settings.no_documents")}</p>
-            )}
-            {!userRagLoading && userRagDocuments.length > 0 && (
-              <ul className="settings-doc-list" role="list">
-                {userRagDocuments.map((d) => (
-                  <li key={d.id} className="settings-doc-item">
-                    <span className="settings-doc-name">{d.name}</span>
-                    <span className="settings-doc-meta">{d.added_at.slice(0, 10)}</span>
-                    <button
-                      type="button"
-                      className="settings-doc-delete"
-                      aria-label={`Supprimer ${d.name}`}
-                      onClick={async () => {
-                        try {
-                          await invoke("delete_user_rag_document", { id: d.id, port: DAEMON_PORT });
-                          fetchUserRagDocuments();
-                        } catch (err) {
-                          setUserRagError(String(err));
-                        }
-                      }}
-                    >
-                      {t("settings.delete")}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <p className="settings-doc">{t("settings.config_note")}</p>
+                <div className="settings-data-subtabs" role="tablist" aria-label={t("settings.section_data")}>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={dataSourcesSubTab === "rag"}
+                    className={dataSourcesSubTab === "rag" ? "active" : ""}
+                    onClick={() => setDataSourcesSubTab("rag")}
+                  >
+                    {t("settings.section_data_sub_rag")}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={dataSourcesSubTab === "project_graph"}
+                    className={dataSourcesSubTab === "project_graph" ? "active" : ""}
+                    onClick={() => setDataSourcesSubTab("project_graph")}
+                  >
+                    {t("settings.section_data_sub_graph")}
+                  </button>
+                </div>
+                <div className="settings-data-scroll">
+                  {dataSourcesSubTab === "rag" && (
+                    <>
+                      <h3 className="settings-subtitle">{t("settings.user_rag_title")}</h3>
+                      <p className="settings-doc muted">{t("settings.user_rag_desc")}</p>
+                      {userRagError && (
+                        <p className="error-inline" role="alert">{userRagError}</p>
+                      )}
+                      <input
+                        ref={userRagFileInputRef}
+                        type="file"
+                        accept=".txt,.md,.csv,.json,text/*"
+                        className="sr-only"
+                        aria-hidden
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          try {
+                            const { content_base64, mime_type } = await readFileAsBase64(file);
+                            await invoke("add_user_rag_document", {
+                              name: file.name,
+                              content_base64: content_base64,
+                              mime_type: mime_type,
+                              port: DAEMON_PORT,
+                            });
+                            fetchUserRagDocuments();
+                          } catch (err) {
+                            setUserRagError(String(err));
+                          }
+                          e.target.value = "";
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="refresh-btn"
+                        onClick={() => userRagFileInputRef.current?.click()}
+                        disabled={userRagLoading}
+                      >
+                        {t("settings.add_document")}
+                      </button>
+                      {userRagLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
+                      {!userRagLoading && userRagDocuments.length === 0 && (
+                        <p className="empty-state">{t("settings.no_documents")}</p>
+                      )}
+                      {!userRagLoading && userRagDocuments.length > 0 && (
+                        <ul className="settings-doc-list" role="list">
+                          {userRagDocuments.map((d) => (
+                            <li key={d.id} className="settings-doc-item">
+                              <span className="settings-doc-name">{d.name}</span>
+                              <span className="settings-doc-meta">{d.added_at.slice(0, 10)}</span>
+                              <button
+                                type="button"
+                                className="settings-doc-delete"
+                                aria-label={`Supprimer ${d.name}`}
+                                onClick={async () => {
+                                  try {
+                                    await invoke("delete_user_rag_document", { id: d.id, port: DAEMON_PORT });
+                                    fetchUserRagDocuments();
+                                  } catch (err) {
+                                    setUserRagError(String(err));
+                                  }
+                                }}
+                              >
+                                {t("settings.delete")}
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </>
+                  )}
+                  {dataSourcesSubTab === "project_graph" && (
+                    <>
+                      <h3 className="settings-subtitle">{t("settings.workspace_graph_title")}</h3>
+                      <p className="settings-doc muted">{t("settings.workspace_graph_desc")}</p>
+                      {projectGraphError && (
+                        <p className="error-inline" role="alert">{projectGraphError}</p>
+                      )}
+                      {projectGraphSuccess && (
+                        <p className="settings-doc" role="status">{projectGraphSuccess}</p>
+                      )}
+                      <h4 className="settings-subheading">{t("settings.project_graph_add_title")}</h4>
+                      <dl className="settings-list">
+                        <dt>{t("settings.project_graph_name")}</dt>
+                        <dd>
+                          <input
+                            type="text"
+                            className="settings-input"
+                            aria-label={t("settings.project_graph_name")}
+                            value={newProjectWsName}
+                            onChange={(e) => setNewProjectWsName(e.target.value)}
+                            placeholder={t("settings.project_graph_name_placeholder")}
+                          />
+                        </dd>
+                        <dt>{t("settings.project_graph_path")}</dt>
+                        <dd>
+                          <input
+                            type="text"
+                            className="settings-input"
+                            aria-label={t("settings.project_graph_path")}
+                            value={newProjectWsPath}
+                            onChange={(e) => setNewProjectWsPath(e.target.value)}
+                            placeholder="C:\path\to\project"
+                          />
+                        </dd>
+                      </dl>
+                      <button
+                        type="button"
+                        className="refresh-btn"
+                        disabled={newProjectWsSubmitting || !newProjectWsName.trim() || !newProjectWsPath.trim()}
+                        onClick={async () => {
+                          setProjectGraphError(null);
+                          setProjectGraphSuccess(null);
+                          setNewProjectWsSubmitting(true);
+                          try {
+                            const out = await invoke<{
+                              files_indexed?: number;
+                              nodes?: number;
+                              edges?: number;
+                            }>("create_project_workspace", {
+                              name: newProjectWsName.trim(),
+                              rootPath: newProjectWsPath.trim(),
+                              rebuild: true,
+                              port: DAEMON_PORT,
+                            });
+                            const fi = typeof out?.files_indexed === "number" ? out.files_indexed : 0;
+                            const nn = typeof out?.nodes === "number" ? out.nodes : 0;
+                            const ee = typeof out?.edges === "number" ? out.edges : 0;
+                            setProjectGraphSuccess(
+                              t("settings.project_graph_created_ok")
+                                .replace("{{files}}", String(fi))
+                                .replace("{{nodes}}", String(nn))
+                                .replace("{{edges}}", String(ee)),
+                            );
+                            setNewProjectWsName("");
+                            setNewProjectWsPath("");
+                            await fetchProjectWorkspaces({ clearError: false });
+                          } catch (err) {
+                            setProjectGraphSuccess(null);
+                            setProjectGraphError(String(err));
+                          } finally {
+                            setNewProjectWsSubmitting(false);
+                          }
+                        }}
+                      >
+                        {newProjectWsSubmitting ? t("common.loading") : t("settings.project_graph_create")}
+                      </button>
+                      <h4 className="settings-subheading">{t("settings.project_graph_list_title")}</h4>
+                      {projectWorkspacesLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
+                      {!projectWorkspacesLoading && projectWorkspaces.length === 0 && (
+                        <p className="empty-state">{t("settings.project_graph_empty")}</p>
+                      )}
+                      {!projectWorkspacesLoading && projectWorkspaces.length > 0 && (
+                        <ul className="settings-project-ws-list" role="list">
+                          {projectWorkspaces.map((w) => (
+                            <li key={w.id} className="settings-project-ws-card">
+                              <div className="settings-project-ws-head">
+                                <strong>{w.name}</strong>
+                                <span className="settings-doc-meta muted">{w.id.slice(0, 8)}…</span>
+                              </div>
+                              <p className="settings-doc muted settings-project-ws-path">{w.root_path}</p>
+                              <p className="settings-doc">
+                                {typeof w.node_count === "number" && typeof w.edge_count === "number"
+                                  ? t("settings.workspace_graph_stats")
+                                      .replace("{{nodes}}", String(w.node_count))
+                                      .replace("{{edges}}", String(w.edge_count))
+                                  : null}
+                                {w.built_at != null && w.built_at !== "" && (
+                                  <>
+                                    {" "}
+                                    {t("settings.workspace_graph_built").replace("{{time}}", String(w.built_at))}
+                                  </>
+                                )}
+                              </p>
+                              <div className="settings-row-actions">
+                                <button
+                                  type="button"
+                                  className="refresh-btn"
+                                  disabled={projectWsBusyId === w.id}
+                                  onClick={async () => {
+                                    setProjectWsBusyId(w.id);
+                                    setProjectGraphError(null);
+                                    try {
+                                      const out = await invoke<{
+                                        files_indexed?: number;
+                                        nodes?: number;
+                                        edges?: number;
+                                      }>("rebuild_project_workspace", {
+                                        id: w.id,
+                                        port: DAEMON_PORT,
+                                      });
+                                      const fi = typeof out?.files_indexed === "number" ? out.files_indexed : 0;
+                                      const nn = typeof out?.nodes === "number" ? out.nodes : 0;
+                                      const ee = typeof out?.edges === "number" ? out.edges : 0;
+                                      setProjectGraphSuccess(
+                                        t("settings.project_graph_rebuild_ok")
+                                          .replace("{{files}}", String(fi))
+                                          .replace("{{nodes}}", String(nn))
+                                          .replace("{{edges}}", String(ee)),
+                                      );
+                                      await fetchProjectWorkspaces({ clearError: false });
+                                    } catch (err) {
+                                      setProjectGraphError(String(err));
+                                    } finally {
+                                      setProjectWsBusyId(null);
+                                    }
+                                  }}
+                                >
+                                  {projectWsBusyId === w.id ? t("common.loading") : t("settings.workspace_graph_rebuild")}
+                                </button>
+                                <a
+                                  className="refresh-btn settings-link-btn"
+                                  href={e2eDaemonHttpUrl(`/api/workspace-graph/workspaces/${encodeURIComponent(w.id)}/html`)}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  {t("settings.workspace_graph_open_html")}
+                                </a>
+                                <button
+                                  type="button"
+                                  className="settings-doc-delete"
+                                  disabled={projectWsBusyId === w.id}
+                                  onClick={async () => {
+                                    if (!window.confirm(t("settings.project_graph_confirm_delete").replace("{{name}}", w.name))) return;
+                                    setProjectWsBusyId(w.id);
+                                    setProjectGraphError(null);
+                                    try {
+                                      await invoke("delete_project_workspace", { id: w.id, port: DAEMON_PORT });
+                                      setProjectGraphSuccess(t("settings.project_graph_deleted"));
+                                      await fetchProjectWorkspaces({ clearError: false });
+                                    } catch (err) {
+                                      setProjectGraphError(String(err));
+                                    } finally {
+                                      setProjectWsBusyId(null);
+                                    }
+                                  }}
+                                >
+                                  {t("settings.delete")}
+                                </button>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </>
+                  )}
+                </div>
+                <p className="settings-doc">{t("settings.config_note")}</p>
               </div>
             )}
           </section>

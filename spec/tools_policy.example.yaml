@@ -78,6 +78,8 @@ command_timeout_secs: 60
 #     - git_diff
 #     - git_log
 #     - git_rev_parse
+#     - memory_search
+#     - workspace_graph_search
 #     - edit_file
 #     - apply_patch
 #     - search_replace

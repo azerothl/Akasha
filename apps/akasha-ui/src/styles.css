@@ -2686,6 +2686,76 @@ pre,
   margin-bottom: 1rem;
 }
 
+.settings-data-subtabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+.settings-data-subtabs button {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.875rem;
+  background: transparent;
+  color: var(--akasha-text-muted);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.settings-data-subtabs button:hover {
+  color: var(--akasha-text);
+  background: var(--akasha-bg-surface);
+}
+.settings-data-subtabs button.active {
+  color: var(--akasha-accent);
+  font-weight: 600;
+  background: var(--akasha-bg-surface);
+}
+.settings-data-scroll {
+  max-height: min(60vh, 28rem);
+  overflow-y: auto;
+  margin-bottom: 0.75rem;
+  padding-right: 0.35rem;
+}
+.settings-subheading {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--akasha-text);
+}
+.settings-project-ws-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.settings-project-ws-card {
+  border: 1px solid var(--akasha-border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  background: var(--akasha-bg-surface);
+}
+.settings-project-ws-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.settings-project-ws-path {
+  word-break: break-all;
+  font-size: 0.8125rem;
+  margin: 0.25rem 0 0;
+}
+a.settings-link-btn.refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  box-sizing: border-box;
+}
+
 .settings-avatar-row {
   display: flex;
   align-items: center;
@@ -2886,6 +2956,12 @@ pre,
 .settings-subtitle {
   margin: 1.5rem 0 0.5rem;
   font-size: 1rem;
+}
+.settings-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0.75rem;
 }
 .settings-doc-list {
   list-style: none;
@@ -5365,6 +5441,11 @@ pre,
   flex-wrap: wrap;
   gap: 0.5rem;
   align-items: center;
+  flex-shrink: 0;
+}
+
+.memory-search-results-scroll {
+  -webkit-overflow-scrolling: touch;
 }
 
 .memory-search-bar .memory-search-input {

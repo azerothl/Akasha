@@ -36,7 +36,8 @@ async function handleInit(params = {}) {
       context = null;
       page = null;
     }
-    const headlessMode = params.headless !== false;
+    // Prefer the per-command param; fall back to the CLI --headed / --headless flag.
+    const headlessMode = params.headless !== undefined ? params.headless !== false : headless;
     browser = await chromium.launch({ headless: headlessMode });
     context = await browser.newContext({
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
