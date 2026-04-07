@@ -8031,6 +8031,35 @@ pub(crate) async fn run_message_via_llm(
     // Persist this exchange in short-term memory (spec 06)
     // Skip orchestrated task messages ([Task]\n prefix): they are internal planner artefacts,
     // not real user/assistant turns. Storing them pollutes future context with unrelated content.
+    // #region agent log
+    {
+        let skip_append = is_small_talk_fast_lane || is_orchestrated_task_msg;
+        let log_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../debug-e02ac0.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
+            use std::io::Write;
+            let _ = writeln!(
+                f,
+                "{}",
+                serde_json::json!({
+                    "sessionId": "e02ac0",
+                    "hypothesisId": "H5",
+                    "location": "api.rs:run_message_via_llm:short_term_gate",
+                    "message": "short_term append decision",
+                    "data": {
+                        "task_id": task_id.to_string(),
+                        "session_id_len": session_id.len(),
+                        "skip_append": skip_append,
+                        "is_small_talk_fast_lane": is_small_talk_fast_lane,
+                        "is_orchestrated_task_msg": is_orchestrated_task_msg,
+                        "has_short_term_store": short_term.is_some(),
+                        "reply_len": reply_text.len()
+                    },
+                    "timestamp": chrono::Utc::now().timestamp_millis()
+                })
+            );
+        }
+    }
+    // #endregion
     if !is_small_talk_fast_lane && !is_orchestrated_task_msg {
         if let Some(ref st) = short_term {
             // Store the clean user message (without any guardrail prefix) so history is human-readable.
@@ -11516,6 +11545,67 @@ async fn pause_task(store_path: &Path, id: Uuid, main_agent: &crate::agents::Mai
     json_response("200 OK", &body.to_string())
 }
 
+/// Progress text that must not be shown as the sole final reply in chat when a richer answer exists on subtasks.
+fn task_progress_is_chat_stub(msg: &str) -> bool {
+    let t = msg.trim();
+    t.is_empty()
+        || matches!(
+            t,
+            "Terminé."
+                | "Done."
+                | "Échec."
+                | "Annulé."
+                | "Failed."
+                | "Cancelled."
+                | "Sous-tâches en cours."
+        )
+        || t.starts_with("Task delegated to agent")
+}
+
+fn merged_last_progress_snapshot(
+    store: &TaskStore,
+    mem: &std::collections::HashMap<Uuid, VecDeque<ProgressEntry>>,
+    task_id: Uuid,
+) -> Option<String> {
+    let disk: Option<String> = store
+        .get_progress(task_id)
+        .ok()
+        .and_then(|v| v.last().map(|(_, m)| m.clone()));
+    let in_mem: Option<String> = mem
+        .get(&task_id)
+        .and_then(|q| q.back())
+        .map(|e| e.message.clone());
+    [disk, in_mem]
+        .into_iter()
+        .flatten()
+        .max_by_key(|s| s.len())
+}
+
+fn best_substantive_progress_in_subtree(
+    store: &TaskStore,
+    mem: &std::collections::HashMap<Uuid, VecDeque<ProgressEntry>>,
+    task_id: Uuid,
+) -> Option<String> {
+    if let Some(line) = merged_last_progress_snapshot(store, mem, task_id) {
+        let tr = line.trim();
+        if !task_progress_is_chat_stub(tr) {
+            return Some(tr.to_string());
+        }
+    }
+    let Ok(children) = store.get_children(task_id) else {
+        return None;
+    };
+    let mut best: Option<String> = None;
+    for c in children {
+        if let Some(m) = best_substantive_progress_in_subtree(store, mem, c.id) {
+            if best.as_ref().map(|b| b.len()).unwrap_or(0) < m.len() {
+                best = Some(m);
+            }
+        }
+    }
+    best
+}
+
 async fn resume_task(store_path: &Path, id: Uuid, main_agent: &crate::agents::MainAgent) -> String {
     let store = match TaskStore::open(store_path) {
         Ok(s) => s,
@@ -11610,6 +11700,24 @@ async fn get_task_status(
             } else if let Some(last) = progress_list.last_mut() {
                 last.progress_pct = display_pct;
             }
+            // Chat UI polls root task_id: last progress line must reflect the real answer when the root row is only a generic completion stub while children hold the substantive reply.
+            if progress_list
+                .last()
+                .map(|e| task_progress_is_chat_stub(&e.message))
+                .unwrap_or(false)
+            {
+                let mut best: Option<String> = None;
+                for c in &children {
+                    if let Some(m) = best_substantive_progress_in_subtree(&store, &g, c.id) {
+                        if best.as_ref().map(|b| b.len()).unwrap_or(0) < m.len() {
+                            best = Some(m);
+                        }
+                    }
+                }
+                if let (Some(last_mut), Some(b)) = (progress_list.last_mut(), best) {
+                    last_mut.message = b;
+                }
+            }
         }
     }
     let (tokens_used, cost_usd) = task_usage_store.get_task(id).await.unwrap_or((0, 0.0));
@@ -11640,6 +11748,44 @@ async fn get_task_status(
     if let Some(u) = todos_updated_at {
         body["todos_updated_at"] = serde_json::Value::String(u);
     }
+    // #region agent log
+    {
+        let child_n = store.get_children(id).map(|c| c.len()).unwrap_or(0);
+        let last_preview = progress_list
+            .last()
+            .map(|e| e.message.chars().take(160).collect::<String>())
+            .unwrap_or_default();
+        let prev_preview = progress_list
+            .len()
+            .checked_sub(2)
+            .and_then(|i| progress_list.get(i))
+            .map(|e| e.message.chars().take(80).collect::<String>())
+            .unwrap_or_default();
+        let log_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../debug-e02ac0.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
+            use std::io::Write;
+            let _ = writeln!(
+                f,
+                "{}",
+                serde_json::json!({
+                    "sessionId": "e02ac0",
+                    "hypothesisId": "H1",
+                    "location": "api.rs:get_task_status",
+                    "message": "task status for UI poll",
+                    "data": {
+                        "task_id": id.to_string(),
+                        "status": task.status.as_str(),
+                        "child_count": child_n,
+                        "progress_entries": progress_list.len(),
+                        "last_progress_preview": last_preview,
+                        "prev_progress_preview": prev_preview
+                    },
+                    "timestamp": chrono::Utc::now().timestamp_millis()
+                })
+            );
+        }
+    }
+    // #endregion
     json_response("200 OK", &body.to_string())
 }
 

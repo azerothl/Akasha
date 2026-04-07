@@ -2338,6 +2338,24 @@ function App() {
           { sessionId: sessionId ?? undefined, port: DAEMON_PORT }
         );
         if (cancelled) return;
+        // #region agent log
+        fetch("http://127.0.0.1:7708/ingest/83a7f7de-74a3-4ba3-8a97-b0169801051e", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e02ac0" },
+          body: JSON.stringify({
+            sessionId: "e02ac0",
+            location: "App.tsx:mount:get_memory_short_term",
+            message: "hydrate on load",
+            data: {
+              hypothesisId: "H4",
+              requestedSessionId: sessionId ?? null,
+              returnedSessionId: data?.session_id ?? null,
+              turnsCount: data?.turns?.length ?? 0,
+            },
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {});
+        // #endregion
         if (data?.session_id && (data.turns?.length ?? 0) > 0) {
           const sid = data.session_id;
           const rows = data.turns!.map((t) => ({
@@ -4676,6 +4694,28 @@ function App() {
                 humanInputAutoOpenedRef.current.delete(taskId);
                 setHumanInputModalTaskId((c) => (c === taskId ? null : c));
                 const finalMsg = status?.progress?.slice(-1)[0]?.message ?? "Terminé.";
+                // #region agent log
+                fetch("http://127.0.0.1:7708/ingest/83a7f7de-74a3-4ba3-8a97-b0169801051e", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "e02ac0" },
+                  body: JSON.stringify({
+                    sessionId: "e02ac0",
+                    location: "App.tsx:pollUntilDone:completed",
+                    message: "task completed chat update",
+                    data: {
+                      hypothesisId: "H3",
+                      taskId,
+                      taskForActiveChat,
+                      sessionIdRef: sessionIdRef.current,
+                      mappedSessionForTask: taskIdToSessionIdRef.current[taskId] ?? null,
+                      progressLen: status?.progress?.length ?? 0,
+                      finalMsgPreview: (finalMsg || "").slice(0, 200),
+                      lastProgressPreview: (status?.progress?.slice(-1)[0]?.message ?? "").slice(0, 120),
+                    },
+                    timestamp: Date.now(),
+                  }),
+                }).catch(() => {});
+                // #endregion
                 const doneMapVis =
                   extractChatMapVisualFromTaskEvents(events) ??
                   extractChatMapVisualFromAssistantText(finalMsg) ??
