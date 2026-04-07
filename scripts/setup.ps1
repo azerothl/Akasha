@@ -62,11 +62,9 @@ if ($null -eq $doAutoStart) {
 }
 
 # 1) Install CLI + daemon + TUI (init, PATH, optional task)
-# Use hashtable splatting: array splat with a switch (e.g. @(...,"-NoAutoStart")) misparses and
-# can set -InstallDir to the literal "-InstallDir" (PowerShell pairs array elements incorrectly).
-$installSplat = @{ InstallDir = $InstallDir }
-if (-not $doAutoStart) { $installSplat.NoAutoStart = $true }
-& $InstallScript @installSplat
+$installArgs = @("-InstallDir", $InstallDir)
+if (-not $doAutoStart) { $installArgs += "-NoAutoStart" }
+& $InstallScript @installArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # 2) Optional: install Tauri desktop app

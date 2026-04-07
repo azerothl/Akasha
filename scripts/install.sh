@@ -47,11 +47,10 @@ fi
 mkdir -p "$INSTALL_DIR"
 cp "$BIN_DIR/akasha" "$BIN_DIR/akasha-daemon" "$BIN_DIR/akasha-tui" "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/akasha" "$INSTALL_DIR/akasha-daemon" "$INSTALL_DIR/akasha-tui"
-for sub in docs playwright-runner spec; do
-    if [[ -d "$BIN_DIR/$sub" ]]; then
-        cp -a "$BIN_DIR/$sub" "$INSTALL_DIR/"
-    fi
-done
+if [[ -f "$BIN_DIR/docs/user_guide.md" ]]; then
+    mkdir -p "$INSTALL_DIR/../share/akasha/docs"
+    cp "$BIN_DIR/docs/user_guide.md" "$INSTALL_DIR/../share/akasha/docs/" 2>/dev/null || true
+fi
 echo "Binaries installed to $INSTALL_DIR"
 
 # Initial setup (idempotent)

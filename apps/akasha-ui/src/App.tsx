@@ -12,14 +12,6 @@ import { GeoMapView } from "./GeoMapView";
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
 const DAEMON_PORT = 3876;
-/** Browser E2E (Playwright): talk to daemon over HTTP instead of Tauri. Match VITE_E2E or vite --mode e2e (npm run test:e2e). */
-const E2E_WEB = import.meta.env.VITE_E2E === "true" || import.meta.env.MODE === "e2e";
-/** Same-origin path proxied in vite `server`/`preview` when mode is e2e — avoids cross-port browser blocks (e.g. Chromium PNA on Windows). */
-function e2eDaemonHttpUrl(path: string): string {
-  const p = path.startsWith("/") ? path : `/${path}`;
-  if (E2E_WEB) return `/__e2e_daemon${p}`;
-  return `http://127.0.0.1:${DAEMON_PORT}${p}`;
-}
 const THEME_STORAGE_KEY = "akasha_theme";
 const UI_MODE_STORAGE_KEY = "akasha_ui_mode";
 const AKASHA_SESSION_ID_KEY = "akasha_session_id";
@@ -134,19 +126,19 @@ const GRAPH_THEME_COLORS: Record<
   }
 > = {
   dark_akasha: {
-    backgroundColor: "#0d0d14",
-    defaultNodeColor: "#1a1a2e",
-    defaultNodeFontColor: "#f1f5f9",
-    defaultNodeBorderColor: "#3d3666",
-    defaultLineColor: "#64748b",
+    backgroundColor: "#0b0f17",
+    defaultNodeColor: "#1a2233",
+    defaultNodeFontColor: "#e4e4e7",
+    defaultNodeBorderColor: "#2a3448",
+    defaultLineColor: "#6b7280",
     defaultLineWidth: 2,
-    defaultLineFontColor: "#94a3b8",
+    defaultLineFontColor: "#a1a1aa",
     defaultShowLineLabel: true,
-    checkedLineColor: "#8b5cf6",
+    checkedLineColor: "#7c8cff",
     nodeType: {
-      entry: { color: "#2d1f4e", fontColor: "#f1f5f9" },
-      related: { color: "#252538", fontColor: "#94a3b8" },
-      selected: { color: "#312e4a", fontColor: "#f1f5f9", borderColor: "#a78bfa" },
+      entry: { color: "#1e3a5f", fontColor: "#e4e4e7" },
+      related: { color: "#334155", fontColor: "#cbd5e1" },
+      selected: { color: "#312e81", fontColor: "#e4e4e7", borderColor: "#7c8cff" },
     },
   },
   dark: {
@@ -795,7 +787,7 @@ function renderAdvancedViewToCanvas(visual: EventAdvancedView, width: number, he
   const ctx = canvas.getContext("2d");
   if (!ctx) return canvas;
 
-  ctx.fillStyle = "#0d0d14";
+  ctx.fillStyle = "#0b0f17";
   ctx.fillRect(0, 0, width, height);
 
   if (visual.kind === "map") {
@@ -826,7 +818,7 @@ function renderAdvancedViewToCanvas(visual: EventAdvancedView, width: number, he
     return canvas;
   }
 
-  const palette = ["#8b5cf6", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
+  const palette = ["#7c8cff", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
   visual.series.forEach((s, idx) => {
     const scaled = scalePoints(s.points, width, height);
     if (scaled.length < 2) return;
@@ -1174,7 +1166,7 @@ function isDeterministicAutoToolEvent(eventType?: string | null): boolean {
   );
 }
 
-type Tab = "chat" | "scheduled" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory" | "mission";
+type Tab = "chat" | "scheduled" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory";
 
 type SettingsSection = "display" | "system" | "agent" | "user" | "data";
 type AgentProfileSubTab = "identity" | "personality" | "traits" | "rules" | "can_do" | "cannot_do";
@@ -1785,89 +1777,6 @@ function App() {
   /** Track last node click for double-click detection: single = recenter, double = open detail modal. */
   const memoryGraphLastClickRef = useRef<{ nodeId: string; at: number } | null>(null);
 
-  type MissionApi = {
-    enabled: boolean;
-    global_context: string;
-    horizon: string;
-    objective: string;
-    heartbeat_interval_minutes: number;
-    report_dir: string;
-    session_id: string;
-    status: string;
-    operating_rules?: string;
-    role_definitions?: Array<{
-      name: string;
-      responsibility: string;
-      preferred_agent_type?: string | null;
-    }>;
-    heartbeat_preferred_task_type?: string;
-    report_path_absolute?: string;
-    last_heartbeat_at?: string | null;
-    next_heartbeat_approx_at?: string | null;
-    last_task_id?: string | null;
-  };
-  type MissionSubTab = "goals" | "settings" | "status";
-  const MISSION_HEARTBEAT_AGENT_TYPES = [
-    "conversation",
-    "search",
-    "code",
-    "schedule",
-    "financial",
-    "documentalist",
-    "project_manager",
-    "technical_writer",
-    "research",
-    "security_audit",
-    "creative",
-    "analyst",
-    "architect",
-    "frontend",
-    "backend",
-    "database",
-    "integration",
-    "qa",
-    "system",
-    "image_generation",
-  ] as const;
-  function normalizeMissionApi(j: MissionApi): MissionApi {
-    return {
-      ...j,
-      operating_rules: j.operating_rules ?? "",
-      role_definitions: Array.isArray(j.role_definitions) ? j.role_definitions : [],
-      heartbeat_preferred_task_type: j.heartbeat_preferred_task_type ?? "project_manager",
-    };
-  }
-  function cloneMission(m: MissionApi): MissionApi {
-    return JSON.parse(JSON.stringify(m)) as MissionApi;
-  }
-  function missionEditableEqual(a: MissionApi, b: MissionApi): boolean {
-    const ra = JSON.stringify(a.role_definitions ?? []);
-    const rb = JSON.stringify(b.role_definitions ?? []);
-    return (
-      a.enabled === b.enabled &&
-      a.global_context === b.global_context &&
-      a.horizon === b.horizon &&
-      a.objective === b.objective &&
-      a.heartbeat_interval_minutes === b.heartbeat_interval_minutes &&
-      a.report_dir === b.report_dir &&
-      a.session_id === b.session_id &&
-      (a.operating_rules ?? "") === (b.operating_rules ?? "") &&
-      (a.heartbeat_preferred_task_type ?? "project_manager") === (b.heartbeat_preferred_task_type ?? "project_manager") &&
-      ra === rb
-    );
-  }
-  const [mission, setMission] = useState<MissionApi | null>(null);
-  const [missionDraft, setMissionDraft] = useState<MissionApi | null>(null);
-  const [missionSubTab, setMissionSubTab] = useState<MissionSubTab>("goals");
-  const [missionEvents, setMissionEvents] = useState<
-    Array<{ id: number; at: string; event_type: string; payload?: unknown }>
-  >([]);
-  const [missionLoading, setMissionLoading] = useState(false);
-  const [missionError, setMissionError] = useState<string | null>(null);
-  const [missionSaving, setMissionSaving] = useState(false);
-  const missionDirty =
-    mission != null && missionDraft != null && !missionEditableEqual(missionDraft, mission);
-
   function buildMemoryGraphData(
     entries: MemoryLongTermEntry[],
     selectedIndex: number,
@@ -1959,26 +1868,6 @@ function App() {
   const [userRagDocuments, setUserRagDocuments] = useState<Array<{ id: string; name: string; mime_type: string; added_at: string }>>([]);
   const [userRagLoading, setUserRagLoading] = useState(false);
   const [userRagError, setUserRagError] = useState<string | null>(null);
-  const [dataSourcesSubTab, setDataSourcesSubTab] = useState<"rag" | "project_graph">("rag");
-  type ProjectWorkspaceRow = {
-    id: string;
-    name: string;
-    root_path: string;
-    created_at?: string;
-    node_count?: number;
-    edge_count?: number;
-    built_at?: string | null;
-    file_count?: number;
-    indexed_root?: string | null;
-  };
-  const [projectWorkspaces, setProjectWorkspaces] = useState<ProjectWorkspaceRow[]>([]);
-  const [projectWorkspacesLoading, setProjectWorkspacesLoading] = useState(false);
-  const [projectGraphError, setProjectGraphError] = useState<string | null>(null);
-  const [projectGraphSuccess, setProjectGraphSuccess] = useState<string | null>(null);
-  const [newProjectWsName, setNewProjectWsName] = useState("");
-  const [newProjectWsPath, setNewProjectWsPath] = useState("");
-  const [projectWsBusyId, setProjectWsBusyId] = useState<string | null>(null);
-  const [newProjectWsSubmitting, setNewProjectWsSubmitting] = useState(false);
   const userRagFileInputRef = useRef<HTMLInputElement>(null);
   const agentAvatarFileInputRef = useRef<HTMLInputElement>(null);
   const userAvatarFileInputRef = useRef<HTMLInputElement>(null);
@@ -2135,27 +2024,6 @@ function App() {
   ]);
 
   const checkHealth = useCallback(async () => {
-    if (E2E_WEB) {
-      try {
-        const r = await fetch(e2eDaemonHttpUrl("/"));
-        const body = (await r.json()) as { status?: string };
-        const ok = r.ok && body?.status === "ok";
-        setHealth((prev) => {
-          const next = { ok, port: DAEMON_PORT };
-          const unchanged = prev != null && prev.ok === next.ok && prev.port === next.port;
-          if (unchanged) return prev;
-          return next;
-        });
-      } catch {
-        setHealth((prev) => {
-          const next = { ok: false, port: DAEMON_PORT };
-          const unchanged = prev != null && prev.ok === next.ok && prev.port === next.port;
-          if (unchanged) return prev;
-          return next;
-        });
-      }
-      return;
-    }
     try {
       const result = await invoke<{ ok: boolean; port?: number }>("check_health", {
         port: DAEMON_PORT,
@@ -2624,15 +2492,15 @@ function App() {
     return () => document.removeEventListener("click", onDocClick);
   }, [pendingNotifOpen]);
 
-  // Global keyboard shortcuts: 1–9 = switch tab (when not in a modal or input)
-  const tabsByIndex: Tab[] = ["chat", "scheduled", "router", "docs", "tasks", "calendar", "memory", "mission", "settings"];
+  // Global keyboard shortcuts: 1–7 = switch tab (when not in a modal or input)
+  const tabsByIndex: Tab[] = ["chat", "scheduled", "router", "docs", "tasks", "calendar", "memory", "settings"];
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (humanInputModalTaskId != null) return;
       const target = e.target as HTMLElement;
       if (target?.closest("input") || target?.closest("textarea") || target?.closest("[role='dialog']")) return;
-      const n = e.key === "1" ? 1 : e.key === "2" ? 2 : e.key === "3" ? 3 : e.key === "4" ? 4 : e.key === "5" ? 5 : e.key === "6" ? 6 : e.key === "7" ? 7 : e.key === "8" ? 8 : e.key === "9" ? 9 : 0;
-      if (n >= 1 && n <= 9) {
+      const n = e.key === "1" ? 1 : e.key === "2" ? 2 : e.key === "3" ? 3 : e.key === "4" ? 4 : e.key === "5" ? 5 : e.key === "6" ? 6 : e.key === "7" ? 7 : e.key === "8" ? 8 : 0;
+      if (n >= 1 && n <= 8) {
         e.preventDefault();
         setTab(tabsByIndex[n - 1]);
       }
@@ -2640,72 +2508,6 @@ function App() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [humanInputModalTaskId]);
-
-  const fetchMission = useCallback(async () => {
-    setMissionLoading(true);
-    setMissionError(null);
-    try {
-      if (E2E_WEB) {
-        const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission"));
-        if (r.status === 503) {
-          setMissionError("unavailable");
-          setMission(null);
-          setMissionDraft(null);
-          setMissionEvents([]);
-          return;
-        }
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const j = normalizeMissionApi((await r.json()) as MissionApi);
-        setMission(j);
-        setMissionDraft(cloneMission(j));
-        const ev = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission/events?limit=200"));
-        if (ev.ok) {
-          const ej = (await ev.json()) as {
-            events?: Array<{ id: number; at: string; event_type: string; payload?: unknown }>;
-          };
-          setMissionEvents(ej.events ?? []);
-        } else {
-          setMissionEvents([]);
-        }
-      } else {
-        try {
-          const raw = await invoke<MissionApi>("get_autonomous_mission", { port: DAEMON_PORT });
-          const j = normalizeMissionApi(raw);
-          setMission(j);
-          setMissionDraft(cloneMission(j));
-        } catch (err) {
-          const msg = String(err);
-          if (msg === "unavailable" || msg.includes("unavailable")) {
-            setMissionError("unavailable");
-            setMission(null);
-            setMissionDraft(null);
-            setMissionEvents([]);
-            return;
-          }
-          throw err;
-        }
-        try {
-          const ej = await invoke<{
-            events?: Array<{ id: number; at: string; event_type: string; payload?: unknown }>;
-          }>("get_autonomous_mission_events", { limit: 200, port: DAEMON_PORT });
-          setMissionEvents(ej.events ?? []);
-        } catch {
-          setMissionEvents([]);
-        }
-      }
-    } catch (e) {
-      setMissionError(String(e));
-      setMission(null);
-      setMissionDraft(null);
-    } finally {
-      setMissionLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (tab !== "mission") return;
-    void fetchMission();
-  }, [tab, fetchMission]);
 
   type MetricsPeriod = "all" | "day" | "week" | "month" | "year";
   const [routerMetricsPeriod, setRouterMetricsPeriod] = useState<MetricsPeriod>("all");
@@ -2745,18 +2547,9 @@ function App() {
     setDocLoading(true);
     setDocError(null);
     try {
-      if (E2E_WEB) {
-        const r = await fetch(e2eDaemonHttpUrl("/api/docs"));
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const j = (await r.json()) as { content?: string };
-        const content = j.content ?? "";
-        setDocContent(content);
-        setCached("docs", content);
-      } else {
-        const content = await invoke<string>("get_docs", { port: DAEMON_PORT });
-        setDocContent(content);
-        setCached("docs", content);
-      }
+      const content = await invoke<string>("get_docs", { port: DAEMON_PORT });
+      setDocContent(content);
+      setCached("docs", content);
     } catch (e) {
       setDocError(String(e));
       setDocContent(null);
@@ -3389,9 +3182,7 @@ function App() {
   // SSE: subscribe to daemon events for real-time updates (< 1s) when daemon is healthy.
   useEffect(() => {
     if (!health?.ok) return;
-    const url = E2E_WEB
-      ? e2eDaemonHttpUrl("/api/events")
-      : `http://127.0.0.1:${health.port ?? DAEMON_PORT}/api/events`;
+    const url = `http://127.0.0.1:${health.port ?? DAEMON_PORT}/api/events`;
     let es: EventSource | null = null;
     try {
       es = new EventSource(url);
@@ -3702,7 +3493,7 @@ function App() {
     setPluginReputationResetMessage(null);
     try {
       const trimmed = (pluginId ?? "").trim();
-      const res = await fetch(e2eDaemonHttpUrl("/api/plugins/reputation/reset"), {
+      const res = await fetch(`http://127.0.0.1:${DAEMON_PORT}/api/plugins/reputation/reset`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: trimmed ? JSON.stringify({ plugin_id: trimmed }) : JSON.stringify({}),
@@ -3752,37 +3543,6 @@ function App() {
       setUserRagDocuments([]);
     } finally {
       setUserRagLoading(false);
-    }
-  }, []);
-
-  const fetchProjectWorkspaces = useCallback(async (opts?: { clearError?: boolean }) => {
-    setProjectWorkspacesLoading(true);
-    if (opts?.clearError !== false) setProjectGraphError(null);
-    try {
-      const raw = await invoke<{
-        workspaces?: ProjectWorkspaceRow[];
-        total_node_count?: number;
-        total_edge_count?: number;
-      }>("list_project_workspaces", { port: DAEMON_PORT });
-      const list = Array.isArray(raw?.workspaces) ? raw.workspaces : [];
-      setProjectWorkspaces(
-        list.map((w) => ({
-          id: String(w.id ?? ""),
-          name: String(w.name ?? ""),
-          root_path: String(w.root_path ?? ""),
-          created_at: typeof w.created_at === "string" ? w.created_at : undefined,
-          node_count: typeof w.node_count === "number" ? w.node_count : undefined,
-          edge_count: typeof w.edge_count === "number" ? w.edge_count : undefined,
-          built_at: w.built_at === null || typeof w.built_at === "string" ? w.built_at : undefined,
-          file_count: typeof w.file_count === "number" ? w.file_count : undefined,
-          indexed_root: w.indexed_root === null || typeof w.indexed_root === "string" ? w.indexed_root : undefined,
-        })),
-      );
-    } catch (e) {
-      setProjectGraphError(String(e));
-      setProjectWorkspaces([]);
-    } finally {
-      setProjectWorkspacesLoading(false);
     }
   }, []);
 
@@ -3874,12 +3634,6 @@ function App() {
       fetchPluginStatus();
     }
   }, [tab, settingsSection, fetchPluginStatus]);
-
-  useEffect(() => {
-    if (tab === "settings" && settingsSection === "data" && dataSourcesSubTab === "project_graph") {
-      void fetchProjectWorkspaces();
-    }
-  }, [tab, settingsSection, dataSourcesSubTab, fetchProjectWorkspaces]);
 
   useEffect(() => {
     if (!calendarSelectedTaskId) {
@@ -4933,16 +4687,6 @@ function App() {
             </button>
             <button
               role="tab"
-              aria-selected={tab === "mission"}
-              aria-controls="panel-mission"
-              id="tab-mission"
-              className={tab === "mission" ? "active" : ""}
-              onClick={() => setTab("mission")}
-            >
-              {t("tabs.mission")}
-            </button>
-            <button
-              role="tab"
               aria-selected={tab === "settings"}
               aria-controls="panel-settings"
               id="tab-settings"
@@ -5208,7 +4952,7 @@ function App() {
                           const ctx = canvas.getContext("2d");
                           if (ctx) ctx.drawImage(video, 0, 0, w, h, 0, 0, canvas.width, canvas.height);
                           const data = canvas.toDataURL("image/jpeg", 0.85).split(",")[1] ?? "";
-                          const url = e2eDaemonHttpUrl("/api/device/result");
+                          const url = `http://127.0.0.1:${DAEMON_PORT}/api/device/result`;
                           try {
                             const res = await fetch(url, {
                               method: "POST",
@@ -6661,7 +6405,7 @@ function App() {
 
                                 const width = 460;
                                 const height = 190;
-                                const palette = ["#8b5cf6", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
+                                const palette = ["#7c8cff", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
                                 const totalPoints = visual.series.reduce((acc, s) => acc + s.points.length, 0);
                                 return (
                                   <div className="event-advanced-view event-advanced-view-chart">
@@ -7551,22 +7295,20 @@ function App() {
                             {t("memory.search_back")}
                           </button>
                         </div>
-                        <div className="memory-list-scroll memory-search-results-scroll">
-                          {memorySearchResults.length === 0 ? (
-                            <p className="muted">Saisir une requête puis Rechercher. Aucun résultat pour l’instant.</p>
-                          ) : (
-                            <ul className="memory-long-term-list">
-                              {memorySearchResults.map((r, i) => (
-                                <li key={r.id ?? i} className="memory-long-term-item">
-                                  <div className="memory-long-term-body">
-                                    <div className="memory-long-term-content">{r.content}</div>
-                                    <div className="memory-long-term-meta">id: {r.id}</div>
-                                  </div>
-                                </li>
-                              ))}
-                            </ul>
-                          )}
-                        </div>
+                        {memorySearchResults.length === 0 ? (
+                          <p className="muted">Saisir une requête puis Rechercher. Aucun résultat pour l’instant.</p>
+                        ) : (
+                          <ul className="memory-long-term-list">
+                            {memorySearchResults.map((r, i) => (
+                              <li key={r.id ?? i} className="memory-long-term-item">
+                                <div className="memory-long-term-body">
+                                  <div className="memory-long-term-content">{r.content}</div>
+                                  <div className="memory-long-term-meta">id: {r.id}</div>
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
                       </div>
                     ) : memoryViewGraph ? (
                       <div className="memory-graph-wrap" role="region" aria-label={t("memory.view_graph")}>
@@ -7839,7 +7581,7 @@ function App() {
                   (() => {
                     const width = 1200;
                     const height = 560;
-                    const palette = ["#8b5cf6", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
+                    const palette = ["#7c8cff", "#22c55e", "#f97316", "#06b6d4", "#f59e0b", "#ec4899"];
                     const totalPoints = eventVisualFullscreen.visual.series.reduce((acc, s) => acc + s.points.length, 0);
                     return (
                       <div className="event-advanced-view event-advanced-view-chart event-advanced-view-fullscreen">
@@ -7883,460 +7625,6 @@ function App() {
               </div>
             </div>
           </div>
-        )}
-
-        {tab === "mission" && (
-          <section
-            id="panel-mission"
-            role="tabpanel"
-            aria-labelledby="tab-mission"
-            className="panel memory-panel"
-          >
-            <h2 className="panel-title">{t("mission.title")}</h2>
-            <p className="muted">{t("mission.description")}</p>
-            <p className="muted" style={{ marginTop: "0.35rem" }}>
-              {t("mission.intro_detail")}
-            </p>
-            <button type="button" className="refresh-btn" onClick={() => void fetchMission()} disabled={missionLoading}>
-              {missionLoading ? t("common.loading") : t("mission.refresh")}
-            </button>
-            {missionError === "unavailable" && (
-              <p className="error-inline" role="alert">
-                {t("mission.unavailable")}
-              </p>
-            )}
-            {missionError && missionError !== "unavailable" && (
-              <p className="error-inline" role="alert">
-                {missionError}
-              </p>
-            )}
-            {!missionLoading && mission && missionDraft && (
-              <div className="memory-content-wrap mission-panel-body">
-                <nav className="settings-tabs" role="tablist" aria-label={t("mission.title")} style={{ marginBottom: "0.75rem" }}>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={missionSubTab === "goals"}
-                    className={missionSubTab === "goals" ? "active" : ""}
-                    onClick={() => setMissionSubTab("goals")}
-                  >
-                    {t("mission.section_goals")}
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={missionSubTab === "settings"}
-                    className={missionSubTab === "settings" ? "active" : ""}
-                    onClick={() => setMissionSubTab("settings")}
-                  >
-                    {t("mission.section_settings")}
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={missionSubTab === "status"}
-                    className={missionSubTab === "status" ? "active" : ""}
-                    onClick={() => setMissionSubTab("status")}
-                  >
-                    {t("mission.section_status")}
-                  </button>
-                </nav>
-                {missionDirty && (
-                  <p className="muted" role="status">
-                    {t("mission.unsaved")}
-                  </p>
-                )}
-                {missionSubTab === "goals" && (
-                  <>
-                    <label className="settings-field">
-                      <input
-                        type="checkbox"
-                        checked={missionDraft.enabled}
-                        onChange={(e) => setMissionDraft({ ...missionDraft, enabled: e.target.checked })}
-                      />{" "}
-                      {t("mission.enabled")}
-                    </label>
-                    <label className="settings-field">
-                      {t("mission.context")}
-                      <textarea
-                        rows={5}
-                        value={missionDraft.global_context}
-                        onChange={(e) => setMissionDraft({ ...missionDraft, global_context: e.target.value })}
-                      />
-                    </label>
-                    <label className="settings-field">
-                      {t("mission.objective")}
-                      <textarea
-                        rows={5}
-                        value={missionDraft.objective}
-                        onChange={(e) => setMissionDraft({ ...missionDraft, objective: e.target.value })}
-                      />
-                    </label>
-                    <label className="settings-field">
-                      {t("mission.operating_rules")}
-                      <span className="muted" style={{ display: "block", fontWeight: "normal", marginBottom: "0.25rem" }}>
-                        {t("mission.operating_rules_hint")}
-                      </span>
-                      <textarea
-                        rows={5}
-                        value={missionDraft.operating_rules ?? ""}
-                        onChange={(e) => setMissionDraft({ ...missionDraft, operating_rules: e.target.value })}
-                      />
-                    </label>
-                    <h3 className="panel-subtitle" style={{ marginTop: "1rem" }}>
-                      {t("mission.roles_title")}
-                    </h3>
-                    <p className="muted">{t("mission.roles_hint")}</p>
-                    {(missionDraft.role_definitions ?? []).map((row, idx) => (
-                      <div
-                        key={idx}
-                        className="settings-field"
-                        style={{
-                          border: "1px solid color-mix(in srgb, currentColor 18%, transparent)",
-                          borderRadius: 8,
-                          padding: "0.75rem",
-                          marginBottom: "0.5rem",
-                        }}
-                      >
-                        <label className="settings-field" style={{ marginBottom: "0.5rem" }}>
-                          {t("mission.role_name")}
-                          <input
-                            type="text"
-                            value={row.name}
-                            onChange={(e) => {
-                              const next = [...(missionDraft.role_definitions ?? [])];
-                              next[idx] = { ...next[idx], name: e.target.value };
-                              setMissionDraft({ ...missionDraft, role_definitions: next });
-                            }}
-                          />
-                        </label>
-                        <label className="settings-field" style={{ marginBottom: "0.5rem" }}>
-                          {t("mission.role_responsibility")}
-                          <textarea
-                            rows={2}
-                            value={row.responsibility}
-                            onChange={(e) => {
-                              const next = [...(missionDraft.role_definitions ?? [])];
-                              next[idx] = { ...next[idx], responsibility: e.target.value };
-                              setMissionDraft({ ...missionDraft, role_definitions: next });
-                            }}
-                          />
-                        </label>
-                        <label className="settings-field">
-                          {t("mission.role_agent")}
-                          <select
-                            value={row.preferred_agent_type ?? ""}
-                            onChange={(e) => {
-                              const next = [...(missionDraft.role_definitions ?? [])];
-                              const v = e.target.value;
-                              next[idx] = {
-                                ...next[idx],
-                                preferred_agent_type: v === "" ? null : v,
-                              };
-                              setMissionDraft({ ...missionDraft, role_definitions: next });
-                            }}
-                          >
-                            <option value="">{t("mission.role_agent_default")}</option>
-                            {MISSION_HEARTBEAT_AGENT_TYPES.map((ag) => (
-                              <option key={ag} value={ag}>
-                                {ag}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <button
-                          type="button"
-                          className="btn-secondary"
-                          style={{ marginTop: "0.5rem" }}
-                          onClick={() => {
-                            const next = [...(missionDraft.role_definitions ?? [])];
-                            next.splice(idx, 1);
-                            setMissionDraft({ ...missionDraft, role_definitions: next });
-                          }}
-                        >
-                          {t("mission.remove_role")}
-                        </button>
-                      </div>
-                    ))}
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      onClick={() =>
-                        setMissionDraft({
-                          ...missionDraft,
-                          role_definitions: [
-                            ...(missionDraft.role_definitions ?? []),
-                            { name: "", responsibility: "", preferred_agent_type: null },
-                          ],
-                        })
-                      }
-                    >
-                      {t("mission.add_role")}
-                    </button>
-                  </>
-                )}
-                {missionSubTab === "settings" && (
-                  <>
-                    <label className="settings-field">
-                      {t("mission.horizon")}
-                      <select
-                        value={missionDraft.horizon}
-                        onChange={(e) => setMissionDraft({ ...missionDraft, horizon: e.target.value })}
-                      >
-                        <option value="short">{t("mission.horizon_short")}</option>
-                        <option value="medium">{t("mission.horizon_medium")}</option>
-                        <option value="long">{t("mission.horizon_long")}</option>
-                      </select>
-                    </label>
-                    <label className="settings-field">
-                      {t("mission.heartbeat_minutes")}
-                      <input
-                        type="number"
-                        min={1}
-                        value={missionDraft.heartbeat_interval_minutes}
-                        onChange={(e) =>
-                          setMissionDraft({
-                            ...missionDraft,
-                            heartbeat_interval_minutes: Math.max(1, parseInt(e.target.value, 10) || 1),
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="settings-field">
-                      {t("mission.heartbeat_task_type")}
-                      <span className="muted" style={{ display: "block", fontWeight: "normal", marginBottom: "0.25rem" }}>
-                        {t("mission.heartbeat_task_type_hint")}
-                      </span>
-                      <select
-                        value={missionDraft.heartbeat_preferred_task_type ?? "project_manager"}
-                        onChange={(e) =>
-                          setMissionDraft({ ...missionDraft, heartbeat_preferred_task_type: e.target.value })
-                        }
-                      >
-                        {MISSION_HEARTBEAT_AGENT_TYPES.map((ag) => (
-                          <option key={ag} value={ag}>
-                            {ag}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="settings-field">
-                      {t("mission.report_dir")}
-                      <input
-                        type="text"
-                        value={missionDraft.report_dir}
-                        onChange={(e) => setMissionDraft({ ...missionDraft, report_dir: e.target.value })}
-                      />
-                    </label>
-                    <label className="settings-field">
-                      {t("mission.session_id")}
-                      <input
-                        type="text"
-                        value={missionDraft.session_id}
-                        onChange={(e) => setMissionDraft({ ...missionDraft, session_id: e.target.value })}
-                      />
-                    </label>
-                  </>
-                )}
-                {(missionSubTab === "goals" || missionSubTab === "settings") && (
-                  <div className="schedule-detail-actions" style={{ marginTop: "1rem" }}>
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      disabled={missionSaving || !missionDirty}
-                      onClick={async () => {
-                        setMissionSaving(true);
-                        try {
-                          const payload = {
-                            enabled: missionDraft.enabled,
-                            global_context: missionDraft.global_context,
-                            horizon: missionDraft.horizon,
-                            objective: missionDraft.objective,
-                            heartbeat_interval_minutes: missionDraft.heartbeat_interval_minutes,
-                            report_dir: missionDraft.report_dir,
-                            session_id: missionDraft.session_id,
-                            operating_rules: missionDraft.operating_rules ?? "",
-                            role_definitions: missionDraft.role_definitions ?? [],
-                            heartbeat_preferred_task_type:
-                              missionDraft.heartbeat_preferred_task_type ?? "project_manager",
-                          };
-                          let j: MissionApi;
-                          if (E2E_WEB) {
-                            const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission"), {
-                              method: "PUT",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify(payload),
-                            });
-                            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                            j = normalizeMissionApi((await r.json()) as MissionApi);
-                          } else {
-                            j = normalizeMissionApi(
-                              (await invoke<MissionApi>("put_autonomous_mission", {
-                                body: payload,
-                                port: DAEMON_PORT,
-                              })) as MissionApi
-                            );
-                          }
-                          setMission(j);
-                          setMissionDraft(cloneMission(j));
-                        } catch (e) {
-                          setMissionError(String(e));
-                        } finally {
-                          setMissionSaving(false);
-                        }
-                      }}
-                    >
-                      {missionSaving ? "…" : t("mission.save")}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      disabled={missionSaving || !missionDirty}
-                      onClick={() => mission && setMissionDraft(cloneMission(mission))}
-                    >
-                      {t("mission.discard")}
-                    </button>
-                  </div>
-                )}
-                {missionSubTab === "status" && (
-                  <>
-                    <p>
-                      <strong>{t("mission.status")}:</strong> {mission.status}
-                    </p>
-                    {mission.report_path_absolute && (
-                      <p className="muted">
-                        <strong>{t("mission.report_path")}:</strong> {mission.report_path_absolute}
-                      </p>
-                    )}
-                    {(mission.last_heartbeat_at || mission.next_heartbeat_approx_at) && (
-                      <p className="muted">
-                        {mission.last_heartbeat_at && (
-                          <>
-                            {t("mission.last_heartbeat")}: {mission.last_heartbeat_at}{" "}
-                          </>
-                        )}
-                        {mission.next_heartbeat_approx_at && (
-                          <>
-                            · {t("mission.next_heartbeat")}: {mission.next_heartbeat_approx_at}
-                          </>
-                        )}
-                      </p>
-                    )}
-                    <div className="schedule-detail-actions" style={{ marginTop: "0.75rem" }}>
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        disabled={missionSaving}
-                        onClick={async () => {
-                          try {
-                            let j: MissionApi;
-                            if (E2E_WEB) {
-                              const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission/pause"), {
-                                method: "POST",
-                              });
-                              if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                              j = normalizeMissionApi((await r.json()) as MissionApi);
-                            } else {
-                              j = normalizeMissionApi(
-                                (await invoke<MissionApi>("post_autonomous_mission_pause", {
-                                  port: DAEMON_PORT,
-                                })) as MissionApi
-                              );
-                            }
-                            setMission(j);
-                            setMissionDraft(cloneMission(j));
-                          } catch (e) {
-                            setMissionError(String(e));
-                          }
-                        }}
-                      >
-                        {t("mission.pause")}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        disabled={missionSaving}
-                        onClick={async () => {
-                          try {
-                            let j: MissionApi;
-                            if (E2E_WEB) {
-                              const r = await fetch(e2eDaemonHttpUrl("/api/autonomous-mission/resume"), {
-                                method: "POST",
-                              });
-                              if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                              j = normalizeMissionApi((await r.json()) as MissionApi);
-                            } else {
-                              j = normalizeMissionApi(
-                                (await invoke<MissionApi>("post_autonomous_mission_resume", {
-                                  port: DAEMON_PORT,
-                                })) as MissionApi
-                              );
-                            }
-                            setMission(j);
-                            setMissionDraft(cloneMission(j));
-                          } catch (e) {
-                            setMissionError(String(e));
-                          }
-                        }}
-                      >
-                        {t("mission.resume")}
-                      </button>
-                    </div>
-                    <h3 className="panel-subtitle" style={{ marginTop: "1.5rem" }}>
-                      {t("mission.activity_title")}
-                    </h3>
-                    {(() => {
-                      const buckets = Array.from({ length: 7 }, () => 0);
-                      const now = Date.now();
-                      const dayMs = 86400000;
-                      for (const ev of missionEvents) {
-                        const t0 = new Date(ev.at).getTime();
-                        const dayIdx = Math.floor((now - t0) / dayMs);
-                        if (dayIdx >= 0 && dayIdx < 7) buckets[6 - dayIdx] += 1;
-                      }
-                      const max = Math.max(1, ...buckets);
-                      const w = 280;
-                      const h = 80;
-                      const bw = w / 7;
-                      return (
-                        <svg
-                          viewBox={`0 0 ${w} ${h}`}
-                          className="event-advanced-chart"
-                          width={w}
-                          height={h}
-                          aria-label={t("mission.chart_label")}
-                        >
-                          <rect x="0" y="0" width={w} height={h} rx="8" className="event-advanced-chart-bg" />
-                          {buckets.map((n, i) => (
-                            <rect
-                              key={i}
-                              x={i * bw + 2}
-                              y={h - 4 - (n / max) * (h - 12)}
-                              width={bw - 4}
-                              height={Math.max(1, (n / max) * (h - 12))}
-                              fill="currentColor"
-                              opacity={0.55}
-                            />
-                          ))}
-                        </svg>
-                      );
-                    })()}
-                    <ul className="memory-turns-list" style={{ marginTop: "1rem" }}>
-                      {missionEvents.slice(-20).map((ev) => (
-                        <li key={ev.id} className="memory-turn memory-turn-assistant">
-                          <span className="memory-turn-role">{ev.event_type}</span>
-                          <div className="memory-turn-content">
-                            <time dateTime={ev.at}>{ev.at}</time>
-                            {ev.payload != null ? ` — ${JSON.stringify(ev.payload)}` : ""}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-              </div>
-            )}
-          </section>
         )}
 
         {tab === "settings" && (
@@ -8964,274 +8252,75 @@ function App() {
             )}
             {settingsSection === "data" && (
               <div className="settings-section-content">
-                <div className="settings-data-subtabs" role="tablist" aria-label={t("settings.section_data")}>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={dataSourcesSubTab === "rag"}
-                    className={dataSourcesSubTab === "rag" ? "active" : ""}
-                    onClick={() => setDataSourcesSubTab("rag")}
-                  >
-                    {t("settings.section_data_sub_rag")}
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={dataSourcesSubTab === "project_graph"}
-                    className={dataSourcesSubTab === "project_graph" ? "active" : ""}
-                    onClick={() => setDataSourcesSubTab("project_graph")}
-                  >
-                    {t("settings.section_data_sub_graph")}
-                  </button>
-                </div>
-                <div className="settings-data-scroll">
-                  {dataSourcesSubTab === "rag" && (
-                    <>
-                      <h3 className="settings-subtitle">{t("settings.user_rag_title")}</h3>
-                      <p className="settings-doc muted">{t("settings.user_rag_desc")}</p>
-                      {userRagError && (
-                        <p className="error-inline" role="alert">{userRagError}</p>
-                      )}
-                      <input
-                        ref={userRagFileInputRef}
-                        type="file"
-                        accept=".txt,.md,.csv,.json,text/*"
-                        className="sr-only"
-                        aria-hidden
-                        onChange={async (e) => {
-                          const file = e.target.files?.[0];
-                          if (!file) return;
-                          try {
-                            const { content_base64, mime_type } = await readFileAsBase64(file);
-                            await invoke("add_user_rag_document", {
-                              name: file.name,
-                              content_base64: content_base64,
-                              mime_type: mime_type,
-                              port: DAEMON_PORT,
-                            });
-                            fetchUserRagDocuments();
-                          } catch (err) {
-                            setUserRagError(String(err));
-                          }
-                          e.target.value = "";
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="refresh-btn"
-                        onClick={() => userRagFileInputRef.current?.click()}
-                        disabled={userRagLoading}
-                      >
-                        {t("settings.add_document")}
-                      </button>
-                      {userRagLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
-                      {!userRagLoading && userRagDocuments.length === 0 && (
-                        <p className="empty-state">{t("settings.no_documents")}</p>
-                      )}
-                      {!userRagLoading && userRagDocuments.length > 0 && (
-                        <ul className="settings-doc-list" role="list">
-                          {userRagDocuments.map((d) => (
-                            <li key={d.id} className="settings-doc-item">
-                              <span className="settings-doc-name">{d.name}</span>
-                              <span className="settings-doc-meta">{d.added_at.slice(0, 10)}</span>
-                              <button
-                                type="button"
-                                className="settings-doc-delete"
-                                aria-label={`Supprimer ${d.name}`}
-                                onClick={async () => {
-                                  try {
-                                    await invoke("delete_user_rag_document", { id: d.id, port: DAEMON_PORT });
-                                    fetchUserRagDocuments();
-                                  } catch (err) {
-                                    setUserRagError(String(err));
-                                  }
-                                }}
-                              >
-                                {t("settings.delete")}
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </>
-                  )}
-                  {dataSourcesSubTab === "project_graph" && (
-                    <>
-                      <h3 className="settings-subtitle">{t("settings.workspace_graph_title")}</h3>
-                      <p className="settings-doc muted">{t("settings.workspace_graph_desc")}</p>
-                      {projectGraphError && (
-                        <p className="error-inline" role="alert">{projectGraphError}</p>
-                      )}
-                      {projectGraphSuccess && (
-                        <p className="settings-doc" role="status">{projectGraphSuccess}</p>
-                      )}
-                      <h4 className="settings-subheading">{t("settings.project_graph_add_title")}</h4>
-                      <dl className="settings-list">
-                        <dt>{t("settings.project_graph_name")}</dt>
-                        <dd>
-                          <input
-                            type="text"
-                            className="settings-input"
-                            aria-label={t("settings.project_graph_name")}
-                            value={newProjectWsName}
-                            onChange={(e) => setNewProjectWsName(e.target.value)}
-                            placeholder={t("settings.project_graph_name_placeholder")}
-                          />
-                        </dd>
-                        <dt>{t("settings.project_graph_path")}</dt>
-                        <dd>
-                          <input
-                            type="text"
-                            className="settings-input"
-                            aria-label={t("settings.project_graph_path")}
-                            value={newProjectWsPath}
-                            onChange={(e) => setNewProjectWsPath(e.target.value)}
-                            placeholder="C:\path\to\project"
-                          />
-                        </dd>
-                      </dl>
-                      <button
-                        type="button"
-                        className="refresh-btn"
-                        disabled={newProjectWsSubmitting || !newProjectWsName.trim() || !newProjectWsPath.trim()}
-                        onClick={async () => {
-                          setProjectGraphError(null);
-                          setProjectGraphSuccess(null);
-                          setNewProjectWsSubmitting(true);
-                          try {
-                            const out = await invoke<{
-                              files_indexed?: number;
-                              nodes?: number;
-                              edges?: number;
-                            }>("create_project_workspace", {
-                              name: newProjectWsName.trim(),
-                              rootPath: newProjectWsPath.trim(),
-                              rebuild: true,
-                              port: DAEMON_PORT,
-                            });
-                            const fi = typeof out?.files_indexed === "number" ? out.files_indexed : 0;
-                            const nn = typeof out?.nodes === "number" ? out.nodes : 0;
-                            const ee = typeof out?.edges === "number" ? out.edges : 0;
-                            setProjectGraphSuccess(
-                              t("settings.project_graph_created_ok")
-                                .replace("{{files}}", String(fi))
-                                .replace("{{nodes}}", String(nn))
-                                .replace("{{edges}}", String(ee)),
-                            );
-                            setNewProjectWsName("");
-                            setNewProjectWsPath("");
-                            await fetchProjectWorkspaces({ clearError: false });
-                          } catch (err) {
-                            setProjectGraphSuccess(null);
-                            setProjectGraphError(String(err));
-                          } finally {
-                            setNewProjectWsSubmitting(false);
-                          }
-                        }}
-                      >
-                        {newProjectWsSubmitting ? t("common.loading") : t("settings.project_graph_create")}
-                      </button>
-                      <h4 className="settings-subheading">{t("settings.project_graph_list_title")}</h4>
-                      {projectWorkspacesLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
-                      {!projectWorkspacesLoading && projectWorkspaces.length === 0 && (
-                        <p className="empty-state">{t("settings.project_graph_empty")}</p>
-                      )}
-                      {!projectWorkspacesLoading && projectWorkspaces.length > 0 && (
-                        <ul className="settings-project-ws-list" role="list">
-                          {projectWorkspaces.map((w) => (
-                            <li key={w.id} className="settings-project-ws-card">
-                              <div className="settings-project-ws-head">
-                                <strong>{w.name}</strong>
-                                <span className="settings-doc-meta muted">{w.id.slice(0, 8)}…</span>
-                              </div>
-                              <p className="settings-doc muted settings-project-ws-path">{w.root_path}</p>
-                              <p className="settings-doc">
-                                {typeof w.node_count === "number" && typeof w.edge_count === "number"
-                                  ? t("settings.workspace_graph_stats")
-                                      .replace("{{nodes}}", String(w.node_count))
-                                      .replace("{{edges}}", String(w.edge_count))
-                                  : null}
-                                {w.built_at != null && w.built_at !== "" && (
-                                  <>
-                                    {" "}
-                                    {t("settings.workspace_graph_built").replace("{{time}}", String(w.built_at))}
-                                  </>
-                                )}
-                              </p>
-                              <div className="settings-row-actions">
-                                <button
-                                  type="button"
-                                  className="refresh-btn"
-                                  disabled={projectWsBusyId === w.id}
-                                  onClick={async () => {
-                                    setProjectWsBusyId(w.id);
-                                    setProjectGraphError(null);
-                                    try {
-                                      const out = await invoke<{
-                                        files_indexed?: number;
-                                        nodes?: number;
-                                        edges?: number;
-                                      }>("rebuild_project_workspace", {
-                                        id: w.id,
-                                        port: DAEMON_PORT,
-                                      });
-                                      const fi = typeof out?.files_indexed === "number" ? out.files_indexed : 0;
-                                      const nn = typeof out?.nodes === "number" ? out.nodes : 0;
-                                      const ee = typeof out?.edges === "number" ? out.edges : 0;
-                                      setProjectGraphSuccess(
-                                        t("settings.project_graph_rebuild_ok")
-                                          .replace("{{files}}", String(fi))
-                                          .replace("{{nodes}}", String(nn))
-                                          .replace("{{edges}}", String(ee)),
-                                      );
-                                      await fetchProjectWorkspaces({ clearError: false });
-                                    } catch (err) {
-                                      setProjectGraphError(String(err));
-                                    } finally {
-                                      setProjectWsBusyId(null);
-                                    }
-                                  }}
-                                >
-                                  {projectWsBusyId === w.id ? t("common.loading") : t("settings.workspace_graph_rebuild")}
-                                </button>
-                                <a
-                                  className="refresh-btn settings-link-btn"
-                                  href={e2eDaemonHttpUrl(`/api/workspace-graph/workspaces/${encodeURIComponent(w.id)}/html`)}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                >
-                                  {t("settings.workspace_graph_open_html")}
-                                </a>
-                                <button
-                                  type="button"
-                                  className="settings-doc-delete"
-                                  disabled={projectWsBusyId === w.id}
-                                  onClick={async () => {
-                                    if (!window.confirm(t("settings.project_graph_confirm_delete").replace("{{name}}", w.name))) return;
-                                    setProjectWsBusyId(w.id);
-                                    setProjectGraphError(null);
-                                    try {
-                                      await invoke("delete_project_workspace", { id: w.id, port: DAEMON_PORT });
-                                      setProjectGraphSuccess(t("settings.project_graph_deleted"));
-                                      await fetchProjectWorkspaces({ clearError: false });
-                                    } catch (err) {
-                                      setProjectGraphError(String(err));
-                                    } finally {
-                                      setProjectWsBusyId(null);
-                                    }
-                                  }}
-                                >
-                                  {t("settings.delete")}
-                                </button>
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </>
-                  )}
-                </div>
-                <p className="settings-doc">{t("settings.config_note")}</p>
+                <h3 className="settings-subtitle">{t("settings.user_rag_title")}</h3>
+                <p className="settings-doc muted">
+              {t("settings.user_rag_desc")}
+            </p>
+            {userRagError && (
+              <p className="error-inline" role="alert">{userRagError}</p>
+            )}
+            <input
+              ref={userRagFileInputRef}
+              type="file"
+              accept=".txt,.md,.csv,.json,text/*"
+              className="sr-only"
+              aria-hidden
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                try {
+                  const { content_base64, mime_type } = await readFileAsBase64(file);
+                  await invoke("add_user_rag_document", {
+                    name: file.name,
+                    content_base64: content_base64,
+                    mime_type: mime_type,
+                    port: DAEMON_PORT,
+                  });
+                  fetchUserRagDocuments();
+                } catch (err) {
+                  setUserRagError(String(err));
+                }
+                e.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              className="refresh-btn"
+              onClick={() => userRagFileInputRef.current?.click()}
+              disabled={userRagLoading}
+            >
+              {t("settings.add_document")}
+            </button>
+            {userRagLoading && <p className="panel-loading" aria-busy="true">{t("common.loading")}</p>}
+            {!userRagLoading && userRagDocuments.length === 0 && (
+              <p className="empty-state">{t("settings.no_documents")}</p>
+            )}
+            {!userRagLoading && userRagDocuments.length > 0 && (
+              <ul className="settings-doc-list" role="list">
+                {userRagDocuments.map((d) => (
+                  <li key={d.id} className="settings-doc-item">
+                    <span className="settings-doc-name">{d.name}</span>
+                    <span className="settings-doc-meta">{d.added_at.slice(0, 10)}</span>
+                    <button
+                      type="button"
+                      className="settings-doc-delete"
+                      aria-label={`Supprimer ${d.name}`}
+                      onClick={async () => {
+                        try {
+                          await invoke("delete_user_rag_document", { id: d.id, port: DAEMON_PORT });
+                          fetchUserRagDocuments();
+                        } catch (err) {
+                          setUserRagError(String(err));
+                        }
+                      }}
+                    >
+                      {t("settings.delete")}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="settings-doc">{t("settings.config_note")}</p>
               </div>
             )}
           </section>

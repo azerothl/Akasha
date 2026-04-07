@@ -152,11 +152,7 @@ impl Default for TaskTypeConfig {
 impl RoutingConfig {
     pub fn load_from_path(path: &Path) -> anyhow::Result<Self> {
         let s = std::fs::read_to_string(path)?;
-        Self::from_yaml_str(&s)
-    }
-
-    pub fn from_yaml_str(s: &str) -> anyhow::Result<Self> {
-        let config: Self = serde_yaml::from_str(s)?;
+        let config: Self = serde_yaml::from_str(&s)?;
         Ok(config)
     }
 
