@@ -588,14 +588,15 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
-    fn open_empty_store() -> WorkspaceGraphStore {
+    fn open_empty_store() -> (WorkspaceGraphStore, NamedTempFile) {
         let f = NamedTempFile::new().unwrap();
-        WorkspaceGraphStore::open(f.path()).unwrap()
+        let s = WorkspaceGraphStore::open(f.path()).unwrap();
+        (s, f)
     }
 
     #[test]
     fn workspace_isolation_and_search() {
-        let s = open_empty_store();
+        let (s, _tmp) = open_empty_store();
         let a = s.create_workspace("Alpha", "/tmp/a").unwrap();
         let b = s.create_workspace("Beta", "/tmp/b").unwrap();
         s.insert_node(
