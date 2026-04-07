@@ -9,18 +9,13 @@ use crate::latency::{
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use crate::protocol_adapter::unknown_external_message_count;
-use crate::autonomous_mission_config::{
-    merge_from_json_partial, persist_config_and_snapshot, AutonomousMissionConfig, Horizon,
-    MissionStatusYaml,
-};
 use crate::user_profile::UserProfile;
 use akasha_core::{EventEnvelope, EventType};
 use akasha_llm::CompletionRequest;
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use akasha_store::{
-    format_todos_plan_block, parse_todos_from_payload, AutonomousMissionStore, Schedule,
-    ScheduleException, ScheduleExceptionType, ScheduleStore, Task, TaskRunStatus, TaskStatus,
-    TaskStore, TodoStatus, WorkspaceGraphStore,
+    format_todos_plan_block, parse_todos_from_payload, Schedule, ScheduleException,
+    ScheduleExceptionType, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore, TodoStatus,
 };
 use akasha_vault::Vault;
 use std::cmp::Ordering;
@@ -151,54 +146,6 @@ fn parse_write_file_request(args: &[String]) -> Option<(String, String)> {
     let path = normalize_tool_path_hint(args.first()?.as_str());
     let content = args.get(1..).map(|a| a.join("\n")).unwrap_or_default();
     Some((path, content))
-}
-
-/// Parse `memory_store` optional `link_to:` / `link_kind:` into `(target_uuid, relation_kind)` pairs.
-/// Supports `link_to: uuid1+excludes,uuid2+relates_to` (per-target kind after `+`) or
-/// `link_to: uuid1,uuid2` with `link_kind: relates_to` (one kind for all UUIDs; default `related`).
-/// Repeated `link_to:` arguments append segments.
-fn parse_memory_store_explicit_links(extra_args: &[String]) -> Option<Vec<(String, String)>> {
-    let mut segments: Vec<String> = Vec::new();
-    let mut global_kind: Option<String> = None;
-    for arg in extra_args {
-        if let Some(rest) = arg.strip_prefix("link_to:") {
-            for part in rest.split(',') {
-                let p = part.trim();
-                if !p.is_empty() {
-                    segments.push(p.to_string());
-                }
-            }
-        } else if let Some(rest) = arg.strip_prefix("link_kind:") {
-            let k = rest.trim();
-            if !k.is_empty() {
-                global_kind = Some(k.to_string());
-            }
-        }
-    }
-    if segments.is_empty() {
-        return None;
-    }
-    let default_kind = global_kind.unwrap_or_else(|| "related".to_string());
-    let mut out: Vec<(String, String)> = Vec::new();
-    for seg in segments {
-        let seg = seg.trim();
-        if let Some(idx) = seg.rfind('+') {
-            let uuid_part = seg[..idx].trim();
-            let kind_part = seg[idx + 1..].trim();
-            if Uuid::parse_str(uuid_part).is_ok() && !kind_part.is_empty() {
-                out.push((uuid_part.to_string(), kind_part.to_string()));
-                continue;
-            }
-        }
-        if Uuid::parse_str(seg).is_ok() {
-            out.push((seg.to_string(), default_kind.clone()));
-        }
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
 }
 
 enum PluginReputationResetBody {
@@ -1044,7 +991,7 @@ pub fn parse_request(
 
 pub fn json_response(status: &str, body: &str) -> String {
     format!(
-        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         status,
         body.len(),
         body
@@ -1078,8 +1025,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("web_search", "web_search <query> [max_results] — rechercher sur le web (Brave API; BRAVE_API_KEY, web_search_enabled)"),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
     ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
-    ("workspace_graph_search", "workspace_graph_search <query> [--workspace <uuid>] — rechercher dans les graphes projet indexés (nœuds label/chemin) ; limite ~20 lignes ; --workspace pour un espace enregistré uniquement"),
-    ("memory_store", "memory_store <content> <source> [link_to: uuid1+kind1,uuid2+kind2,...] [link_kind: default_kind] — mémoire long terme. Types recommandés : similar, relates_to, related, updates, supersedes, excludes, contradicts, supports, derived_from, same_as, spouse, child, birth_date, … ; par cible utiliser uuid+kind, ou uuid seuls avec link_kind (défaut related)."),
+    ("memory_store", "memory_store <content> <source> [link_to: id1,id2...] [link_kind: spouse|child|birth_date|residence|same_person|...] — stocker en mémoire long terme ; optionnellement lier à des entrées (UUIDs) avec un type de relation."),
     ("memory_delete", "memory_delete <id> — supprimer une entrée de la mémoire long terme par son id (UUID)"),
     ("memory_forget", "memory_forget <query> — supprimer les entrées dont le contenu correspond aux mots-clés (plan moyen terme 9)"),
     ("memory_stats", "memory_stats — nombre d'entrées et taille approximative de la mémoire long terme"),
@@ -2968,7 +2914,6 @@ const ORCH_INLINE_TOOL_FIRST_WORDS: &[&str] = &[
     "install_playwright",
     "read_skill",
     "memory_store",
-    "workspace_graph_search",
     "device_invoke",
     "ask_user",
     "generate_image",
@@ -3494,69 +3439,6 @@ async fn execute_tool_call(
         }
     };
     let result = match tool_name {
-        "workspace_graph_search" => {
-            let Some(sp) = store_path else {
-                return (
-                    false,
-                    "[workspace_graph_search] no task store path".to_string(),
-                    None,
-                );
-            };
-            let sp = sp.to_path_buf();
-            let mut ws_id: Option<String> = None;
-            let mut rest: Vec<String> = Vec::new();
-            let mut it = args.iter().peekable();
-            while let Some(a) = it.next() {
-                if a == "--workspace" {
-                    ws_id = it
-                        .next()
-                        .cloned()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty());
-                } else {
-                    rest.push(a.clone());
-                }
-            }
-            let query = rest.join(" ").trim().to_string();
-            if query.is_empty() {
-                (
-                    false,
-                    "[workspace_graph_search] usage: workspace_graph_search <query> [--workspace <uuid>]"
-                        .to_string(),
-                    None,
-                )
-            } else {
-                let limit = 20usize;
-                match tokio::task::spawn_blocking(move || {
-                    let store = WorkspaceGraphStore::open(&sp)?;
-                    store.search_graph_context(&query, limit, ws_id.as_deref())
-                })
-                .await
-                {
-                    Ok(Ok(lines)) => {
-                        if lines.is_empty() {
-                            (
-                                true,
-                                "[workspace_graph_search] no matching nodes".to_string(),
-                                None,
-                            )
-                        } else {
-                            (
-                                true,
-                                format!("[workspace_graph_search]\n{}", lines.join("\n")),
-                                None,
-                            )
-                        }
-                    }
-                    Ok(Err(e)) => (false, format!("[workspace_graph_search] {}", e), None),
-                    Err(e) => (
-                        false,
-                        format!("[workspace_graph_search] join: {}", e),
-                        None,
-                    ),
-                }
-            }
-        }
         "read_file" => {
             let path_str = normalize_tool_path_hint(&path_arg_joined(args));
             if path_str.is_empty() {
@@ -3863,15 +3745,34 @@ async fn execute_tool_call(
             let content = args.get(0).map(|a| a.as_str()).unwrap_or("");
             let source = args.get(1).map(|a| a.as_str()).unwrap_or("agent");
             if content.is_empty() {
-                return (false, "[memory_store] usage: memory_store <content> <source> [link_to: uuid+kind,...|uuid,...] [link_kind: default_for_plain_uuids]".to_string(), None);
+                return (false, "[memory_store] usage: memory_store <content> <source> [link_to: id1,id2...] [link_kind: spouse|child|birth_date|residence|...]".to_string(), None);
             }
-            let explicit_links = parse_memory_store_explicit_links(args.get(2..).unwrap_or(&[]));
+            let mut link_to_ids: Option<Vec<String>> = None;
+            let mut link_kind: Option<String> = None;
+            for arg in args.get(2..).unwrap_or(&[]).iter().map(|a| a.as_str()) {
+                if let Some(rest) = arg.strip_prefix("link_to:") {
+                    let ids: Vec<String> = rest
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .collect();
+                    if !ids.is_empty() {
+                        link_to_ids = Some(ids);
+                    }
+                } else if let Some(rest) = arg.strip_prefix("link_kind:") {
+                    let k = rest.trim();
+                    if !k.is_empty() {
+                        link_kind = Some(k.to_string());
+                    }
+                }
+            }
             match long_term_client {
                 Some(client) => {
                     let client = client.clone();
                     let content = content.to_string();
                     let source = source.to_string();
-                    let out = tokio::task::spawn_blocking(move || client.promote(content, source, None, None, None, None, None, None, explicit_links))
+                    let out = tokio::task::spawn_blocking(move || client.promote(content, source, None, None, None, None, None, None, link_to_ids, link_kind))
                         .await
                         .ok()
                         .and_then(|r| r.ok());
@@ -5049,7 +4950,7 @@ async fn compact_short_term_if_needed(
                     let session_id_attr = session_id.to_string();
                     let client = client.clone();
                     tokio::task::spawn_blocking(move || {
-                        if let Err(e) = client.promote(summary.clone(), "compaction".to_string(), None, None, Some(session_id_attr.clone()), Some(1), Some("session".to_string()), None, None) {
+                        if let Err(e) = client.promote(summary.clone(), "compaction".to_string(), None, None, Some(session_id_attr.clone()), Some(1), Some("session".to_string()), None, None, None) {
                             tracing::warn!(error = %e, "Long-term promote after compaction failed");
                         } else if let Err(e) = client.emit_event("memory_promoted".to_string(), summary, None, None, Some(session_id_attr), None, Some(1), Some("session".to_string()), Some("compaction".to_string())) {
                             tracing::debug!(error = %e, "Episodic emit after compaction promote failed");
@@ -5136,6 +5037,7 @@ Factual response in English.\n\n{}",
                         None,
                         None,
                         Some(1),
+                        None,
                         None,
                         None,
                         None,
@@ -5303,7 +5205,6 @@ struct MemoryProfile {
     episodic_limit: usize,
     facts_limit: usize,
     user_rag_top_k: usize,
-    workspace_graph_top_k: usize,
     expand_by_graph: bool,
     compact_before_prompt: bool,
     allow_project_recall: bool,
@@ -5331,7 +5232,6 @@ fn memory_profile_for_task(
             episodic_limit: 0,
             facts_limit: 0,
             user_rag_top_k: 0,
-            workspace_graph_top_k: 0,
             expand_by_graph: false,
             compact_before_prompt: false,
             allow_project_recall: false,
@@ -5353,7 +5253,6 @@ fn memory_profile_for_task(
             episodic_limit: 5,
             facts_limit: 10,
             user_rag_top_k: 5,
-            workspace_graph_top_k: 5,
             expand_by_graph: std::env::var("AKASHA_GRAPH_EXPAND").ok().as_deref() == Some("1"),
             compact_before_prompt: true,
             allow_project_recall: true,
@@ -5367,7 +5266,6 @@ fn memory_profile_for_task(
             episodic_limit: 1,
             facts_limit: 0,
             user_rag_top_k: 0,
-            workspace_graph_top_k: 0,
             expand_by_graph: false,
             compact_before_prompt: false,
             allow_project_recall: false,
@@ -5562,7 +5460,6 @@ pub(crate) async fn run_message_via_llm(
     device_bridge: Option<std::sync::Arc<crate::device_bridge::DeviceBridge>>,
     workspace_store: Option<TaskWorkspaceStore>,
     browser_registry: Option<crate::browser::BrowserSessionRegistry>,
-    autonomous_mission: Option<Arc<RwLock<AutonomousMissionConfig>>>,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -5649,7 +5546,6 @@ pub(crate) async fn run_message_via_llm(
             episodic_limit: 0,
             facts_limit: 0,
             user_rag_top_k: 0,
-            workspace_graph_top_k: 0,
             expand_by_graph: false,
             compact_before_prompt: false,
             allow_project_recall: false,
@@ -5881,25 +5777,6 @@ pub(crate) async fn run_message_via_llm(
     user_prefix.push_str(
         "Reply in the same language as the user message below (French, English, etc.).\n\n",
     );
-    if let Some(ref am) = autonomous_mission {
-        let g = am.read().await;
-        if g.enabled && g.status == MissionStatusYaml::Active && session_id == g.session_id {
-            user_prefix.push_str(
-                "\n\n[Autonomous mission mode — do not ask the user questions]\n\
-                - Do NOT ask clarifying questions unless a hard blocker remains (missing vault credentials, or tools_policy denies the action).\n\
-                - Prefer tools (read_file, write_file, memory_store, web_search, run_command) and record decisions in markdown under the mission report directory.\n",
-            );
-            if !g.operating_rules.trim().is_empty() {
-                user_prefix.push_str("- Mission operating rules:\n");
-                for line in g.operating_rules.lines().take(32) {
-                    user_prefix.push_str("  ");
-                    user_prefix.push_str(line);
-                    user_prefix.push('\n');
-                }
-                user_prefix.push('\n');
-            }
-        }
-    }
     let turns_empty = match &short_term {
         Some(st) => st.get_turns(&session_id).await.is_empty(),
         None => true,
@@ -5954,30 +5831,6 @@ pub(crate) async fn run_message_via_llm(
             for c in &chunks {
                 user_prefix.push_str("- ");
                 user_prefix.push_str(&c.replace('\n', " "));
-                user_prefix.push_str("\n");
-            }
-            user_prefix.push_str("\n");
-        }
-    }
-    if memory_profile.workspace_graph_top_k > 0 {
-        let graph_query = message.clone();
-        let graph_k = memory_profile.workspace_graph_top_k;
-        let sp = store_path.clone();
-        let graph_lines = tokio::task::spawn_blocking(move || {
-            let store = WorkspaceGraphStore::open(&sp)?;
-            store.search_graph_context(&graph_query, graph_k, None)
-        })
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_default();
-        if !graph_lines.is_empty() {
-            user_prefix.push_str(
-                "[Project knowledge graphs — indexed project folders; use if relevant]\n",
-            );
-            for line in &graph_lines {
-                user_prefix.push_str("- ");
-                user_prefix.push_str(line);
                 user_prefix.push_str("\n");
             }
             user_prefix.push_str("\n");
@@ -6317,11 +6170,6 @@ pub(crate) async fn run_message_via_llm(
         let mut strict_no_tool_rounds = 0u32;
         let mut strict_successful_tool_calls = 0u32;
         let mut strict_preferred_tool_replay_input: Option<String> = None;
-        // In strict tools-first mode, deterministic preferred-tool attempts must run only once before
-        // the first LLM call. `round` stays 0 until the model emits parseable TOOL lines, so without
-        // this flag we would re-run deterministic maps (etc.) on every strict re-prompt and burn a
-        // full LLM timeout budget on a duplicate hung stream.
-        let mut deterministic_preferred_attempted = false;
         // Orchestrated deliverables: re-prompts when the model returns no parseable TOOL lines.
         let mut orch_disk_write_nags = 0u32;
         let mut last_captured_image_base64: Option<String> = None;
@@ -6358,10 +6206,7 @@ pub(crate) async fn run_message_via_llm(
 
             // Deterministic first attempt in strict tools-first mode:
             // try preferred tools with the full user request as input before asking the LLM again.
-            let run_deterministic_preferred = strict_mode_active
-                && (strict_preferred_tool_replay_input.is_some()
-                    || (!deterministic_preferred_attempted && round == 0));
-            if run_deterministic_preferred {
+            if strict_mode_active && (round == 0 || strict_preferred_tool_replay_input.is_some()) {
                 if let (Some(enforcer), Some(exec)) = (
                     &runtime_tool_routing_enforcer,
                     tools_executor_snapshot.as_ref(),
@@ -6474,7 +6319,6 @@ pub(crate) async fn run_message_via_llm(
                     .with_correlation(timeline_correlation),
                 );
                 }
-                deterministic_preferred_attempted = true;
             }
 
             // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
@@ -8092,6 +7936,7 @@ pub(crate) async fn run_message_via_llm(
                         Some("global_user".to_string()),
                         None,
                         None,
+                        None,
                     );
                     if res.is_ok() {
                         let _ = client.emit_event(
@@ -8254,7 +8099,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                     let c = content.clone();
                     let s = source.clone();
                     match tokio::task::spawn_blocking(move || {
-                        client.promote(c, s, None, None, None, None, None, None, None)
+                        client.promote(c, s, None, None, None, None, None, None, None, None)
                     })
                     .await
                     {
@@ -8540,171 +8385,6 @@ where
     Ok(())
 }
 
-fn split_path_query(path: &str) -> (&str, &str) {
-    path.split_once('?').map(|(p, q)| (p, q)).unwrap_or((path, ""))
-}
-
-fn parse_query_param(query: &str, key: &str) -> Option<String> {
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == key {
-                return Some(
-                    urlencoding::decode(v)
-                        .map(|c| c.into_owned())
-                        .unwrap_or_else(|_| v.to_string()),
-                );
-            }
-        }
-    }
-    None
-}
-
-async fn get_autonomous_mission_state(
-    data_dir: &Path,
-    store_path: &Path,
-    am: &Arc<RwLock<AutonomousMissionConfig>>,
-) -> String {
-    let cfg = am.read().await;
-    let am_store = match AutonomousMissionStore::open(store_path) {
-        Ok(s) => s,
-        Err(e) => {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    };
-    let (last_hb, last_tid) = am_store.get_meta().unwrap_or((None, None));
-    let report_abs = data_dir.join(&cfg.report_dir);
-    let horizon_s = match cfg.horizon {
-        Horizon::Short => "short",
-        Horizon::Medium => "medium",
-        Horizon::Long => "long",
-    };
-    let status_s = match cfg.status {
-        MissionStatusYaml::Active => "active",
-        MissionStatusYaml::Paused => "paused",
-        MissionStatusYaml::Completed => "completed",
-    };
-    let next_hb = last_hb.map(|t| t + chrono::Duration::minutes(cfg.heartbeat_interval_minutes as i64));
-    let role_definitions: Vec<serde_json::Value> = cfg
-        .role_definitions
-        .iter()
-        .map(|r| {
-            serde_json::json!({
-                "name": r.name,
-                "responsibility": r.responsibility,
-                "preferred_agent_type": r.preferred_agent_type,
-            })
-        })
-        .collect();
-    let body = serde_json::json!({
-        "enabled": cfg.enabled,
-        "global_context": cfg.global_context.as_str(),
-        "horizon": horizon_s,
-        "objective": cfg.objective.as_str(),
-        "heartbeat_interval_minutes": cfg.heartbeat_interval_minutes,
-        "report_dir": cfg.report_dir.as_str(),
-        "report_path_absolute": report_abs.display().to_string(),
-        "session_id": cfg.session_id.as_str(),
-        "status": status_s,
-        "operating_rules": cfg.operating_rules.as_str(),
-        "role_definitions": role_definitions,
-        "heartbeat_preferred_task_type": cfg.heartbeat_preferred_task_type.as_str(),
-        "last_heartbeat_at": last_hb.map(|t| t.to_rfc3339()),
-        "last_task_id": last_tid.map(|u| u.to_string()),
-        "next_heartbeat_approx_at": next_hb.map(|t| t.to_rfc3339()),
-    });
-    json_response("200 OK", &body.to_string())
-}
-
-async fn put_autonomous_mission_state(
-    data_dir: &Path,
-    store_path: &Path,
-    am: &Arc<RwLock<AutonomousMissionConfig>>,
-    body: &[u8],
-) -> String {
-    let v: serde_json::Value = match serde_json::from_slice(body) {
-        Ok(x) => x,
-        Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
-    };
-    {
-        let mut w = am.write().await;
-        let _ = merge_from_json_partial(&mut *w, &v);
-        if let Err(e) = persist_config_and_snapshot(data_dir, store_path, &*w) {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    }
-    get_autonomous_mission_state(data_dir, store_path, am).await
-}
-
-async fn get_autonomous_mission_events_list(store_path: &Path, query: &str) -> String {
-    let limit = parse_query_param(query, "limit")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(100)
-        .min(1000);
-    let since = parse_query_param(query, "since").and_then(|s| {
-        chrono::DateTime::parse_from_rfc3339(s.trim())
-            .ok()
-            .map(|d| d.with_timezone(&chrono::Utc))
-    });
-    let am_store = match AutonomousMissionStore::open(store_path) {
-        Ok(s) => s,
-        Err(e) => {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    };
-    let events = match am_store.list_events_since(since, limit) {
-        Ok(e) => e,
-        Err(e) => {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    };
-    let arr: Vec<_> = events
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "id": e.id,
-                "at": e.at.to_rfc3339(),
-                "event_type": e.event_type,
-                "payload": e.payload,
-            })
-        })
-        .collect();
-    json_response("200 OK", &serde_json::json!({ "events": arr }).to_string())
-}
-
-async fn post_autonomous_mission_status(
-    data_dir: &Path,
-    store_path: &Path,
-    am: &Arc<RwLock<AutonomousMissionConfig>>,
-    status: MissionStatusYaml,
-) -> String {
-    {
-        let mut w = am.write().await;
-        w.status = status;
-        if let Err(e) = persist_config_and_snapshot(data_dir, store_path, &*w) {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    }
-    get_autonomous_mission_state(data_dir, store_path, am).await
-}
-
 pub async fn handle_api(
     method: &str,
     path: &str,
@@ -8733,7 +8413,6 @@ pub async fn handle_api(
     update_cache: &UpdateCheckCache,
     task_usage_store: &TaskUsageStore,
     device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
-    autonomous_mission: Option<Arc<RwLock<AutonomousMissionConfig>>>,
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
@@ -8749,74 +8428,13 @@ pub async fn handle_api(
                 || origin.starts_with("http://127.0.0.1")
                 || origin.starts_with("https://localhost")
                 || origin.starts_with("https://127.0.0.1")
-                || origin.starts_with("http://tauri.localhost")
-                || origin.starts_with("https://tauri.localhost")
-                || origin.starts_with("tauri://");
+                || origin.starts_with("tauri://")
+                || origin.starts_with("https://tauri.localhost");
             if !is_local {
                 tracing::warn!(origin = %origin, method = %method, path = %path, "CSRF: rejected request from non-local origin");
                 return json_response("403 Forbidden", r#"{"error":"origin_not_allowed"}"#);
             }
         }
-    }
-
-    let (path_only, query_str) = split_path_query(path);
-
-    if let Some(resp) = crate::api_workspace_graph::handle_workspace_graph(
-        method,
-        path_only,
-        body.as_deref(),
-        data_dir,
-        store_path,
-    )
-    .await
-    {
-        return resp;
-    }
-
-    if path_only == "/api/autonomous-mission" {
-        let Some(ref am) = autonomous_mission else {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
-        };
-        if method == "GET" {
-            return get_autonomous_mission_state(data_dir, store_path, am).await;
-        }
-        if method == "PUT" {
-            let Some(ref b) = body else {
-                return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-            };
-            return put_autonomous_mission_state(data_dir, store_path, am, b).await;
-        }
-        return json_response("405 Method Not Allowed", r#"{"error":"method_not_allowed"}"#);
-    }
-    if path_only == "/api/autonomous-mission/events" && method == "GET" {
-        if autonomous_mission.is_none() {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
-        }
-        return get_autonomous_mission_events_list(store_path, query_str).await;
-    }
-    if path_only == "/api/autonomous-mission/pause" && method == "POST" {
-        let Some(ref am) = autonomous_mission else {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
-        };
-        return post_autonomous_mission_status(data_dir, store_path, am, MissionStatusYaml::Paused).await;
-    }
-    if path_only == "/api/autonomous-mission/resume" && method == "POST" {
-        let Some(ref am) = autonomous_mission else {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
-        };
-        return post_autonomous_mission_status(data_dir, store_path, am, MissionStatusYaml::Active).await;
     }
 
     if method == "GET" && (path == "/" || path.is_empty()) {
@@ -9575,7 +9193,7 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
-    // POST /api/memory/rebuild-relations — recompute embedding-based relations (similar / relates_to tiers)
+    // POST /api/memory/rebuild-relations — recompute "similar" relations for all existing entries
     if method == "POST" && path == "/api/memory/rebuild-relations" {
         const DEFAULT_MAX_PER_ENTRY: usize = 5;
         let result = match long_term_client {
@@ -9917,11 +9535,10 @@ pub async fn handle_api(
             _ => (false, None),
         };
 
-        let npm_exe = if cfg!(windows) { "npm.cmd" } else { "npm" };
         let npm_on_path = matches!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(3),
-                tokio::process::Command::new(npm_exe)
+                tokio::process::Command::new("npm")
                     .arg("--version")
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::null())
@@ -12176,9 +11793,8 @@ mod tests {
         looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
         normalize_tool_path_hint, packaged_spec_check_ok, parse_content_length,
         parse_device_invoke_params, parse_generate_image_tool_args,
-        parse_memory_store_explicit_links, parse_plugin_reputation_reset_body, parse_run_command_args,
-        parse_skill_install_url, parse_tool_calls, parse_write_file_request,
-        resolve_run_command_working_dir,
+        parse_plugin_reputation_reset_body, parse_run_command_args, parse_skill_install_url,
+        parse_tool_calls, parse_write_file_request, resolve_run_command_working_dir,
         response_looks_off_topic_for_small_talk, rewrite_workspace_plan_key_to_lineage_root,
         rewrite_workspace_plan_path_str, small_talk_fast_lane, PluginReputationResetBody,
         SessionRecallIntent, SessionRecallRange, SmallTalkLanguage,
@@ -12331,7 +11947,6 @@ mod tests {
         let profile = memory_profile_for_task("Bonjour, ça va ?", "conversation", false, false);
         assert_eq!(profile.semantic_top_k, 2);
         assert_eq!(profile.user_rag_top_k, 0);
-        assert_eq!(profile.workspace_graph_top_k, 0);
         assert!(!profile.expand_by_graph);
         assert!(!profile.compact_before_prompt);
     }
@@ -12347,7 +11962,6 @@ mod tests {
         assert_eq!(profile.semantic_top_k, 0);
         assert_eq!(profile.episodic_limit, 0);
         assert_eq!(profile.user_rag_top_k, 0);
-        assert_eq!(profile.workspace_graph_top_k, 0);
         assert!(!profile.compact_before_prompt);
     }
 
@@ -12498,31 +12112,6 @@ mod tests {
         let (path, content) = parse_write_file_request(&args).expect("json payload should parse");
         assert_eq!(path, "workspace:/project_plan.md");
         assert!(content.contains("# Plan"));
-    }
-
-    #[test]
-    fn parse_memory_store_explicit_links_uuid_plus_kind() {
-        let u = "550e8400-e29b-41d4-a716-446655440000";
-        let args = vec![format!("link_to:{u}+excludes")];
-        let p = parse_memory_store_explicit_links(&args).expect("links");
-        assert_eq!(p.len(), 1);
-        assert_eq!(p[0].0, u);
-        assert_eq!(p[0].1, "excludes");
-    }
-
-    #[test]
-    fn parse_memory_store_explicit_links_plain_uuids_and_global_kind() {
-        let a = "550e8400-e29b-41d4-a716-446655440001";
-        let b = "550e8400-e29b-41d4-a716-446655440002";
-        let args = vec![
-            format!("link_to:{a},{b}"),
-            "link_kind:relates_to".to_string(),
-        ];
-        let p = parse_memory_store_explicit_links(&args).expect("links");
-        assert_eq!(p, vec![
-            (a.to_string(), "relates_to".to_string()),
-            (b.to_string(), "relates_to".to_string()),
-        ]);
     }
 
     #[test]

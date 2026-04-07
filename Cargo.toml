@@ -16,7 +16,6 @@ members = [
     "crates/akasha-cli",
     "crates/akasha-evals",
     "crates/akasha-tui",
-    "crates/akasha-workspace-graph",
 ]
 exclude = [
     "apps/akasha-ui/src-tauri",

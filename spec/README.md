@@ -130,7 +130,6 @@ Voir [§1](#1-vision-et-périmètre) (scope, FR, NFR, personas). Les paires 01/0
 |----------|-------------|
 | [47_memory_4_layers.md](47_memory_4_layers.md) | Mémoire à quatre couches (complément au [06_memory_model.md](06_memory_model.md)) |
 | [46_memory_facts_knowledge_graph.md](46_memory_facts_knowledge_graph.md) | Faits, graphe de connaissances |
-| [54_workspace_project_knowledge_graph.md](54_workspace_project_knowledge_graph.md) | Graphes projet multi-workspaces (indexation, API, UI, agents) |
 | [48_gateway_layer.md](48_gateway_layer.md) | Couche gateway (enveloppe messages, cycle de vie tâches) |
 | [49_policy_engine.md](49_policy_engine.md) | Moteur de politique (transitions tâches, défauts sûrs) |
 | [observability.md](observability.md) | Observabilité : métriques, timeline, diagnostic |

@@ -28,18 +28,6 @@ Enrichir la mémoire long terme avec :
 - Mémoire long terme actuelle avec attribution (entity_id, process_id, session_id) et métadonnées (title, tags) — en place.
 - Décision sur le moment d’extraction (batch, après chaque promote, ou à la demande).
 
-## Types de relations (`memory_relations.kind`)
-
-La table accepte toute chaîne non vide. **Valeurs recommandées** (pour le graphe et les outils) :
-
-| Origine | Exemples de `kind` |
-|--------|---------------------|
-| Automatique (similarité d’embedding) | `similar`, `relates_to` (seuils cosinus dans `akasha_store::relation_kind_from_embedding_similarity`) |
-| Outil `memory_store` / JSON | `related`, `updates`, `supersedes`, `excludes`, `contradicts`, `supports`, `derived_from`, `same_as`, `spouse`, `child`, `birth_date`, … |
-| JSON structuré | Champ optionnel `"memory_edges": [ { "to": "<uuid>", "kind": "excludes" }, ... ]` (voir inférence dans le daemon) |
-
-Heuristiques texte légères (marqueurs « correction », « incompatible », etc.) peuvent forcer `updates` / `excludes` / `contradicts` sur les liens auto-générés par embedding. Variable réservée `AKASHA_MEMORY_EDGE_LLM` : étiquetage LLM futur.
-
 ## Référence
 
 Comparaison et pistes détaillées : plan « Comparaison mémoire OpenClaw vs Akasha » (court/moyen/long terme).

@@ -40,29 +40,6 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a * norm_b)
 }
 
-// --- Automatic graph edges from embedding similarity (tiers; documented in spec/46_memory_facts_knowledge_graph.md) ---
-
-/// Below this cosine similarity, no automatic semantic edge is created (reduces noise).
-pub const AUTO_RELATION_MIN_COSINE: f32 = 0.35;
-/// Cosine at or above: edge kind `similar` (strong topical match).
-pub const AUTO_RELATION_SIMILAR_THRESHOLD: f32 = 0.82;
-/// Cosine in \[AUTO_RELATION_RELATES_THRESHOLD, AUTO_RELATION_SIMILAR_THRESHOLD): `relates_to`.
-pub const AUTO_RELATION_RELATES_THRESHOLD: f32 = 0.55;
-
-/// Map embedding cosine similarity to a relation `kind` for automatic links, or `None` to skip.
-pub fn relation_kind_from_embedding_similarity(cosine: f32) -> Option<&'static str> {
-    if cosine < AUTO_RELATION_MIN_COSINE {
-        return None;
-    }
-    if cosine >= AUTO_RELATION_SIMILAR_THRESHOLD {
-        Some("similar")
-    } else if cosine >= AUTO_RELATION_RELATES_THRESHOLD {
-        Some("relates_to")
-    } else {
-        None
-    }
-}
-
 /// Maximum embedding blob size (bytes). Prevents huge allocation from corrupted/oversized DB blobs.
 /// 1M f32s = 4 MiB; real models use 384–4096 dimensions.
 const MAX_EMBEDDING_BYTES: usize = 4 * 1024 * 1024;
@@ -345,9 +322,8 @@ impl LongTermStore {
         Ok(out)
     }
 
-    /// Recompute semantic relations for all entries: for each entry, find up to `max_per_entry`
-    /// most similar other entries by embedding and insert relations with kinds `similar` or `relates_to`
-    /// (see [`relation_kind_from_embedding_similarity`]).
+    /// Recompute "similar" relations for all entries: for each entry, find up to `max_per_entry`
+    /// most similar other entries by embedding and insert relation (from_id, to_id, "similar").
     /// Duplicates are ignored (INSERT OR IGNORE). Returns the number of new relations inserted.
     pub fn rebuild_similar_relations(&self, max_per_entry: usize) -> anyhow::Result<u64> {
         let rows = self.get_all_with_embedding(None)?;
@@ -380,18 +356,10 @@ impl LongTermStore {
                 .filter(|(sim, _)| *sim > 0.0)
                 .collect();
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            let mut n = 0usize;
-            for (sim, to_id) in scored {
-                if n >= max_per_entry {
-                    break;
-                }
-                let Some(kind) = relation_kind_from_embedding_similarity(sim) else {
-                    continue;
-                };
+            for (_, to_id) in scored.into_iter().take(max_per_entry) {
                 if let Ok(to_uuid) = Uuid::parse_str(to_id) {
-                    let _ = self.insert_relation(from_uuid, to_uuid, kind);
+                    let _ = self.insert_relation(from_uuid, to_uuid, "similar");
                     inserted += self.conn.changes() as u64;
-                    n += 1;
                 }
             }
         }
@@ -679,20 +647,6 @@ impl LongTermStore {
         top_k: usize,
         filter: Option<&MemorySearchFilter>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
-        Ok(self
-            .search_by_embedding_with_scores(query_embedding, top_k, filter)?
-            .into_iter()
-            .map(|(_, e)| e)
-            .collect())
-    }
-
-    /// Same as [`Self::search_by_embedding`], but each entry includes its cosine score (for tiered relation kinds).
-    pub fn search_by_embedding_with_scores(
-        &self,
-        query_embedding: &[f32],
-        top_k: usize,
-        filter: Option<&MemorySearchFilter>,
-    ) -> anyhow::Result<Vec<(f32, MemoryEntry)>> {
         let rows = self.get_all_with_embedding(filter)?;
         let mut scored: Vec<(f32, (String, String, Vec<u8>, String, String, Option<i64>, Option<String>, Option<String>))> = rows
             .into_iter()
@@ -703,10 +657,10 @@ impl LongTermStore {
             })
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let out: Vec<(f32, MemoryEntry)> = scored
+        let out: Vec<MemoryEntry> = scored
             .into_iter()
             .take(top_k)
-            .map(|(sim, (id, content, embedding, created_at, source, importance, scope, expires_at_s))| {
+            .map(|(_, (id, content, embedding, created_at, source, importance, scope, expires_at_s))| {
                 let created_at = DateTime::parse_from_rfc3339(&created_at)
                     .map(|dt| dt.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now());
@@ -714,7 +668,7 @@ impl LongTermStore {
                     .as_ref()
                     .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&Utc));
-                let entry = MemoryEntry {
+                MemoryEntry {
                     id: Uuid::parse_str(&id).unwrap_or_else(|_| Uuid::nil()),
                     content,
                     embedding,
@@ -723,8 +677,7 @@ impl LongTermStore {
                     importance,
                     scope,
                     expires_at,
-                };
-                (sim, entry)
+                }
             })
             .collect();
         Ok(out)
@@ -768,17 +721,8 @@ mod tests {
     }
 
     #[test]
-    fn relation_kind_from_embedding_similarity_tiers() {
-        assert_eq!(relation_kind_from_embedding_similarity(0.34), None);
-        assert_eq!(relation_kind_from_embedding_similarity(0.5), None);
-        assert_eq!(relation_kind_from_embedding_similarity(0.6), Some("relates_to"));
-        assert_eq!(relation_kind_from_embedding_similarity(0.85), Some("similar"));
-        assert_eq!(relation_kind_from_embedding_similarity(1.0), Some("similar"));
-    }
-
-    #[test]
     fn decode_embedding_bytes_roundtrip() {
-        let v = [1.0f32, -0.5, 0.0, 2.5];
+        let v = [1.0f32, -0.5, 0.0, 3.14];
         let bytes = embedding_f32_to_bytes(&v);
         let decoded = decode_embedding_bytes(&bytes);
         assert_eq!(decoded.len(), v.len());

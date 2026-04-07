@@ -1,7 +1,6 @@
 //! Long-term memory actor: runs on a dedicated thread (SQLite and embedder are !Send), services search/insert via channel.
 //! When neither "embeddings" nor "embeddings-tract" is enabled, no-op client and start_memory_actor returns Err.
 
-use crate::memory_relation_semantic::auto_relation_kind;
 use std::path::Path;
 use std::thread;
 
@@ -21,8 +20,9 @@ pub enum MemoryRequest {
         importance: Option<i64>,
         scope: Option<String>,
         expires_at: Option<String>,
-        /// Graph RAG: explicit edges `(to_entry_uuid, kind)` from the agent tool (see `memory_store`).
-        explicit_links: Option<Vec<(String, String)>>,
+        /// Graph RAG: link new entry to these memory entry ids (kind = link_kind or "related").
+        link_to_ids: Option<Vec<String>>,
+        link_kind: Option<String>,
     },
     List { limit: usize, offset: usize },
     Delete { id: String },
@@ -58,7 +58,7 @@ pub enum MemoryRequest {
     GetContentsByIds { ids: Vec<String> },
     /// Graph RAG: get relations for a batch of entry ids (from_id -> [(to_id, kind)]).
     GetRelationsForEntries { ids: Vec<String> },
-    /// Recompute embedding-tier relations (`similar` / `relates_to`) for all entries (graph display).
+    /// Recompute "similar" relations for all existing entries (for graph display).
     RebuildSimilarRelations { max_per_entry: usize },
 }
 
@@ -124,12 +124,13 @@ impl LongTermMemoryClient {
         importance: Option<i64>,
         scope: Option<String>,
         expires_at: Option<String>,
-        explicit_links: Option<Vec<(String, String)>>,
+        link_to_ids: Option<Vec<String>>,
+        link_kind: Option<String>,
     ) -> Result<(), String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-            if self.tx.send((MemoryRequest::Promote { content, source, entity_id, process_id, session_id, importance, scope, expires_at, explicit_links }, resp_tx)).is_err() {
+            if self.tx.send((MemoryRequest::Promote { content, source, entity_id, process_id, session_id, importance, scope, expires_at, link_to_ids, link_kind }, resp_tx)).is_err() {
                 return Err("memory actor disconnected".into());
             }
             match resp_rx.blocking_recv() {
@@ -139,7 +140,7 @@ impl LongTermMemoryClient {
         }
         #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
         {
-            let _ = (content, source, entity_id, process_id, session_id, importance, scope, expires_at, explicit_links);
+            let _ = (content, source, entity_id, process_id, session_id, importance, scope, expires_at, link_to_ids, link_kind);
             Ok(())
         }
     }
@@ -498,7 +499,7 @@ pub fn start_memory_actor(
                         };
                         MemoryResponse::Search(contents)
                     }
-                    MemoryRequest::Promote { content, source, entity_id, process_id, session_id, importance, scope, expires_at, explicit_links } => {
+                    MemoryRequest::Promote { content, source, entity_id, process_id, session_id, importance, scope, expires_at, link_to_ids, link_kind } => {
                         let already_exists = store.content_exists(&content).unwrap_or(false);
                         if already_exists {
                             tracing::debug!(content = %content.chars().take(60).collect::<String>(), "Skipping duplicate long-term memory entry");
@@ -535,31 +536,27 @@ pub fn start_memory_actor(
                                         }
                                     }
                                     const MAX_LINK_TO: usize = 10;
-                                    if let Some(links) = explicit_links {
-                                        for (to_id_str, kind) in links.into_iter().take(MAX_LINK_TO) {
-                                            if let Ok(to_id) = Uuid::parse_str(to_id_str.trim()) {
-                                                if to_id != id {
-                                                    let _ = store.insert_relation(id, to_id, kind.trim());
-                                                }
+                                    let kind = link_kind.as_deref().unwrap_or("related");
+                                    if let Some(ref ids) = link_to_ids {
+                                        for to_id_str in ids.iter().take(MAX_LINK_TO) {
+                                            if let Ok(to_id) = Uuid::parse_str(to_id_str) {
+                                                let _ = store.insert_relation(id, to_id, kind);
                                             }
                                         }
                                     }
                                     // Infer typed relations from JSON content (mariage/partenaires -> spouse, *_birth -> birth_date, profil_utilisateur Conjoint/Enfants).
                                     let _ = memory_relation_inference::infer_typed_relations(&store, id, &content);
-                                    // Auto-link by embedding tiers (similar / relates_to) and optional text heuristics.
-                                    const AUTO_LINK_TOP_K: usize = 12;
-                                    const AUTO_LINK_MAX: usize = 8;
-                                    if let Ok(scored) = store.search_by_embedding_with_scores(&vec, AUTO_LINK_TOP_K, None) {
-                                        let mut n = 0usize;
-                                        for (sim, entry) in scored {
+                                    // Auto-link by semantic similarity so the graph has edges even when the agent doesn't pass link_to.
+                                    const AUTO_LINK_TOP_K: usize = 6;
+                                    const AUTO_LINK_MAX: usize = 5;
+                                    if let Ok(similar) = store.search_by_embedding(&vec, AUTO_LINK_TOP_K, None) {
+                                        let mut n = 0;
+                                        for entry in similar {
                                             if n >= AUTO_LINK_MAX {
                                                 break;
                                             }
-                                            if entry.id == id {
-                                                continue;
-                                            }
-                                            if let Some(kind) = auto_relation_kind(sim, &content) {
-                                                let _ = store.insert_relation(id, entry.id, kind);
+                                            if entry.id != id {
+                                                let _ = store.insert_relation(id, entry.id, "similar");
                                                 n += 1;
                                             }
                                         }
