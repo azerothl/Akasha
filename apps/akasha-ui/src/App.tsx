@@ -7551,20 +7551,22 @@ function App() {
                             {t("memory.search_back")}
                           </button>
                         </div>
-                        {memorySearchResults.length === 0 ? (
-                          <p className="muted">Saisir une requête puis Rechercher. Aucun résultat pour l’instant.</p>
-                        ) : (
-                          <ul className="memory-long-term-list">
-                            {memorySearchResults.map((r, i) => (
-                              <li key={r.id ?? i} className="memory-long-term-item">
-                                <div className="memory-long-term-body">
-                                  <div className="memory-long-term-content">{r.content}</div>
-                                  <div className="memory-long-term-meta">id: {r.id}</div>
-                                </div>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
+                        <div className="memory-list-scroll memory-search-results-scroll">
+                          {memorySearchResults.length === 0 ? (
+                            <p className="muted">Saisir une requête puis Rechercher. Aucun résultat pour l’instant.</p>
+                          ) : (
+                            <ul className="memory-long-term-list">
+                              {memorySearchResults.map((r, i) => (
+                                <li key={r.id ?? i} className="memory-long-term-item">
+                                  <div className="memory-long-term-body">
+                                    <div className="memory-long-term-content">{r.content}</div>
+                                    <div className="memory-long-term-meta">id: {r.id}</div>
+                                  </div>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
                       </div>
                     ) : memoryViewGraph ? (
                       <div className="memory-graph-wrap" role="region" aria-label={t("memory.view_graph")}>

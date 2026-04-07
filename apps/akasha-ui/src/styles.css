@@ -5441,6 +5441,11 @@ a.settings-link-btn.refresh-btn {
   flex-wrap: wrap;
   gap: 0.5rem;
   align-items: center;
+  flex-shrink: 0;
+}
+
+.memory-search-results-scroll {
+  -webkit-overflow-scrolling: touch;
 }
 
 .memory-search-bar .memory-search-input {
