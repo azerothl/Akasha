@@ -5633,13 +5633,12 @@ pub(crate) async fn run_message_via_llm(
     let structured = interpret_message(clean_message);
     let orch_disk_deliverables = clean_message.contains(ORCH_DISK_DELIVERABLES_MARKER);
     let small_talk_intent = classify_small_talk_message(clean_message);
-    let small_talk_fast_lane_intent = small_talk_fast_lane(clean_message);
     let session_recall_intent = detect_session_recall_intent(clean_message);
     tracing::debug!(
         ?session_recall_intent,
         "[RECALL_DEBUG] session_recall_intent"
     );
-    let is_small_talk_fast_lane = small_talk_fast_lane_intent.is_some();
+    let is_small_talk_fast_lane = small_talk_fast_lane(clean_message).is_some();
     let is_session_recall = session_recall_intent.is_some();
     let mut memory_profile = if is_small_talk_fast_lane || is_session_recall {
         MemoryProfile {
@@ -5723,6 +5722,11 @@ pub(crate) async fn run_message_via_llm(
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(4096);
+    let completion_max_tokens = if is_small_talk_fast_lane {
+        max_tokens.min(256).max(64)
+    } else {
+        max_tokens
+    };
 
     let tool_instruction = if is_small_talk_fast_lane {
         String::new()
@@ -6031,6 +6035,12 @@ pub(crate) async fn run_message_via_llm(
             }
         }
     }
+    if is_small_talk_fast_lane {
+        user_prefix.push_str(
+            "\n[Brief small-talk only: reply in 1–3 short sentences. Do not use tools. \
+             Follow your identity, personality, and traits from the system instructions.]\n",
+        );
+    }
     let intent_flags = compute_message_intent_flags(&message);
     let runtime_tool_routing_enforcer = build_runtime_tool_routing_enforcer(
         plugin_registry.as_ref(),
@@ -6204,20 +6214,7 @@ pub(crate) async fn run_message_via_llm(
     let mut last_llm_model_used: Option<String> = None;
     let mut first_meaningful_progress_sent = false;
 
-    if let Some(intent) = small_talk_fast_lane_intent {
-        reply_text = small_talk_fast_reply(&message, intent);
-        first_meaningful_progress_sent = true;
-        cancel_progress_watchdog(&mut watchdog_cancel);
-        if emit_timeline_once_for_task(
-            &bus,
-            Some(store_path.as_path()),
-            task_id,
-            "first_meaningful_progress",
-            Some(serde_json::json!({ "source": "small_talk_fast_lane" })),
-        ) {
-            log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
-        }
-    } else if let Some(intent) = session_recall_intent {
+    if let Some(intent) = session_recall_intent {
         tracing::debug!(?intent, "[RECALL_LOAD] loading recall turns");
         let recall_turns = match intent.range {
             SessionRecallRange::Yesterday => {
@@ -6294,6 +6291,7 @@ pub(crate) async fn run_message_via_llm(
         let mut last_tool_results_blob: Option<String> = None;
         let mut force_synthesis_attempted = false;
         let mut meta_response_retry_count = 0u32;
+        let mut small_talk_off_topic_retries = 0u32;
         let strict_tools_first = runtime_tool_routing_enforcer
             .as_ref()
             .map(|e| !e.preferred_tools.is_empty())
@@ -6522,7 +6520,7 @@ pub(crate) async fn run_message_via_llm(
                 } else {
                     format!("{}{}", current_prompt, tool_instruction)
                 },
-                max_tokens: Some(max_tokens),
+                max_tokens: Some(completion_max_tokens),
                 temperature: Some(0.7),
                 preferred_task_type,
                 system_prompt: system_prompt.clone(),
@@ -6701,6 +6699,21 @@ pub(crate) async fn run_message_via_llm(
 
             if let Some(intent) = small_talk_intent {
                 if response_looks_off_topic_for_small_talk(&response) {
+                    if is_small_talk_fast_lane && small_talk_off_topic_retries < 1 {
+                        small_talk_off_topic_retries += 1;
+                        tracing::warn!(
+                            task_id = %task_id,
+                            "Small-talk guardrail: retrying with stricter brief-reply instruction"
+                        );
+                        current_prompt = format!(
+                            "{}\n\n[Regeneration]: Your previous reply was not appropriate for simple small talk \
+                             (tools, policies, file paths, or too long). Reply ONLY with a brief polite exchange \
+                             (1–2 short sentences) in the same language as the user, following your identity and \
+                             personality from the system instructions. No tools.\n",
+                            current_prompt
+                        );
+                        continue;
+                    }
                     tracing::warn!(task_id = %task_id, "Small-talk guardrail triggered; suppressing off-topic/tool-heavy reply");
                     reply_text = small_talk_fast_reply(&message, intent);
                     break 'tool_rounds;
