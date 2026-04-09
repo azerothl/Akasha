@@ -59,31 +59,6 @@ pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, per
                 } else {
                     "Terminé.".to_string()
                 };
-                // #region agent log
-                {
-                    let log_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../debug-e02ac0.log");
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
-                        use std::io::Write;
-                        let _ = writeln!(
-                            f,
-                            "{}",
-                            serde_json::json!({
-                                "sessionId": "e02ac0",
-                                "hypothesisId": "H2",
-                                "location": "progress_subscriber.rs:TaskCompleted",
-                                "message": "completion progress merge",
-                                "data": {
-                                    "task_id": task_id.to_string(),
-                                    "last_back_preview": last_msg.chars().take(140).collect::<String>(),
-                                    "chosen_preview": chosen.chars().take(140).collect::<String>(),
-                                    "used_generic_fallback": chosen == "Terminé." || chosen == "Échec." || chosen == "Annulé."
-                                },
-                                "timestamp": Utc::now().timestamp_millis()
-                            })
-                        );
-                    }
-                }
-                // #endregion
                 chosen
             } else if ev.event_type == EventType::TaskFailed {
                 "Échec.".to_string()

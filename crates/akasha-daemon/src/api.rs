@@ -5692,44 +5692,6 @@ pub(crate) async fn run_message_via_llm(
         memory_profile.compact_before_prompt = false;
     }
 
-    // #region agent log
-    {
-        use std::io::Write;
-        let fast = memory_fast_path_enabled();
-        let suggests = message_suggests_project(clean_message);
-        let enriched_calc = !fast
-            || orch_disk_deliverables
-            || suggests
-            || assigned_agent != "conversation"
-            || clean_message.chars().count() > 280;
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debug-7b2c3f.log");
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            let payload = serde_json::json!({
-                "sessionId": "7b2c3f",
-                "timestamp": chrono::Utc::now().timestamp_millis(),
-                "location": "api.rs:memory_profile_final",
-                "message": "memory profile for prompt build",
-                "hypothesisId": "H1",
-                "data": {
-                    "workspace_graph_top_k": memory_profile.workspace_graph_top_k,
-                    "enriched_calc": enriched_calc,
-                    "memory_fast_path": fast,
-                    "message_suggests_project": suggests,
-                    "msg_chars": clean_message.chars().count(),
-                    "assigned_agent": assigned_agent,
-                    "external_info": message_intent_flags_clean.external_info,
-                    "transport": message_intent_flags_clean.transport,
-                    "is_small_talk_fast_lane": is_small_talk_fast_lane,
-                    "is_session_recall": is_session_recall,
-                    "task_id": task_id.to_string()
-                }
-            });
-            let _ = writeln!(f, "{}", payload);
-        }
-    }
-    // #endregion
-
     let tools_executor_snapshot = match &tools_executor {
         Some(r) => Some((*r.read().await).clone()),
         None => None,
@@ -6030,39 +5992,20 @@ pub(crate) async fn run_message_via_llm(
         .ok()
         .and_then(|r| r.ok())
         .unwrap_or_default();
-        // #region agent log
-        {
-            use std::io::Write;
-            let path =
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debug-7b2c3f.log");
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-                let preview: Vec<&str> = graph_lines.iter().take(3).map(String::as_str).collect();
-                let payload = serde_json::json!({
-                    "sessionId": "7b2c3f",
-                    "timestamp": chrono::Utc::now().timestamp_millis(),
-                    "location": "api.rs:workspace_graph_inject",
-                    "message": "graph context lines for prompt",
-                    "hypothesisId": "H2-H3",
-                    "data": {
-                        "graph_k": graph_k,
-                        "workspace_line_count": workspace_lines.len(),
-                        "line_count": graph_lines.len(),
-                        "workspace_filter": serde_json::Value::Null,
-                        "preview": preview,
-                        "task_id": task_id.to_string()
-                    }
-                });
-                let _ = writeln!(f, "{}", payload);
-            }
-        }
-        // #endregion
-        if !workspace_lines.is_empty() {
+        if workspace_lines.len() > 1 {
+            const MAX_WORKSPACE_LINES: usize = 8;
             user_prefix.push_str(
                 "[Project knowledge graphs — registered workspaces (use id with workspace_graph_search --workspace)]\n",
             );
-            for line in &workspace_lines {
+            for line in workspace_lines.iter().take(MAX_WORKSPACE_LINES) {
                 user_prefix.push_str(line);
                 user_prefix.push_str("\n");
+            }
+            if workspace_lines.len() > MAX_WORKSPACE_LINES {
+                user_prefix.push_str(&format!(
+                    "- … ({} more workspaces not shown)\n",
+                    workspace_lines.len() - MAX_WORKSPACE_LINES
+                ));
             }
             user_prefix.push_str(
                 "To fetch more symbols or files from the index, call: workspace_graph_search <keywords> [--workspace <id>]\n\n",
@@ -8137,35 +8080,6 @@ pub(crate) async fn run_message_via_llm(
     // Persist this exchange in short-term memory (spec 06)
     // Skip orchestrated task messages ([Task]\n prefix): they are internal planner artefacts,
     // not real user/assistant turns. Storing them pollutes future context with unrelated content.
-    // #region agent log
-    {
-        let skip_append = is_small_talk_fast_lane || is_orchestrated_task_msg;
-        let log_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../debug-e02ac0.log");
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
-            use std::io::Write;
-            let _ = writeln!(
-                f,
-                "{}",
-                serde_json::json!({
-                    "sessionId": "e02ac0",
-                    "hypothesisId": "H5",
-                    "location": "api.rs:run_message_via_llm:short_term_gate",
-                    "message": "short_term append decision",
-                    "data": {
-                        "task_id": task_id.to_string(),
-                        "session_id_len": session_id.len(),
-                        "skip_append": skip_append,
-                        "is_small_talk_fast_lane": is_small_talk_fast_lane,
-                        "is_orchestrated_task_msg": is_orchestrated_task_msg,
-                        "has_short_term_store": short_term.is_some(),
-                        "reply_len": reply_text.len()
-                    },
-                    "timestamp": chrono::Utc::now().timestamp_millis()
-                })
-            );
-        }
-    }
-    // #endregion
     if !is_small_talk_fast_lane && !is_orchestrated_task_msg {
         if let Some(ref st) = short_term {
             // Store the clean user message (without any guardrail prefix) so history is human-readable.
@@ -11781,15 +11695,23 @@ async fn get_task_status(
     // For a root task with children, aggregate child progress so the UI shows intermediate percentages.
     if let Ok(children) = store.get_children(id) {
         if !children.is_empty() {
+            // Take a snapshot of in-memory progress for all children and drop the lock
+            // before doing any SQLite traversal to avoid holding the RwLock during DB I/O.
+            let mem_snapshot: std::collections::HashMap<Uuid, VecDeque<ProgressEntry>> = {
+                let g = progress.read().await;
+                g.iter()
+                    .map(|(k, v)| (*k, v.clone()))
+                    .collect()
+            };
             let mut sum: u32 = 0;
-            let g = progress.read().await;
             for child in &children {
                 let child_pct = store
                     .get_progress(child.id)
                     .ok()
                     .and_then(|v| v.last().map(|(pct, _)| *pct as u32))
                     .or_else(|| {
-                        g.get(&child.id)
+                        mem_snapshot
+                            .get(&child.id)
                             .and_then(|q| q.back().map(|e| e.progress_pct as u32))
                     })
                     .unwrap_or(0);
@@ -11814,7 +11736,7 @@ async fn get_task_status(
             {
                 let mut best: Option<String> = None;
                 for c in &children {
-                    if let Some(m) = best_substantive_progress_in_subtree(&store, &g, c.id) {
+                    if let Some(m) = best_substantive_progress_in_subtree(&store, &mem_snapshot, c.id) {
                         if best.as_ref().map(|b| b.len()).unwrap_or(0) < m.len() {
                             best = Some(m);
                         }
@@ -11854,44 +11776,6 @@ async fn get_task_status(
     if let Some(u) = todos_updated_at {
         body["todos_updated_at"] = serde_json::Value::String(u);
     }
-    // #region agent log
-    {
-        let child_n = store.get_children(id).map(|c| c.len()).unwrap_or(0);
-        let last_preview = progress_list
-            .last()
-            .map(|e| e.message.chars().take(160).collect::<String>())
-            .unwrap_or_default();
-        let prev_preview = progress_list
-            .len()
-            .checked_sub(2)
-            .and_then(|i| progress_list.get(i))
-            .map(|e| e.message.chars().take(80).collect::<String>())
-            .unwrap_or_default();
-        let log_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../debug-e02ac0.log");
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
-            use std::io::Write;
-            let _ = writeln!(
-                f,
-                "{}",
-                serde_json::json!({
-                    "sessionId": "e02ac0",
-                    "hypothesisId": "H1",
-                    "location": "api.rs:get_task_status",
-                    "message": "task status for UI poll",
-                    "data": {
-                        "task_id": id.to_string(),
-                        "status": task.status.as_str(),
-                        "child_count": child_n,
-                        "progress_entries": progress_list.len(),
-                        "last_progress_preview": last_preview,
-                        "prev_progress_preview": prev_preview
-                    },
-                    "timestamp": chrono::Utc::now().timestamp_millis()
-                })
-            );
-        }
-    }
-    // #endregion
     json_response("200 OK", &body.to_string())
 }
 

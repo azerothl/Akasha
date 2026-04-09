@@ -582,9 +582,9 @@ impl WorkspaceGraphStore {
                             .cloned()
                             .collect();
                         hit_samples.push(serde_json::json!({
-                            "workspace": ws.name,
-                            "kind": kind,
-                            "label": label,
+                            "workspace": ws.name.as_str(),
+                            "kind": kind.as_str(),
+                            "label": label.as_str(),
                             "path": p,
                             "matched_terms": matched_terms
                         }));
@@ -597,32 +597,16 @@ impl WorkspaceGraphStore {
             }
         }
 
-        // #region agent log
-        {
-            use std::io::Write;
-            let path =
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debug-7b2c3f.log");
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-                let payload = serde_json::json!({
-                    "sessionId": "7b2c3f",
-                    "timestamp": chrono::Utc::now().timestamp_millis(),
-                    "location": "workspace_graph.rs:search_graph_context",
-                    "message": "graph lexical search diagnostics",
-                    "hypothesisId": "H6-H8",
-                    "data": {
-                        "query": query,
-                        "terms": terms,
-                        "limit": limit,
-                        "workspace_filter": workspace_id,
-                        "workspace_count": workspace_count,
-                        "out_count": out.len(),
-                        "hit_samples": hit_samples
-                    }
-                });
-                let _ = writeln!(f, "{}", payload);
-            }
-        }
-        // #endregion
+        tracing::debug!(
+            query = %query,
+            terms = ?terms,
+            limit = limit,
+            workspace_filter = ?workspace_id,
+            workspace_count = workspace_count,
+            out_count = out.len(),
+            hit_samples = ?hit_samples,
+            "graph lexical search diagnostics"
+        );
 
         Ok(out.into_iter().take(limit).collect())
     }
