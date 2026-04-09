@@ -2127,6 +2127,12 @@ fn should_skip_capture_content(content: &str) -> bool {
 fn message_suggests_project(message: &str) -> bool {
     let m = message.to_lowercase();
     let keywords = [
+        "résumé du projet",
+        "resume du projet",
+        "summary of project",
+        "workspace",
+        "graphe projet",
+        "project graph",
         "roman",
         "bd",
         "bande dessinée",
@@ -5667,9 +5673,9 @@ pub(crate) async fn run_message_via_llm(
     // small local models: they latch onto the most recent topic (e.g. Akasha CLI discussion)
     // and copy it instead of answering the actual question.
     // This cap is unconditional — it does NOT require a guardrail prefix to be active.
+    let message_intent_flags_clean = compute_message_intent_flags(clean_message);
     if !is_small_talk_fast_lane && !is_subagent {
-        let clean_flags = compute_message_intent_flags(clean_message);
-        if clean_flags.external_info || clean_flags.transport {
+        if message_intent_flags_clean.external_info || message_intent_flags_clean.transport {
             memory_profile.recent_turns_limit = 0;
             memory_profile.episodic_limit = 0;
             memory_profile.semantic_top_k = 0;
@@ -5685,6 +5691,44 @@ pub(crate) async fn run_message_via_llm(
         memory_profile.semantic_top_k = memory_profile.semantic_top_k.min(1);
         memory_profile.compact_before_prompt = false;
     }
+
+    // #region agent log
+    {
+        use std::io::Write;
+        let fast = memory_fast_path_enabled();
+        let suggests = message_suggests_project(clean_message);
+        let enriched_calc = !fast
+            || orch_disk_deliverables
+            || suggests
+            || assigned_agent != "conversation"
+            || clean_message.chars().count() > 280;
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debug-7b2c3f.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let payload = serde_json::json!({
+                "sessionId": "7b2c3f",
+                "timestamp": chrono::Utc::now().timestamp_millis(),
+                "location": "api.rs:memory_profile_final",
+                "message": "memory profile for prompt build",
+                "hypothesisId": "H1",
+                "data": {
+                    "workspace_graph_top_k": memory_profile.workspace_graph_top_k,
+                    "enriched_calc": enriched_calc,
+                    "memory_fast_path": fast,
+                    "message_suggests_project": suggests,
+                    "msg_chars": clean_message.chars().count(),
+                    "assigned_agent": assigned_agent,
+                    "external_info": message_intent_flags_clean.external_info,
+                    "transport": message_intent_flags_clean.transport,
+                    "is_small_talk_fast_lane": is_small_talk_fast_lane,
+                    "is_session_recall": is_session_recall,
+                    "task_id": task_id.to_string()
+                }
+            });
+            let _ = writeln!(f, "{}", payload);
+        }
+    }
+    // #endregion
 
     let tools_executor_snapshot = match &tools_executor {
         Some(r) => Some((*r.read().await).clone()),
@@ -5967,17 +6011,66 @@ pub(crate) async fn run_message_via_llm(
         let graph_query = message.clone();
         let graph_k = memory_profile.workspace_graph_top_k;
         let sp = store_path.clone();
-        let graph_lines = tokio::task::spawn_blocking(move || {
+        let (workspace_lines, graph_lines) = tokio::task::spawn_blocking(move || {
             let store = WorkspaceGraphStore::open(&sp)?;
-            store.search_graph_context(&graph_query, graph_k, None)
+            let workspaces = store.list_workspaces()?;
+            let workspace_lines: Vec<String> = workspaces
+                .iter()
+                .map(|w| {
+                    format!(
+                        "- \"{}\" — id {} — {}",
+                        w.name, w.id, w.root_path
+                    )
+                })
+                .collect();
+            let graph_lines = store.search_graph_context(&graph_query, graph_k, None)?;
+            Ok::<_, anyhow::Error>((workspace_lines, graph_lines))
         })
         .await
         .ok()
         .and_then(|r| r.ok())
         .unwrap_or_default();
+        // #region agent log
+        {
+            use std::io::Write;
+            let path =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debug-7b2c3f.log");
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let preview: Vec<&str> = graph_lines.iter().take(3).map(String::as_str).collect();
+                let payload = serde_json::json!({
+                    "sessionId": "7b2c3f",
+                    "timestamp": chrono::Utc::now().timestamp_millis(),
+                    "location": "api.rs:workspace_graph_inject",
+                    "message": "graph context lines for prompt",
+                    "hypothesisId": "H2-H3",
+                    "data": {
+                        "graph_k": graph_k,
+                        "workspace_line_count": workspace_lines.len(),
+                        "line_count": graph_lines.len(),
+                        "workspace_filter": serde_json::Value::Null,
+                        "preview": preview,
+                        "task_id": task_id.to_string()
+                    }
+                });
+                let _ = writeln!(f, "{}", payload);
+            }
+        }
+        // #endregion
+        if !workspace_lines.is_empty() {
+            user_prefix.push_str(
+                "[Project knowledge graphs — registered workspaces (use id with workspace_graph_search --workspace)]\n",
+            );
+            for line in &workspace_lines {
+                user_prefix.push_str(line);
+                user_prefix.push_str("\n");
+            }
+            user_prefix.push_str(
+                "To fetch more symbols or files from the index, call: workspace_graph_search <keywords> [--workspace <id>]\n\n",
+            );
+        }
         if !graph_lines.is_empty() {
             user_prefix.push_str(
-                "[Project knowledge graphs — indexed project folders; use if relevant]\n",
+                "[Project knowledge graphs — excerpts matching this message (indexed folders)]\n",
             );
             for line in &graph_lines {
                 user_prefix.push_str("- ");

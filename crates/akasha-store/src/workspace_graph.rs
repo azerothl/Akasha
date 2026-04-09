@@ -533,11 +533,13 @@ impl WorkspaceGraphStore {
         }
 
         let mut out: Vec<String> = Vec::new();
+        let mut hit_samples: Vec<serde_json::Value> = Vec::new();
         let workspaces = if let Some(wid) = workspace_id {
             self.get_workspace(wid)?.into_iter().collect::<Vec<_>>()
         } else {
             self.list_workspaces()?
         };
+        let workspace_count = workspaces.len();
 
         for ws in workspaces {
             if out.len() >= limit {
@@ -561,16 +563,32 @@ impl WorkspaceGraphStore {
                 }
                 let (id, kind, label, path) = row?;
                 let hay = format!(
-                    "{} {} {} {}",
+                    "{} {} {} {} {} {}",
                     id.to_lowercase(),
                     kind.to_lowercase(),
                     label.to_lowercase(),
-                    path.as_deref().unwrap_or("").to_lowercase()
+                    path.as_deref().unwrap_or("").to_lowercase(),
+                    ws.name.to_lowercase(),
+                    ws.root_path.to_lowercase()
                 );
                 let hit = terms.is_empty()
                     || terms.iter().any(|t| hay.contains(t.as_str()));
                 if hit {
                     let p = path.as_deref().unwrap_or("");
+                    if hit_samples.len() < 5 {
+                        let matched_terms: Vec<String> = terms
+                            .iter()
+                            .filter(|t| hay.contains(t.as_str()))
+                            .cloned()
+                            .collect();
+                        hit_samples.push(serde_json::json!({
+                            "workspace": ws.name,
+                            "kind": kind,
+                            "label": label,
+                            "path": p,
+                            "matched_terms": matched_terms
+                        }));
+                    }
                     out.push(format!(
                         "[Workspace \"{}\"] {} — {} ({})",
                         ws.name, kind, label, p
@@ -578,6 +596,33 @@ impl WorkspaceGraphStore {
                 }
             }
         }
+
+        // #region agent log
+        {
+            use std::io::Write;
+            let path =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debug-7b2c3f.log");
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let payload = serde_json::json!({
+                    "sessionId": "7b2c3f",
+                    "timestamp": chrono::Utc::now().timestamp_millis(),
+                    "location": "workspace_graph.rs:search_graph_context",
+                    "message": "graph lexical search diagnostics",
+                    "hypothesisId": "H6-H8",
+                    "data": {
+                        "query": query,
+                        "terms": terms,
+                        "limit": limit,
+                        "workspace_filter": workspace_id,
+                        "workspace_count": workspace_count,
+                        "out_count": out.len(),
+                        "hit_samples": hit_samples
+                    }
+                });
+                let _ = writeln!(f, "{}", payload);
+            }
+        }
+        // #endregion
 
         Ok(out.into_iter().take(limit).collect())
     }
@@ -628,6 +673,11 @@ mod tests {
 
         let scoped = s.search_graph_context("other", 10, Some(&a)).unwrap();
         assert!(scoped.is_empty());
+
+        // Query terms match workspace name / root path, not only node labels.
+        let by_name = s.search_graph_context("Beta", 10, None).unwrap();
+        assert_eq!(by_name.len(), 1);
+        assert!(by_name[0].contains("Beta"));
 
         assert!(s.delete_workspace(&a).unwrap());
         let after = s.search_graph_context("frobnicate", 10, None).unwrap();
