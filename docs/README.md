@@ -12,6 +12,7 @@ Ce dossier est le point d'entrée vers la documentation du projet.
 
 | Document | Description |
 |----------|-------------|
+| [internal_release_0.8.md](internal_release_0.8.md) | **Notes internes 0.8.0** : delta depuis v0.7.0 (mission autonome, graphe projet, API, CI, doctor, specs) — hors zip utilisateur. |
 | [user_guide.md](user_guide.md) | Renvoi vers le **guide utilisateur complet** ([spec/user_guide.md](../spec/user_guide.md)) : même contenu étendu (build, Rust, références aux specs). |
 | [bench_prompt_results.md](bench_prompt_results.md) | Benchmarks des prompts et heuristiques agents, optimisations appliquées et propositions d'amélioration. |
 | [tests_and_benchmarks.md](tests_and_benchmarks.md) | Vue d'ensemble des tests et benchmarks : ce qu'ils analysent et comment les lancer. |

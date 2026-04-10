@@ -254,9 +254,9 @@ npm install
 npm run tauri dev
 ```
 
-L'UI se connecte au daemon sur le port 3876 (configurable via `AKASHA_PORT`). **Onglets** : Chat, **Retours planifiés**, Routeur (métriques), Documentation, Tâches, Calendrier, Mémoire, **Mission**, Paramètres. Touches **1–9** pour changer d’onglet si le focus n’est pas dans un champ (Mission = touche **8**, Paramètres = **9**). **Paramètres** : quatre sections (Affichage, Système, Agent, Data). Dans **Data** : deux sous-onglets — **RAG utilisateur** (documents texte indexés) et **Graphe projet** (un ou plusieurs dossiers de projet indexés dans SQLite + fichiers sous `workspace_graph/out/<id>/`). Dans Agent : sous-onglets pour le profil (Identité, Personnalité, Règles, Autorisé, Interdit), sélecteur de template de personnalité (Neutre, Bienveillant, Concis/technique, Créatif, Strict/sécurisé), limites de caractères affichées.
+L'UI se connecte au daemon sur le port 3876 (configurable via `AKASHA_PORT`). **Onglets** : Chat, **Retours planifiés**, Routeur (métriques), Documentation, Tâches, Calendrier, Mémoire, **Mission**, Paramètres. Touches **1–9** pour changer d’onglet si le focus n’est pas dans un champ (Mission = touche **8**, Paramètres = **9**). **Paramètres** : quatre sections (Affichage, Système, Agent, Data). Dans **Data** : deux sous-onglets — **RAG utilisateur** (documents texte indexés) et **Graphe projet** (un ou plusieurs dossiers de projet indexés dans SQLite + fichiers sous `workspace_graph/out/<id>/`). Dans Agent : sous-onglets pour le profil (Identité, Personnalité, Règles, Autorisé, Interdit), sélecteur de template de personnalité (Neutre, Bienveillant, Concis/technique, Créatif, Strict/sécurisé), réglage **tutoiement / vouvoiement** (`formality` : formel, informel ou défaut — API `GET`/`POST /api/agent-profile`), limites de caractères affichées.
 
-**Mission autonome (interface web uniquement)** : permet de fixer un **objectif** de fond, un **contexte**, des **règles de fonctionnement** et des **rôles** (comme une petite organisation). Tant que le mode est activé et le statut **actif**, le daemon déclenche périodiquement un **heartbeat** : une tâche confiée à l’orchestrateur (type d’agent configurable, défaut *chef de projet* / `project_manager`) qui peut ensuite **déléguer** à d’autres types d’agents selon les rôles décrits. Les rapports d’avancement sont à écrire en Markdown sous le répertoire configuré (`report_dir`, relatif au data_dir). La configuration est persistée dans **`autonomous_mission.yaml`** dans le data_dir ; l’API expose l’état courant via **`GET /api/autonomous-mission`** et **`PUT /api/autonomous-mission`** (champs partiels acceptés). Pour que le **chat** sur une session reçoive aussi le rappel « ne pas poser de questions » en mode mission, utilisez le même **`session_id`** que celui défini pour la mission (sinon seuls les heartbeats appliquent le contexte mission). **Pause / reprise** : `POST /api/autonomous-mission/pause` et `POST /api/autonomous-mission/resume`. **Exemple** : objectif « tenir à jour un fichier `STATUS.md` dans le dépôt X avec les changements de la semaine », contexte « dépôt cloné sous `projects/X`, branche `main` », horizon moyen, heartbeat toutes les 120 minutes, rapports sous `autonomous_mission/reports` ; après quelques cycles, les fichiers `report_*.md` s’y accumulent. La liste de rôles dans l’interface **guide** l’orchestrateur mais la décomposition concrète reste **interne** à l’orchestrateur (pas d’agents séparés persistés par rôle).
+**Mission autonome (interface web uniquement)** : permet de fixer un **objectif** de fond, un **contexte**, des **règles de fonctionnement** et des **rôles** (comme une petite organisation). Tant que le mode est activé et le statut **actif**, le daemon déclenche périodiquement un **heartbeat** : une tâche confiée à l’orchestrateur (type d’agent configurable, défaut *chef de projet* / `project_manager`) qui peut ensuite **déléguer** à d’autres types d’agents selon les rôles décrits. Les rapports d’avancement sont à écrire en Markdown sous le répertoire configuré (`report_dir`, relatif au data_dir). La configuration est persistée dans **`autonomous_mission.yaml`** dans le data_dir ; l’API expose l’état courant via **`GET /api/autonomous-mission`** et **`PUT /api/autonomous-mission`** (champs partiels acceptés). **Journal** : `GET /api/autonomous-mission/events` avec query optionnelle `limit` (défaut 100, max 1000) et `since` (horodatage RFC3339). Pour que le **chat** sur une session reçoive aussi le rappel « ne pas poser de questions » en mode mission, utilisez le même **`session_id`** que celui défini pour la mission (sinon seuls les heartbeats appliquent le contexte mission). **Pause / reprise** : `POST /api/autonomous-mission/pause` et `POST /api/autonomous-mission/resume`. **Exemple** : objectif « tenir à jour un fichier `STATUS.md` dans le dépôt X avec les changements de la semaine », contexte « dépôt cloné sous `projects/X`, branche `main` », horizon moyen, heartbeat toutes les 120 minutes, rapports sous `autonomous_mission/reports` ; après quelques cycles, les fichiers `report_*.md` s’y accumulent. La liste de rôles dans l’interface **guide** l’orchestrateur mais la décomposition concrète reste **interne** à l’orchestrateur (pas d’agents séparés persistés par rôle). Persistance SQLite : snapshot + événements (voir crate `akasha-store`).
 
 **Pièces jointes (interface web uniquement)** : dans le Chat, le bouton « Joindre » permet d’ajouter des images ou des documents (texte, PDF). Les images sont envoyées au modèle (vision) ; les documents texte et PDF sont extraits et inclus dans le message pour l’agent. Utile pour « analyse ce document » ou pour fournir un fichier sans le copier-coller.
 
@@ -361,7 +361,42 @@ cargo run -p akasha-evals
 
 ---
 
-## 9. Nouveautés de la version 0.7.0
+## 9. Nouveautés (0.8.0 depuis v0.7.0)
+
+### Mission autonome
+
+- Fichier **`autonomous_mission.yaml`**, boucle **heartbeat** dans le daemon, persistance SQLite (snapshot + événements).
+- API : `GET`/`PUT /api/autonomous-mission`, `POST .../pause`, `POST .../resume`, `GET .../events` (`limit`, `since`).
+- Onglet **Mission** dans l’UI web ; alignement **`session_id`** avec le chat pour le mode sans questions.
+
+### Graphe projet
+
+- **Multi-workspaces** : plusieurs racines indexées ; artefacts `workspace_graph/out/<uuid>/` ; API `/api/workspace-graph/...` (voir [54_workspace_project_knowledge_graph.md](54_workspace_project_knowledge_graph.md)).
+- Enrichissement du prompt (top‑k nœuds) + outil **`workspace_graph_search`** ; améliorations UI (liste, HTML, recherche mémoire).
+
+### Profil agent
+
+- Champ **`formality`** (`formal` | `informal` | omis) dans `agent_profile.json` et **`/api/agent-profile`** ; ligne de prompt dans `personality` / orchestrateur.
+
+### Orchestration, outils, plugins, réponses
+
+- **Strict tools-first** : tentative déterministe d’un premier outil lorsque le routeur l’exige (`akasha-daemon` / boucle d’outils dans `api.rs`).
+- **Small talk** : chemins allégés pour les messages légers sans enchaînement LLM inutile.
+- **Suggestions de projet** : détection / logs améliorés.
+- **Contrats JSON** : validation « contrat significatif » avant strip ; strip des blocs JSON purement contractuels pour le résumé utilisateur (`strip_trailing_contract` / `is_meaningful_contract`).
+- **Plugins** : exécution des appels d’outils plugin (`execute_tool_call`) — chemins d’erreur et enchaînements revus.
+- **AXI** : textes d’aide **`run_command`** et prompts pointant vers des CLI optionnels token‑efficients ([axi.md](https://axi.md/)) — pas de dépendance packaging.
+
+### Observabilité et release
+
+- **Logs agent** : progression des tâches et sessions (niveaux configurables via `AKASHA_LOG`).
+- **`akasha doctor` / `--fix`** : scénarios **binaires + zip** et résolution **`spec/`** (`AKASHA_SPEC_DIR`, à côté du daemon, `data_dir/spec`).
+- **CI** : libération d’espace disque runners ; **E2E Playwright** UI (`apps/akasha-ui`) ; workflow **sync version** + `verify-release-version` sur tag (voir [AGENTS.md](../AGENTS.md)).
+- **Notes détaillées contributeurs** : [docs/internal_release_0.8.md](../docs/internal_release_0.8.md).
+
+---
+
+## 10. Nouveautés de la version 0.7.0 (rappel)
 
 ### Orchestration renforcée
 

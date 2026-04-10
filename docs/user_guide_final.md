@@ -85,7 +85,7 @@ Vous pouvez modifier les fichiers suivants dans ce répertoire (avec un éditeur
 | `voice_router.yaml` | (Optionnel) Voix TTS/STT : URLs des services de synthèse (`tts.base_url`) et de transcription (`stt.base_url`). Si STT est configuré, l’interface web affiche un bouton **Message vocal** (micro). Si TTS est aussi configuré, la réponse à un message vocal est affichée en texte et lue en audio. |
 | `akasha.env` | Variables d'environnement persistantes (éditables aussi via `akasha config env`). |
 | `connectors.env` | Activation des canaux (Telegram, Slack, Discord). |
-| `agent_profile.json` | Profil de l'agent : nom, rôle, personnalité, règles. Éditable dans Paramètres → Profil de l'agent (interface web) ou en modifiant le fichier puis en redémarrant le daemon. |
+| `agent_profile.json` | Profil de l'agent : nom, rôle, personnalité, règles, **formalité** (tutoiement / vouvoiement, champs optionnels). Éditable dans Paramètres → Profil de l'agent (interface web) ou en modifiant le fichier puis en redémarrant le daemon. |
 | `autonomous_mission.yaml` | (Optionnel) **Mission autonome** : objectif, contexte, règles de fonctionnement, rôles, intervalle de heartbeat, répertoire des rapports, `session_id`, type d’agent pour le premier pas de chaque heartbeat. Éditable dans l’onglet **Mission** de l’interface web ou via `GET` / `PUT /api/autonomous-mission`. |
 
 Le répertoire de données est créé automatiquement par `akasha init` ou `akasha doctor --fix` s'il est absent.
@@ -226,8 +226,8 @@ Les variables définies via `akasha config env set` sont enregistrées dans le f
 - **Raccourcis** : touches **1 à 9** pour basculer vers l'onglet correspondant (Mission = **8**, Paramètres = **9** ; inactif si le focus est dans un champ de saisie ou une modale).
 - **Pièces jointes** : dans le Chat, vous pouvez joindre des images ou des documents (texte, PDF) ; l'agent les reçoit pour analyse.
 - **Données** : dans Paramètres → **Données**, deux sous-onglets — **RAG utilisateur** (documents texte indexés, extraits injectés dans le contexte de l’agent) et **Graphe projet** (plusieurs dossiers de projet enregistrés, index SQLite + rapports sous `workspace_graph/out/<id>/` ; ouverture du HTML par workspace ; agents enrichis automatiquement et outil `workspace_graph_search` si autorisé). Sans interface web, gérer via `/api/user-rag/...` et `/api/workspace-graph/workspaces` (voir le guide complet).
-- **Profil de l'agent** : dans Paramètres → Profil de l'agent, vous pouvez définir le nom, le rôle, la personnalité, les règles et les comportements autorisés/interdits ; des modèles (Neutre, Bienveillant, Concis/technique, etc.) sont proposés.
-- **Mission autonome** : onglet **Mission** pour définir un objectif de fond, le contexte, des règles, des rôles (organisation) et la fréquence des **heartbeats**. Tant que la mission est activée et **active**, le daemon lance périodiquement une tâche orchestrée (type d’agent du premier pas configurable, souvent *chef de projet*) ; l’orchestrateur peut déléguer à d’autres agents. Les rapports Markdown vont dans le répertoire configuré (relatif au data_dir). Fichier **`autonomous_mission.yaml`** ; API **`GET` / `PUT /api/autonomous-mission`**, pause/reprise **`POST`** sur `/api/autonomous-mission/pause` et `/resume`. Pour appliquer aussi au **chat** le mode « sans questions » lié à la mission, utilisez le même **`session_id`** que dans la fiche mission. *Exemple* : maintenir un fichier `CHANGELOG_HEBDO.md` à jour dans un dépôt — renseignez l’objectif et le contexte (chemin du dépôt), horizon moyen, heartbeat 120 min, consultez les rapports sous le dossier indiqué après quelques cycles.
+- **Profil de l'agent** : dans Paramètres → Profil de l'agent, vous pouvez définir le nom, le rôle, la personnalité, les règles et les comportements autorisés/interdits ; des modèles (Neutre, Bienveillant, Concis/technique, etc.) sont proposés. Depuis la version **0.8.0**, un réglage **Tutoiement / vouvoiement** (formel, informel ou par défaut) oriente le registre de l'agent — en français, cela correspond au vouvoiement ou au tutoiement ; dans les autres langues, le registre s'adapte de la même manière.
+- **Mission autonome** : onglet **Mission** pour définir un objectif de fond, le contexte, des règles, des rôles (organisation) et la fréquence des **heartbeats**. Tant que la mission est activée et **active**, le daemon lance périodiquement une tâche orchestrée (type d’agent du premier pas configurable, souvent *chef de projet*) ; l’orchestrateur peut déléguer à d’autres agents. Les rapports Markdown vont dans le répertoire configuré (relatif au data_dir). Fichier **`autonomous_mission.yaml`** ; API **`GET` / `PUT /api/autonomous-mission`**, pause/reprise **`POST`** sur `/api/autonomous-mission/pause` et `/resume`. L’historique des événements de mission est consultable via **`GET /api/autonomous-mission/events`** (paramètres optionnels `limit`, `since` en date ISO). Pour appliquer aussi au **chat** le mode « sans questions » lié à la mission, utilisez le même **`session_id`** que dans la fiche mission. *Exemple* : maintenir un fichier `CHANGELOG_HEBDO.md` à jour dans un dépôt — renseignez l’objectif et le contexte (chemin du dépôt), horizon moyen, heartbeat 120 min, consultez les rapports sous le dossier indiqué après quelques cycles.
 - **Plugins** : la vue plugins affiche l’état d’activation, les règles de routage dynamiques et permet de réinitialiser la réputation d’un plugin (ou de tous les plugins) si nécessaire.
 
 Le daemon écoute par défaut sur le port **3876**. Pour que l'onglet Doc affiche ce guide, lancez `akasha start` depuis le dossier où vous avez extrait l'archive (contenant le dossier `docs`).
@@ -350,20 +350,36 @@ Cette documentation est également affichée dans l'**onglet Doc** des interface
 
 ---
 
-## 14. Nouveautés de la version 0.7.0
+## 14. Nouveautés depuis la version 0.7.0 (version 0.8.0)
 
-### Orchestration multi-agents
+### Mission autonome
 
-- **Route `orchestrator` dédiée** : si votre `llm_router.yaml` contient un bloc `task_types.orchestrator`, l’orchestrateur l’utilise pour la décomposition de requêtes complexes. Sans cette route, la route `system` est utilisée (compatibilité ascendante).
-- **Livrables vérifiés sur disque** : l’orchestrateur s’assure que les fichiers attendus (`workspace:/rapport.md`, etc.) ont bien été créés avant de valider une étape.
-- **Sécurité des livrables** : les chemins absolus et les chemins qui sortent du workspace (`..`) sont rejetés. Les livrables restent confinés au workspace autorisé.
-- **Retry automatique ciblé** : si un livrable attendu manque, l’orchestrateur peut relancer une tentative focalisée sur la création du fichier manquant.
-- **Trace de plan** : un fichier `.akasha/plan_<id>.md` est maintenu en temps réel dans le workspace pour les requêtes multi-étapes — consultable à tout moment.
+- **Objectif périodique** : définissez une mission de fond (objectif, contexte, règles, rôles) et une fréquence de **heartbeat** ; le daemon lance des cycles d’orchestration tant que la mission est active. Rapports Markdown dans le répertoire configuré ; fichier **`autonomous_mission.yaml`** dans le data_dir.
+- **Interface** : onglet **Mission** (application web / desktop) pour configurer, suivre l’activité, mettre en pause ou reprendre. API : **`GET` / `PUT /api/autonomous-mission`**, **`POST .../pause`** et **`.../resume`**, journal **`GET /api/autonomous-mission/events`**.
+- **Chat aligné sur la mission** : en réutilisant le même **`session_id`** que la mission, le comportement « sans questions inutiles » du mode mission s’applique aussi aux messages du chat.
 
-### Sécurité et correctifs
+### Graphe projet et mémoire
 
-- **Politique de chemins** : comparaison stricte par composant de chemin (`Path::starts_with`) — évite la confusion entre `/data` et `/database`.
-- **Envoi de documents RAG** : l’upload de documents fonctionne désormais correctement depuis l’interface Tauri.
-- **Contrat d’upload unifié** : côté API, les uploads utilisent `content_base64` + `mime_type` (chat via `attachments[]`, RAG via `POST /api/user-rag/documents`).
-- **Paramètres LLM** : les valeurs `max_tokens` / `top_k` / `num_ctx` / `num_gpu` très grandes dans `llm_router.yaml` sont limitées proprement (plus de comportement imprévisible).
-- **Azure OpenAI** : `max_tokens` par défaut aligné à 4 096 (comme les autres providers).
+- **Plusieurs dossiers projet** : enregistrez plusieurs **workspaces** (nom + chemin racine) ; chaque indexation produit un graphe (fichiers sous `workspace_graph/out/<id>/` dans le data_dir, dont une visualisation HTML).
+- **Aide à l’agent** : l’agent reçoit automatiquement des extraits pertinents du graphe quand votre question touche des fichiers ou symboles indexés ; l’outil **`workspace_graph_search`** permet une recherche ciblée (voir la politique d’outils si vous restreignez les outils).
+- **Interface** : sous Paramètres → Données → **Graphe projet**, gestion des espaces, reconstruction et ouverture du rapport HTML ; présentation des résultats de recherche en **Mémoire** améliorée.
+
+### Profil de l’agent
+
+- **Tutoiement / vouvoiement** : réglage explicite (formel, informel ou par défaut) pour que l’agent vous parle avec le registre souhaité.
+
+### Fiabilité et expérience
+
+- **Orchestration et outils** : mode **outils d’abord** renforcé lorsque la configuration l’exige — premier appel d’outil plus prévisible pour certaines tâches.
+- **Réponses plus lisibles** : lorsque le modèle termine par un bloc JSON de « contrat » technique, l’interface peut n’afficher dans le résumé que la partie utile pour vous, sans ce bloc brut.
+- **Suggestions de projet** : meilleure détection et suivi lorsque l’agent propose d’associer un dossier à un graphe projet.
+- **`akasha doctor`** : diagnostics et **`doctor --fix`** mieux adaptés aux installations à partir du **zip** (dossier `spec`, chemins à côté des binaires).
+- **Vérification de version** : le produit et le site des releases doivent afficher la même version ; en cas de bannière de mise à jour incohérente, vérifiez que vous avez bien installé l’archive correspondant à la version annoncée.
+
+### Pour les utilisateurs avancés (ligne de commande)
+
+- Les invites intégrées à l’agent peuvent recommander des **CLI orientés agent** (par ex. pour GitHub ou le navigateur) si vous les installez vous-même — ce n’est pas obligatoire ; Akasha conserve ses outils intégrés navigateur et `run_command` habituels.
+
+### Rappel — nouveautés déjà présentes en 0.7.0
+
+- Route **`orchestrator`** dans `llm_router.yaml`, livrables vérifiés sur disque, sécurité des chemins de livrables, retry ciblé, fichier de plan `.akasha/plan_<id>.md`, politique de chemins renforcée pour les fichiers, uploads RAG/contrat pièces jointes, limites sûres sur les paramètres numériques du routeur LLM.
