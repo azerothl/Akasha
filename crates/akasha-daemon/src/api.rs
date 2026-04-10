@@ -5094,48 +5094,68 @@ async fn execute_tool_call(
         _ => {
             if let Some((plugin_id, plugin_payload)) = plugin_invocation {
                 match plugin_registry {
-                    Some(r) => match r.call_tool(&plugin_id, &plugin_payload) {
-                        Ok(out) => {
-                        if out.trim().is_empty() {
-                            return (
+                    Some(r) => {
+                        // WASM + host imports (e.g. http_fetch) must not run on the Tokio async worker:
+                        // blocking HTTP and Wasmtime host callbacks can abort the process if nested on a worker thread.
+                        let reg = Arc::clone(r);
+                        let pid = plugin_id.clone();
+                        let pl = plugin_payload.clone();
+                        match tokio::task::spawn_blocking(move || reg.call_tool(&pid, &pl)).await {
+                            Ok(Ok(out)) => {
+                                if out.trim().is_empty() {
+                                    return (
+                                        false,
+                                        format!(
+                                            "[plugin:{}] execution returned empty output (check plugin input/action)",
+                                            plugin_id
+                                        ),
+                                        None,
+                                    );
+                                }
+                                let plugin_ok = serde_json::from_str::<serde_json::Value>(&out)
+                                    .ok()
+                                    .and_then(|v| v.get("ok").and_then(|b| b.as_bool()));
+                                let preview = if out.chars().count() > 600 {
+                                    format!("{}…", out.chars().take(600).collect::<String>())
+                                } else {
+                                    out
+                                };
+                                if plugin_ok == Some(false) {
+                                    return (
+                                        false,
+                                        format!(
+                                            "[plugin:{}] execution failed: plugin returned ok=false: {}",
+                                            plugin_id, preview
+                                        ),
+                                        None,
+                                    );
+                                }
+                                (
+                                    true,
+                                    format!("[plugin:{}] {}", plugin_id, preview),
+                                    None,
+                                )
+                            }
+                            Ok(Err(err)) => (
+                                false,
+                                format!("[plugin:{}] execution failed: {}", plugin_id, err),
+                                None,
+                            ),
+                            Err(join_err) => (
                                 false,
                                 format!(
-                                    "[plugin:{}] execution returned empty output (check plugin input/action)",
-                                    plugin_id
+                                    "[plugin:{}] execution failed: {}",
+                                    plugin_id,
+                                    if join_err.is_panic() {
+                                        "internal error (plugin task panicked)".to_string()
+                                    } else {
+                                        join_err.to_string()
+                                    }
                                 ),
                                 None,
-                            );
+                            ),
                         }
-                        let plugin_ok = serde_json::from_str::<serde_json::Value>(&out)
-                            .ok()
-                            .and_then(|v| v.get("ok").and_then(|b| b.as_bool()));
-                        let preview = if out.chars().count() > 600 {
-                            format!("{}…", out.chars().take(600).collect::<String>())
-                        } else {
-                            out
-                        };
-                        if plugin_ok == Some(false) {
-                            return (
-                                false,
-                                format!(
-                                    "[plugin:{}] execution failed: plugin returned ok=false: {}",
-                                    plugin_id, preview
-                                ),
-                                None,
-                            );
-                        }
-                        (
-                            true,
-                            format!("[plugin:{}] {}", plugin_id, preview),
-                            None,
-                        )
-                        }
-                        Err(err) => (
-                            false,
-                            format!("[plugin:{}] execution failed: {}", plugin_id, err),
-                            None,
-                        ),
-                    },
+                    }
                     None => (
                         false,
                         format!(
