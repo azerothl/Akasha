@@ -46,8 +46,11 @@ Vous obtenez (dans l'archive CLI) :
 - **akasha-daemon** — serveur 24/7 (lancé par `akasha start`)
 - **akasha-tui** — interface en terminal (lancée par `akasha tui`)
 - **docs/user_guide.md** — documentation utilisateur (guide pour les binaires uniquement)
+- **spec/** — sous-dossier réduit avec des fichiers d’exemple (`tools_policy.example.yaml`, `voice_router.example.yaml`, `llm_router.example.yaml`) pour l’init et les modèles de configuration
 
-**Documentation dans l’interface** : lancez `akasha start` depuis le dossier où vous avez extrait l’archive. L’onglet **Doc** des interfaces (TUI et Web) affiche alors cette documentation. Si le fichier `docs/user_guide.md` est absent du zip, l’onglet Doc affichera « Documentation non disponible ».
+**Résolution du dossier `spec` au runtime** (daemon et `akasha paths`) : dans l’ordre — **`AKASHA_SPEC_DIR`** si elle pointe vers un répertoire existant → **`spec/` à côté du binaire `akasha-daemon`** → **`data_dir/spec`** s’il existe → sinon chemin relatif **`spec`** (dépôt source / développement).
+
+**Documentation dans l’interface** : lancez `akasha start` depuis le dossier où vous avez extrait l’archive (ou utilisez un `data_dir` cohérent). L’onglet **Doc** charge le markdown depuis `spec/user_guide.md`, puis à défaut **`docs/user_guide.md`** à côté des binaires, puis `data_dir/docs/user_guide.md`. Si aucun de ces contenus n’est disponible, l’onglet Doc affiche un message « Documentation non disponible ».
 
 ---
 

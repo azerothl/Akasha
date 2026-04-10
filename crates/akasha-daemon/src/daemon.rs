@@ -510,6 +510,13 @@ impl Daemon {
                 Arc::new(RwLock::new(std::collections::HashMap::new()));
             let task_usage_store = std::sync::Arc::new(crate::api::TaskUsageStore::new());
             let user_rag_store = crate::user_rag::UserRagStore::new_shared(&data_dir);
+            let autonomous_mission = match crate::autonomous_mission_config::load_and_sync_db(data_dir, db_path.as_path()) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    warn!(error = %e, "autonomous_mission: failed to load/sync");
+                    None
+                }
+            };
             let (progress_persistence_tx, progress_persistence_rx) = std::sync::mpsc::channel::<(uuid::Uuid, u8, String)>();
             let (event_persistence_tx, event_persistence_rx) = std::sync::mpsc::channel::<(
                 uuid::Uuid,
@@ -671,6 +678,7 @@ impl Daemon {
                 let root_llm_sem = root_llm_sem.clone();
                 let subtask_llm_sem = subtask_llm_sem.clone();
                 let delegation_tx = delegation_tx.clone();
+                let autonomous_mission_worker = autonomous_mission.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
                         // Phase 4: skip if task was cancelled (e.g. via POST /api/tasks/:id/cancel) before worker started.
@@ -733,6 +741,7 @@ impl Daemon {
                             let session_id = task.session_id;
                             let image_data_urls = task.image_data_urls;
                             let preferred_task_type_override = task.preferred_task_type.clone();
+                            let autonomous_mission = autonomous_mission_worker.clone();
                             tokio::spawn(async move {
                                 run_message_via_llm(
                                     bus,
@@ -760,6 +769,7 @@ impl Daemon {
                                     Some(device_bridge),
                                     Some(workspace_store),
                                     Some(browser_registry),
+                                    autonomous_mission,
                                 )
                                 .instrument(span)
                                 .await;
@@ -795,6 +805,7 @@ impl Daemon {
                             let session_id = task.session_id;
                             let image_data_urls = task.image_data_urls;
                             let preferred_task_type_override = task.preferred_task_type.clone();
+                            let autonomous_mission = autonomous_mission_worker.clone();
                             tokio::spawn(async move {
                                 run_message_via_llm(
                                     bus,
@@ -822,6 +833,7 @@ impl Daemon {
                                     Some(device_bridge),
                                     Some(workspace_store),
                                     Some(browser_registry),
+                                    autonomous_mission,
                                 )
                                 .instrument(span)
                                 .await;
@@ -884,6 +896,16 @@ impl Daemon {
                     }
                 }
             });
+
+            if let Some(ref am) = autonomous_mission {
+                let store_path = db_path.clone();
+                let dd = self.data_dir.clone();
+                let cfg = am.clone();
+                let tx = normal_tx.clone();
+                tokio::spawn(async move {
+                    crate::autonomous_heartbeat::run_autonomous_heartbeat(store_path, dd, cfg, tx).await;
+                });
+            }
 
             // Scheduler: tick, create task_runs, push to orchestrator (normal priority queue).
             tokio::spawn({
@@ -1039,6 +1061,7 @@ impl Daemon {
                 let user_rag_store = user_rag_store.clone();
                 let agent_profile_cache = agent_profile_cache.clone();
                 let task_usage_store = task_usage_store.clone();
+                                let autonomous_mission_http = autonomous_mission.clone();
                                 let device_bridge = device_bridge.clone();
                                 let bus_clone = bus.clone();
                                 // Body reading is done inside the spawned task so slow/large uploads
@@ -1104,6 +1127,7 @@ impl Daemon {
                                             &update_check_cache_clone,
                                             task_usage_store.as_ref(),
                                             Some(&device_bridge),
+                                            autonomous_mission_http,
                                         )
                                         .await;
                                         if let Some(idx) = resp.find("\r\n") {

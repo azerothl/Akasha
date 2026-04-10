@@ -84,12 +84,21 @@ fn init_failure_suggests_missing_browser(msg: &str) -> bool {
         || m.contains("node:internal/modules")
 }
 
+/// On Windows, `npm` / `npx` are `.cmd` shims; `Command::new("npm")` often fails to spawn (NotFound).
 fn npm_program() -> &'static str {
-    "npm"
+    if cfg!(windows) {
+        "npm.cmd"
+    } else {
+        "npm"
+    }
 }
 
 fn npx_program() -> &'static str {
-    "npx"
+    if cfg!(windows) {
+        "npx.cmd"
+    } else {
+        "npx"
+    }
 }
 
 /// Run `npm install` then `npx playwright install chromium` in the runner directory.
@@ -342,22 +351,38 @@ pub async fn create_browser_session(
     headless: bool,
     action_timeout_secs: u64,
 ) -> Result<BrowserSession, String> {
+    let runner_dir = playwright_runner_dir(runner_path).ok_or_else(|| {
+        format!(
+            "Playwright runner path has no parent directory: {}",
+            runner_path.display()
+        )
+    })?;
+    let auto_install_off = std::env::var("AKASHA_PLAYWRIGHT_AUTO_INSTALL")
+        .ok()
+        .as_deref()
+        == Some("0");
+    let playwright_pkg = runner_dir
+        .join("node_modules")
+        .join("playwright")
+        .join("package.json");
+    if !auto_install_off && !playwright_pkg.is_file() {
+        let lock = PLAYWRIGHT_INSTALL_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock.lock().await;
+        if !playwright_pkg.is_file() {
+            tracing::info!(
+                path = %runner_dir.display(),
+                "Playwright npm package missing; installing dependencies and Chromium…"
+            );
+            ensure_playwright_chromium(&runner_dir).await?;
+        }
+    }
+
     match create_browser_session_once(runner_path, headless, action_timeout_secs).await {
         Ok(s) => Ok(s),
         Err(e) => {
-            let auto_off = std::env::var("AKASHA_PLAYWRIGHT_AUTO_INSTALL")
-                .ok()
-                .as_deref()
-                == Some("0");
-            if auto_off || !init_failure_suggests_missing_browser(&e) {
+            if auto_install_off || !init_failure_suggests_missing_browser(&e) {
                 return Err(e);
             }
-            let Some(runner_dir) = playwright_runner_dir(runner_path) else {
-                return Err(format!(
-                    "{} (could not resolve runner directory for auto-install)",
-                    e
-                ));
-            };
             let lock = PLAYWRIGHT_INSTALL_LOCK.get_or_init(|| Mutex::new(()));
             let _guard = lock.lock().await;
             tracing::warn!(

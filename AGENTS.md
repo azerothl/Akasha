@@ -19,9 +19,24 @@ Akasha is a Rust workspace (15 crates) with a Tauri desktop UI (React/TypeScript
 - **Test (Rust):** `CXX=g++ cargo test`
 - **Lint:** `CXX=g++ cargo clippy`
 - **Test (UI):** `cd apps/akasha-ui && npm run test`
+- **Test (UI E2E / Playwright):** `cargo build -p akasha-daemon` then `cd apps/akasha-ui && npm run test:e2e:install && npm run test:e2e` (writes screenshots under `docs/screenshots/`)
 - **Benchmarks:** `CXX=g++ cargo bench -p akasha-daemon`
 
 See `docs/tests_and_benchmarks.md` for the full test inventory by crate.
+
+### Release version alignment (GitHub)
+
+Product version must match across the workspace Cargo.toml (`[workspace.package].version`) and the Tauri app (`apps/akasha-ui`: `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `tauri.conf.json`). Mismatch causes false “update available” banners versus `api/latest.json`.
+
+**Recommended sequence (automated):**
+
+1. Actions → **Sync release version** → set `version` (e.g. `0.8.0`, no `v` prefix) and `branch` (e.g. `main`). This runs `scripts/sync-release-version.py` and pushes one commit.
+2. Pull locally, then create and push the tag: `git tag v0.8.0 && git push origin v0.8.0`.
+3. The **Release** workflow builds and publishes artifacts. The `verify-release-version` job fails the tag build if the tag does not match the embedded versions (run step 1 first).
+
+If `main` is branch-protected, add a repository secret `VERSION_SYNC_TOKEN` (PAT with `contents: write`) so the sync workflow can push.
+
+Locally: `python3 scripts/sync-release-version.py X.Y.Z` from the repo root.
 
 ### Running the daemon
 

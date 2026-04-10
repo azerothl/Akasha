@@ -14,7 +14,7 @@ Ce guide s'adresse aux utilisateurs qui ont téléchargé les **binaires précom
 2. Pour une installation complète en une étape, téléchargez l'archive **« Akasha full »** correspondant à votre système (ex. `akasha-full-windows-x86_64.zip`, `akasha-full-linux-x86_64.zip`, `akasha-full-macos-x86_64.zip`). Sinon, téléchargez l'archive CLI (akasha, daemon, TUI) et, si besoin, l'archive de l'application desktop (Tauri) séparément.
 3. Décompressez l'archive dans un dossier (ex. `C:\Akasha` ou `~/Akasha`).
 
-Vous obtenez les exécutables **akasha** (ou akasha.exe), **akasha-daemon** et **akasha-tui**, le dossier **scripts** (install et setup), **docs**, et dans le zip « full » un sous-dossier **ui** contenant l'installateur de l'application desktop.
+Vous obtenez les exécutables **akasha** (ou akasha.exe), **akasha-daemon** et **akasha-tui**, le dossier **scripts** (install et setup), **docs**, un sous-dossier **spec/** (fichiers d'exemple pour la configuration), et dans le zip « full » un sous-dossier **ui** contenant l'installateur de l'application desktop.
 
 ### Installation recommandée (installeur unifié)
 
@@ -60,6 +60,8 @@ Pour afficher l'interface en terminal : `akasha tui` (ou `.\akasha.exe tui` sous
 
 **Important** : lancez `akasha start` depuis le dossier d'installation (ou après avoir ajouté ce dossier au PATH) afin que l'onglet **Doc** des interfaces affiche cette documentation.
 
+Des **captures d’écran** de l’interface (chat, onglet Doc) peuvent être incluses sous `docs/screenshots/` dans les archives de développement ; elles sont générées par la suite Playwright du dépôt source (`apps/akasha-ui`, `npm run test:e2e`) et servent aussi au site public Akasha_app.
+
 ---
 
 ## 2. Où se trouve la configuration
@@ -84,8 +86,15 @@ Vous pouvez modifier les fichiers suivants dans ce répertoire (avec un éditeur
 | `akasha.env` | Variables d'environnement persistantes (éditables aussi via `akasha config env`). |
 | `connectors.env` | Activation des canaux (Telegram, Slack, Discord). |
 | `agent_profile.json` | Profil de l'agent : nom, rôle, personnalité, règles. Éditable dans Paramètres → Profil de l'agent (interface web) ou en modifiant le fichier puis en redémarrant le daemon. |
+| `autonomous_mission.yaml` | (Optionnel) **Mission autonome** : objectif, contexte, règles de fonctionnement, rôles, intervalle de heartbeat, répertoire des rapports, `session_id`, type d’agent pour le premier pas de chaque heartbeat. Éditable dans l’onglet **Mission** de l’interface web ou via `GET` / `PUT /api/autonomous-mission`. |
 
 Le répertoire de données est créé automatiquement par `akasha init` ou `akasha doctor --fix` s'il est absent.
+
+### Dossier `spec` à côté des binaires
+
+Les archives de release incluent un sous-dossier **`spec/`** avec des **fichiers d'exemple** (politique d'outils, routeur vocal, routeur LLM) utilisés par `akasha init` pour générer la configuration par défaut lorsque ces fichiers sont présents. Le daemon résout le dossier `spec` utilisé à l'exécution dans cet ordre : variable d'environnement **`AKASHA_SPEC_DIR`** (si elle pointe vers un répertoire existant) → **`spec/` à côté du binaire `akasha-daemon`** → **`data_dir/spec`** s'il existe → sinon le chemin relatif **`spec`** (cas habituel du dépôt source lancé depuis la racine du projet). La commande **`akasha paths`** affiche le chemin retenu et la source (variable, binaire, données, ou relatif).
+
+L'onglet **Doc** des interfaces charge le guide depuis `spec/user_guide.md`, ou à défaut depuis **`docs/user_guide.md`** à côté des binaires (puis éventuellement `data_dir/docs/user_guide.md`). Les spécifications et documents d'architecture complets du dépôt Git ne sont pas tous inclus dans le zip utilisateur ; ils restent disponibles dans le dépôt source sous **`spec/`**.
 
 ---
 
@@ -207,17 +216,18 @@ Les variables définies via `akasha config env set` sont enregistrées dans le f
 
 ### Interface terminal (TUI)
 
-- **Onglets** : Chat, **Retours planifiés** (réponses des tâches récurrentes), Routeur (métriques), Doc (cette documentation), Tâches, Calendrier, Mémoire.
+- **Onglets** : Chat, **Retours planifiés** (réponses des tâches récurrentes), Routeur (métriques), Doc (cette documentation), Tâches, Calendrier, Mémoire. L’onglet **Mission autonome** et les **Paramètres** complets sont disponibles dans l’interface web / desktop uniquement ; la mission peut toutefois être configurée via **`autonomous_mission.yaml`** ou l’API.
 - **Chat** : uniquement la conversation avec l’agent (messages envoyés et réponses). **Retours planifiés** : uniquement les réponses de l’agent pour les rappels / tâches planifiées (schedules), sans les mélanger au fil du chat.
 - **Raccourcis** : Tab (changer d'onglet), Entrée (envoyer un message), R (rafraîchir Routeur, Retours planifiés ou liste des tâches), ↑/↓ PgUp/PgDn Home/End (défilement), Échap ou Ctrl+Q (quitter). **Onglet Tâches** : ↑/↓ (sélectionner une tâche), D (filtrer racines uniquement). **Onglet Mémoire** : / ou S (recherche), G (basculer vue graphe), D ou Suppr (supprimer l'entrée long terme sélectionnée).
 
 ### Interface web / desktop (si installée)
 
-- **Onglets** : Chat, **Retours planifiés**, Routeur, Documentation, Tâches, Calendrier, Mémoire, Paramètres. **Chat** = conversation uniquement ; **Retours planifiés** = réponses de l’agent pour les tâches planifiées (rappels récurrents), dans un onglet dédié.
-- **Raccourcis** : touches **1 à 8** pour basculer vers l'onglet correspondant (inactif si le focus est dans un champ de saisie ou une modale).
+- **Onglets** : Chat, **Retours planifiés**, Routeur, Documentation, Tâches, Calendrier, Mémoire, **Mission**, Paramètres. **Chat** = conversation uniquement ; **Retours planifiés** = réponses de l’agent pour les tâches planifiées (rappels récurrents), dans un onglet dédié.
+- **Raccourcis** : touches **1 à 9** pour basculer vers l'onglet correspondant (Mission = **8**, Paramètres = **9** ; inactif si le focus est dans un champ de saisie ou une modale).
 - **Pièces jointes** : dans le Chat, vous pouvez joindre des images ou des documents (texte, PDF) ; l'agent les reçoit pour analyse.
-- **RAG utilisateur** : dans Paramètres, section « Mes documents (RAG utilisateur) », vous pouvez ajouter ou supprimer des documents ; les extraits pertinents sont utilisés par l'agent lors des réponses.
+- **Données** : dans Paramètres → **Données**, deux sous-onglets — **RAG utilisateur** (documents texte indexés, extraits injectés dans le contexte de l’agent) et **Graphe projet** (plusieurs dossiers de projet enregistrés, index SQLite + rapports sous `workspace_graph/out/<id>/` ; ouverture du HTML par workspace ; agents enrichis automatiquement et outil `workspace_graph_search` si autorisé). Sans interface web, gérer via `/api/user-rag/...` et `/api/workspace-graph/workspaces` (voir le guide complet).
 - **Profil de l'agent** : dans Paramètres → Profil de l'agent, vous pouvez définir le nom, le rôle, la personnalité, les règles et les comportements autorisés/interdits ; des modèles (Neutre, Bienveillant, Concis/technique, etc.) sont proposés.
+- **Mission autonome** : onglet **Mission** pour définir un objectif de fond, le contexte, des règles, des rôles (organisation) et la fréquence des **heartbeats**. Tant que la mission est activée et **active**, le daemon lance périodiquement une tâche orchestrée (type d’agent du premier pas configurable, souvent *chef de projet*) ; l’orchestrateur peut déléguer à d’autres agents. Les rapports Markdown vont dans le répertoire configuré (relatif au data_dir). Fichier **`autonomous_mission.yaml`** ; API **`GET` / `PUT /api/autonomous-mission`**, pause/reprise **`POST`** sur `/api/autonomous-mission/pause` et `/resume`. Pour appliquer aussi au **chat** le mode « sans questions » lié à la mission, utilisez le même **`session_id`** que dans la fiche mission. *Exemple* : maintenir un fichier `CHANGELOG_HEBDO.md` à jour dans un dépôt — renseignez l’objectif et le contexte (chemin du dépôt), horizon moyen, heartbeat 120 min, consultez les rapports sous le dossier indiqué après quelques cycles.
 - **Plugins** : la vue plugins affiche l’état d’activation, les règles de routage dynamiques et permet de réinitialiser la réputation d’un plugin (ou de tous les plugins) si nécessaire.
 
 Le daemon écoute par défaut sur le port **3876**. Pour que l'onglet Doc affiche ce guide, lancez `akasha start` depuis le dossier où vous avez extrait l'archive (contenant le dossier `docs`).
