@@ -146,7 +146,7 @@ Voir [§1](#1-vision-et-périmètre) (scope, FR, NFR, personas). Les paires 01/0
 | [43_session_terminal.md](43_session_terminal.md) | Session et terminal (usage avancé) |
 | [44_whatsapp.md](44_whatsapp.md) | Canal WhatsApp (spec / état) |
 | [52_personality_architecture.md](52_personality_architecture.md) | Architecture personnalité (modes, mémoire personnalité) |
-| [personality_core.yaml](personality_core.yaml) / [personality_modes.yaml](personality_modes.yaml) | Données de personnalité par défaut |
+| [personality_core.yaml](personality_core.yaml) / [personality_modes.yaml](personality_modes.yaml) | Données de personnalité par défaut (textes injectés au LLM en **anglais** pour cohérence du prompt système) |
 
 ### Projets longue durée
 

@@ -5819,9 +5819,9 @@ pub(crate) async fn run_message_via_llm(
             "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
              Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
-             CAMERA RULE (PRIORITAIRE sur WRITE): When the user asks for a webcam/camera photo (e.g. \"prends une photo\", \"take a photo\", \"photo depuis la webcam\", \"affiche-la dans le chat\", \"display it in the chat\"), you MUST reply ONLY with TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture. Do NOT mention tools_policy.yaml, allowed_write_paths, or file writing. After the tool returns, if the user asked to \"display in the chat\" / \"affiche-la dans le chat\" / \"show it in the chat\", reply with ONLY a short confirmation in the user's language (e.g. in French: \"Photo prise. Elle s'affiche ci-dessous.\"; in English: \"Photo captured. It is shown below.\"). Do NOT offer \"save to file\", \"get a description\", \"take another photo\", or \"What would you like to do next?\" — the image is appended automatically below your message. Use the same language as the user (French if they wrote in French).\n\
-             WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
-             WEATHER/MÉTEO RULE (PRIORITY): When the user asks for weather, météo, or forecasts (e.g. \"quel temps\", \"météo demain\", \"weather in X\"), you MUST use TOOL: web_search <query> first, then if snippets lack numeric detail use TOOL: web_fetch <url> on a trusted result URL and/or TOOL: browser navigate <url> then TOOL: browser snapshot (many météo sites are JS-heavy). Do NOT use bankr, portfolio, or any other skill for weather — use web_search plus web_fetch/browser as needed.\n\
+             CAMERA RULE (priority over WRITE): When the user asks for a webcam/camera photo (e.g. \"prends une photo\", \"take a photo\", \"photo depuis la webcam\", \"affiche-la dans le chat\", \"display it in the chat\"), you MUST reply ONLY with TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture. Do NOT mention tools_policy.yaml, allowed_write_paths, or file writing. After the tool returns, if the user asked to \"display in the chat\" / \"affiche-la dans le chat\" / \"show it in the chat\", reply with ONLY a short confirmation in the user's language (e.g. in French: \"Photo prise. Elle s'affiche ci-dessous.\"; in English: \"Photo captured. It is shown below.\"). Do NOT offer \"save to file\", \"get a description\", \"take another photo\", or \"What would you like to do next?\" — the image is appended automatically below your message. Use the same language as the user (French if they wrote in French).\n\
+             WRITE RULE (mandatory): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
+             WEATHER RULE (PRIORITY): When the user asks for weather, météo, or forecasts (e.g. \"quel temps\", \"météo demain\", \"weather in X\"), you MUST use TOOL: web_search <query> first, then if snippets lack numeric detail use TOOL: web_fetch <url> on a trusted result URL and/or TOOL: browser navigate <url> then TOOL: browser snapshot (many weather sites are JS-heavy). Do NOT use bankr, portfolio, or any other skill for weather — use web_search plus web_fetch/browser as needed.\n\
              BROWSER RULE (PRIORITY): When the user explicitly asks to open the browser, go to a website, or show something on X/Twitter (e.g. \"ouvre le navigateur\", \"open the browser\", \"va sur X\", \"go to twitter\", \"cherche sur X\", \"ouvre le navigateur et cherche\"), you MUST use TOOL: browser navigate <url> first with the appropriate URL (e.g. https://x.com/akashabot for a profile, https://x.com for the home page). You may then add a short message. Do NOT use only web_search when the user asked to open the browser or go to X/Twitter.\n\
              SOCIAL / LOGGED-IN SITES RULE: If tools_policy allows the domain, use TOOL: browser navigate <https URL> and TOOL: browser snapshot when the user asks to open or inspect X/Twitter or similar. Do NOT refuse with vague \"security\", \"confidentiality\", or \"structural policy\" claims — the user runs Akasha locally and controls tools_policy. Real limitation: you cannot type the user's password or complete interactive MFA inside the managed browser on their behalf; if a login wall blocks content, say that clearly and offer practical options (user logs in manually in that same browser session if their environment keeps the session, or official API access via TOOL: run_command with VAULT:... when applicable). Do NOT state that vault-backed API access is forbidden when the user has configured secrets — follow VAULT ENV RULE.\n\
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first, then answer from fetched content — not only from snippets. If snippets are insufficient, use TOOL: web_fetch <url> on a relevant result URL, or TOOL: browser navigate <url> then TOOL: browser snapshot so YOU retrieve the page text inside Akasha (managed browser), then summarize for the user. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. Do NOT tell the user to open links in their own browser when web_fetch or browser snapshot is available and allowed — retrieve and answer yourself.\n\
@@ -5873,7 +5873,7 @@ pub(crate) async fn run_message_via_llm(
     system_prompt.push_str(
         "\n\n[Response]\n\
         - Language: reply ONLY in the same language as the user's message. If the user writes in French, reply entirely in French; in English, in English. Do not adopt the language of tool results or context.\n\
-        - Personality: always apply your identity (name), tone and form of address (formal/informal as configured).\n\n",
+        - Personality: always apply your identity (name), tone, and form of address as defined in [Agent profile and instructions] (including formality when set).\n\n",
     );
     let system_prompt: Option<String> = if system_prompt.trim().is_empty() {
         None
@@ -9061,7 +9061,7 @@ pub async fn handle_api(
         }
     }
 
-    // GET /api/agent-profile — read agent profile (name, personality, role, gender, avatar, rules, can_do, cannot_do, traits_override, preferred_mode)
+    // GET /api/agent-profile — read agent profile (name, personality, role, gender, formality, avatar, rules, can_do, cannot_do, traits_override, preferred_mode)
     if method == "GET" && path == "/api/agent-profile" {
         let profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         let body_json = serde_json::json!({
@@ -9069,6 +9069,7 @@ pub async fn handle_api(
             "personality": profile.personality,
             "role": profile.role,
             "gender": profile.gender,
+            "formality": profile.formality,
             "avatar": profile.avatar,
             "rules": profile.rules,
             "can_do": profile.can_do,
@@ -9079,7 +9080,7 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
-    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, role?, gender?, avatar?, rules?, can_do?, cannot_do?, traits_override?, preferred_mode? }
+    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, role?, gender?, formality?, avatar?, rules?, can_do?, cannot_do?, traits_override?, preferred_mode? }
     if method == "POST" && path == "/api/agent-profile" {
         let mut profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         if let Some(body) = body.as_deref() {
@@ -9095,6 +9096,18 @@ pub async fn handle_api(
                 }
                 if v.get("gender").is_some() {
                     profile.gender = v.get("gender").and_then(|x| x.as_str()).map(String::from);
+                }
+                if let Some(fv) = v.get("formality") {
+                    if fv.is_null() {
+                        profile.formality = None;
+                    } else if let Some(s) = fv.as_str() {
+                        let t = s.trim().to_lowercase();
+                        profile.formality = match t.as_str() {
+                            "formal" => Some("formal".to_string()),
+                            "informal" => Some("informal".to_string()),
+                            _ => None,
+                        };
+                    }
                 }
                 if v.get("avatar").is_some() {
                     profile.avatar = v.get("avatar").and_then(|x| x.as_str()).map(String::from);

@@ -1987,6 +1987,7 @@ function App() {
     name: string;
     role: string;
     gender: string;
+    formality: string;
     avatar: string;
     personality: string;
     rules: string[];
@@ -1998,6 +1999,7 @@ function App() {
     name: "",
     role: "",
     gender: "",
+    formality: "",
     avatar: "",
     personality: "",
     rules: [],
@@ -3795,6 +3797,7 @@ function App() {
         personality?: string | null;
         role?: string | null;
         gender?: string | null;
+        formality?: string | null;
         avatar?: string | null;
         rules?: string[];
         can_do?: string[];
@@ -3803,11 +3806,13 @@ function App() {
         preferred_mode?: string | null;
       }>("get_agent_profile", { port: DAEMON_PORT });
       const to = data?.traits_override;
+      const f = data?.formality;
       setAgentProfile({
         name: data?.name ?? "",
         personality: data?.personality ?? "",
         role: data?.role ?? "",
         gender: data?.gender ?? "",
+        formality: f === "formal" || f === "informal" ? f : "",
         avatar: data?.avatar ?? "",
         rules: Array.isArray(data?.rules) ? data.rules : [],
         can_do: Array.isArray(data?.can_do) ? data.can_do : [],
@@ -8624,6 +8629,15 @@ function App() {
                                 <option value="neutral">{t("settings.gender_neutral")}</option>
                               </select>
                             </dd>
+                            <dt>{t("settings.agent_profile_formality")}</dt>
+                            <dd>
+                              <select aria-label={t("settings.agent_profile_formality")} className="settings-theme-select" value={agentProfile.formality} onChange={(e) => setAgentProfile((p) => ({ ...p, formality: e.target.value }))}>
+                                <option value="">{t("settings.agent_profile_formality_default")}</option>
+                                <option value="formal">{t("settings.formality_formal")}</option>
+                                <option value="informal">{t("settings.formality_informal")}</option>
+                              </select>
+                              <span className="settings-doc muted">{t("settings.agent_profile_formality_hint")}</span>
+                            </dd>
                             <dt>{t("settings.agent_profile_avatar")}</dt>
                             <dd>
                               <input
@@ -8895,7 +8909,7 @@ function App() {
                         </div>
                       )}
                     </div>
-                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { const traits = Object.keys(agentProfile.traits_override).length ? agentProfile.traits_override : undefined; await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role) || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do, traits_override: traits, preferred_mode: agentProfile.preferred_mode.trim() || undefined }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
+                    <button type="button" className="refresh-btn" disabled={agentProfileSaving} onClick={async () => { setAgentProfileSaving(true); setAgentProfileError(null); try { const traits = Object.keys(agentProfile.traits_override).length ? agentProfile.traits_override : undefined; const formality = agentProfile.formality === "formal" || agentProfile.formality === "informal" ? agentProfile.formality : null; await invoke("post_agent_profile", { body: { name: agentProfile.name.trim().slice(0, AGENT_PROFILE_LIMITS.name) || undefined, personality: agentProfile.personality.trim().slice(0, AGENT_PROFILE_LIMITS.personality) || undefined, role: agentProfile.role.trim().slice(0, AGENT_PROFILE_LIMITS.role) || undefined, gender: (agentProfile.gender === "male" || agentProfile.gender === "female" || agentProfile.gender === "neutral") ? agentProfile.gender : undefined, formality, avatar: agentProfile.avatar || undefined, rules: agentProfile.rules, can_do: agentProfile.can_do, cannot_do: agentProfile.cannot_do, traits_override: traits, preferred_mode: agentProfile.preferred_mode.trim() || undefined }, port: DAEMON_PORT }); } catch (err) { setAgentProfileError(String(err)); } finally { setAgentProfileSaving(false); } }}>{agentProfileSaving ? t("common.loading") : t("settings.agent_profile_save")}</button>
                   </>
                 )}
               </div>

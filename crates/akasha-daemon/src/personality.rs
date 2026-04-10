@@ -116,6 +116,9 @@ pub fn mode_from_assigned_agent(assigned_agent: &str) -> &'static str {
 /// If traits_override or preferred_mode are present on profile, they are applied (Phase 2).
 /// When preferred_mode is not set, mode is derived from assigned_agent (Phase 3).
 /// If any YAML is missing, falls back to profile.format_for_prompt().
+/// Name in the prompt is always from the user profile or the product default — never from YAML `personality_core.name`.
+/// User-defined fields are listed first; when `profile.personality` is set, YAML mission/posture/relationship are omitted
+/// so they do not contradict the UI.
 pub fn build_personality_prompt(
     spec_dir: &Path,
     profile: &AgentProfile,
@@ -134,46 +137,25 @@ pub fn build_personality_prompt(
         None => return profile.format_for_prompt(),
     };
 
+    let user_personality_set = profile
+        .personality
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+
     let mut out = String::from("[Agent profile and instructions]\n");
 
-    // Identity: name from profile (or default), then core mission/posture
     let name = profile
         .name
         .as_deref()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or(
-            core.personality_core
-                .as_ref()
-                .and_then(|c| c.name.as_deref())
-                .unwrap_or(AgentProfile::DEFAULT_NAME),
-        );
+        .unwrap_or(AgentProfile::DEFAULT_NAME);
     out.push_str(&format!(
         "- You are « {} ». That is your name. You remember it and can introduce yourself when relevant.\n",
         name
     ));
 
-    if let Some(ref c) = core.personality_core {
-        if let Some(ref mission) = c.mission {
-            let m = mission.trim().replace('\n', " ");
-            if !m.is_empty() {
-                out.push_str(&format!("- Your mission: {}.\n", m));
-            }
-        }
-        if let Some(ref posture) = c.posture {
-            let p = posture.trim().replace('\n', " ");
-            if !p.is_empty() {
-                out.push_str(&format!("- Posture: {}.\n", p));
-            }
-        }
-        if let Some(ref rel) = c.relationship_to_user {
-            let r = rel.trim().replace('\n', " ");
-            if !r.is_empty() {
-                out.push_str(&format!("- Relationship to user: {}.\n", r));
-            }
-        }
-    }
-
-    // Gender (pronouns) from profile
+    // Gender (pronouns) from profile — early so identity matches the UI
     if let Some(ref g) = profile.gender {
         let g = g.trim().to_lowercase();
         if g == "male" || g == "female" || g == "neutral" {
@@ -188,6 +170,10 @@ pub fn build_personality_prompt(
         }
     }
 
+    if let Some(ref line) = crate::agent_profile::formality_prompt_line(profile.formality.as_deref()) {
+        out.push_str(line);
+    }
+
     // Role from profile (overrides core role for user customization)
     if let Some(ref r) = profile.role {
         let r = r.trim();
@@ -199,6 +185,59 @@ pub fn build_personality_prompt(
             let r = r.trim();
             if !r.is_empty() {
                 out.push_str(&format!("- Your role: {}.\n", r));
+            }
+        }
+    }
+
+    if let Some(ref p) = profile.personality {
+        let p = p.trim();
+        if !p.is_empty() {
+            out.push_str(&format!(
+                "- Personality / tone: {}. Adopt this tone in every response.\n",
+                p
+            ));
+        }
+    }
+
+    if !profile.rules.is_empty() {
+        out.push_str("- Rules to follow:\n");
+        for r in &profile.rules {
+            out.push_str(&format!("  • {}\n", r));
+        }
+    }
+    if !profile.can_do.is_empty() {
+        out.push_str("- You can (allowed):\n");
+        for c in &profile.can_do {
+            out.push_str(&format!("  • {}\n", c));
+        }
+    }
+    if !profile.cannot_do.is_empty() {
+        out.push_str("- You must not:\n");
+        for c in &profile.cannot_do {
+            out.push_str(&format!("  • {}\n", c));
+        }
+    }
+
+    // Default YAML identity narrative only when the user has not set a custom personality text
+    if !user_personality_set {
+        if let Some(ref c) = core.personality_core {
+            if let Some(ref mission) = c.mission {
+                let m = mission.trim().replace('\n', " ");
+                if !m.is_empty() {
+                    out.push_str(&format!("- Your mission: {}.\n", m));
+                }
+            }
+            if let Some(ref posture) = c.posture {
+                let p = posture.trim().replace('\n', " ");
+                if !p.is_empty() {
+                    out.push_str(&format!("- Posture: {}.\n", p));
+                }
+            }
+            if let Some(ref rel) = c.relationship_to_user {
+                let r = rel.trim().replace('\n', " ");
+                if !r.is_empty() {
+                    out.push_str(&format!("- Relationship to user: {}.\n", r));
+                }
             }
         }
     }
@@ -342,37 +381,6 @@ pub fn build_personality_prompt(
         }
     }
 
-    // Personality text from profile (user free-form)
-    if let Some(ref p) = profile.personality {
-        let p = p.trim();
-        if !p.is_empty() {
-            out.push_str(&format!(
-                "- Personality / tone: {}. Adopt this tone in every response.\n",
-                p
-            ));
-        }
-    }
-
-    // User rules, can_do, cannot_do
-    if !profile.rules.is_empty() {
-        out.push_str("- Rules to follow:\n");
-        for r in &profile.rules {
-            out.push_str(&format!("  • {}\n", r));
-        }
-    }
-    if !profile.can_do.is_empty() {
-        out.push_str("- You can (allowed):\n");
-        for c in &profile.can_do {
-            out.push_str(&format!("  • {}\n", c));
-        }
-    }
-    if !profile.cannot_do.is_empty() {
-        out.push_str("- You must not:\n");
-        for c in &profile.cannot_do {
-            out.push_str(&format!("  • {}\n", c));
-        }
-    }
-
     // Personality memory reminder
     out.push_str(
         "- Remember user preferences for tone and technical depth when stored in long-term memory; \
@@ -409,31 +417,32 @@ fn merge_traits(
 
 const DEFAULT_POSTURE: &str = "calm, structured, action-oriented";
 
-/// One-line personality reminder to prefix the user message (reinforces tone). Name from profile or core; posture/tone from core or active mode.
+/// One-line personality reminder to prefix the user message (reinforces tone). Name from profile or product default; posture/tone from YAML or active mode unless the user set custom personality text (then YAML posture is skipped).
 pub fn build_personality_reminder_line(
     spec_dir: &Path,
     profile: &AgentProfile,
     assigned_agent: Option<&str>,
 ) -> String {
+    let user_personality_set = profile
+        .personality
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+
     let name = profile
         .name
         .as_deref()
         .filter(|s| !s.trim().is_empty())
         .map(String::from)
-        .or_else(|| {
-            load_personality_core(spec_dir).and_then(|c| {
-                c.personality_core
-                    .as_ref()
-                    .and_then(|inner| inner.name.as_deref().map(String::from))
-            })
-        })
         .unwrap_or_else(|| AgentProfile::DEFAULT_NAME.to_string());
     if let Some(core) = load_personality_core(spec_dir) {
-        if let Some(ref c) = core.personality_core {
-            if let Some(ref p) = c.posture {
-                let t = p.trim().replace('\n', " ");
-                if !t.is_empty() {
-                    return format!("Reply staying in character as « {} »: {}.\n\n", name, t);
+        if !user_personality_set {
+            if let Some(ref c) = core.personality_core {
+                if let Some(ref p) = c.posture {
+                    let t = p.trim().replace('\n', " ");
+                    if !t.is_empty() {
+                        return format!("Reply staying in character as « {} »: {}.\n\n", name, t);
+                    }
                 }
             }
         }
@@ -500,5 +509,82 @@ mod tests {
         assert_eq!(mode_from_assigned_agent("code"), "operator");
         assert_eq!(mode_from_assigned_agent("qa"), "operator");
         assert_eq!(mode_from_assigned_agent(""), "assistant");
+    }
+
+    /// Minimal valid personality YAML set so `build_personality_prompt` uses the 5-level path.
+    fn write_minimal_personality_yamls(dir: &std::path::Path) {
+        std::fs::write(
+            dir.join("personality_core.yaml"),
+            r#"personality_core:
+  name: YamlOnlyName
+  role: yaml role fallback
+  mission: "YAML_MISSION_UNIQUE_MARKER"
+  posture: "YAML_POSTURE_UNIQUE_MARKER"
+  relationship_to_user: "YAML_REL_UNIQUE_MARKER"
+values: []
+traits: {}
+behavior_rules: []
+"#,
+        )
+        .expect("write personality_core");
+        std::fs::write(
+            dir.join("personality_modes.yaml"),
+            r#"mode_assistant:
+  tone: calm_clear_professional
+"#,
+        )
+        .expect("write personality_modes");
+        std::fs::write(
+            dir.join("initiative_policy.yaml"),
+            "suggest_improvements_when: []\n",
+        )
+        .expect("write initiative_policy");
+    }
+
+    #[test]
+    fn build_personality_prompt_name_default_not_from_yaml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        write_minimal_personality_yamls(dir);
+        let profile = AgentProfile::default();
+        let out = build_personality_prompt(dir, &profile, None);
+        assert!(
+            out.contains("« Akasha »"),
+            "expected product default name, got: {}",
+            &out[..out.len().min(500)]
+        );
+        assert!(!out.contains("YamlOnlyName"));
+    }
+
+    #[test]
+    fn build_personality_prompt_skips_yaml_mission_when_user_personality_set() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        write_minimal_personality_yamls(dir);
+        let mut profile = AgentProfile::default();
+        profile.personality = Some("USER_PERSONALITY_MARKER".to_string());
+        let out = build_personality_prompt(dir, &profile, None);
+        assert!(out.contains("USER_PERSONALITY_MARKER"));
+        assert!(!out.contains("YAML_MISSION_UNIQUE_MARKER"));
+        assert!(!out.contains("YAML_POSTURE_UNIQUE_MARKER"));
+        assert!(!out.contains("YAML_REL_UNIQUE_MARKER"));
+    }
+
+    #[test]
+    fn build_personality_prompt_user_rules_before_yaml_mission() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        write_minimal_personality_yamls(dir);
+        let mut profile = AgentProfile::default();
+        profile.rules = vec!["RULE_MARKER_FIRST".to_string()];
+        let out = build_personality_prompt(dir, &profile, None);
+        let pos_rule = out.find("RULE_MARKER_FIRST").expect("rule");
+        let pos_mission = out
+            .find("YAML_MISSION_UNIQUE_MARKER")
+            .expect("yaml mission");
+        assert!(
+            pos_rule < pos_mission,
+            "user rules should appear before default YAML mission"
+        );
     }
 }

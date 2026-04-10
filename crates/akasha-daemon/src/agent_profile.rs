@@ -19,6 +19,9 @@ pub struct AgentProfile {
     /// Gender for pronoun consistency: "male" | "female" | "neutral".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gender: Option<String>,
+    /// Form of address for replies: "formal" | "informal" (e.g. French vous vs tu); omitted = no extra instruction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formality: Option<String>,
     /// Avatar image as data URL or URL (displayed in UI; not used in prompt).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar: Option<String>,
@@ -39,6 +42,19 @@ pub struct AgentProfile {
     pub preferred_mode: Option<String>,
 }
 
+pub(crate) fn formality_prompt_line(formality: Option<&str>) -> Option<String> {
+    let t = formality?.trim().to_lowercase();
+    match t.as_str() {
+        "formal" => Some(
+            "- Form of address: In French use formal address (vous); in other languages use a professional, respectful register consistent with formal tone.\n".to_string(),
+        ),
+        "informal" => Some(
+            "- Form of address: In French use informal address (tu); in other languages use a friendly, conversational tone.\n".to_string(),
+        ),
+        _ => None,
+    }
+}
+
 const FILENAME: &str = "agent_profile.json";
 
 impl AgentProfile {
@@ -47,6 +63,7 @@ impl AgentProfile {
             && self.personality.is_none()
             && self.role.is_none()
             && self.gender.is_none()
+            && self.formality.is_none()
             && self.avatar.is_none()
             && self.rules.is_empty()
             && self.can_do.is_empty()
@@ -112,15 +129,6 @@ impl AgentProfile {
             "- You are « {} ». That is your name. You remember it and can introduce yourself when relevant.\n",
             name
         ));
-        if let Some(ref r) = self.role {
-            let r = r.trim();
-            if !r.is_empty() {
-                out.push_str(&format!("- Your role: {}.\n", r));
-            }
-        }
-        if let Some(ref p) = self.personality {
-            out.push_str(&format!("- Personality / tone: {}. Adopt this tone and personality in every response.\n", p));
-        }
         if let Some(ref g) = self.gender {
             let g = g.trim().to_lowercase();
             if g == "male" || g == "female" || g == "neutral" {
@@ -133,6 +141,18 @@ impl AgentProfile {
                 };
                 out.push_str(&format!("- When referring to yourself, use {}.\n", pronoun));
             }
+        }
+        if let Some(ref line) = formality_prompt_line(self.formality.as_deref()) {
+            out.push_str(line);
+        }
+        if let Some(ref r) = self.role {
+            let r = r.trim();
+            if !r.is_empty() {
+                out.push_str(&format!("- Your role: {}.\n", r));
+            }
+        }
+        if let Some(ref p) = self.personality {
+            out.push_str(&format!("- Personality / tone: {}. Adopt this tone and personality in every response.\n", p));
         }
         if !self.rules.is_empty() {
             out.push_str("- Rules to follow:\n");
