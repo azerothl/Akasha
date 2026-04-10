@@ -54,11 +54,12 @@ pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, per
                 let q = g.entry(task_id).or_insert_with(VecDeque::new);
                 let last_msg = q.back().map(|e| e.message.trim()).unwrap_or("");
                 let generic = ["Terminé.", "Done.", "Échec.", "Annulé."];
-                if !last_msg.is_empty() && !generic.contains(&last_msg) {
+                let chosen = if !last_msg.is_empty() && !generic.contains(&last_msg) {
                     last_msg.to_string()
                 } else {
                     "Terminé.".to_string()
-                }
+                };
+                chosen
             } else if ev.event_type == EventType::TaskFailed {
                 "Échec.".to_string()
             } else {

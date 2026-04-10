@@ -145,6 +145,7 @@ Définit l’**identité et la personnalité** de l’agent : nom, ton, règles 
 | `personality`| string          | Non         | Description du ton et de la personnalité, **rédigée en anglais**, incluant le **rôle** (ex. « You are a joyful assistant. Upbeat, light humor… »). Pour un comportement stable du modèle, toujours préciser le rôle dans le texte (e.g. « You are a concise, technical assistant… »). |
 | `role`       | string          | Non         | Rôle explicite de l’assistant (ex. « joyful assistant », « clever assistant », « friendly advisor »). Renforcé dans le prompt par une ligne « Your role: … ». |
 | `gender`     | string          | Non         | Genre pour la cohérence des pronoms : `"male"`, `"female"` ou `"neutral"`. Injecté dans le prompt (he/she/they) si présent. |
+| `formality`  | string          | Non         | Registre d’adresse : `"formal"` ou `"informal"` (ex. vouvoiement vs tutoiement en français). Absent ou `null` = aucune consigne supplémentaire dans le prompt. |
 | `avatar`     | string          | Non         | URL ou data URL de l’image d’avatar (affichée dans les interfaces à côté des réponses de l’agent). Non utilisé dans le prompt. |
 | `rules`      | liste de strings | Non         | Règles à respecter (une par ligne).                                        |
 | `can_do`     | liste de strings | Non         | Comportements autorisés.                                                    |
@@ -158,12 +159,12 @@ L'interface web applique des limites : **name** et **role** 128 caractères, **p
 
 ### Lien avec le prompt
 
-Le daemon charge le profil au démarrage (et après chaque POST `/api/agent-profile`). À chaque tour, il produit un bloc `[Agent profile and instructions]` en anglais avec : identité (nom toujours présent), rôle (si défini), personnalité, consigne de pronoms (si `gender` défini : he/she/they), règles, can_do, cannot_do. Ce bloc est injecté en tête du contexte système avant la mémoire et le RAG. L’avatar n’est pas inclus dans le prompt ; il sert uniquement à l’affichage dans les interfaces.
+Le daemon charge le profil au démarrage (et après chaque POST `/api/agent-profile`). À chaque tour, il produit un bloc `[Agent profile and instructions]` **entièrement en anglais** (texte injecté au modèle) avec : identité (nom depuis le profil ou défaut produit « Akasha », jamais depuis le YAML `personality_core`), pronoms si `gender`, registre d’adresse si `formality`, rôle, texte de personnalité, règles, can_do, cannot_do, puis (si les YAML `spec/personality_*.yaml` sont présents) valeurs, traits, règles comportementales et politique d’initiative — la mission/posture/relation du YAML n’est pas répétée lorsque l’utilisateur a renseigné un texte de personnalité, pour éviter les contradictions avec l’UI. Ce bloc est injecté dans le contexte système avant la mémoire et le RAG. L’avatar n’est pas inclus dans le prompt.
 
 ### Édition
 
 - **CLI** : `akasha init` propose des templates de personnalité (Neutre, Kind/coach, Concis/technique, Créatif, Strict/sécurisé, Joyful & fun, Friendly advisor, Geek & nerdy) en anglais avec rôle ; écrit `agent_profile.json`.
-- **UI** : Paramètres → section « Profil de l’agent » : champs Nom, Rôle, Genre (male/female/neutral), Avatar (image), Personnalité, Règles, Autorisé, Interdit ; sélecteur de template (8 templates) ; bouton Enregistrer (POST `/api/agent-profile`). En Affichage : « Votre avatar » (stocké en localStorage, affiché à côté des messages utilisateur dans le chat). Paramètres organisés en 4 onglets : Affichage, Système, Agent, Data.
+- **UI** : Paramètres → section « Profil de l’agent » : champs Nom, Rôle, Genre (male/female/neutral), Tutoiement/vouvoiement (formal/informal ou défaut), Avatar (image), Personnalité, Règles, Autorisé, Interdit ; sélecteur de template (8 templates) ; bouton Enregistrer (POST `/api/agent-profile`). En Affichage : « Votre avatar » (stocké en localStorage, affiché à côté des messages utilisateur dans le chat). Paramètres organisés en 4 onglets : Affichage, Système, Agent, Data.
 - **Manuel** : éditer `data_dir/agent_profile.json` puis redémarrer le daemon (ou envoyer POST pour invalider le cache).
 
 ### Exemple

@@ -16,6 +16,7 @@ pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use akasha_store::{
     format_todos_plan_block, parse_todos_from_payload, Schedule, ScheduleException,
     ScheduleExceptionType, ScheduleStore, Task, TaskRunStatus, TaskStatus, TaskStore, TodoStatus,
+    WorkspaceGraphStore,
 };
 use akasha_vault::Vault;
 use std::cmp::Ordering;
@@ -1025,6 +1026,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("web_search", "web_search <query> [max_results] — rechercher sur le web (Brave API; BRAVE_API_KEY, web_search_enabled)"),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
     ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
+    ("workspace_graph_search", "workspace_graph_search <query> [--workspace <uuid>] — rechercher dans les graphes projet indexés (nœuds label/chemin) ; limite ~20 lignes ; --workspace pour un espace enregistré uniquement"),
     ("memory_store", "memory_store <content> <source> [link_to: id1,id2...] [link_kind: spouse|child|birth_date|residence|same_person|...] — stocker en mémoire long terme ; optionnellement lier à des entrées (UUIDs) avec un type de relation."),
     ("memory_delete", "memory_delete <id> — supprimer une entrée de la mémoire long terme par son id (UUID)"),
     ("memory_forget", "memory_forget <query> — supprimer les entrées dont le contenu correspond aux mots-clés (plan moyen terme 9)"),
@@ -2073,6 +2075,12 @@ fn should_skip_capture_content(content: &str) -> bool {
 fn message_suggests_project(message: &str) -> bool {
     let m = message.to_lowercase();
     let keywords = [
+        "résumé du projet",
+        "resume du projet",
+        "summary of project",
+        "workspace",
+        "graphe projet",
+        "project graph",
         "roman",
         "bd",
         "bande dessinée",
@@ -2914,6 +2922,7 @@ const ORCH_INLINE_TOOL_FIRST_WORDS: &[&str] = &[
     "install_playwright",
     "read_skill",
     "memory_store",
+    "workspace_graph_search",
     "device_invoke",
     "ask_user",
     "generate_image",
@@ -3439,6 +3448,69 @@ async fn execute_tool_call(
         }
     };
     let result = match tool_name {
+        "workspace_graph_search" => {
+            let Some(sp) = store_path else {
+                return (
+                    false,
+                    "[workspace_graph_search] no task store path".to_string(),
+                    None,
+                );
+            };
+            let sp = sp.to_path_buf();
+            let mut ws_id: Option<String> = None;
+            let mut rest: Vec<String> = Vec::new();
+            let mut it = args.iter().peekable();
+            while let Some(a) = it.next() {
+                if a == "--workspace" {
+                    ws_id = it
+                        .next()
+                        .cloned()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                } else {
+                    rest.push(a.clone());
+                }
+            }
+            let query = rest.join(" ").trim().to_string();
+            if query.is_empty() {
+                (
+                    false,
+                    "[workspace_graph_search] usage: workspace_graph_search <query> [--workspace <uuid>]"
+                        .to_string(),
+                    None,
+                )
+            } else {
+                let limit = 20usize;
+                match tokio::task::spawn_blocking(move || {
+                    let store = WorkspaceGraphStore::open(&sp)?;
+                    store.search_graph_context(&query, limit, ws_id.as_deref())
+                })
+                .await
+                {
+                    Ok(Ok(lines)) => {
+                        if lines.is_empty() {
+                            (
+                                true,
+                                "[workspace_graph_search] no matching nodes".to_string(),
+                                None,
+                            )
+                        } else {
+                            (
+                                true,
+                                format!("[workspace_graph_search]\n{}", lines.join("\n")),
+                                None,
+                            )
+                        }
+                    }
+                    Ok(Err(e)) => (false, format!("[workspace_graph_search] {}", e), None),
+                    Err(e) => (
+                        false,
+                        format!("[workspace_graph_search] join: {}", e),
+                        None,
+                    ),
+                }
+            }
+        }
         "read_file" => {
             let path_str = normalize_tool_path_hint(&path_arg_joined(args));
             if path_str.is_empty() {
@@ -5205,6 +5277,7 @@ struct MemoryProfile {
     episodic_limit: usize,
     facts_limit: usize,
     user_rag_top_k: usize,
+    workspace_graph_top_k: usize,
     expand_by_graph: bool,
     compact_before_prompt: bool,
     allow_project_recall: bool,
@@ -5232,6 +5305,7 @@ fn memory_profile_for_task(
             episodic_limit: 0,
             facts_limit: 0,
             user_rag_top_k: 0,
+            workspace_graph_top_k: 0,
             expand_by_graph: false,
             compact_before_prompt: false,
             allow_project_recall: false,
@@ -5253,6 +5327,7 @@ fn memory_profile_for_task(
             episodic_limit: 5,
             facts_limit: 10,
             user_rag_top_k: 5,
+            workspace_graph_top_k: 5,
             expand_by_graph: std::env::var("AKASHA_GRAPH_EXPAND").ok().as_deref() == Some("1"),
             compact_before_prompt: true,
             allow_project_recall: true,
@@ -5266,6 +5341,7 @@ fn memory_profile_for_task(
             episodic_limit: 1,
             facts_limit: 0,
             user_rag_top_k: 0,
+            workspace_graph_top_k: 0,
             expand_by_graph: false,
             compact_before_prompt: false,
             allow_project_recall: false,
@@ -5530,13 +5606,12 @@ pub(crate) async fn run_message_via_llm(
     let structured = interpret_message(clean_message);
     let orch_disk_deliverables = clean_message.contains(ORCH_DISK_DELIVERABLES_MARKER);
     let small_talk_intent = classify_small_talk_message(clean_message);
-    let small_talk_fast_lane_intent = small_talk_fast_lane(clean_message);
     let session_recall_intent = detect_session_recall_intent(clean_message);
     tracing::debug!(
         ?session_recall_intent,
         "[RECALL_DEBUG] session_recall_intent"
     );
-    let is_small_talk_fast_lane = small_talk_fast_lane_intent.is_some();
+    let is_small_talk_fast_lane = small_talk_fast_lane(clean_message).is_some();
     let is_session_recall = session_recall_intent.is_some();
     let mut memory_profile = if is_small_talk_fast_lane || is_session_recall {
         MemoryProfile {
@@ -5546,6 +5621,7 @@ pub(crate) async fn run_message_via_llm(
             episodic_limit: 0,
             facts_limit: 0,
             user_rag_top_k: 0,
+            workspace_graph_top_k: 0,
             expand_by_graph: false,
             compact_before_prompt: false,
             allow_project_recall: false,
@@ -5564,9 +5640,9 @@ pub(crate) async fn run_message_via_llm(
     // small local models: they latch onto the most recent topic (e.g. Akasha CLI discussion)
     // and copy it instead of answering the actual question.
     // This cap is unconditional — it does NOT require a guardrail prefix to be active.
+    let message_intent_flags_clean = compute_message_intent_flags(clean_message);
     if !is_small_talk_fast_lane && !is_subagent {
-        let clean_flags = compute_message_intent_flags(clean_message);
-        if clean_flags.external_info || clean_flags.transport {
+        if message_intent_flags_clean.external_info || message_intent_flags_clean.transport {
             memory_profile.recent_turns_limit = 0;
             memory_profile.episodic_limit = 0;
             memory_profile.semantic_top_k = 0;
@@ -5619,6 +5695,11 @@ pub(crate) async fn run_message_via_llm(
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(4096);
+    let completion_max_tokens = if is_small_talk_fast_lane {
+        max_tokens.min(256).max(64)
+    } else {
+        max_tokens
+    };
 
     let tool_instruction = if is_small_talk_fast_lane {
         String::new()
@@ -5705,9 +5786,9 @@ pub(crate) async fn run_message_via_llm(
             "\n\nYou may request tools by writing a line: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
              Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
-             CAMERA RULE (PRIORITAIRE sur WRITE): When the user asks for a webcam/camera photo (e.g. \"prends une photo\", \"take a photo\", \"photo depuis la webcam\", \"affiche-la dans le chat\", \"display it in the chat\"), you MUST reply ONLY with TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture. Do NOT mention tools_policy.yaml, allowed_write_paths, or file writing. After the tool returns, if the user asked to \"display in the chat\" / \"affiche-la dans le chat\" / \"show it in the chat\", reply with ONLY a short confirmation in the user's language (e.g. in French: \"Photo prise. Elle s'affiche ci-dessous.\"; in English: \"Photo captured. It is shown below.\"). Do NOT offer \"save to file\", \"get a description\", \"take another photo\", or \"What would you like to do next?\" — the image is appended automatically below your message. Use the same language as the user (French if they wrote in French).\n\
-             WRITE RULE (OBLIGATOIRE): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
-             WEATHER/MÉTEO RULE (PRIORITY): When the user asks for weather, météo, or forecasts (e.g. \"quel temps\", \"météo demain\", \"weather in X\"), you MUST use TOOL: web_search <query> first, then if snippets lack numeric detail use TOOL: web_fetch <url> on a trusted result URL and/or TOOL: browser navigate <url> then TOOL: browser snapshot (many météo sites are JS-heavy). Do NOT use bankr, portfolio, or any other skill for weather — use web_search plus web_fetch/browser as needed.\n\
+             CAMERA RULE (priority over WRITE): When the user asks for a webcam/camera photo (e.g. \"prends une photo\", \"take a photo\", \"photo depuis la webcam\", \"affiche-la dans le chat\", \"display it in the chat\"), you MUST reply ONLY with TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture. Do NOT mention tools_policy.yaml, allowed_write_paths, or file writing. After the tool returns, if the user asked to \"display in the chat\" / \"affiche-la dans le chat\" / \"show it in the chat\", reply with ONLY a short confirmation in the user's language (e.g. in French: \"Photo prise. Elle s'affiche ci-dessous.\"; in English: \"Photo captured. It is shown below.\"). Do NOT offer \"save to file\", \"get a description\", \"take another photo\", or \"What would you like to do next?\" — the image is appended automatically below your message. Use the same language as the user (French if they wrote in French).\n\
+             WRITE RULE (mandatory): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
+             WEATHER RULE (PRIORITY): When the user asks for weather, météo, or forecasts (e.g. \"quel temps\", \"météo demain\", \"weather in X\"), you MUST use TOOL: web_search <query> first, then if snippets lack numeric detail use TOOL: web_fetch <url> on a trusted result URL and/or TOOL: browser navigate <url> then TOOL: browser snapshot (many weather sites are JS-heavy). Do NOT use bankr, portfolio, or any other skill for weather — use web_search plus web_fetch/browser as needed.\n\
              BROWSER RULE (PRIORITY): When the user explicitly asks to open the browser, go to a website, or show something on X/Twitter (e.g. \"ouvre le navigateur\", \"open the browser\", \"va sur X\", \"go to twitter\", \"cherche sur X\", \"ouvre le navigateur et cherche\"), you MUST use TOOL: browser navigate <url> first with the appropriate URL (e.g. https://x.com/akashabot for a profile, https://x.com for the home page). You may then add a short message. Do NOT use only web_search when the user asked to open the browser or go to X/Twitter.\n\
              SOCIAL / LOGGED-IN SITES RULE: If tools_policy allows the domain, use TOOL: browser navigate <https URL> and TOOL: browser snapshot when the user asks to open or inspect X/Twitter or similar. Do NOT refuse with vague \"security\", \"confidentiality\", or \"structural policy\" claims — the user runs Akasha locally and controls tools_policy. Real limitation: you cannot type the user's password or complete interactive MFA inside the managed browser on their behalf; if a login wall blocks content, say that clearly and offer practical options (user logs in manually in that same browser session if their environment keeps the session, or official API access via TOOL: run_command with VAULT:... when applicable). Do NOT state that vault-backed API access is forbidden when the user has configured secrets — follow VAULT ENV RULE.\n\
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first, then answer from fetched content — not only from snippets. If snippets are insufficient, use TOOL: web_fetch <url> on a relevant result URL, or TOOL: browser navigate <url> then TOOL: browser snapshot so YOU retrieve the page text inside Akasha (managed browser), then summarize for the user. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. Do NOT tell the user to open links in their own browser when web_fetch or browser snapshot is available and allowed — retrieve and answer yourself.\n\
@@ -5759,7 +5840,7 @@ pub(crate) async fn run_message_via_llm(
     system_prompt.push_str(
         "\n\n[Response]\n\
         - Language: reply ONLY in the same language as the user's message. If the user writes in French, reply entirely in French; in English, in English. Do not adopt the language of tool results or context.\n\
-        - Personality: always apply your identity (name), tone and form of address (formal/informal as configured).\n\n",
+        - Personality: always apply your identity (name), tone, and form of address as defined in [Agent profile and instructions] (including formality when set).\n\n",
     );
     let system_prompt: Option<String> = if system_prompt.trim().is_empty() {
         None
@@ -5836,6 +5917,60 @@ pub(crate) async fn run_message_via_llm(
             user_prefix.push_str("\n");
         }
     }
+    if memory_profile.workspace_graph_top_k > 0 {
+        let graph_query = message.clone();
+        let graph_k = memory_profile.workspace_graph_top_k;
+        let sp = store_path.clone();
+        let (workspace_lines, graph_lines) = tokio::task::spawn_blocking(move || {
+            let store = WorkspaceGraphStore::open(&sp)?;
+            let workspaces = store.list_workspaces()?;
+            let workspace_lines: Vec<String> = workspaces
+                .iter()
+                .map(|w| {
+                    format!(
+                        "- \"{}\" — id {} — {}",
+                        w.name, w.id, w.root_path
+                    )
+                })
+                .collect();
+            let graph_lines = store.search_graph_context(&graph_query, graph_k, None)?;
+            Ok::<_, anyhow::Error>((workspace_lines, graph_lines))
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
+        if workspace_lines.len() > 1 {
+            const MAX_WORKSPACE_LINES: usize = 8;
+            user_prefix.push_str(
+                "[Project knowledge graphs — registered workspaces (use id with workspace_graph_search --workspace)]\n",
+            );
+            for line in workspace_lines.iter().take(MAX_WORKSPACE_LINES) {
+                user_prefix.push_str(line);
+                user_prefix.push_str("\n");
+            }
+            if workspace_lines.len() > MAX_WORKSPACE_LINES {
+                user_prefix.push_str(&format!(
+                    "- … ({} more workspaces not shown)\n",
+                    workspace_lines.len() - MAX_WORKSPACE_LINES
+                ));
+            }
+            user_prefix.push_str(
+                "To fetch more symbols or files from the index, call: workspace_graph_search <keywords> [--workspace <id>]\n\n",
+            );
+        }
+        if !graph_lines.is_empty() {
+            user_prefix.push_str(
+                "[Project knowledge graphs — excerpts matching this message (indexed folders)]\n",
+            );
+            for line in &graph_lines {
+                user_prefix.push_str("- ");
+                user_prefix.push_str(line);
+                user_prefix.push_str("\n");
+            }
+            user_prefix.push_str("\n");
+        }
+    }
     if let Some(ref st) = short_term {
         if memory_profile.compact_before_prompt {
             let new_msg_tokens = ShortTermStore::estimate_tokens(&message);
@@ -5883,6 +6018,12 @@ pub(crate) async fn run_message_via_llm(
                 user_prefix.push_str("\n");
             }
         }
+    }
+    if is_small_talk_fast_lane {
+        user_prefix.push_str(
+            "\n[Brief small-talk only: reply in 1–3 short sentences. Do not use tools. \
+             Follow your identity, personality, and traits from the system instructions.]\n",
+        );
     }
     let intent_flags = compute_message_intent_flags(&message);
     let runtime_tool_routing_enforcer = build_runtime_tool_routing_enforcer(
@@ -6057,20 +6198,7 @@ pub(crate) async fn run_message_via_llm(
     let mut last_llm_model_used: Option<String> = None;
     let mut first_meaningful_progress_sent = false;
 
-    if let Some(intent) = small_talk_fast_lane_intent {
-        reply_text = small_talk_fast_reply(&message, intent);
-        first_meaningful_progress_sent = true;
-        cancel_progress_watchdog(&mut watchdog_cancel);
-        if emit_timeline_once_for_task(
-            &bus,
-            Some(store_path.as_path()),
-            task_id,
-            "first_meaningful_progress",
-            Some(serde_json::json!({ "source": "small_talk_fast_lane" })),
-        ) {
-            log_latency_metric(store_path.as_path(), task_id, "ttfr_ms");
-        }
-    } else if let Some(intent) = session_recall_intent {
+    if let Some(intent) = session_recall_intent {
         tracing::debug!(?intent, "[RECALL_LOAD] loading recall turns");
         let recall_turns = match intent.range {
             SessionRecallRange::Yesterday => {
@@ -6147,6 +6275,7 @@ pub(crate) async fn run_message_via_llm(
         let mut last_tool_results_blob: Option<String> = None;
         let mut force_synthesis_attempted = false;
         let mut meta_response_retry_count = 0u32;
+        let mut small_talk_off_topic_retries = 0u32;
         let strict_tools_first = runtime_tool_routing_enforcer
             .as_ref()
             .map(|e| !e.preferred_tools.is_empty())
@@ -6366,7 +6495,7 @@ pub(crate) async fn run_message_via_llm(
                 } else {
                     format!("{}{}", current_prompt, tool_instruction)
                 },
-                max_tokens: Some(max_tokens),
+                max_tokens: Some(completion_max_tokens),
                 temperature: Some(0.7),
                 preferred_task_type,
                 system_prompt: system_prompt.clone(),
@@ -6545,6 +6674,21 @@ pub(crate) async fn run_message_via_llm(
 
             if let Some(intent) = small_talk_intent {
                 if response_looks_off_topic_for_small_talk(&response) {
+                    if is_small_talk_fast_lane && small_talk_off_topic_retries < 1 {
+                        small_talk_off_topic_retries += 1;
+                        tracing::warn!(
+                            task_id = %task_id,
+                            "Small-talk guardrail: retrying with stricter brief-reply instruction"
+                        );
+                        current_prompt = format!(
+                            "{}\n\n[Regeneration]: Your previous reply was not appropriate for simple small talk \
+                             (tools, policies, file paths, or too long). Reply ONLY with a brief polite exchange \
+                             (1–2 short sentences) in the same language as the user, following your identity and \
+                             personality from the system instructions. No tools.\n",
+                            current_prompt
+                        );
+                        continue;
+                    }
                     tracing::warn!(task_id = %task_id, "Small-talk guardrail triggered; suppressing off-topic/tool-heavy reply");
                     reply_text = small_talk_fast_reply(&message, intent);
                     break 'tool_rounds;
@@ -8385,6 +8529,10 @@ where
     Ok(())
 }
 
+fn split_path_query(path: &str) -> (&str, &str) {
+    path.split_once('?').map(|(p, q)| (p, q)).unwrap_or((path, ""))
+}
+
 pub async fn handle_api(
     method: &str,
     path: &str,
@@ -8435,6 +8583,20 @@ pub async fn handle_api(
                 return json_response("403 Forbidden", r#"{"error":"origin_not_allowed"}"#);
             }
         }
+    }
+
+    let (path_only, _query_str) = split_path_query(path);
+
+    if let Some(resp) = crate::api_workspace_graph::handle_workspace_graph(
+        method,
+        path_only,
+        body.as_deref(),
+        data_dir,
+        store_path,
+    )
+    .await
+    {
+        return resp;
     }
 
     if method == "GET" && (path == "/" || path.is_empty()) {
@@ -8630,7 +8792,7 @@ pub async fn handle_api(
         }
     }
 
-    // GET /api/agent-profile — read agent profile (name, personality, role, gender, avatar, rules, can_do, cannot_do, traits_override, preferred_mode)
+    // GET /api/agent-profile — read agent profile (name, personality, role, gender, formality, avatar, rules, can_do, cannot_do, traits_override, preferred_mode)
     if method == "GET" && path == "/api/agent-profile" {
         let profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         let body_json = serde_json::json!({
@@ -8638,6 +8800,7 @@ pub async fn handle_api(
             "personality": profile.personality,
             "role": profile.role,
             "gender": profile.gender,
+            "formality": profile.formality,
             "avatar": profile.avatar,
             "rules": profile.rules,
             "can_do": profile.can_do,
@@ -8648,7 +8811,7 @@ pub async fn handle_api(
         return json_response("200 OK", &body_json.to_string());
     }
 
-    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, role?, gender?, avatar?, rules?, can_do?, cannot_do?, traits_override?, preferred_mode? }
+    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, role?, gender?, formality?, avatar?, rules?, can_do?, cannot_do?, traits_override?, preferred_mode? }
     if method == "POST" && path == "/api/agent-profile" {
         let mut profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
         if let Some(body) = body.as_deref() {
@@ -8664,6 +8827,18 @@ pub async fn handle_api(
                 }
                 if v.get("gender").is_some() {
                     profile.gender = v.get("gender").and_then(|x| x.as_str()).map(String::from);
+                }
+                if let Some(fv) = v.get("formality") {
+                    if fv.is_null() {
+                        profile.formality = None;
+                    } else if let Some(s) = fv.as_str() {
+                        let t = s.trim().to_lowercase();
+                        profile.formality = match t.as_str() {
+                            "formal" => Some("formal".to_string()),
+                            "informal" => Some("informal".to_string()),
+                            _ => None,
+                        };
+                    }
                 }
                 if v.get("avatar").is_some() {
                     profile.avatar = v.get("avatar").and_then(|x| x.as_str()).map(String::from);
@@ -11133,6 +11308,67 @@ async fn pause_task(store_path: &Path, id: Uuid, main_agent: &crate::agents::Mai
     json_response("200 OK", &body.to_string())
 }
 
+/// Progress text that must not be shown as the sole final reply in chat when a richer answer exists on subtasks.
+fn task_progress_is_chat_stub(msg: &str) -> bool {
+    let t = msg.trim();
+    t.is_empty()
+        || matches!(
+            t,
+            "Terminé."
+                | "Done."
+                | "Échec."
+                | "Annulé."
+                | "Failed."
+                | "Cancelled."
+                | "Sous-tâches en cours."
+        )
+        || t.starts_with("Task delegated to agent")
+}
+
+fn merged_last_progress_snapshot(
+    store: &TaskStore,
+    mem: &std::collections::HashMap<Uuid, VecDeque<ProgressEntry>>,
+    task_id: Uuid,
+) -> Option<String> {
+    let disk: Option<String> = store
+        .get_progress(task_id)
+        .ok()
+        .and_then(|v| v.last().map(|(_, m)| m.clone()));
+    let in_mem: Option<String> = mem
+        .get(&task_id)
+        .and_then(|q| q.back())
+        .map(|e| e.message.clone());
+    [disk, in_mem]
+        .into_iter()
+        .flatten()
+        .max_by_key(|s| s.len())
+}
+
+fn best_substantive_progress_in_subtree(
+    store: &TaskStore,
+    mem: &std::collections::HashMap<Uuid, VecDeque<ProgressEntry>>,
+    task_id: Uuid,
+) -> Option<String> {
+    if let Some(line) = merged_last_progress_snapshot(store, mem, task_id) {
+        let tr = line.trim();
+        if !task_progress_is_chat_stub(tr) {
+            return Some(tr.to_string());
+        }
+    }
+    let Ok(children) = store.get_children(task_id) else {
+        return None;
+    };
+    let mut best: Option<String> = None;
+    for c in children {
+        if let Some(m) = best_substantive_progress_in_subtree(store, mem, c.id) {
+            if best.as_ref().map(|b| b.len()).unwrap_or(0) < m.len() {
+                best = Some(m);
+            }
+        }
+    }
+    best
+}
+
 async fn resume_task(store_path: &Path, id: Uuid, main_agent: &crate::agents::MainAgent) -> String {
     let store = match TaskStore::open(store_path) {
         Ok(s) => s,
@@ -11202,15 +11438,23 @@ async fn get_task_status(
     // For a root task with children, aggregate child progress so the UI shows intermediate percentages.
     if let Ok(children) = store.get_children(id) {
         if !children.is_empty() {
+            // Take a snapshot of in-memory progress for all children and drop the lock
+            // before doing any SQLite traversal to avoid holding the RwLock during DB I/O.
+            let mem_snapshot: std::collections::HashMap<Uuid, VecDeque<ProgressEntry>> = {
+                let g = progress.read().await;
+                g.iter()
+                    .map(|(k, v)| (*k, v.clone()))
+                    .collect()
+            };
             let mut sum: u32 = 0;
-            let g = progress.read().await;
             for child in &children {
                 let child_pct = store
                     .get_progress(child.id)
                     .ok()
                     .and_then(|v| v.last().map(|(pct, _)| *pct as u32))
                     .or_else(|| {
-                        g.get(&child.id)
+                        mem_snapshot
+                            .get(&child.id)
                             .and_then(|q| q.back().map(|e| e.progress_pct as u32))
                     })
                     .unwrap_or(0);
@@ -11226,6 +11470,24 @@ async fn get_task_status(
                 });
             } else if let Some(last) = progress_list.last_mut() {
                 last.progress_pct = display_pct;
+            }
+            // Chat UI polls root task_id: last progress line must reflect the real answer when the root row is only a generic completion stub while children hold the substantive reply.
+            if progress_list
+                .last()
+                .map(|e| task_progress_is_chat_stub(&e.message))
+                .unwrap_or(false)
+            {
+                let mut best: Option<String> = None;
+                for c in &children {
+                    if let Some(m) = best_substantive_progress_in_subtree(&store, &mem_snapshot, c.id) {
+                        if best.as_ref().map(|b| b.len()).unwrap_or(0) < m.len() {
+                            best = Some(m);
+                        }
+                    }
+                }
+                if let (Some(last_mut), Some(b)) = (progress_list.last_mut(), best) {
+                    last_mut.message = b;
+                }
             }
         }
     }
@@ -11947,6 +12209,7 @@ mod tests {
         let profile = memory_profile_for_task("Bonjour, ça va ?", "conversation", false, false);
         assert_eq!(profile.semantic_top_k, 2);
         assert_eq!(profile.user_rag_top_k, 0);
+        assert_eq!(profile.workspace_graph_top_k, 0);
         assert!(!profile.expand_by_graph);
         assert!(!profile.compact_before_prompt);
     }
@@ -11962,6 +12225,7 @@ mod tests {
         assert_eq!(profile.semantic_top_k, 0);
         assert_eq!(profile.episodic_limit, 0);
         assert_eq!(profile.user_rag_top_k, 0);
+        assert_eq!(profile.workspace_graph_top_k, 0);
         assert!(!profile.compact_before_prompt);
     }
 

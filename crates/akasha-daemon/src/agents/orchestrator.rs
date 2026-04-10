@@ -24,6 +24,7 @@ use crate::agent_contracts::ContractRegistry;
 use crate::api::{learn_from_task_outcome_async, message_suggests_tool_only_action, ProgressCache, TaskCompletionRegistry};
 use crate::latency::{clear_task_milestones, emit_timeline_for_task, emit_timeline_once_for_task, env_duration_ms, log_latency_metric};
 use crate::session_state;
+use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use crate::policy_engine::PolicyEngine;
 
@@ -1232,6 +1233,7 @@ pub struct Orchestrator {
     llm_router: Arc<akasha_llm::LLMRouter>,
     task_completion: TaskCompletionRegistry,
     long_term_client: Option<LongTermMemoryClient>,
+    short_term: Option<Arc<ShortTermStore>>,
 }
 
 impl Orchestrator {
@@ -1245,6 +1247,7 @@ impl Orchestrator {
         llm_router: Arc<akasha_llm::LLMRouter>,
         task_completion: TaskCompletionRegistry,
         long_term_client: Option<LongTermMemoryClient>,
+        short_term: Option<Arc<ShortTermStore>>,
     ) -> Self {
         Self {
             bus,
@@ -1256,6 +1259,7 @@ impl Orchestrator {
             llm_router,
             task_completion,
             long_term_client,
+            short_term,
         }
     }
 
@@ -1273,6 +1277,7 @@ impl Orchestrator {
             let llm_router = self.llm_router.clone();
             let task_completion = self.task_completion.clone();
             let long_term_client = self.long_term_client.clone();
+            let short_term = self.short_term.clone();
             let root_task_id = task.task_id;
             let message = task.message;
             let session_id = task.session_id;
@@ -1294,6 +1299,7 @@ impl Orchestrator {
                     llm_router,
                     task_completion,
                     long_term_client,
+                    short_term,
                     execution_mode,
                     preferred_task_type,
                 )
@@ -1320,6 +1326,7 @@ async fn process_root_task(
     llm_router: Arc<akasha_llm::LLMRouter>,
     task_completion: TaskCompletionRegistry,
     long_term_client: Option<LongTermMemoryClient>,
+    short_term: Option<Arc<ShortTermStore>>,
     execution_mode: Option<ExecutionMode>,
     preferred_task_type: Option<String>,
 ) -> anyhow::Result<()> {
@@ -1812,6 +1819,7 @@ async fn process_root_task(
     let user_message = message.clone();
     let conversation_tx_aggregator = conversation_tx.clone();
     let session_id_aggregator = session_id.clone();
+    let short_term_aggregator = short_term.clone();
     let execution_mode_aggregator = execution_mode;
     let plan_trace_rel = plan_trace_rel_path(root_task_id);
     const GENERIC_MESSAGES: &[&str] = &["Done.", "Failed.", "Cancelled."];
@@ -2976,6 +2984,15 @@ Formatting rules (Markdown):
             None,
         )
         .await;
+        // Persist user-visible exchange for session reload (sub-agent turns skip short_term in run_message_via_llm).
+        if let Some(ref st) = short_term_aggregator {
+            let u = user_message.trim().to_string();
+            let a = display_message.trim().to_string();
+            if !u.is_empty() && !a.is_empty() {
+                st.append(&session_id_aggregator, "user", u).await;
+                st.append(&session_id_aggregator, "assistant", a).await;
+            }
+        }
         let _ = bus.send(
             EventEnvelope::new(
                 event_type,

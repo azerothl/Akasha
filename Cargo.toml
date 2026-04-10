@@ -16,6 +16,7 @@ members = [
     "crates/akasha-cli",
     "crates/akasha-evals",
     "crates/akasha-tui",
+    "crates/akasha-workspace-graph",
 ]
 exclude = [
     "apps/akasha-ui/src-tauri",
@@ -24,4 +25,4 @@ exclude = [
 # Single release version for all workspace crates (CLI, daemon, TUI, libs).
 # Keep apps/akasha-ui/package.json + src-tauri/Cargo.toml + tauri.conf.json in sync (crate is excluded from workspace).
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
