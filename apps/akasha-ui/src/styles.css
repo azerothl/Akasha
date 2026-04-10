@@ -2,24 +2,40 @@
   box-sizing: border-box;
 }
 
-/* Theme variables: default dark_akasha (plan palette) */
+/* Theme variables: default dark_akasha (aligned with Akasha_app marketing site) */
 :root,
 [data-theme="dark_akasha"] {
-  --akasha-bg: #0b0f17;
-  --akasha-bg-elevated: #121826;
-  --akasha-bg-surface: #121826;
-  --akasha-bg-surface-hover: #1a2233;
-  --akasha-bg-card: #1a2233;
-  --akasha-text: #e4e4e7;
-  --akasha-text-muted: #a1a1aa;
-  --akasha-text-dim: #71717a;
-  --akasha-border: #2a3448;
-  --akasha-accent: #7c8cff;
-  --akasha-accent-hover: #6b7bef;
-  --akasha-success: #5de4c7;
-  --akasha-error: #ef6a6a;
-  --akasha-warning: #f6c177;
-  --akasha-warning-hover: #f0b85c;
+  --akasha-bg: #0d0d14;
+  --akasha-bg-elevated: #12121e;
+  --akasha-bg-surface: #12121e;
+  --akasha-bg-surface-hover: #1e1e38;
+  --akasha-bg-card: #1a1a2e;
+  --akasha-text: #f1f5f9;
+  --akasha-text-muted: #94a3b8;
+  --akasha-text-dim: #64748b;
+  --akasha-border: rgba(139, 92, 246, 0.25);
+  --akasha-accent: #8b5cf6;
+  --akasha-accent-hover: #7c3aed;
+  --akasha-accent-light: #a78bfa;
+  --akasha-accent-cyan: #06b6d4;
+  --akasha-success: #10b981;
+  --akasha-error: #ef4444;
+  --akasha-warning: #f59e0b;
+  --akasha-warning-hover: #fbbf24;
+  /* Buttons: purple → cyan gradient (same as akasha_app css/style.css) */
+  --akasha-gradient: linear-gradient(135deg, #8b5cf6, #06b6d4);
+  --akasha-gradient-hover: linear-gradient(135deg, #7c3aed, #0891b2);
+  --akasha-btn-primary-bg: var(--akasha-gradient);
+  --akasha-btn-primary-hover-bg: var(--akasha-gradient-hover);
+  --akasha-btn-primary-shadow: 0 4px 20px rgba(139, 92, 246, 0.4);
+  --akasha-btn-primary-hover-shadow: 0 8px 28px rgba(139, 92, 246, 0.52);
+  --akasha-btn-primary-hover-transform: translateY(-1px);
+  --akasha-radius-button: 12px;
+  --akasha-btn-secondary-border: rgba(139, 92, 246, 0.45);
+  --akasha-btn-secondary-fg: #a78bfa;
+  --akasha-btn-secondary-fg-hover: #f1f5f9;
+  --akasha-btn-secondary-border-hover: rgba(139, 92, 246, 0.65);
+  --akasha-btn-secondary-bg-hover: rgba(139, 92, 246, 0.12);
 }
 
 [data-theme="dark"] {
@@ -94,6 +110,14 @@
   --akasha-warning-hover: #e6a117;
 }
 
+/* Helps native controls (select, number spinners) match dark/light themes in WebView */
+[data-theme^="dark"] {
+  color-scheme: dark;
+}
+[data-theme^="light"] {
+  color-scheme: light;
+}
+
 body {
   margin: 0;
   font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -102,13 +126,13 @@ body {
   min-height: 100vh;
 }
 
-/* Titles: Inter (same as body per plan; Geist/Satoshi optional) */
+/* Titles: Inter — weights 600–800 match Akasha_app */
 .logo,
 .panel-title,
 .view-title,
 .sidebar-right-title,
 h1, h2, h3 {
-  font-family: "Inter", "Geist", "Satoshi", system-ui, sans-serif;
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
 }
 
 /* Code and logs: JetBrains Mono */
@@ -631,54 +655,67 @@ pre,
   border-color: var(--akasha-text-dim);
 }
 
-/* Unified button base classes */
+/* Unified button base classes (dark_akasha: gradient + radius from Akasha_app) */
 .btn-primary {
-  background: var(--akasha-accent);
+  background: var(--akasha-btn-primary-bg, var(--akasha-accent));
   color: #fff;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--akasha-radius-button, 6px);
   padding: 0.5rem 1rem;
   font-size: 0.875rem;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
+  box-shadow: var(--akasha-btn-primary-shadow, none);
+  transition: background 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
 .btn-primary:hover:not(:disabled) {
-  background: var(--akasha-accent-hover);
+  background: var(--akasha-btn-primary-hover-bg, var(--akasha-accent-hover));
+  box-shadow: var(--akasha-btn-primary-hover-shadow, none);
+  transform: var(--akasha-btn-primary-hover-transform, none);
 }
 .btn-primary:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+  transform: none;
 }
 .btn-secondary {
   background: transparent;
-  color: var(--akasha-text-muted);
-  border: 1px solid var(--akasha-border);
-  border-radius: 6px;
+  color: var(--akasha-btn-secondary-fg, var(--akasha-text-muted));
+  border: 1px solid var(--akasha-btn-secondary-border, var(--akasha-border));
+  border-radius: var(--akasha-radius-button, 6px);
   padding: 0.5rem 1rem;
   font-size: 0.875rem;
+  font-weight: 600;
   cursor: pointer;
+  transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
 }
 .btn-secondary:hover {
-  color: var(--akasha-text);
-  border-color: var(--akasha-text-dim);
+  color: var(--akasha-btn-secondary-fg-hover, var(--akasha-text));
+  border-color: var(--akasha-btn-secondary-border-hover, var(--akasha-text-dim));
+  background: var(--akasha-btn-secondary-bg-hover, transparent);
 }
 
 .refresh-btn {
-  background: var(--akasha-accent);
+  background: var(--akasha-btn-primary-bg, var(--akasha-accent));
   color: #fff;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--akasha-radius-button, 6px);
   padding: 0.5rem 1rem;
   font-size: 0.875rem;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
+  box-shadow: var(--akasha-btn-primary-shadow, none);
+  transition: background 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
 .refresh-btn:hover:not(:disabled) {
-  background: var(--akasha-accent-hover);
+  background: var(--akasha-btn-primary-hover-bg, var(--akasha-accent-hover));
+  box-shadow: var(--akasha-btn-primary-hover-shadow, none);
+  transform: var(--akasha-btn-primary-hover-transform, none);
 }
 .refresh-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+  transform: none;
 }
 
 .update-banner-steps {
@@ -703,7 +740,8 @@ pre,
 .logo {
   margin: 0;
   font-size: 1.5rem;
-  font-weight: 600;
+  font-weight: 800;
+  letter-spacing: -0.02em;
 }
 
 .tagline {
@@ -2590,8 +2628,8 @@ pre,
   font-size: 0.875rem;
   background: transparent;
   color: var(--akasha-text-muted);
-  border: none;
-  border-radius: 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
   cursor: pointer;
 }
 .settings-tabs button:hover {
@@ -2602,6 +2640,7 @@ pre,
   color: var(--akasha-accent);
   font-weight: 600;
   background: var(--akasha-bg-surface);
+  border-color: color-mix(in srgb, var(--akasha-accent) 48%, var(--akasha-border));
 }
 .settings-section-content {
   flex: 1;
@@ -2645,6 +2684,76 @@ pre,
 }
 .settings-agent-tab-content {
   margin-bottom: 1rem;
+}
+
+.settings-data-subtabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+.settings-data-subtabs button {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.875rem;
+  background: transparent;
+  color: var(--akasha-text-muted);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.settings-data-subtabs button:hover {
+  color: var(--akasha-text);
+  background: var(--akasha-bg-surface);
+}
+.settings-data-subtabs button.active {
+  color: var(--akasha-accent);
+  font-weight: 600;
+  background: var(--akasha-bg-surface);
+}
+.settings-data-scroll {
+  max-height: min(60vh, 28rem);
+  overflow-y: auto;
+  margin-bottom: 0.75rem;
+  padding-right: 0.35rem;
+}
+.settings-subheading {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--akasha-text);
+}
+.settings-project-ws-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.settings-project-ws-card {
+  border: 1px solid var(--akasha-border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  background: var(--akasha-bg-surface);
+}
+.settings-project-ws-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.settings-project-ws-path {
+  word-break: break-all;
+  font-size: 0.8125rem;
+  margin: 0.25rem 0 0;
+}
+a.settings-link-btn.refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  box-sizing: border-box;
 }
 
 .settings-avatar-row {
@@ -2848,6 +2957,12 @@ pre,
   margin: 1.5rem 0 0.5rem;
   font-size: 1rem;
 }
+.settings-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0.75rem;
+}
 .settings-doc-list {
   list-style: none;
   padding: 0;
@@ -2917,6 +3032,82 @@ pre,
 .settings-theme-hint {
   font-size: 0.8125rem;
   color: var(--akasha-text-dim);
+}
+
+/* Mission tab & other forms: label + raw input/textarea/select (no settings-input class) */
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 0.9rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--akasha-text);
+}
+
+.settings-field:has(> input[type="checkbox"]) {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-weight: 500;
+}
+
+.settings-field input[type="checkbox"] {
+  width: 1.125rem;
+  height: 1.125rem;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--akasha-accent);
+  cursor: pointer;
+}
+
+.settings-field input[type="text"],
+.settings-field input[type="number"],
+.settings-field input[type="search"],
+.settings-field input[type="email"],
+.settings-field input[type="password"],
+.settings-field input[type="url"],
+.settings-field textarea,
+.settings-field select {
+  width: 100%;
+  max-width: 42rem;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.9375rem;
+  font-weight: 400;
+  line-height: 1.5;
+  background: var(--akasha-bg-card);
+  border: 1px solid var(--akasha-border);
+  color: var(--akasha-text);
+  border-radius: var(--akasha-radius-button, 8px);
+  font-family: inherit;
+  box-sizing: border-box;
+}
+
+.settings-field textarea {
+  resize: vertical;
+  min-height: 5.5rem;
+}
+
+.settings-field input::placeholder,
+.settings-field textarea::placeholder {
+  color: var(--akasha-text-dim);
+}
+
+.settings-field select {
+  cursor: pointer;
+}
+
+.settings-field input:focus-visible,
+.settings-field textarea:focus-visible,
+.settings-field select:focus-visible {
+  outline: 2px solid var(--akasha-accent);
+  outline-offset: 2px;
+}
+
+.settings-field option {
+  background: var(--akasha-bg-card);
+  color: var(--akasha-text);
 }
 
 .settings-input,
@@ -5124,6 +5315,35 @@ pre,
   min-height: 0;
 }
 
+/* Mission: intro + refresh stay visible; form scrolls inside the panel */
+.memory-panel > .panel-title,
+.memory-panel > .muted,
+.memory-panel > .refresh-btn,
+.memory-panel > .error-inline {
+  flex-shrink: 0;
+}
+
+.mission-panel-body {
+  margin-top: 1rem;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  padding-right: 0.25rem;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mission-panel-body .settings-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  flex-shrink: 0;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.35rem;
+  background: color-mix(in srgb, var(--akasha-bg) 94%, var(--akasha-bg-elevated));
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid color-mix(in srgb, var(--akasha-border) 70%, transparent);
+}
+
 .memory-subtabs {
   display: flex;
   gap: 0.25rem;
@@ -5221,6 +5441,11 @@ pre,
   flex-wrap: wrap;
   gap: 0.5rem;
   align-items: center;
+  flex-shrink: 0;
+}
+
+.memory-search-results-scroll {
+  -webkit-overflow-scrolling: touch;
 }
 
 .memory-search-bar .memory-search-input {
