@@ -8,6 +8,8 @@ pub const RUN_COMMAND_STDOUT_MAX: usize = 12_000;
 pub const RUN_COMMAND_STDERR_MAX: usize = 4_000;
 /// Align with browser snapshot default cap.
 pub const GIT_TEXT_MAX: usize = 8_000;
+/// Max bytes included from a browser snapshot text result.
+pub const BROWSER_SNAPSHOT_TEXT_MAX: usize = 8_000;
 
 const READ_FILE_PREVIEW_BYTES: usize = 500;
 
@@ -19,7 +21,7 @@ pub fn truncate_utf8_by_bytes(s: &str, max_bytes: usize) -> (Cow<'_, str>, usize
         return (Cow::Borrowed(s), total, false);
     }
     let end = s.floor_char_boundary(max_bytes);
-    (Cow::Owned(s[..end].to_string()), total, true)
+    (Cow::Borrowed(&s[..end]), total, true)
 }
 
 /// Footer line when output was cut for token budget (AXI-style explicit hint).
@@ -46,12 +48,12 @@ pub fn read_file_preview(content: &str) -> (String, bool, usize) {
 }
 
 /// Format stdout/stderr for tool messages with separate caps and one combined truncation note if needed.
-pub fn format_truncated_streams(
-    stdout: &str,
-    stderr: &str,
+pub fn format_truncated_streams<'a>(
+    stdout: &'a str,
+    stderr: &'a str,
     stdout_max: usize,
     stderr_max: usize,
-) -> (String, String, bool, String) {
+) -> (Cow<'a, str>, Cow<'a, str>, bool, String) {
     let (stdout_cow, stdout_total, stdout_trunc) = truncate_utf8_by_bytes(stdout.trim(), stdout_max);
     let (stderr_cow, stderr_total, stderr_trunc) = truncate_utf8_by_bytes(stderr.trim(), stderr_max);
     let any = stdout_trunc || stderr_trunc;
@@ -76,12 +78,7 @@ pub fn format_truncated_streams(
     } else {
         String::new()
     };
-    (
-        stdout_cow.into_owned(),
-        stderr_cow.into_owned(),
-        any,
-        note,
-    )
+    (stdout_cow, stderr_cow, any, note)
 }
 
 /// Success path: `[tool cmd cwd_note] exit … stdout: … stderr: …` with optional truncation footers.
