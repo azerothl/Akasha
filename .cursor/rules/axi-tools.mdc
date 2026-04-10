@@ -1,0 +1,8 @@
+---
+description: Point to AXI (agent-ergonomic CLI) when adding shell-facing tools or run_command guidance
+globs:
+  - crates/akasha-daemon/src/api.rs
+  - crates/akasha-tools/**/*.rs
+---
+
+When changing built-in tool strings, `AVAILABLE_TOOLS`, or `run_command` behavior, keep outputs compact and explicit (totals, truncation hints, unambiguous empty results). Reference: https://axi.md/ and https://github.com/kunchenguid/axi . Optional dev skill: `npx skills add kunchenguid/axi`.

@@ -59,3 +59,21 @@ The daemon listens on port **3876** (env `AKASHA_PORT`). Key API endpoints:
 3. **No external services required** for core functionality. SQLite is bundled (`rusqlite` with `bundled` feature), embeddings model is pre-bundled at `embedding_model/`, and the embedded LLM eliminates the hard dependency on Ollama.
 4. **Data directory** defaults to `~/akasha`. Config files (`llm_router.yaml`, `tools_policy.yaml`, `akasha.env`, `connectors.env`) are stored there.
 5. The Tauri desktop UI (`apps/akasha-ui`) requires the daemon to be running on port 3876. Run `npm install` then `npm run tauri dev` from that directory.
+
+### Agent-ergonomic CLIs (AXI)
+
+When the embedded agent runs shell commands (`run_command`), prefer **token-efficient, agent-oriented CLIs** where they help:
+
+- **Principles and background:** [axi.md](https://axi.md/) — design goals (compact output, explicit totals, clear empty states).
+- **Reference repo:** [github.com/kunchenguid/axi](https://github.com/kunchenguid/axi) — benchmarks, `gh-axi` (GitHub), `chrome-devtools-axi` (browser).
+- **Install (global npm):** `npm install -g gh-axi` and/or `npm install -g chrome-devtools-axi` when you want the agent to drive GitHub or browser automation from the shell with less context overhead than raw `gh`/curl-only flows or very chatty snapshots.
+
+Akasha still exposes built-in `browser navigate` / `browser snapshot` and vault-backed `run_command`; AXI tools are an optional complement.
+
+### Optional: AXI skill for development
+
+To align new tools or CLIs with the same principles while coding, contributors can install the upstream skill:
+
+`npx skills add kunchenguid/axi`
+
+This is for **developer workflows** (e.g. Cursor / Claude Code), not a runtime dependency of the daemon.

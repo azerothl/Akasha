@@ -1059,7 +1059,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (création/remplacement complet). Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). TOUJOURS utiliser le chemin EXACT fourni par l'utilisateur. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace plutôt que de tout réécrire. Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel."),
     ("search_files", "search_files <dir> <pattern> [--no-ignore] — chercher des fichiers (glob) sous un répertoire ; par défaut respecte .gitignore et ignore node_modules/target/dist/… ; --no-ignore pour tout parcourir."),
     ("grep_content", "grep_content <dir> <pattern> [file_glob] [--regex|-r] [--no-ignore] — chercher dans les fichiers ; défaut = sous-chaîne insensible à la casse + .gitignore ; --regex = motif regex insensible à la casse ; --no-ignore = ignorer .gitignore."),
-    ("run_command", "run_command [--cwd <path>] <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique). Optionnel : --cwd workspace:/ ou chemin disque (allowed_read_paths). Si tools_policy run_command_default_cwd_workspace: true, cwd par défaut = workspace de la tâche."),
+    ("run_command", "run_command [--cwd <path>] <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique). Optionnel : --cwd workspace:/ ou chemin disque (allowed_read_paths). Si tools_policy run_command_default_cwd_workspace: true, cwd par défaut = workspace de la tâche. Pour GitHub depuis le shell, préférer gh-axi (npm install -g gh-axi ; principes AXI https://axi.md/) s'il est installé — sorties compactes pour l'agent. Pour l'automation navigateur en CLI, chrome-devtools-axi (même dépôt https://github.com/kunchenguid/axi) en complément d'Akasha browser."),
     ("run_terminal", "run_terminal [--cwd <path>] <cmd> [args...] — exécuter une commande (même que run_command)"),
     ("run_command_background", "run_command_background [--cwd <path>] <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
     ("terminal_session", "terminal_session — session PTY interactive (prévue ultérieurement, spec 43). Pour l’instant utiliser run_command / run_terminal pour une commande, run_command_background + process pour suivi."),
@@ -2752,7 +2752,8 @@ const APP_CONTEXT: &str = concat!(
     "slash commands in Chat (/help, /status, /doctor, /advice, /config, /models, /routes, /newsession, /skills reload, etc.). ",
     "To install a CLI globally (e.g. \"install the bankr CLI\", \"npm install -g @bankr/cli\"), reply with TOOL: run_command npm install -g <package> (do not generate a script for the user to run). ",
     "To use a vault key in a command: TOOL: run_command VAULT:bankr_api_key=BANKR_API_KEY bankr whoami (the system injects the vault value). ",
-    "GitHub + vault: run TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (not GITHUB_TOKEN=VAULT:... or export or plain token). ",
+    "GitHub + vault: run TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (not GITHUB_TOKEN=VAULT:... or export or plain token). If gh-axi is installed (npm install -g gh-axi), prefer it for issues/PRs/repos — token-efficient CLI per AXI (https://axi.md/, https://github.com/kunchenguid/axi). ",
+    "Browser automation from shell: chrome-devtools-axi (same repo) can complement Akasha TOOL: browser navigate + browser snapshot for heavy browsing tasks; use whichever fits policy and environment. ",
     "Skills (extra capabilities): the user can add them without changing code. When the user asks to install, download, fetch or add a skill from a URL (e.g. \"install the bankr skill from …\", \"download the skill at this url\"), you MUST reply with TOOL: install_skill <url>. If the user says \"follow the SKILL.md instructions\", you must first do TOOL: install_skill <url> (the system registers the skill); then the skill is available and can be invoked by name (e.g. TOOL: security-audit <args>). Do not fetch SKILL.md with web_fetch to execute its content manually. ",
     "To uninstall a skill: TOOL: uninstall_skill <name> (e.g. TOOL: uninstall_skill bankr). ",
     "When the user asks you to perform an action with a skill (e.g. \"check my bankr wallet\", \"run bankr whoami\"), you MUST reply ONLY with one line TOOL: <skill_name> <arguments> (e.g. TOOL: bankr whoami) so the system runs the command; do not tell the user to run the command themselves. ",
@@ -3587,18 +3588,18 @@ async fn execute_tool_call(
                             // Empty in-memory entry must not mask the real file on disk (orchestrator
                             // writes `.akasha/plan_*.md` with tokio::fs, not via this map).
                             if !content.is_empty() {
-                                let preview = if content.len() <= 500 {
-                                    content.as_str()
-                                } else {
-                                    &content[..content.floor_char_boundary(500)]
-                                };
+                                let (preview, truncated, total) = crate::tool_output::read_file_preview(content);
+                                let body = format!(
+                                    "[read_file workspace:{}] {} bytes: {}",
+                                    key, total, preview
+                                );
                                 return (
                                     true,
-                                    format!(
-                                        "[read_file workspace:{}] {} chars: {}",
-                                        key,
-                                        content.len(),
-                                        preview
+                                    crate::tool_output::with_truncation_footer(
+                                        body,
+                                        truncated,
+                                        total,
+                                        "use grep_content or search_files to narrow, then read_file again",
                                     ),
                                     None,
                                 );
@@ -3623,18 +3624,34 @@ async fn execute_tool_call(
                 match executor.read_file(&disk_path).await {
                     Ok((content, res)) => {
                         let msg = if res.success {
-                            format!(
-                                "[read_file {}] {} chars: {}",
+                            let (preview, truncated, total) = crate::tool_output::read_file_preview(&content);
+                            let body = format!(
+                                "[read_file {}] {} bytes: {}",
                                 disk_path.display(),
-                                content.len(),
-                                if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] }
+                                total,
+                                preview
+                            );
+                            crate::tool_output::with_truncation_footer(
+                                body,
+                                truncated,
+                                total,
+                                "use grep_content or search_files to narrow, then read_file again",
                             )
                         } else {
-                            format!("[read_file workspace] read failed: {}", res.summary)
+                            format!("[read_file workspace] failed: {}", res.summary)
                         };
                         return (res.success, msg, None);
                     }
-                    Err(e) => return (false, format!("[read_file workspace] read error for {} at {}: {}", key, disk_path.display(), e), None),
+                    Err(e) => return (
+                        false,
+                        format!(
+                            "[read_file workspace] failed: read error for {} at {}: {}",
+                            key,
+                            disk_path.display(),
+                            e
+                        ),
+                        None,
+                    ),
                 };
             } else {
                 let p = Path::new(&path_str);
@@ -3644,13 +3661,25 @@ async fn execute_tool_call(
                     match executor.read_file(p).await {
                         Ok((content, res)) => {
                             let msg = if res.success {
-                                format!("[read_file {}] {} chars: {}", p.display(), content.len(), if content.len() <= 500 { content.as_str() } else { &content[..content.floor_char_boundary(500)] })
+                                let (preview, truncated, total) = crate::tool_output::read_file_preview(&content);
+                                let body = format!(
+                                    "[read_file {}] {} bytes: {}",
+                                    p.display(),
+                                    total,
+                                    preview
+                                );
+                                crate::tool_output::with_truncation_footer(
+                                    body,
+                                    truncated,
+                                    total,
+                                    "use grep_content or search_files to narrow, then read_file again",
+                                )
                             } else {
-                                format!("[read_file] denied or error: {}", res.summary)
+                                format!("[read_file] failed: {}", res.summary)
                             };
                             (res.success, msg, None)
                         }
-                        Err(e) => (false, format!("[read_file] error: {}", e), None),
+                        Err(e) => (false, format!("[read_file] failed: {}", e), None),
                     }
                 }
             }
@@ -3710,20 +3739,32 @@ async fn execute_tool_call(
                     let cwd_note = cwd_ref
                         .map(|p| format!(" cwd={}", p.display()))
                         .unwrap_or_default();
+                    let exit = out
+                        .status
+                        .code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "?".to_string());
                     let msg = if res.success {
-                        format!(
-                            "[run_command {}{}] stdout: {} stderr: {}",
-                            cmd,
-                            cwd_note,
-                            stdout.trim(),
-                            stderr.trim()
+                        crate::tool_output::shell_tool_success(
+                            "run_command",
+                            &cmd,
+                            &cwd_note,
+                            &exit,
+                            stdout.as_ref(),
+                            stderr.as_ref(),
                         )
                     } else {
-                        format!("[run_command] {} stderr: {}", res.summary, stderr.trim())
+                        crate::tool_output::shell_tool_failure(
+                            "run_command",
+                            &res.summary,
+                            &exit,
+                            stdout.as_ref(),
+                            stderr.as_ref(),
+                        )
                     };
                     (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[run_command] error: {}", e), None),
+                Err(e) => (false, format!("[run_command] failed: {}", e), None),
             }
         }
         "run_terminal" => {
@@ -3737,14 +3778,35 @@ async fn execute_tool_call(
                 Ok((out, res)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let stderr = String::from_utf8_lossy(&out.stderr);
+                    let cwd_note = cwd_ref
+                        .map(|p| format!(" cwd={}", p.display()))
+                        .unwrap_or_default();
+                    let exit = out
+                        .status
+                        .code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "?".to_string());
                     let msg = if res.success {
-                        format!("[run_terminal {}] stdout: {} stderr: {}", cmd, stdout.trim(), stderr.trim())
+                        crate::tool_output::shell_tool_success(
+                            "run_terminal",
+                            &cmd,
+                            &cwd_note,
+                            &exit,
+                            stdout.as_ref(),
+                            stderr.as_ref(),
+                        )
                     } else {
-                        format!("[run_terminal] {} stderr: {}", res.summary, stderr.trim())
+                        crate::tool_output::shell_tool_failure(
+                            "run_terminal",
+                            &res.summary,
+                            &exit,
+                            stdout.as_ref(),
+                            stderr.as_ref(),
+                        )
                     };
                     (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[run_terminal] error: {}", e), None),
+                Err(e) => (false, format!("[run_terminal] failed: {}", e), None),
             }
         }
         "run_command_background" => {
@@ -3800,17 +3862,33 @@ async fn execute_tool_call(
                                     reg.write().await.remove(&id);
                                     let stdout = String::from_utf8_lossy(&out.stdout);
                                     let stderr = String::from_utf8_lossy(&out.stderr);
-                                    let base_msg = format!(
-                                        "[process poll {}] done — exit {} stdout: {} stderr: {}",
-                                        id,
-                                        out.status.code().unwrap_or(-1),
-                                        stdout.trim(),
-                                        stderr.trim()
+                                    let exit = out
+                                        .status
+                                        .code()
+                                        .map(|c| c.to_string())
+                                        .unwrap_or_else(|| "?".to_string());
+                                    let (so, se, trunc, note) = crate::tool_output::format_truncated_streams(
+                                        stdout.as_ref(),
+                                        stderr.as_ref(),
+                                        crate::tool_output::RUN_COMMAND_STDOUT_MAX,
+                                        crate::tool_output::RUN_COMMAND_STDERR_MAX,
                                     );
+                                    let mut base_msg = format!(
+                                        "[process poll {}] done — exit {} stdout: {} stderr: {}",
+                                        id, exit, so, se
+                                    );
+                                    if trunc {
+                                        base_msg.push('\n');
+                                        base_msg.push_str(&note);
+                                    }
                                     if res.success {
                                         (true, base_msg, None)
                                     } else {
-                                        (false, format!("{} | summary: {}", base_msg, res.summary), None)
+                                        (
+                                            false,
+                                            format!("{} | summary: {}", base_msg, res.summary),
+                                            None,
+                                        )
                                     }
                                 }
                                 Some(Err(e)) => {
@@ -4189,8 +4267,20 @@ async fn execute_tool_call(
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                         if ok {
                             let result = resp.get("result").and_then(|r| r.get("text").and_then(|t| t.as_str())).unwrap_or("");
-                            let preview = if result.len() > 8000 { format!("{}…", &result[..result.floor_char_boundary(8000)]) } else { result.to_string() };
-                            (true, format!("[browser] Snapshot ({} chars):\n{}", result.len(), preview), None)
+                            let (preview, total, trunc) =
+                                crate::tool_output::truncate_utf8_by_bytes(result, crate::tool_output::BROWSER_SNAPSHOT_TEXT_MAX);
+                            let base = format!(
+                                "[browser] Snapshot ({} bytes):\n{}",
+                                total,
+                                preview
+                            );
+                            let msg = crate::tool_output::with_truncation_footer(
+                                base,
+                                trunc,
+                                total,
+                                "use web_fetch on static URLs when applicable or navigate to a narrower page",
+                            );
+                            (true, msg, None)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("Snapshot failed");
                             (false, format!("[browser] {}", err), None)
@@ -4307,14 +4397,36 @@ async fn execute_tool_call(
             match executor.search_files(dir, pattern, respect_gitignore).await {
                 Ok((paths, res)) => {
                     let msg = if res.success {
-                        let list: Vec<String> = paths.iter().take(20).map(|p| p.display().to_string()).collect();
-                        format!("[search_files] found {}: {:?}", paths.len(), list)
+                        let n = paths.len();
+                        const SHOW: usize = 20;
+                        let lines: Vec<String> = paths.iter().take(SHOW).map(|p| p.display().to_string()).collect();
+                        let listing = lines.join("\n");
+                        let mut m = format!(
+                            "[search_files] count: {}\ndir: {}\npattern: {}\n",
+                            n,
+                            dir.display(),
+                            pattern
+                        );
+                        if n == 0 {
+                            m.push_str("matches: (none — 0 files)\n");
+                        } else {
+                            m.push_str("paths:\n");
+                            m.push_str(&listing);
+                            m.push('\n');
+                            if n > SHOW {
+                                m.push_str(&format!(
+                                    "showing: {} of {} — narrow pattern or dir to list fewer\n",
+                                    SHOW, n
+                                ));
+                            }
+                        }
+                        m
                     } else {
-                        format!("[search_files] {}", res.summary)
+                        format!("[search_files] failed: {}", res.summary)
                     };
                     (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[search_files] error: {}", e), None),
+                Err(e) => (false, format!("[search_files] failed: {}", e), None),
             }
         }
         "grep_content" => {
@@ -4337,18 +4449,41 @@ async fn execute_tool_call(
             {
                 Ok((matches, res)) => {
                     let msg = if res.success {
-                        let lines: Vec<String> = matches
-                            .iter()
-                            .take(30)
-                            .map(|(p, n, line)| format!("{}:{}: {}", p.display(), n, line.trim()))
-                            .collect();
-                        format!("[grep_content] {} — {}", res.summary, lines.join(" ; "))
+                        let collected = matches.len();
+                        const DISPLAY: usize = 30;
+                        const CAP: usize = 50;
+                        if collected == 0 {
+                            format!(
+                                "[grep_content] 0 matches (dir={} pattern={} regex={})",
+                                dir.display(),
+                                pattern,
+                                use_regex
+                            )
+                        } else {
+                            let lines: Vec<String> = matches
+                                .iter()
+                                .take(DISPLAY)
+                                .map(|(p, n, line)| format!("{}:{}: {}", p.display(), n, line.trim()))
+                                .collect();
+                            let listing = lines.join("\n");
+                            let mut m = format!(
+                                "[grep_content] matches_collected: {} (showing up to {} lines)\n{}",
+                                collected, DISPLAY, listing
+                            );
+                            if collected >= CAP {
+                                m.push_str(&format!(
+                                    "\n(at least {} matches — output capped; narrow pattern, dir, or file_glob)\n",
+                                    CAP
+                                ));
+                            }
+                            m
+                        }
                     } else {
-                        format!("[grep_content] {}", res.summary)
+                        format!("[grep_content] failed: {}", res.summary)
                     };
                     (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[grep_content] error: {}", e), None),
+                Err(e) => (false, format!("[grep_content] failed: {}", e), None),
             }
         }
         "write_file" => {
@@ -4598,14 +4733,19 @@ async fn execute_tool_call(
             let disk = resolve_tool_disk_path(repo_str, workspace_root);
             match executor.git_status(&disk).await {
                 Ok((out, res)) => {
-                    let msg = if res.success {
-                        format!("[git_status] {} — {}", res.summary, out.trim())
-                    } else {
-                        format!("[git_status] {} — {}", res.summary, out.trim())
-                    };
+                    let text = out.trim();
+                    let (frag, total, trunc) =
+                        crate::tool_output::truncate_utf8_by_bytes(text, crate::tool_output::GIT_TEXT_MAX);
+                    let base = format!("[git_status] {} — {}", res.summary, frag);
+                    let msg = crate::tool_output::with_truncation_footer(
+                        base,
+                        trunc,
+                        total,
+                        "output truncated — run git status in run_command with > file if you need the full text",
+                    );
                     (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[git_status] error: {}", e), None),
+                Err(e) => (false, format!("[git_status] failed: {}", e), None),
             }
         }
         "git_diff" => {
@@ -4623,10 +4763,19 @@ async fn execute_tool_call(
             let pathspecs: Vec<String> = args.get(rest_start..).map(|s| s.to_vec()).unwrap_or_default();
             match executor.git_diff(&disk, staged, &pathspecs).await {
                 Ok((out, res)) => {
-                    let msg = format!("[git_diff] {} — {}", res.summary, out.trim());
+                    let text = out.trim();
+                    let (frag, total, trunc) =
+                        crate::tool_output::truncate_utf8_by_bytes(text, crate::tool_output::GIT_TEXT_MAX);
+                    let base = format!("[git_diff] {} — {}", res.summary, frag);
+                    let msg = crate::tool_output::with_truncation_footer(
+                        base,
+                        trunc,
+                        total,
+                        "narrow with pathspec arguments on git_diff or use file_diff for two files",
+                    );
                     (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[git_diff] error: {}", e), None),
+                Err(e) => (false, format!("[git_diff] failed: {}", e), None),
             }
         }
         "git_log" => {
@@ -4638,10 +4787,19 @@ async fn execute_tool_call(
             let disk = resolve_tool_disk_path(repo_str, workspace_root);
             match executor.git_log(&disk, n).await {
                 Ok((out, res)) => {
-                    let msg = format!("[git_log] {} — {}", res.summary, out.trim());
+                    let text = out.trim();
+                    let (frag, total, trunc) =
+                        crate::tool_output::truncate_utf8_by_bytes(text, crate::tool_output::GIT_TEXT_MAX);
+                    let base = format!("[git_log] {} — {}", res.summary, frag);
+                    let msg = crate::tool_output::with_truncation_footer(
+                        base,
+                        trunc,
+                        total,
+                        "reduce n on git_log or save to a file and read_file with grep_content",
+                    );
                     (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[git_log] error: {}", e), None),
+                Err(e) => (false, format!("[git_log] failed: {}", e), None),
             }
         }
         "git_rev_parse" => {
@@ -4652,10 +4810,19 @@ async fn execute_tool_call(
             let disk = resolve_tool_disk_path(repo_str, workspace_root);
             match executor.git_rev_parse_head(&disk).await {
                 Ok((out, res)) => {
-                    let msg = format!("[git_rev_parse] {} — {}", res.summary, out.trim());
+                    let text = out.trim();
+                    let (frag, total, trunc) =
+                        crate::tool_output::truncate_utf8_by_bytes(text, crate::tool_output::GIT_TEXT_MAX);
+                    let base = format!("[git_rev_parse] {} — {}", res.summary, frag);
+                    let msg = crate::tool_output::with_truncation_footer(
+                        base,
+                        trunc,
+                        total,
+                        "output truncated — retry via run_command if needed",
+                    );
                     (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[git_rev_parse] error: {}", e), None),
+                Err(e) => (false, format!("[git_rev_parse] failed: {}", e), None),
             }
         }
         "web_fetch" => {
@@ -4666,14 +4833,20 @@ async fn execute_tool_call(
             match executor.web_fetch(url).await {
                 Ok((body, res)) => {
                     let msg = if res.success {
-                        let preview = if body.len() <= 500 { body.as_str() } else { &body[..body.floor_char_boundary(500)] };
-                        format!("[web_fetch] {} — {}", res.summary, preview)
+                        let (preview, total, trunc) = crate::tool_output::truncate_utf8_by_bytes(&body, 500);
+                        let base = format!("[web_fetch] {} — {}", res.summary, preview);
+                        crate::tool_output::with_truncation_footer(
+                            base,
+                            trunc,
+                            total,
+                            "use a more specific URL or browser snapshot for long pages",
+                        )
                     } else {
-                        format!("[web_fetch] {}", res.summary)
+                        format!("[web_fetch] failed: {}", res.summary)
                     };
                     (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[web_fetch] error: {}", e), None),
+                Err(e) => (false, format!("[web_fetch] failed: {}", e), None),
             }
         }
         "web_search" => {
@@ -4694,14 +4867,20 @@ async fn execute_tool_call(
             match executor.web_search(query.trim(), max_results).await {
                 Ok((body, res)) => {
                     let msg = if res.success {
-                        let preview = if body.len() <= 600 { body.as_str() } else { &body[..body.floor_char_boundary(600)] };
-                        format!("[web_search] {} — {}", res.summary, preview)
+                        let (preview, total, trunc) = crate::tool_output::truncate_utf8_by_bytes(&body, 600);
+                        let base = format!("[web_search] {} — {}", res.summary, preview);
+                        crate::tool_output::with_truncation_footer(
+                            base,
+                            trunc,
+                            total,
+                            "use web_fetch on a result URL for full article text",
+                        )
                     } else {
-                        format!("[web_search] {}", res.summary)
+                        format!("[web_search] failed: {}", res.summary)
                     };
                     (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[web_search] error: {}", e), None),
+                Err(e) => (false, format!("[web_search] failed: {}", e), None),
             }
         }
         "run_in_container" => {
