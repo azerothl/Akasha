@@ -173,6 +173,44 @@ pub enum ProviderError {
     Auth(String),
 }
 
+/// One NDJSON line from Ollama `POST /api/generate` with `"stream": true`.
+/// Used by [`OllamaProvider::complete_stream_async`] and unit tests.
+fn ollama_apply_stream_ndjson_line(
+    line: &str,
+    accumulated_text: &mut String,
+    thinking_buf: &mut String,
+    thinking_final: &mut Option<String>,
+    last_done_json: &mut Option<serde_json::Value>,
+    chunk_tx: &std::sync::mpsc::Sender<String>,
+) -> Result<(), ProviderError> {
+    let line = line.trim();
+    if line.is_empty() {
+        return Ok(());
+    }
+    let json: serde_json::Value = serde_json::from_str(line)
+        .map_err(|e| ProviderError::Api(format!("ollama stream line: {}", e)))?;
+    let done = json.get("done").and_then(|v| v.as_bool()) == Some(true);
+    if let Some(delta) = json.get("response").and_then(|v| v.as_str()) {
+        if !delta.is_empty() {
+            accumulated_text.push_str(delta);
+            let _ = chunk_tx.send(delta.to_string());
+        }
+    }
+    if let Some(t) = json.get("thinking").and_then(|v| v.as_str()) {
+        if !t.is_empty() {
+            if done {
+                *thinking_final = Some(t.to_string());
+            } else {
+                thinking_buf.push_str(t);
+            }
+        }
+    }
+    if done {
+        *last_done_json = Some(json);
+    }
+    Ok(())
+}
+
 // --- Ollama (local)
 pub struct OllamaProvider {
     base_url: String,
@@ -185,20 +223,19 @@ impl OllamaProvider {
         }
     }
 
-    async fn complete_async(
+    /// Shared `/api/generate` JSON body for Ollama (same options for stream and non-stream).
+    fn build_generate_body(
         &self,
         request: &CompletionRequest,
         model: &str,
-        timeout: Duration,
-    ) -> Result<CompletionResponse, ProviderError> {
-        let client = reqwest::Client::new();
+        stream: bool,
+    ) -> (String, serde_json::Value) {
         let url = format!("{}/api/generate", self.base_url);
         let prompt = match &request.system_prompt {
             Some(s) if !s.is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
             _ => request.prompt.clone(),
         };
 
-        // Build options with all supported parameters (Ollama-compatible).
         let mut options = serde_json::json!({
             "num_predict": request.max_tokens.unwrap_or(4096),
             "temperature": request.temperature.unwrap_or(0.7),
@@ -220,17 +257,26 @@ impl OllamaProvider {
             options["num_gpu"] = serde_json::json!(num_gpu);
         }
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "prompt": prompt,
-            "stream": false,
+            "stream": stream,
             "options": options
         });
-        let mut body = body;
         if let Some(enabled) = ollama_think_enabled(request.thinking_level.as_deref()) {
-            // Ollama supports `think` as a boolean toggle.
             body["think"] = serde_json::json!(enabled);
         }
+        (url, body)
+    }
+
+    async fn complete_async(
+        &self,
+        request: &CompletionRequest,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let client = reqwest::Client::new();
+        let (url, body) = self.build_generate_body(request, model, false);
         let resp = client
             .post(&url)
             .json(&body)
@@ -245,7 +291,7 @@ impl OllamaProvider {
                         endpoint = %url,
                         model = %model,
                         timeout_secs = timeout.as_secs(),
-                        prompt_chars = prompt.chars().count(),
+                        prompt_chars = request.prompt.chars().count(),
                         reqwest_error = %e,
                         "Ollama request timed out (reqwest total deadline: cold model load, slow generation, or unreachable host often exceed this; check network and llm_router timeout_per_call)"
                     );
@@ -319,6 +365,151 @@ impl OllamaProvider {
             total_duration_ns,
         })
     }
+
+    async fn complete_stream_async(
+        &self,
+        request: &CompletionRequest,
+        model: &str,
+        timeout: Duration,
+        chunk_tx: &std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let client = reqwest::Client::new();
+        let (url, body) = self.build_generate_body(request, model, true);
+        let mut resp = client
+            .post(&url)
+            .json(&body)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    warn!(
+                        provider = "ollama",
+                        base_url = %self.base_url,
+                        endpoint = %url,
+                        model = %model,
+                        timeout_secs = timeout.as_secs(),
+                        reqwest_error = %e,
+                        "Ollama streaming request timed out"
+                    );
+                    ProviderError::Timeout
+                } else {
+                    ProviderError::Api(e.to_string())
+                }
+            })?;
+        if resp.status().as_u16() == 429 {
+            return Err(ProviderError::RateLimit);
+        }
+        if !resp.status().is_success() {
+            return Err(ProviderError::Api(format!("status {}", resp.status())));
+        }
+
+        let mut pending = String::new();
+        let mut accumulated_text = String::new();
+        let mut thinking_buf = String::new();
+        let mut thinking_final: Option<String> = None;
+        let mut last_done_json: Option<serde_json::Value> = None;
+
+        loop {
+            let chunk = resp.chunk().await.map_err(|e| {
+                if e.is_timeout() {
+                    warn!(
+                        provider = "ollama",
+                        base_url = %self.base_url,
+                        endpoint = %url,
+                        model = %model,
+                        timeout_secs = timeout.as_secs(),
+                        phase = "read_chunk",
+                        reqwest_error = %e,
+                        "Ollama streaming body read timed out"
+                    );
+                    ProviderError::Timeout
+                } else {
+                    ProviderError::Api(e.to_string())
+                }
+            })?;
+            let Some(chunk) = chunk else {
+                break;
+            };
+            pending.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(pos) = pending.find('\n') {
+                let line = pending[..pos].trim_end_matches('\r').to_string();
+                pending = pending[pos + 1..].to_string();
+                ollama_apply_stream_ndjson_line(
+                    &line,
+                    &mut accumulated_text,
+                    &mut thinking_buf,
+                    &mut thinking_final,
+                    &mut last_done_json,
+                    chunk_tx,
+                )?;
+            }
+        }
+        if !pending.trim().is_empty() {
+            ollama_apply_stream_ndjson_line(
+                pending.trim(),
+                &mut accumulated_text,
+                &mut thinking_buf,
+                &mut thinking_final,
+                &mut last_done_json,
+                chunk_tx,
+            )?;
+        }
+
+        let thinking = thinking_final.or_else(|| {
+            if thinking_buf.is_empty() {
+                None
+            } else {
+                Some(thinking_buf)
+            }
+        });
+
+        let json = last_done_json.as_ref();
+        let text = accumulated_text;
+        if text.trim().is_empty() {
+            let full = json
+                .map(|j| serde_json::to_string_pretty(j).unwrap_or_else(|_| j.to_string()))
+                .unwrap_or_else(|| "(no final chunk)".to_string());
+            warn!(
+                model = %model,
+                "Ollama stream returned empty text. Last JSON line (debug):\n{}",
+                full
+            );
+        }
+
+        let usage = json
+            .and_then(|j| j.get("eval_count").and_then(|v| v.as_u64()))
+            .map(|c| TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: c,
+            });
+        let done_reason = json
+            .and_then(|j| j.get("done_reason").and_then(|v| v.as_str()))
+            .map(String::from);
+        let eval_count = json.and_then(|j| j.get("eval_count").and_then(|v| v.as_u64()));
+        let total_duration_ns = json.and_then(|j| j.get("total_duration").and_then(|v| v.as_u64()));
+
+        if done_reason.as_deref() == Some("length") {
+            warn!(
+                model = %model,
+                text_len = text.len(),
+                thinking_len = thinking.as_ref().map(|t| t.len()),
+                eval_count = ?eval_count,
+                "Model response truncated due to max_tokens limit (streaming)"
+            );
+        }
+
+        Ok(CompletionResponse {
+            text,
+            usage,
+            model_used: model.to_string(),
+            cost_usd: None,
+            thinking,
+            done_reason,
+            eval_count,
+            total_duration_ns,
+        })
+    }
 }
 
 #[async_trait]
@@ -339,6 +530,10 @@ impl LLMProvider for OllamaProvider {
         true
     }
 
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
     async fn complete(
         &self,
         request: &CompletionRequest,
@@ -347,6 +542,18 @@ impl LLMProvider for OllamaProvider {
     ) -> Result<CompletionResponse, ProviderError> {
         let model = model_override.unwrap_or("llama3.2");
         self.complete_async(request, model, timeout).await
+    }
+
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let model = model_override.unwrap_or("llama3.2");
+        self.complete_stream_async(request, model, timeout, &chunk_tx)
+            .await
     }
 }
 
@@ -1457,6 +1664,56 @@ mod tests {
     fn ollama_provider_is_available_no_panic() {
         let p = OllamaProvider::new(None);
         let _ = p.is_available();
+    }
+
+    #[test]
+    fn ollama_provider_supports_streaming() {
+        let p = OllamaProvider::new(None);
+        assert!(LLMProvider::supports_streaming(&p));
+    }
+
+    #[test]
+    fn ollama_stream_ndjson_lines_accumulate_text_and_emit_chunk_deltas() {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let mut acc = String::new();
+        let mut thinking_buf = String::new();
+        let mut thinking_final: Option<String> = None;
+        let mut last_done: Option<serde_json::Value> = None;
+
+        ollama_apply_stream_ndjson_line(
+            r#"{"response":"Hel","done":false}"#,
+            &mut acc,
+            &mut thinking_buf,
+            &mut thinking_final,
+            &mut last_done,
+            &tx,
+        )
+        .unwrap();
+        ollama_apply_stream_ndjson_line(
+            r#"{"response":"lo","done":false}"#,
+            &mut acc,
+            &mut thinking_buf,
+            &mut thinking_final,
+            &mut last_done,
+            &tx,
+        )
+        .unwrap();
+        ollama_apply_stream_ndjson_line(
+            r#"{"response":"","done":true,"eval_count":2,"done_reason":"stop"}"#,
+            &mut acc,
+            &mut thinking_buf,
+            &mut thinking_final,
+            &mut last_done,
+            &tx,
+        )
+        .unwrap();
+
+        drop(tx);
+        let chunks: Vec<String> = rx.into_iter().collect();
+        assert_eq!(chunks, vec!["Hel".to_string(), "lo".to_string()]);
+        assert_eq!(acc, "Hello");
+        assert!(last_done.is_some());
+        assert_eq!(last_done.unwrap()["eval_count"], serde_json::json!(2));
     }
 
     #[test]

@@ -65,7 +65,6 @@ const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "ligh
 function shouldChatStreamProgress(message: string): boolean {
   const m = message?.trim() ?? "";
   if (!m) return false;
-  if (m.includes("Analyzing your request") || m.includes("Analyse de votre demande")) return false;
   if (/^\s*TOOL\s*:/im.test(m)) return false;
   if (/\n\s*TOOL\s*:/i.test(m)) return false;
   return true;
