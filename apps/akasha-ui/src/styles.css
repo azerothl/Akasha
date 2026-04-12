@@ -1369,9 +1369,10 @@ pre,
 .chat-subagents-panel {
   margin: 0 1rem 1rem;
   background: var(--akasha-bg-elevated);
-  border: 1px solid var(--akasha-border);
-  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--akasha-accent) 28%, var(--akasha-border));
+  border-radius: 10px;
   overflow: hidden;
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--akasha-accent) 12%, transparent);
 }
 
 .chat-subagents-toggle {
@@ -1402,9 +1403,14 @@ pre,
   color: var(--akasha-text-dim);
 }
 
+.chat-subagents-toggle-text {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
 .chat-subagents-detail {
   padding: 0.75rem 1rem;
-  max-height: 12rem;
+  max-height: min(42vh, 22rem);
   overflow-y: auto;
   font-size: 0.8125rem;
 }
@@ -1720,6 +1726,14 @@ pre,
   border: 1px solid color-mix(in srgb, var(--akasha-border) 88%, transparent);
   border-radius: 10px;
   background: color-mix(in srgb, var(--akasha-bg-surface) 76%, var(--akasha-bg-elevated));
+}
+
+.chat-subagents-event-summary {
+  margin: 0 0 0.4rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--akasha-text);
 }
 
 .chat-subagents-event-topline {
@@ -3537,6 +3551,13 @@ a.settings-link-btn.refresh-btn {
   margin: 0 0 0.45rem;
   font-size: 0.875rem;
   line-height: 1.5;
+  color: var(--akasha-text);
+}
+
+.activity-event-summary--lead {
+  font-size: 0.92rem;
+  font-weight: 500;
+  margin-bottom: 0.5rem;
   color: var(--akasha-text);
 }
 
