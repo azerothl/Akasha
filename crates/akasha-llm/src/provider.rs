@@ -1,5 +1,6 @@
 //! Provider trait and implementations (Ollama, Akasha Core, OpenAI, OpenRouter).
 
+use crate::streaming;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -132,8 +133,9 @@ pub trait LLMProvider: Send + Sync {
         false
     }
     /// Whether this provider can stream chunks (avoids total timeout; use idle timeout instead).
+    /// Default `true`: [`complete_stream`] falls back to [`complete`] and emits one chunk unless overridden.
     fn supports_streaming(&self) -> bool {
-        false
+        true
     }
     /// Complete with optional model override from routing config (e.g. "llama3.2", "codellama").
     async fn complete(
@@ -530,10 +532,6 @@ impl LLMProvider for OllamaProvider {
         true
     }
 
-    fn supports_streaming(&self) -> bool {
-        true
-    }
-
     async fn complete(
         &self,
         request: &CompletionRequest,
@@ -574,17 +572,7 @@ impl OpenAIProvider {
         }
     }
 
-    async fn complete_async(
-        &self,
-        request: &CompletionRequest,
-        model: &str,
-        timeout: Duration,
-    ) -> Result<CompletionResponse, ProviderError> {
-        if self.api_key.is_empty() {
-            return Err(ProviderError::Auth("missing API key".into()));
-        }
-        let client = reqwest::Client::new();
-        let url = format!("{}/chat/completions", self.base_url);
+    fn build_chat_completions_body(&self, request: &CompletionRequest, model: &str) -> serde_json::Value {
         let user_content = match &request.image_data_urls {
             Some(urls) if !urls.is_empty() => {
                 let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
@@ -606,7 +594,6 @@ impl OpenAIProvider {
             _ => serde_json::json!([{ "role": "user", "content": user_content }]),
         };
 
-        // Build request body with all supported OpenAI parameters.
         let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
@@ -628,6 +615,21 @@ impl OpenAIProvider {
                 body["reasoning_effort"] = serde_json::json!(level);
             }
         }
+        body
+    }
+
+    async fn complete_async(
+        &self,
+        request: &CompletionRequest,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Auth("missing API key".into()));
+        }
+        let client = reqwest::Client::new();
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = self.build_chat_completions_body(request, model);
 
         let resp = client
             .post(&url)
@@ -711,6 +713,33 @@ impl LLMProvider for OpenAIProvider {
         // Approx gpt-4o-mini: $0.15/1M input, $0.60/1M output (simplified)
         (usage.prompt_tokens as f64 * 0.15 + usage.completion_tokens as f64 * 0.60) / 1_000_000.0
     }
+
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Auth("missing API key".into()));
+        }
+        let model = model_override.unwrap_or("gpt-4o-mini");
+        let client = reqwest::Client::new();
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = self.build_chat_completions_body(request, model);
+        let key = self.api_key.clone();
+        streaming::post_openai_chat_completions_stream(
+            &client,
+            &url,
+            move |req| req.header("Authorization", format!("Bearer {}", key)),
+            body,
+            timeout,
+            model,
+            &chunk_tx,
+        )
+        .await
+    }
 }
 
 // --- OpenRouter (cloud, unified API compatible with OpenAI format)
@@ -748,6 +777,52 @@ impl OpenRouterProvider {
             app_title,
         }
     }
+
+    fn build_chat_completions_body(&self, request: &CompletionRequest, model: &str) -> serde_json::Value {
+        let user_content = match &request.image_data_urls {
+            Some(urls) if !urls.is_empty() => {
+                let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
+                for url in urls {
+                    content.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": url }
+                    }));
+                }
+                serde_json::Value::Array(content)
+            }
+            _ => serde_json::json!(request.prompt),
+        };
+        let messages = match &request.system_prompt {
+            Some(s) if !s.trim().is_empty() => serde_json::json!([
+                { "role": "system", "content": s.trim_end() },
+                { "role": "user", "content": user_content }
+            ]),
+            _ => serde_json::json!([{ "role": "user", "content": user_content }]),
+        };
+
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "max_tokens": request.max_tokens.unwrap_or(4096),
+            "temperature": request.temperature.unwrap_or(0.7)
+        });
+
+        if let Some(top_p) = request.top_p {
+            body["top_p"] = serde_json::json!(top_p);
+        }
+        if let Some(freq_penalty) = request.frequency_penalty {
+            body["frequency_penalty"] = serde_json::json!(freq_penalty);
+        }
+        if let Some(pres_penalty) = request.presence_penalty {
+            body["presence_penalty"] = serde_json::json!(pres_penalty);
+        }
+        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
+            if level != "off" && supports_openai_reasoning_effort(model) {
+                body["reasoning_effort"] = serde_json::json!(level);
+            }
+        }
+        body
+    }
 }
 
 #[async_trait]
@@ -776,49 +851,7 @@ impl LLMProvider for OpenRouterProvider {
         let model = model_override.unwrap_or("openai/gpt-4o-mini");
         let client = reqwest::Client::new();
         let url = format!("{}/chat/completions", self.base_url);
-        let user_content = match &request.image_data_urls {
-            Some(urls) if !urls.is_empty() => {
-                let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
-                for url in urls {
-                    content.push(serde_json::json!({
-                        "type": "image_url",
-                        "image_url": { "url": url }
-                    }));
-                }
-                serde_json::Value::Array(content)
-            }
-            _ => serde_json::json!(request.prompt),
-        };
-        let messages = match &request.system_prompt {
-            Some(s) if !s.trim().is_empty() => serde_json::json!([
-                { "role": "system", "content": s.trim_end() },
-                { "role": "user", "content": user_content }
-            ]),
-            _ => serde_json::json!([{ "role": "user", "content": user_content }]),
-        };
-
-        // Build request body with all supported OpenAI/OpenRouter parameters.
-        let mut body = serde_json::json!({
-            "model": model,
-            "messages": messages,
-            "max_tokens": request.max_tokens.unwrap_or(4096),
-            "temperature": request.temperature.unwrap_or(0.7)
-        });
-
-        if let Some(top_p) = request.top_p {
-            body["top_p"] = serde_json::json!(top_p);
-        }
-        if let Some(freq_penalty) = request.frequency_penalty {
-            body["frequency_penalty"] = serde_json::json!(freq_penalty);
-        }
-        if let Some(pres_penalty) = request.presence_penalty {
-            body["presence_penalty"] = serde_json::json!(pres_penalty);
-        }
-        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
-            if level != "off" && supports_openai_reasoning_effort(model) {
-                body["reasoning_effort"] = serde_json::json!(level);
-            }
-        }
+        let body = self.build_chat_completions_body(request, model);
 
         let mut req = client
             .post(&url)
@@ -888,6 +921,42 @@ impl LLMProvider for OpenRouterProvider {
             total_duration_ns: None,
         })
     }
+
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Auth("missing API key".into()));
+        }
+        let model = model_override.unwrap_or("openai/gpt-4o-mini");
+        let client = reqwest::Client::new();
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = self.build_chat_completions_body(request, model);
+        let api_key = self.api_key.clone();
+        let referer = self
+            .site_url
+            .clone()
+            .unwrap_or_else(|| "https://Akasha.local".into());
+        let title = self.app_title.clone().unwrap_or_else(|| "Akasha".into());
+        streaming::post_openai_chat_completions_stream(
+            &client,
+            &url,
+            move |req| {
+                req.header("Authorization", format!("Bearer {}", api_key))
+                    .header("HTTP-Referer", referer.as_str())
+                    .header("X-Title", title.as_str())
+            },
+            body,
+            timeout,
+            model,
+            &chunk_tx,
+        )
+        .await
+    }
 }
 
 // --- Anthropic (cloud, Messages API)
@@ -905,6 +974,30 @@ impl AnthropicProvider {
                 .trim_end_matches('/')
                 .to_string(),
         }
+    }
+
+    fn build_messages_body(&self, request: &CompletionRequest, model: &str) -> serde_json::Value {
+        let prompt = match &request.system_prompt {
+            Some(s) if !s.trim().is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
+            _ => request.prompt.clone(),
+        };
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": request.max_tokens.unwrap_or(4096),
+            "messages": [{ "role": "user", "content": prompt }]
+        });
+        let mut body = body;
+        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
+            if level != "off" && supports_anthropic_thinking(model) {
+                if let Some(budget_tokens) = anthropic_thinking_budget_tokens(level) {
+                    body["thinking"] = serde_json::json!({
+                        "type": "enabled",
+                        "budget_tokens": budget_tokens
+                    });
+                }
+            }
+        }
+        body
     }
 }
 
@@ -931,26 +1024,7 @@ impl LLMProvider for AnthropicProvider {
         let model = model_override.unwrap_or("claude-3-5-sonnet-20241022");
         let client = reqwest::Client::new();
         let url = format!("{}/v1/messages", self.base_url);
-        let prompt = match &request.system_prompt {
-            Some(s) if !s.trim().is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
-            _ => request.prompt.clone(),
-        };
-        let body = serde_json::json!({
-            "model": model,
-            "max_tokens": request.max_tokens.unwrap_or(4096),
-            "messages": [{ "role": "user", "content": prompt }]
-        });
-        let mut body = body;
-        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
-            if level != "off" && supports_anthropic_thinking(model) {
-                if let Some(budget_tokens) = anthropic_thinking_budget_tokens(level) {
-                    body["thinking"] = serde_json::json!({
-                        "type": "enabled",
-                        "budget_tokens": budget_tokens
-                    });
-                }
-            }
-        }
+        let body = self.build_messages_body(request, model);
         let resp = client
             .post(&url)
             .header("x-api-key", &self.api_key)
@@ -996,6 +1070,40 @@ impl LLMProvider for AnthropicProvider {
             total_duration_ns: None,
         })
     }
+
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Auth("missing API key".into()));
+        }
+        let model = model_override.unwrap_or("claude-3-5-sonnet-20241022");
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1/messages", self.base_url);
+        let mut body = self.build_messages_body(request, model);
+        body["stream"] = serde_json::json!(true);
+        let resp = client
+            .post(&url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    ProviderError::Timeout
+                } else {
+                    ProviderError::Api(e.to_string())
+                }
+            })?;
+        streaming::read_anthropic_messages_sse_stream(resp, model, &chunk_tx).await
+    }
 }
 
 // --- Azure OpenAI (cloud, same shape as OpenAI but custom endpoint + api-key header)
@@ -1014,6 +1122,38 @@ impl AzureOpenAIProvider {
             api_key: api_key.unwrap_or_default(),
             base_url: base,
         }
+    }
+
+    fn build_chat_completions_body(&self, request: &CompletionRequest, deployment: &str) -> serde_json::Value {
+        let messages = match &request.system_prompt {
+            Some(s) if !s.trim().is_empty() => serde_json::json!([
+                { "role": "system", "content": s.trim_end() },
+                { "role": "user", "content": request.prompt }
+            ]),
+            _ => serde_json::json!([{ "role": "user", "content": request.prompt }]),
+        };
+
+        let mut body = serde_json::json!({
+            "messages": messages,
+            "max_tokens": request.max_tokens.unwrap_or(4096),
+            "temperature": request.temperature.unwrap_or(0.7)
+        });
+
+        if let Some(top_p) = request.top_p {
+            body["top_p"] = serde_json::json!(top_p);
+        }
+        if let Some(freq_penalty) = request.frequency_penalty {
+            body["frequency_penalty"] = serde_json::json!(freq_penalty);
+        }
+        if let Some(pres_penalty) = request.presence_penalty {
+            body["presence_penalty"] = serde_json::json!(pres_penalty);
+        }
+        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
+            if level != "off" && supports_openai_reasoning_effort(deployment) {
+                body["reasoning_effort"] = serde_json::json!(level);
+            }
+        }
+        body
     }
 }
 
@@ -1044,35 +1184,7 @@ impl LLMProvider for AzureOpenAIProvider {
             self.base_url.trim_end_matches('/'),
             deployment
         );
-        let messages = match &request.system_prompt {
-            Some(s) if !s.trim().is_empty() => serde_json::json!([
-                { "role": "system", "content": s.trim_end() },
-                { "role": "user", "content": request.prompt }
-            ]),
-            _ => serde_json::json!([{ "role": "user", "content": request.prompt }]),
-        };
-
-        // Build request body with OpenAI-compatible parameters.
-        let mut body = serde_json::json!({
-            "messages": messages,
-            "max_tokens": request.max_tokens.unwrap_or(4096),
-            "temperature": request.temperature.unwrap_or(0.7)
-        });
-
-        if let Some(top_p) = request.top_p {
-            body["top_p"] = serde_json::json!(top_p);
-        }
-        if let Some(freq_penalty) = request.frequency_penalty {
-            body["frequency_penalty"] = serde_json::json!(freq_penalty);
-        }
-        if let Some(pres_penalty) = request.presence_penalty {
-            body["presence_penalty"] = serde_json::json!(pres_penalty);
-        }
-        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
-            if level != "off" && supports_openai_reasoning_effort(deployment) {
-                body["reasoning_effort"] = serde_json::json!(level);
-            }
-        }
+        let body = self.build_chat_completions_body(request, deployment);
 
         let resp = client
             .post(&url)
@@ -1119,6 +1231,37 @@ impl LLMProvider for AzureOpenAIProvider {
             total_duration_ns: None,
         })
     }
+
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Auth("missing API key".into()));
+        }
+        let deployment = model_override.unwrap_or("gpt-4o-mini");
+        let client = reqwest::Client::new();
+        let url = format!(
+            "{}/openai/deployments/{}/chat/completions?api-version=2024-02-15-preview",
+            self.base_url.trim_end_matches('/'),
+            deployment
+        );
+        let body = self.build_chat_completions_body(request, deployment);
+        let key = self.api_key.clone();
+        streaming::post_openai_chat_completions_stream(
+            &client,
+            &url,
+            move |req| req.header("api-key", key.clone()),
+            body,
+            timeout,
+            deployment,
+            &chunk_tx,
+        )
+        .await
+    }
 }
 
 // --- Google AI (Gemini, generativelanguage API)
@@ -1136,6 +1279,42 @@ impl GoogleAIProvider {
                 .trim_end_matches('/')
                 .to_string(),
         }
+    }
+
+    fn build_generate_content_body(&self, request: &CompletionRequest, model: &str) -> serde_json::Value {
+        let prompt = match &request.system_prompt {
+            Some(s) if !s.trim().is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
+            _ => request.prompt.clone(),
+        };
+
+        let mut generation_config = serde_json::json!({
+            "maxOutputTokens": request.max_tokens.unwrap_or(4096),
+            "temperature": request.temperature.unwrap_or(0.7)
+        });
+
+        if let Some(top_p) = request.top_p {
+            generation_config["topP"] = serde_json::json!(top_p);
+        }
+        if let Some(top_k) = request.top_k {
+            generation_config["topK"] = serde_json::json!(top_k);
+        }
+        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
+            if supports_google_thinking(model) {
+                let budget = match level {
+                    "off" => 0u32,
+                    "low" => 512u32,
+                    "medium" => 2048u32,
+                    "high" => 4096u32,
+                    _ => 0u32,
+                };
+                generation_config["thinkingConfig"] = serde_json::json!({ "thinkingBudget": budget });
+            }
+        }
+
+        serde_json::json!({
+            "contents": [{ "parts": [{ "text": prompt }] }],
+            "generationConfig": generation_config
+        })
     }
 }
 
@@ -1162,40 +1341,7 @@ impl LLMProvider for GoogleAIProvider {
         let model = model_override.unwrap_or("gemini-1.5-flash");
         let client = reqwest::Client::new();
         let url = format!("{}/v1beta/models/{}:generateContent?key={}", self.base_url, model, self.api_key);
-        let prompt = match &request.system_prompt {
-            Some(s) if !s.trim().is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
-            _ => request.prompt.clone(),
-        };
-
-        // Build generation config with all supported parameters.
-        let mut generation_config = serde_json::json!({
-            "maxOutputTokens": request.max_tokens.unwrap_or(4096),
-            "temperature": request.temperature.unwrap_or(0.7)
-        });
-
-        if let Some(top_p) = request.top_p {
-            generation_config["topP"] = serde_json::json!(top_p);
-        }
-        if let Some(top_k) = request.top_k {
-            generation_config["topK"] = serde_json::json!(top_k);
-        }
-        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
-            if supports_google_thinking(model) {
-                let budget = match level {
-                    "off" => 0u32,
-                    "low" => 512u32,
-                    "medium" => 2048u32,
-                    "high" => 4096u32,
-                    _ => 0u32,
-                };
-                generation_config["thinkingConfig"] = serde_json::json!({ "thinkingBudget": budget });
-            }
-        }
-
-        let body = serde_json::json!({
-            "contents": [{ "parts": [{ "text": prompt }] }],
-            "generationConfig": generation_config
-        });
+        let body = self.build_generate_content_body(request, model);
         let resp = client
             .post(&url)
             .header("Content-Type", "application/json")
@@ -1240,6 +1386,40 @@ impl LLMProvider for GoogleAIProvider {
             total_duration_ns: None,
         })
     }
+
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Auth("missing API key".into()));
+        }
+        let model = model_override.unwrap_or("gemini-1.5-flash");
+        let client = reqwest::Client::new();
+        let url = format!(
+            "{}/v1beta/models/{}:streamGenerateContent?key={}",
+            self.base_url, model, self.api_key
+        );
+        let body = self.build_generate_content_body(request, model);
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    ProviderError::Timeout
+                } else {
+                    ProviderError::Api(e.to_string())
+                }
+            })?;
+        streaming::read_google_gemini_sse_stream(resp, model, &chunk_tx).await
+    }
 }
 
 // --- BitNet (local: llama-server / BitNet inference server, OpenAI-compatible API)
@@ -1265,14 +1445,7 @@ impl BitNetProvider {
         }
     }
 
-    async fn complete_async(
-        &self,
-        request: &CompletionRequest,
-        model: &str,
-        timeout: Duration,
-    ) -> Result<CompletionResponse, ProviderError> {
-        let client = reqwest::Client::new();
-        let url = self.chat_completions_url();
+    fn build_chat_completions_body(&self, request: &CompletionRequest, model: &str) -> serde_json::Value {
         let user_content = match &request.image_data_urls {
             Some(urls) if !urls.is_empty() => {
                 let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
@@ -1294,13 +1467,11 @@ impl BitNetProvider {
             _ => serde_json::json!([{ "role": "user", "content": user_content }]),
         };
 
-        // Build request body with all supported OpenAI-compatible parameters.
         let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
             "max_tokens": request.max_tokens.unwrap_or(4096),
-            "temperature": request.temperature.unwrap_or(0.7),
-            "stream": false
+            "temperature": request.temperature.unwrap_or(0.7)
         });
 
         if let Some(top_p) = request.top_p {
@@ -1321,6 +1492,18 @@ impl BitNetProvider {
         if let Some(num_ctx) = request.num_ctx {
             body["num_ctx"] = serde_json::json!(num_ctx);
         }
+        body
+    }
+
+    async fn complete_async(
+        &self,
+        request: &CompletionRequest,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let client = reqwest::Client::new();
+        let url = self.chat_completions_url();
+        let body = self.build_chat_completions_body(request, model);
 
         let resp = client
             .post(&url)
@@ -1404,10 +1587,6 @@ impl LLMProvider for BitNetProvider {
         true
     }
 
-    fn supports_streaming(&self) -> bool {
-        false
-    }
-
     async fn complete(
         &self,
         request: &CompletionRequest,
@@ -1416,6 +1595,29 @@ impl LLMProvider for BitNetProvider {
     ) -> Result<CompletionResponse, ProviderError> {
         let model = model_override.unwrap_or("default");
         self.complete_async(request, model, timeout).await
+    }
+
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let model = model_override.unwrap_or("default");
+        let client = reqwest::Client::new();
+        let url = self.chat_completions_url();
+        let body = self.build_chat_completions_body(request, model);
+        streaming::post_openai_chat_completions_stream(
+            &client,
+            &url,
+            |req| req,
+            body,
+            timeout,
+            model,
+            &chunk_tx,
+        )
+        .await
     }
 }
 

@@ -8,6 +8,7 @@ pub mod metrics;
 pub mod provider;
 pub mod retry;
 pub mod router;
+pub mod streaming;
 
 pub use classifier::{classify_task_type, TaskType};
 pub use config::{ModelOption, RoutingConfig};
