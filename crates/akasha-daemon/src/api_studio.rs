@@ -412,6 +412,19 @@ pub async fn handle_studio_route(
             tech_stack,
         };
         let _ = save_studio_meta(&dir, &meta);
+        if !dir.join(".git").exists() {
+            let mut g = Command::new("git");
+            g.arg("init").current_dir(&dir).kill_on_drop(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                g.as_std_mut().creation_flags(CREATE_NO_WINDOW);
+            }
+            if let Err(e) = g.status().await {
+                tracing::warn!(error = %e, path = %dir.display(), "git init failed for new studio project");
+            }
+        }
         let body = serde_json::json!({ "id": id, "path": dir.display().to_string() }).to_string();
         return Some(json_response("201 Created", &body));
     }
