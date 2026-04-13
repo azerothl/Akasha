@@ -537,8 +537,12 @@ impl Daemon {
                         }
                     };
                     while let Ok((task_id, progress_pct, message)) = progress_persistence_rx.recv() {
-                        if store.insert_progress(task_id, progress_pct, &message).is_err() {
-                            tracing::warn!(task_id = %task_id, "Progress persistence: insert failed");
+                        if let Err(e) = store.insert_progress(task_id, progress_pct, &message) {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                error = %e,
+                                "Progress persistence: insert failed"
+                            );
                         }
                     }
                 });
@@ -554,8 +558,13 @@ impl Daemon {
                         }
                     };
                     while let Ok((task_id, event_type, payload, at)) = event_persistence_rx.recv() {
-                        if store.insert_event(task_id, &event_type, payload.as_ref(), &at).is_err() {
-                            tracing::warn!(task_id = %task_id, event_type = %event_type, "Event persistence: insert failed");
+                        if let Err(e) = store.insert_event(task_id, &event_type, payload.as_ref(), &at) {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                event_type = %event_type,
+                                error = %e,
+                                "Event persistence: insert failed"
+                            );
                         }
                     }
                 });

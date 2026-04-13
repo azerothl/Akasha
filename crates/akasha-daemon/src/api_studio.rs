@@ -1,12 +1,13 @@
 //! HTTP handlers for `/api/studio/*` (Code Studio).
 use crate::studio::{is_strictly_under_studio_root, resolve_studio_project_dir, studio_projects_base};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{timeout, Duration};
 
 const MAX_FILE_LIST: usize = 500;
@@ -14,6 +15,123 @@ const MAX_RAW_BYTES: usize = 2 * 1024 * 1024;
 const MAX_DEPTH: usize = 8;
 const MAX_BUILD_OUTPUT_BYTES: usize = 512 * 1024;
 const DEFAULT_BUILD_TIMEOUT_SEC: u64 = 600;
+const NPM_INSTALL_TIMEOUT_SEC: u64 = 900;
+/// Default range for Vite/webpack dev servers started by `POST .../preview/start`.
+const PREVIEW_PORT_MIN: u16 = 5180;
+const PREVIEW_PORT_MAX: u16 = 5279;
+
+struct StudioPreviewProcess {
+    child: tokio::process::Child,
+}
+
+fn studio_preview_registry() -> &'static Mutex<HashMap<String, StudioPreviewProcess>> {
+    static REG: OnceLock<Mutex<HashMap<String, StudioPreviewProcess>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Pick a TCP port on 127.0.0.1 (best-effort; released before the dev server binds).
+fn pick_preview_port(preferred: Option<u16>) -> Option<u16> {
+    if let Some(p) = preferred {
+        if p >= 1024 && std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() {
+            return Some(p);
+        }
+    }
+    for p in PREVIEW_PORT_MIN..=PREVIEW_PORT_MAX {
+        if std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// On Windows, `npm` / `npx` are usually `*.cmd` shims — `Command::new("npm")` often returns
+/// `ErrorKind::NotFound` ("program not found"). Delegate to `cmd.exe /c` so PATH matches a shell.
+fn studio_command_from_argv(argv: &[String]) -> Command {
+    #[cfg(windows)]
+    {
+        if argv.first().is_some_and(|s| s == "npm" || s == "npx") {
+            let mut c = Command::new("cmd.exe");
+            c.arg("/c");
+            for a in argv {
+                c.arg(a);
+            }
+            return c;
+        }
+    }
+    let mut c = Command::new(&argv[0]);
+    if argv.len() > 1 {
+        c.args(&argv[1..]);
+    }
+    c
+}
+
+/// Run a bounded command under `root`, capturing stdout/stderr (same safety rules as build).
+async fn studio_run_command_capture(
+    root: &Path,
+    argv: &[String],
+    timeout_sec: u64,
+) -> Result<(Option<i32>, String, String), String> {
+    if argv.is_empty() {
+        return Err("empty argv".into());
+    }
+    if !argv_looks_safe(argv) {
+        return Err("invalid or unsafe argv".into());
+    }
+    let mut cmd = studio_command_from_argv(argv);
+    cmd.current_dir(root).kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.as_std_mut().creation_flags(CREATE_NO_WINDOW);
+    }
+    let run = async move {
+        let mut child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let mut out = String::new();
+        let mut err = String::new();
+        if let Some(mut s) = stdout {
+            let mut r = BufReader::new(&mut s);
+            let mut buf = vec![0u8; 8192];
+            loop {
+                let n = r.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                if out.len() < MAX_BUILD_OUTPUT_BYTES {
+                    let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(out.len()));
+                    out.push_str(&String::from_utf8_lossy(&buf[..take]));
+                }
+            }
+        }
+        if let Some(mut s) = stderr {
+            let mut r = BufReader::new(&mut s);
+            let mut buf = vec![0u8; 8192];
+            loop {
+                let n = r.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                if err.len() < MAX_BUILD_OUTPUT_BYTES {
+                    let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(err.len()));
+                    err.push_str(&String::from_utf8_lossy(&buf[..take]));
+                }
+            }
+        }
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>((status, out, err))
+    };
+    let result = timeout(Duration::from_secs(timeout_sec), run).await;
+    match result {
+        Ok(Ok((status, stdout, stderr))) => Ok((status.code(), truncate_output(&stdout), truncate_output(&stderr))),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!("timeout after {}s", timeout_sec)),
+    }
+}
 
 fn studio_ops_semaphore() -> &'static Semaphore {
     static SEM: OnceLock<Semaphore> = OnceLock::new();
@@ -588,6 +706,170 @@ pub async fn handle_studio_route(
                     "500 Internal Server Error",
                     &serde_json::json!({ "error": format!("git clone failed: {}", s) }).to_string(),
                 ));
+            }
+            Err(e) => {
+                return Some(json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                ));
+            }
+        }
+    }
+
+    // POST /api/studio/projects/:id/preview/stop — kill dev server started for this project.
+    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/preview/stop") {
+        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+        let id = rest
+            .strip_suffix("/preview/stop")
+            .unwrap_or(rest)
+            .trim_end_matches('/');
+        let id = id.split('/').next().unwrap_or("");
+        if id.is_empty() {
+            return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+        }
+        let mut map = studio_preview_registry().lock().await;
+        if let Some(mut prev) = map.remove(id) {
+            let _ = prev.child.kill().await;
+            return Some(json_response("200 OK", r#"{"ok":true,"stopped":true}"#));
+        }
+        return Some(json_response("200 OK", r#"{"ok":true,"stopped":false}"#));
+    }
+
+    // POST /api/studio/projects/:id/preview/start — npm install if needed, then npm run dev (background).
+    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/preview/start") {
+        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+        let id = rest
+            .strip_suffix("/preview/start")
+            .unwrap_or(rest)
+            .trim_end_matches('/');
+        let id = id.split('/').next().unwrap_or("");
+        if id.is_empty() {
+            return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+        }
+        let root = match resolve_studio_project_dir(data_dir, id) {
+            Ok(d) => d,
+            Err(e) => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        };
+        if !root.is_dir() {
+            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+        }
+        let pkg = root.join("package.json");
+        if !pkg.is_file() {
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"package_json_required_for_preview","hint":"Use static HTML preview in the UI or add a package.json with a dev script."}"#,
+            ));
+        }
+        let body_v = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let force_install = body_v
+            .as_ref()
+            .and_then(|v| v.get("force_install"))
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        let preferred_port = body_v
+            .as_ref()
+            .and_then(|v| v.get("port"))
+            .and_then(|x| x.as_u64())
+            .and_then(|n| u16::try_from(n).ok());
+        let _permit = match studio_ops_semaphore().acquire().await {
+            Ok(p) => p,
+            Err(_) => {
+                return Some(json_response(
+                    "503 Service Unavailable",
+                    r#"{"error":"studio_ops_semaphore_closed"}"#,
+                ));
+            }
+        };
+        let node_modules = root.join("node_modules");
+        let mut install_block: Option<serde_json::Value> = None;
+        if force_install || !node_modules.is_dir() {
+            let argv = vec!["npm".to_string(), "install".to_string()];
+            match studio_run_command_capture(&root, &argv, NPM_INSTALL_TIMEOUT_SEC).await {
+                Ok((code, stdout, stderr)) => {
+                    let ok = code == Some(0);
+                    install_block = Some(serde_json::json!({
+                        "exit_code": code,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                    }));
+                    if !ok {
+                        return Some(json_response(
+                            "500 Internal Server Error",
+                            &serde_json::json!({
+                                "error": "npm_install_failed",
+                                "install": install_block,
+                            })
+                            .to_string(),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    return Some(json_response(
+                        "500 Internal Server Error",
+                        &serde_json::json!({ "error": e }).to_string(),
+                    ));
+                }
+            }
+        }
+        let Some(port) = pick_preview_port(preferred_port) else {
+            return Some(json_response(
+                "503 Service Unavailable",
+                r#"{"error":"no_free_preview_port"}"#,
+            ));
+        };
+        let mut map = studio_preview_registry().lock().await;
+        if let Some(mut old) = map.remove(id) {
+            let _ = old.child.kill().await;
+        }
+        let port_s = port.to_string();
+        let argv = vec![
+            "npm".to_string(),
+            "run".to_string(),
+            "dev".to_string(),
+            "--".to_string(),
+            "--host".to_string(),
+            "127.0.0.1".to_string(),
+            "--port".to_string(),
+            port_s.clone(),
+        ];
+        if !argv_looks_safe(&argv) {
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"invalid preview argv"}"#,
+            ));
+        }
+        let mut cmd = studio_command_from_argv(&argv);
+        cmd.current_dir(&root).kill_on_drop(false);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.as_std_mut().creation_flags(CREATE_NO_WINDOW);
+        }
+        match cmd.spawn() {
+            Ok(child) => {
+                map.insert(id.to_string(), StudioPreviewProcess { child });
+                let url = format!("http://127.0.0.1:{port}");
+                let mut body = serde_json::json!({
+                    "ok": true,
+                    "url": url,
+                    "port": port,
+                });
+                if let Some(ib) = install_block {
+                    body["installed"] = serde_json::Value::Bool(true);
+                    body["install"] = ib;
+                } else {
+                    body["installed"] = serde_json::Value::Bool(false);
+                }
+                return Some(json_response("200 OK", &body.to_string()));
             }
             Err(e) => {
                 return Some(json_response(

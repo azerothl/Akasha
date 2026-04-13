@@ -89,6 +89,9 @@ pub struct TaskStore {
 impl TaskStore {
     pub fn open<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
+        // Multiple TaskStore connections hit the same file (API + persistence threads); wait on locks
+        // instead of failing immediately with SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS tasks (
@@ -206,14 +209,11 @@ impl TaskStore {
     /// Append a progress entry for a task (used by daemon to persist progress for fast GET /api/tasks/:id).
     pub fn insert_progress(&self, task_id: Uuid, progress_pct: u8, message: &str) -> anyhow::Result<()> {
         let now = Utc::now().to_rfc3339();
-        let seq: i64 = self.conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM task_progress WHERE task_id = ?1",
-            [task_id.to_string()],
-            |row| row.get(0),
-        )?;
+        // Single statement: avoid SELECT-then-INSERT races across connections (PK (task_id, seq) collision).
         self.conn.execute(
-            "INSERT INTO task_progress (task_id, seq, progress_pct, message, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![task_id.to_string(), seq, progress_pct as i32, message, now],
+            "INSERT INTO task_progress (task_id, seq, progress_pct, message, created_at) \
+             VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM task_progress WHERE task_id = ?1), ?2, ?3, ?4)",
+            rusqlite::params![task_id.to_string(), progress_pct as i32, message, now],
         )?;
         let max_progress: i64 = MAX_PROGRESS_PER_TASK as i64;
         let count: i64 = self.conn.query_row(
