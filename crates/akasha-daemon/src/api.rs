@@ -41,6 +41,32 @@ fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
     p
 }
 
+// #region agent log
+fn agent_debug_9c5756(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    use std::io::Write;
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../debug-9c5756.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let line = serde_json::json!({
+            "sessionId": "9c5756",
+            "timestamp": ts,
+            "location": location,
+            "message": message,
+            "hypothesisId": hypothesis_id,
+            "data": data,
+        });
+        let _ = writeln!(f, "{}", line);
+    }
+}
+// #endregion
+
 /// Normalize common Unicode apostrophes in filenames (e.g. ’ -> ').
 /// LLM tool calls may use typographic quotes, while files on disk typically use ASCII quotes.
 fn normalize_apostrophes(s: &str) -> String {
@@ -1339,7 +1365,27 @@ fn build_plugin_routing_reminders(
             lines.push(format!("- {}", instruction));
         }
     }
+    // #region agent log
+    agent_debug_9c5756(
+        "H1",
+        "api.rs:build_plugin_routing_reminders",
+        "after_rule_loop",
+        serde_json::json!({
+            "lines_count": lines.len(),
+            "geolocation_handled": geolocation_handled,
+            "matched_plugin_entries": matched_plugins.len(),
+        }),
+    );
+    // #endregion
     if lines.is_empty() {
+        // #region agent log
+        agent_debug_9c5756(
+            "H1",
+            "api.rs:build_plugin_routing_reminders",
+            "return_empty_reminder_lines",
+            serde_json::json!({ "geolocation_handled": geolocation_handled }),
+        );
+        // #endregion
         return (String::new(), geolocation_handled);
     }
 
@@ -1347,6 +1393,14 @@ fn build_plugin_routing_reminders(
         "\n[Dynamic plugin routing rules — auto-loaded from installed plugin manifests]\n{}\n\n",
         lines.join("\n")
     );
+    // #region agent log
+    agent_debug_9c5756(
+        "H1",
+        "api.rs:build_plugin_routing_reminders",
+        "return_with_reminder_block",
+        serde_json::json!({ "block_len": block.len(), "lines_count": lines.len() }),
+    );
+    // #endregion
     (block, geolocation_handled)
 }
 
@@ -2743,6 +2797,7 @@ const GITHUB_VAULT_REMINDER: &str = "\n[Reminder GitHub + vault: you MUST run th
 
 /// Injected when the message looks like code/script work: prefer workspace paths, git/diff tools, and explicit cwd for commands.
 const CODE_DEV_SANDBOX_REMINDER: &str = "\n[Reminder — code / project work: use workspace:/ paths for files in this task when no absolute path is given. For Git operations prefer TOOL: git_status, git_diff, git_log, git_rev_parse on the repo path (e.g. workspace:/ or an allowed folder) instead of raw git via run_command, unless you need a subcommand not covered. For file comparison use diff_unified or file_diff; for two trees use dir_compare. For build/test commands use TOOL: run_command --cwd workspace:/ cargo test (or npm test, etc.) so the command runs in the project root; or set run_command_default_cwd_workspace: true in tools_policy.yaml. For isolated execution with a toolchain image, use run_in_container when policy allows.]\n\n";
+const STUDIO_DISK_REMINDER: &str = "\n[Code Studio — périmètre disque: cette tâche s'exécute sous le dossier projet studio uniquement (miroir workspace:/ et cwd des outils). Ne pas cibler de chemins hors de ce répertoire. Pour npm install / builds à risque, privilégier run_in_container si la politique d'outils l'autorise.]\n\n";
 
 /// Application context injected into the prompt: the agent knows it runs inside Akasha and can talk about it.
 const APP_CONTEXT: &str = concat!(
@@ -2804,6 +2859,10 @@ pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
         "qa" => Some("You are the quality control agent. You prevent false 'work done'. Verify coherence, requirement coverage, missing files, hidden TODOs, incomplete sections. Do not rewrite; report defects and gaps by severity. Do not validate if acceptance criteria are incomplete; output a clear report for rework."),
         "system" => Some("You are the system agent. You have full knowledge of the Akasha application: commands (akasha start, init, doctor), interfaces (TUI, Chat, Router, Memory, Doc, Calendar), slash commands, skills, tools, and configuration. You can resolve issues and answer any question about how Akasha works. Be precise and refer to real features only."),
         "image_generation" => Some("You are the image generation agent. Produce images from text prompts using the generate_image tool. Focus on clear, concrete prompts that yield the requested visual. One precise deliverable per request."),
+        "studio_scaffold" => Some("You are the Code Studio scaffold agent. Create a minimal, runnable project skeleton (README, package.json or Cargo.toml, clear entrypoints). Prefer workspace:/ paths when no absolute path is given; mirror files to the studio disk root. Use Vite + React + TypeScript as default web stack unless the user specifies otherwise. Do not add dead files; keep structure conventional."),
+        "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. Verify dependencies exist in package.json before importing. Use read_file before editing. Run builds with run_command --cwd workspace:/ when policy allows."),
+        "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history."),
+        "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds."),
         _ => None,
     }
 }
@@ -3472,6 +3531,14 @@ async fn execute_tool_call(
     workspace_root: Option<&std::path::Path>,
 ) -> (bool, String, Option<String>) {
     use std::path::Path;
+    // #region agent log
+    agent_debug_9c5756(
+        "H3",
+        "api.rs:execute_tool_call",
+        "enter",
+        serde_json::json!({ "tool": tool_name, "args_count": args.len() }),
+    );
+    // #endregion
     let plugin_invocation = parse_plugin_tool_invocation(plugin_registry, tool_name, args);
     let is_plugin_candidate = plugin_invocation.is_some();
     let can_use_named_tool = executor.policy.can_use_tool(tool_name);
@@ -5768,6 +5835,7 @@ pub(crate) async fn run_message_via_llm(
     workspace_store: Option<TaskWorkspaceStore>,
     browser_registry: Option<crate::browser::BrowserSessionRegistry>,
     autonomous_mission: Option<Arc<RwLock<AutonomousMissionConfig>>>,
+    studio_disk_registry: crate::studio::StudioDiskRootRegistry,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -5781,6 +5849,19 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
+    let lineage_for_studio = workspace_lineage_root_task_id(task_id, Some(store_path.as_path()));
+    let tool_disk_workspace_root: std::path::PathBuf = {
+        let reg = studio_disk_registry.read().await;
+        if let Some(p) = reg.get(&lineage_for_studio) {
+            p.clone()
+        } else {
+            drop(reg);
+            store_path
+                .parent()
+                .map(|x| x.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+        }
+    };
     // NOTE: interpret_message is called below, after guardrail extraction, so it uses clean_message.
     let task_snapshot = store.get(task_id).ok().flatten();
     let assigned_agent = task_snapshot
@@ -6283,6 +6364,17 @@ pub(crate) async fn run_message_via_llm(
         &intent_flags,
         tools_executor_snapshot.as_ref(),
     );
+    // #region agent log
+    agent_debug_9c5756(
+        "H4",
+        "api.rs:prompt_build",
+        "after_runtime_tool_routing_enforcer",
+        serde_json::json!({
+            "has_enforcer": runtime_tool_routing_enforcer.is_some(),
+            "preferred_tools_count": runtime_tool_routing_enforcer.as_ref().map(|e| e.preferred_tools.len()).unwrap_or(0),
+        }),
+    );
+    // #endregion
     let write_reminder = if intent_flags.save_file {
         WRITE_FILE_REMINDER
     } else {
@@ -6400,6 +6492,14 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
+    let data_dir_for_studio = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+    let studio_disk_reminder = if tool_disk_workspace_root
+        .starts_with(crate::studio::studio_projects_base(data_dir_for_studio))
+    {
+        STUDIO_DISK_REMINDER
+    } else {
+        ""
+    };
     // When user clearly wants a photo from camera, prefix the message with an imperative so the model responds with device_invoke directly (no ask_user).
     let user_message = if !device_camera_reminder.is_empty() {
         format!(
@@ -6411,7 +6511,7 @@ pub(crate) async fn run_message_via_llm(
     };
     let mut current_prompt = if user_prefix.trim().is_empty() {
         format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
             guardrail_reminder_block,
             write_reminder,
             web_search_reminder,
@@ -6424,11 +6524,12 @@ pub(crate) async fn run_message_via_llm(
             image_generation_reminder,
             github_vault_reminder,
             code_dev_sandbox_reminder,
+            studio_disk_reminder,
             user_message
         )
     } else {
         format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
             user_prefix.trim_end(),
             guardrail_reminder_block,
             write_reminder,
@@ -6442,9 +6543,21 @@ pub(crate) async fn run_message_via_llm(
             image_generation_reminder,
             github_vault_reminder,
             code_dev_sandbox_reminder,
+            studio_disk_reminder,
             user_message
         )
     };
+    // #region agent log
+    agent_debug_9c5756(
+        "H2",
+        "api.rs:prompt_build",
+        "current_prompt_built",
+        serde_json::json!({
+            "current_prompt_len": current_prompt.len(),
+            "user_prefix_nonempty": !user_prefix.trim().is_empty(),
+        }),
+    );
+    // #endregion
     let reply_text;
     let mut last_llm_model_used: Option<String> = None;
     let mut first_meaningful_progress_sent = false;
@@ -6574,6 +6687,18 @@ pub(crate) async fn run_message_via_llm(
             .unwrap_or_else(|| llm_timeout_secs.min(300));
 
         'tool_rounds: loop {
+            // #region agent log
+            agent_debug_9c5756(
+                "H3",
+                "api.rs:tool_rounds",
+                "loop_iter",
+                serde_json::json!({
+                    "round": round,
+                    "strict_tools_first": strict_tools_first,
+                    "strict_mode_active": strict_tools_first && strict_successful_tool_calls == 0,
+                }),
+            );
+            // #endregion
             let strict_mode_active = strict_tools_first && strict_successful_tool_calls == 0;
             if strict_mode_active {
                 let _ = bus.send(
@@ -6641,7 +6766,7 @@ pub(crate) async fn run_message_via_llm(
                             device_bridge.as_ref(),
                             workspace_store.as_ref(),
                             browser_registry.as_ref(),
-                            store_path.parent(),
+                            Some(tool_disk_workspace_root.as_path()),
                         )
                         .await;
                         let result_preview = if res.chars().count() > 320 {
@@ -7758,7 +7883,7 @@ pub(crate) async fn run_message_via_llm(
                                         device_bridge.as_ref(),
                                         workspace_store.as_ref(),
                                         browser_registry.as_ref(),
-                                        store_path.parent(),
+                                        Some(tool_disk_workspace_root.as_path()),
                                     )
                                     .await;
                                     (s, r, None)
@@ -7808,7 +7933,7 @@ pub(crate) async fn run_message_via_llm(
                                     device_bridge.as_ref(),
                                     workspace_store.as_ref(),
                                     browser_registry.as_ref(),
-                                    store_path.parent(),
+                                    Some(tool_disk_workspace_root.as_path()),
                                 )
                                 .await
                             };
@@ -9008,6 +9133,18 @@ pub async fn handle_api(
     }
 
     let (path_only, query_str) = split_path_query(path);
+
+    if let Some(resp) = crate::api_studio::handle_studio_route(
+        method,
+        path_only,
+        query_str,
+        body.as_deref(),
+        data_dir,
+    )
+    .await
+    {
+        return resp;
+    }
 
     if let Some(resp) = crate::api_workspace_graph::handle_workspace_graph(
         method,
@@ -10605,14 +10742,57 @@ pub async fn handle_api(
                 }
             })
             .unwrap_or(TaskPriority::UserNormal);
+        let studio_disk_root = if let Some(pid) = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_project_id").and_then(|x| x.as_str()))
+        {
+            match crate::studio::resolve_studio_project_dir(data_dir, pid.trim()) {
+                Ok(p) => {
+                    let _ = std::fs::create_dir_all(&p);
+                    Some(p)
+                }
+                Err(e) => {
+                    let body = serde_json::json!({ "error": "invalid_studio_project", "detail": e });
+                    return json_response("400 Bad Request", &body.to_string());
+                }
+            }
+        } else {
+            None
+        };
+        let studio_forced_agent = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_assigned_agent").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
+        let mut studio_evolution_branch = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_evolution_branch").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if studio_evolution_branch.is_none() {
+            if let (Some(pid), Some(eid)) = (
+                body_json
+                    .as_ref()
+                    .and_then(|v| v.get("studio_project_id").and_then(|x| x.as_str())),
+                body_json
+                    .as_ref()
+                    .and_then(|v| v.get("studio_evolution_id").and_then(|x| x.as_str())),
+            ) {
+                studio_evolution_branch =
+                    crate::api_studio::evolution_branch_for_id(data_dir, pid.trim(), eid.trim());
+            }
+        }
         // Build acknowledgment message before moving `message` into the envelope.
         let ack_message = build_ack_message(&message);
-        let envelope = crate::gateway::MessageEnvelope::api(
+        let mut envelope = crate::gateway::MessageEnvelope::api(
             session_id.clone(),
             message,
             image_data_urls,
             priority,
         );
+        envelope.studio_disk_root = studio_disk_root;
+        envelope.studio_forced_agent = studio_forced_agent;
+        envelope.studio_evolution_branch = studio_evolution_branch;
         match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
             Ok(task_id) => {
                 let body = serde_json::json!({

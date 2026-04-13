@@ -359,6 +359,21 @@ cargo run -p akasha-evals
 
 **Où trouver cette doc** : dans le dépôt : [spec/user_guide.md](user_guide.md), [spec/onboarding.md](onboarding.md), [spec/README.md](README.md) (index des specs), [README.md](../README.md) à la racine. Quand le daemon tourne : `GET /api/docs` ou onglet Doc (TUI / UI web).
 
+### Code Studio (API daemon + UI dédiée)
+
+- **Interface** : dépôt **[Akasha-code-studio](https://github.com/azerothl/Akasha-code-studio)** (Vite/React). Spec de référence : `docs/CODE_STUDIO_SPEC.md` dans ce dépôt.
+- **Espace disque** : chaque projet = dossier `<data_dir>/studio-projects/<UUID>/` (fichier métadonnées `.akasha-studio.json`).
+- **`POST /api/message` (champs optionnels)** :
+  - `studio_project_id` : UUID du projet — les outils (`workspace:/`, `run_command`, git) utilisent ce disque comme racine pour la lignée de tâche ;
+  - `studio_assigned_agent` : `studio_scaffold` | `studio_frontend` | `studio_backend` | `studio_fullstack` (routage direct vers l’agent spécialisé) ;
+  - `studio_evolution_branch` : branche Git active (contexte agent) ;
+  - `studio_evolution_id` : si renseigné avec `studio_project_id`, le daemon résout la branche depuis les évolutions enregistrées.
+- **API REST studio** : `GET`/`POST /api/studio/projects`, `GET /api/studio/projects/:id`, `GET .../files`, `GET .../raw?path=`, `POST .../git/clone`, `POST .../build` (corps JSON `argv`, `timeout_sec`), `GET`/`POST .../evolutions`, `POST .../evolutions/:id/merge`, `POST .../evolutions/:id/abandon`. Limite de parallélisme : variable `AKASHA_STUDIO_MAX_PARALLEL_OPS` (défaut 4).
+- **Sandbox** : confinement disque côté daemon pour les chemins studio ; les builds via `/build` exécutent la commande sur la machine (hôte). Pour une isolation forte, utilisez l’outil agent **`run_in_container`** si la politique (`tools_policy.yaml`) l’autorise.
+- **Windows / build** : en cas d’erreurs de liaison **ONNX Runtime** (embeddings), compiler avec  
+  `cargo build -p akasha-daemon --no-default-features --features embedded,embeddings-tract`  
+  (voir `crates/akasha-daemon/Cargo.toml`).
+
 ---
 
 ## 9. Nouveautés (0.8.0 depuis v0.7.0)
