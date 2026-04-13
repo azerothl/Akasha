@@ -368,7 +368,7 @@ cargo run -p akasha-evals
   - `studio_assigned_agent` : `studio_scaffold` | `studio_frontend` | `studio_backend` | `studio_fullstack` (routage direct vers l’agent spécialisé) ;
   - `studio_evolution_branch` : branche Git active (contexte agent) ;
   - `studio_evolution_id` : si renseigné avec `studio_project_id`, le daemon résout la branche depuis les évolutions enregistrées.
-- **API REST studio** : `GET`/`POST /api/studio/projects`, `GET /api/studio/projects/:id`, `GET .../files`, `GET .../raw?path=`, `POST .../git/clone`, `POST .../build` (corps JSON `argv`, `timeout_sec`), `GET`/`POST .../evolutions`, `POST .../evolutions/:id/merge`, `POST .../evolutions/:id/abandon`. Limite de parallélisme : variable `AKASHA_STUDIO_MAX_PARALLEL_OPS` (défaut 4).
+- **API REST studio** : `GET`/`POST /api/studio/projects` (liste avec **nom** lisible + chemin), `PATCH /api/studio/projects/:id` (`{ "name": "…" }` pour renommer l’affichage), `GET /api/studio/projects/:id`, `GET .../files`, `GET .../raw?path=`, `POST .../git/clone`, `POST .../build` (corps JSON `argv`, `timeout_sec`), `GET`/`POST .../evolutions`, `POST .../evolutions/:id/merge`, `POST .../evolutions/:id/abandon`. Limite de parallélisme : variable `AKASHA_STUDIO_MAX_PARALLEL_OPS` (défaut 4).
 - **Sandbox** : confinement disque côté daemon pour les chemins studio ; les builds via `/build` exécutent la commande sur la machine (hôte). Pour une isolation forte, utilisez l’outil agent **`run_in_container`** si la politique (`tools_policy.yaml`) l’autorise.
 - **Windows / build** : en cas d’erreurs de liaison **ONNX Runtime** (embeddings), compiler avec  
   `cargo build -p akasha-daemon --no-default-features --features embedded,embeddings-tract`  

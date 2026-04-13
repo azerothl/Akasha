@@ -8,7 +8,7 @@ use crate::provider::{CompletionRequest, CompletionResponse, LLMProvider};
 use crate::retry::RetryPolicy;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use tracing::{info, Instrument};
+use tracing::{info, warn, Instrument};
 
 fn is_custom_route(config: &TaskTypeConfig) -> bool {
     config
@@ -355,7 +355,10 @@ impl LLMRouter {
                         .default_timeout_secs
                         .unwrap_or(300);
                     let timeout = std::time::Duration::from_secs(timeout);
-                    return provider
+                    // Keep a second handle: on stream failure (e.g. rate limit) we still need to push
+                    // the non-streaming fallback response to the same consumer.
+                    let chunk_tx_fallback = chunk_tx.clone();
+                    match provider
                         .complete_stream(
                             request,
                             timeout,
@@ -363,7 +366,29 @@ impl LLMRouter {
                             chunk_tx,
                         )
                         .await
-                        .map_err(|e| e.to_string());
+                    {
+                        Ok(resp) => return Ok(resp),
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                provider = %entry.provider,
+                                model = %entry.model,
+                                "Streaming failed; falling back to non-streaming completion (retries + fallback providers)"
+                            );
+                            let response = self
+                                .fallback
+                                .complete(
+                                    request,
+                                    &task_config,
+                                    &resolve,
+                                    self.metrics.as_ref(),
+                                    self.degraded_mode,
+                                )
+                                .await?;
+                            let _ = chunk_tx_fallback.send(response.text.clone());
+                            return Ok(response);
+                        }
+                    }
                 }
             }
         }

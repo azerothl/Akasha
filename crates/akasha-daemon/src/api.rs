@@ -2859,10 +2859,10 @@ pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
         "qa" => Some("You are the quality control agent. You prevent false 'work done'. Verify coherence, requirement coverage, missing files, hidden TODOs, incomplete sections. Do not rewrite; report defects and gaps by severity. Do not validate if acceptance criteria are incomplete; output a clear report for rework."),
         "system" => Some("You are the system agent. You have full knowledge of the Akasha application: commands (akasha start, init, doctor), interfaces (TUI, Chat, Router, Memory, Doc, Calendar), slash commands, skills, tools, and configuration. You can resolve issues and answer any question about how Akasha works. Be precise and refer to real features only."),
         "image_generation" => Some("You are the image generation agent. Produce images from text prompts using the generate_image tool. Focus on clear, concrete prompts that yield the requested visual. One precise deliverable per request."),
-        "studio_scaffold" => Some("You are the Code Studio scaffold agent. Create a minimal, runnable project skeleton (README, package.json or Cargo.toml, clear entrypoints). Prefer workspace:/ paths when no absolute path is given; mirror files to the studio disk root. Use Vite + React + TypeScript as default web stack unless the user specifies otherwise. Do not add dead files; keep structure conventional."),
-        "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. Verify dependencies exist in package.json before importing. Use read_file before editing. Run builds with run_command --cwd workspace:/ when policy allows."),
-        "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history."),
-        "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds."),
+        "studio_scaffold" => Some("You are the Code Studio scaffold agent. Create a minimal, runnable project skeleton (README, package.json or Cargo.toml, clear entrypoints). Prefer workspace:/ paths when no absolute path is given; mirror files to the studio disk root. When the user message contains a [Stack technique du projet] block at the top, follow it strictly for languages, frameworks, package manager, and tooling; otherwise default to Vite + React + TypeScript for web. Do not add dead files; keep structure conventional."),
+        "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. When a [Stack technique du projet] block is present in the user message, obey it for UI libraries, bundler, CSS approach, and TypeScript/JavaScript choice. Verify dependencies exist in package.json before importing. Use read_file before editing. Run builds with run_command --cwd workspace:/ when policy allows."),
+        "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history."),
+        "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message."),
         _ => None,
     }
 }
@@ -5862,6 +5862,9 @@ pub(crate) async fn run_message_via_llm(
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
         }
     };
+    let data_dir_for_studio_flags = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+    let code_studio_disk_task = tool_disk_workspace_root
+        .starts_with(crate::studio::studio_projects_base(data_dir_for_studio_flags));
     // NOTE: interpret_message is called below, after guardrail extraction, so it uses clean_message.
     let task_snapshot = store.get(task_id).ok().flatten();
     let assigned_agent = task_snapshot
@@ -5918,13 +5921,23 @@ pub(crate) async fn run_message_via_llm(
     // breaks fast-lane matching or memory profile selection.
     let structured = interpret_message(clean_message);
     let orch_disk_deliverables = clean_message.contains(ORCH_DISK_DELIVERABLES_MARKER);
-    let small_talk_intent = classify_small_talk_message(clean_message);
+    // Code Studio tasks run on studio-projects/* disk roots: do not treat user prompts as
+    // "small talk" or suppress tool-heavy LLM replies — that blocked write_file / TOOL lines.
+    let small_talk_intent = if code_studio_disk_task {
+        None
+    } else {
+        classify_small_talk_message(clean_message)
+    };
     let session_recall_intent = detect_session_recall_intent(clean_message);
     tracing::debug!(
         ?session_recall_intent,
         "[RECALL_DEBUG] session_recall_intent"
     );
-    let is_small_talk_fast_lane = small_talk_fast_lane(clean_message).is_some();
+    let is_small_talk_fast_lane = if code_studio_disk_task {
+        false
+    } else {
+        small_talk_fast_lane(clean_message).is_some()
+    };
     let is_session_recall = session_recall_intent.is_some();
     let mut memory_profile = if is_small_talk_fast_lane || is_session_recall {
         MemoryProfile {
@@ -10784,9 +10797,15 @@ pub async fn handle_api(
         }
         // Build acknowledgment message before moving `message` into the envelope.
         let ack_message = build_ack_message(&message);
+        let mut message_for_llm = message;
+        if let Some(ref root) = studio_disk_root {
+            if let Some(prefix) = crate::api_studio::studio_tech_stack_message_prefix(root) {
+                message_for_llm = format!("{prefix}{message_for_llm}");
+            }
+        }
         let mut envelope = crate::gateway::MessageEnvelope::api(
             session_id.clone(),
-            message,
+            message_for_llm,
             image_data_urls,
             priority,
         );

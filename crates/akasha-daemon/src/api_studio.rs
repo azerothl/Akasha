@@ -39,6 +39,8 @@ fn json_response(status: &str, body: &str) -> String {
 #[derive(Serialize)]
 struct ProjectMetaOut {
     id: String,
+    /// Display name from `.akasha-studio.json` (falls back to a short id label if missing).
+    name: String,
     path: String,
 }
 
@@ -64,6 +66,23 @@ struct StudioMeta {
     created_at: String,
     #[serde(default)]
     evolutions: Vec<StudioEvolution>,
+    /// Free-form stack description (languages, frameworks, package manager). Injected into Code Studio messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tech_stack: Option<String>,
+}
+
+const MAX_TECH_STACK_CHARS: usize = 8000;
+
+/// Prefix prepended to the user message when `tech_stack` is set (read by LLM + studio agents).
+pub fn studio_tech_stack_message_prefix(project_root: &Path) -> Option<String> {
+    let meta = load_studio_meta(project_root)?;
+    let t = meta.tech_stack.as_deref()?.trim();
+    if t.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[Stack projet — respecter pour fichiers, dépendances et build (sauf demande utilisateur contraire) :\n{t}\n]\n\n"
+    ))
 }
 
 fn load_studio_meta(project_root: &Path) -> Option<StudioMeta> {
@@ -213,13 +232,21 @@ pub async fn handle_studio_route(
         let dirs = list_project_dirs(&base);
         let projects: Vec<ProjectMetaOut> = dirs
             .iter()
-            .filter_map(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|id| ProjectMetaOut {
+            .filter_map(|dir_path| {
+                dir_path.file_name().and_then(|n| n.to_str()).map(|id| {
+                    let name = load_studio_meta(dir_path)
+                        .map(|m| m.name.trim().to_string())
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| {
+                            let short = id.chars().take(8).collect::<String>();
+                            format!("Projet {short}")
+                        });
+                    ProjectMetaOut {
                         id: id.to_string(),
-                        path: p.display().to_string(),
-                    })
+                        name,
+                        path: dir_path.display().to_string(),
+                    }
+                })
             })
             .collect();
         let body = serde_json::to_string(&ProjectsListOut { projects }).unwrap_or_else(|_| "{}".to_string());
@@ -243,14 +270,28 @@ pub async fn handle_studio_route(
                 &serde_json::json!({ "error": e.to_string() }).to_string(),
             ));
         }
-        let name = body
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+        let body_v = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let name = body_v
+            .as_ref()
             .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(String::from));
+        let tech_stack: Option<String> = match body_v.as_ref().and_then(|v| v.get("tech_stack")) {
+            None => None,
+            Some(v) if v.is_null() => None,
+            Some(v) => v.as_str().and_then(|s| {
+                let t = s.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.chars().take(MAX_TECH_STACK_CHARS).collect::<String>())
+                }
+            }),
+        };
         let meta = StudioMeta {
             id: id.clone(),
             name: name.unwrap_or_else(|| "Untitled".to_string()),
             created_at: chrono::Utc::now().to_rfc3339(),
             evolutions: Vec::new(),
+            tech_stack,
         };
         let _ = save_studio_meta(&dir, &meta);
         let body = serde_json::json!({ "id": id, "path": dir.display().to_string() }).to_string();
@@ -280,8 +321,110 @@ pub async fn handle_studio_route(
                     name: "Untitled".to_string(),
                     created_at: String::new(),
                     evolutions: Vec::new(),
+                    tech_stack: None,
                 });
                 let body = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_string());
+                return Some(json_response("200 OK", &body));
+            }
+        }
+    }
+
+    // PATCH /api/studio/projects/:id — optional `name` and/or `tech_stack` (string or null clears stack).
+    if method == "PATCH" {
+        if let Some(rest) = strip_studio_projects_prefix(path_only) {
+            let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+            if segments.len() == 1 {
+                let id = segments[0];
+                let root = match resolve_studio_project_dir(data_dir, id) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return Some(json_response(
+                            "400 Bad Request",
+                            &serde_json::json!({ "error": e }).to_string(),
+                        ));
+                    }
+                };
+                if !root.is_dir() {
+                    return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                }
+                let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+                    Some(v) => v,
+                    None => {
+                        return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#));
+                    }
+                };
+                let has_name = body_v.get("name").is_some();
+                let has_stack = body_v.get("tech_stack").is_some();
+                if !has_name && !has_stack {
+                    return Some(json_response(
+                        "400 Bad Request",
+                        r#"{"error":"provide \"name\" and/or \"tech_stack\""}"#,
+                    ));
+                }
+                let mut meta = load_studio_meta(&root).unwrap_or(StudioMeta {
+                    id: id.to_string(),
+                    name: "Untitled".to_string(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    evolutions: Vec::new(),
+                    tech_stack: None,
+                });
+                if has_name {
+                    let new_name = match body_v.get("name").and_then(|x| x.as_str()).map(str::trim) {
+                        Some(s) if !s.is_empty() && s.len() <= 200 => s.to_string(),
+                        _ => {
+                            return Some(json_response(
+                                "400 Bad Request",
+                                r#"{"error":"name must be non-empty string, max 200 chars"}"#,
+                            ));
+                        }
+                    };
+                    meta.name = new_name;
+                }
+                if has_stack {
+                    match body_v.get("tech_stack") {
+                        Some(v) if v.is_null() => {
+                            meta.tech_stack = None;
+                        }
+                        Some(v) => {
+                            let s = match v.as_str() {
+                                Some(t) => t,
+                                None => {
+                                    return Some(json_response(
+                                        "400 Bad Request",
+                                        r#"{"error":"tech_stack must be string or null"}"#,
+                                    ));
+                                }
+                            };
+                            if s.len() > MAX_TECH_STACK_CHARS {
+                                return Some(json_response(
+                                    "400 Bad Request",
+                                    &serde_json::json!({ "error": "tech_stack too long", "max": MAX_TECH_STACK_CHARS })
+                                        .to_string(),
+                                ));
+                            }
+                            let t = s.trim();
+                            meta.tech_stack = if t.is_empty() {
+                                None
+                            } else {
+                                Some(t.to_string())
+                            };
+                        }
+                        None => {}
+                    }
+                }
+                if let Err(e) = save_studio_meta(&root, &meta) {
+                    return Some(json_response(
+                        "500 Internal Server Error",
+                        &serde_json::json!({ "error": e }).to_string(),
+                    ));
+                }
+                let body = serde_json::json!({
+                    "ok": true,
+                    "id": id,
+                    "name": meta.name,
+                    "tech_stack": meta.tech_stack,
+                })
+                .to_string();
                 return Some(json_response("200 OK", &body));
             }
         }
@@ -610,6 +753,7 @@ pub async fn handle_studio_route(
                 name: String::new(),
                 created_at: String::new(),
                 evolutions: Vec::new(),
+                tech_stack: None,
             });
             let body = serde_json::json!({ "evolutions": meta.evolutions }).to_string();
             return Some(json_response("200 OK", &body));
@@ -687,6 +831,7 @@ pub async fn handle_studio_route(
                 name: String::new(),
                 created_at: chrono::Utc::now().to_rfc3339(),
                 evolutions: Vec::new(),
+                tech_stack: None,
             });
             meta.evolutions.push(StudioEvolution {
                 id: evo_id.clone(),
