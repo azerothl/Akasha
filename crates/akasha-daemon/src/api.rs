@@ -2818,7 +2818,8 @@ const STUDIO_AGENT_QUALITY_REMINDER: &str = concat!(
     "ou explique clairement ce que tu n'as pas pu valider et pourquoi.\n",
     "- Ta dernière réponse à l'utilisateur (même langue que lui) doit résumer en langage accessible : ce qui a été ajouté ou modifié, ",
     "comment lancer ou essayer le résultat, et les limites éventuelles. Pas de jargon inutile sauf si l'utilisateur demande le détail technique.\n",
-    "- N'achève pas seulement par « Terminé » / « Done » : fournis un paragraphe utile lisible sans ouvrir les fichiers.\n\n",
+    "- N'achève pas seulement par « Terminé » / « Done » : fournis un paragraphe utile lisible sans ouvrir les fichiers.\n",
+    "- Le fichier CODE_STUDIO_PLAN.md à la racine du projet (créé automatiquement) décrit objectif, étapes et historique : mets-le à jour après chaque lot de modifications (fichiers touchés, commandes de vérif, reste à faire). S'il manque (projet importé), crée-le en synthétisant l'existant.\n\n",
 );
 
 /// Application context injected into the prompt: the agent knows it runs inside Akasha and can talk about it.
@@ -2881,10 +2882,10 @@ pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
         "qa" => Some("You are the quality control agent. You prevent false 'work done'. Verify coherence, requirement coverage, missing files, hidden TODOs, incomplete sections. Do not rewrite; report defects and gaps by severity. Do not validate if acceptance criteria are incomplete; output a clear report for rework."),
         "system" => Some("You are the system agent. You have full knowledge of the Akasha application: commands (akasha start, init, doctor), interfaces (TUI, Chat, Router, Memory, Doc, Calendar), slash commands, skills, tools, and configuration. You can resolve issues and answer any question about how Akasha works. Be precise and refer to real features only."),
         "image_generation" => Some("You are the image generation agent. Produce images from text prompts using the generate_image tool. Focus on clear, concrete prompts that yield the requested visual. One precise deliverable per request."),
-        "studio_scaffold" => Some("You are the Code Studio scaffold agent. Create a minimal, runnable project skeleton (README, package.json or Cargo.toml, clear entrypoints). Prefer workspace:/ paths when no absolute path is given; mirror files to the studio disk root. When the user message contains a [Stack technique du projet] block at the top, follow it strictly for languages, frameworks, package manager, and tooling; otherwise default to Vite + React + TypeScript for web. Do not add dead files; keep structure conventional. FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If a previous generation polluted a file with prose, clean it and keep only valid file content. Before finishing: run an appropriate build or typecheck when possible; in your final reply summarize what you created and how to run it in plain language."),
-        "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. When a [Stack technique du projet] block is present in the user message, obey it for UI libraries, bundler, CSS approach, and TypeScript/JavaScript choice. Verify dependencies exist in package.json before importing. Use read_file before editing. FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Run build/lint/typecheck via run_command --cwd workspace:/ when policy allows, and fix issues you introduced. End with a clear user-facing summary of changes and how to preview or test — not only \"Done\"."),
-        "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history. FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Before declaring completion: run tests or at least start/build checks when feasible; summarize APIs and behavior for the user in accessible terms."),
-        "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message. FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If prose was accidentally inserted in a source file, remove it and keep only valid syntax for that file type. Verify end-to-end coherence; run combined build/test when policy allows. Close with a plain-language recap of what changed and how to run the app."),
+        "studio_scaffold" => Some("You are the Code Studio scaffold agent. Create a minimal, runnable project skeleton (README, package.json or Cargo.toml, clear entrypoints). Prefer workspace:/ paths when no absolute path is given; mirror files to the studio disk root. When the user message contains a [Stack technique du projet] block at the top, follow it strictly for languages, frameworks, package manager, and tooling; otherwise align with the stack recorded for the project or keep the skeleton generic. Do not add dead files; keep structure conventional. Update CODE_STUDIO_PLAN.md at the project root after substantive changes. FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If a previous generation polluted a file with prose, clean it and keep only valid file content. Before finishing: run an appropriate build or typecheck when possible; in your final reply summarize what you created and how to run it in plain language."),
+        "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. When a [Stack technique du projet] block is present in the user message, obey it for UI libraries, bundler, CSS approach, and TypeScript/JavaScript choice. Verify dependencies exist in package.json before importing. Use read_file before editing. Update CODE_STUDIO_PLAN.md after substantive edits. FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Run build/lint/typecheck via run_command --cwd workspace:/ when policy allows, and fix issues you introduced. End with a clear user-facing summary of changes and how to preview or test — not only \"Done\"."),
+        "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history. Update CODE_STUDIO_PLAN.md after substantive edits. FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Before declaring completion: run tests or at least start/build checks when feasible; summarize APIs and behavior for the user in accessible terms."),
+        "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message. Update CODE_STUDIO_PLAN.md after substantive edits. FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If prose was accidentally inserted in a source file, remove it and keep only valid syntax for that file type. Verify end-to-end coherence; run combined build/test when policy allows. Close with a plain-language recap of what changed and how to run the app."),
         _ => None,
     }
 }
@@ -4622,6 +4623,15 @@ async fn execute_tool_call(
                                 if let Some(parent) = disk_path.parent() {
                                     let _ = tokio::fs::create_dir_all(parent).await;
                                 }
+                                if let Some(r) = workspace_root {
+                                    if crate::studio::is_strictly_under_studio_root(&disk_path, r) {
+                                        if let Some(msg) =
+                                            crate::api_studio::studio_reject_polluted_code_content(&disk_path, &effective_content)
+                                        {
+                                            return (false, format!("[write_file] {}", msg), None);
+                                        }
+                                    }
+                                }
                                 if tokio::fs::write(&disk_path, &effective_content).await.is_ok() {
                                     return (true, format!("[write_file workspace:{}] saved (disk).", key), None);
                                 }
@@ -4630,6 +4640,14 @@ async fn execute_tool_call(
                         return (true, format!("[write_file workspace:{}] saved.", key), None);
                     }
                     None => return (false, "[write_file] workspace paths require a workspace store.".to_string(), None),
+                }
+            }
+            let disk_path = resolve_tool_disk_path(path_str.trim(), workspace_root);
+            if let Some(root) = workspace_root {
+                if crate::studio::is_strictly_under_studio_root(&disk_path, root) {
+                    if let Some(msg) = crate::api_studio::studio_reject_polluted_code_content(&disk_path, &content) {
+                        return (false, format!("[write_file] {}", msg), None);
+                    }
                 }
             }
             let path = Path::new(&path_str);
@@ -8738,12 +8756,46 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         ws.write().await.remove(&task_id);
     }
 
+    let mut studio_verify_error: Option<String> = None;
+    if !is_paused && code_studio_disk_task {
+        match crate::api_studio::studio_verify_after_agent_task(&tool_disk_workspace_root).await {
+            Ok(()) => {}
+            Err(e) => {
+                studio_verify_error = Some(e);
+            }
+        }
+    }
+    if let Some(ref err) = studio_verify_error {
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ProgressUpdate,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "progress_pct": 100,
+                    "message": format!(
+                        "Échec vérification automatique (build/check) — la tâche est marquée en échec.\n{}",
+                        err.chars().take(1800).collect::<String>()
+                    )
+                })),
+            )
+            .with_correlation(task_id),
+        );
+    }
+
     let final_event_type = if is_paused {
         EventType::TaskPaused
+    } else if studio_verify_error.is_some() {
+        EventType::TaskFailed
     } else {
         EventType::TaskCompleted
     };
-    let final_status_str = if is_paused { "paused" } else { "completed" };
+    let final_status_str = if is_paused {
+        "paused"
+    } else if studio_verify_error.is_some() {
+        "failed"
+    } else {
+        "completed"
+    };
 
     let _ = bus.send(
         EventEnvelope::new(
@@ -8767,7 +8819,11 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
 
     // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
     if !is_paused {
-        let _ = store.update_status(task_id, TaskStatus::Completed);
+        if studio_verify_error.is_some() {
+            let _ = store.update_status(task_id, TaskStatus::Failed);
+        } else {
+            let _ = store.update_status(task_id, TaskStatus::Completed);
+        }
         notify_task_completion(&task_completion_registry, task_id).await;
         let data_dir_sess = store_path.parent().unwrap_or_else(|| store_path.as_ref());
         let is_root_task = store
@@ -8776,7 +8832,11 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             .flatten()
             .map(|t| t.parent_task_id.is_none())
             .unwrap_or(true);
-        if is_root_task && !is_small_talk_fast_lane && !is_orchestrated_task_msg {
+        if is_root_task
+            && !is_small_talk_fast_lane
+            && !is_orchestrated_task_msg
+            && studio_verify_error.is_none()
+        {
             if let Ok(st) = crate::session_state::merge(data_dir_sess, &session_id, |s| {
                 let fact = reply_text.chars().take(240).collect::<String>();
                 // Skip storing agent confusion/redirects as facts — they poison future context.
@@ -8834,12 +8894,21 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             }
         }
         if !is_small_talk_fast_lane {
-            let summary_preview: String = reply_text.chars().take(300).collect();
+            let outcome_label = if studio_verify_error.is_some() {
+                "failed"
+            } else {
+                "completed"
+            };
+            let summary_preview: String = if let Some(ref e) = studio_verify_error {
+                e.chars().take(300).collect()
+            } else {
+                reply_text.chars().take(300).collect()
+            };
             learn_from_task_outcome_async(
                 long_term_client.clone(),
                 task_id,
                 message.clone(),
-                "completed".to_string(),
+                outcome_label.to_string(),
                 summary_preview,
                 Some(session_id.clone()),
                 structured.intent_slug.clone(),

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, Semaphore};
@@ -19,9 +19,42 @@ const NPM_INSTALL_TIMEOUT_SEC: u64 = 900;
 /// Default range for Vite/webpack dev servers started by `POST .../preview/start`.
 const PREVIEW_PORT_MIN: u16 = 5180;
 const PREVIEW_PORT_MAX: u16 = 5279;
+/// Ring buffer for dev-server stdout/stderr (preview process).
+const MAX_PREVIEW_LOG_BYTES: usize = 256 * 1024;
 
 struct StudioPreviewProcess {
     child: tokio::process::Child,
+    log: Arc<Mutex<String>>,
+}
+
+/// Append to `log`, keeping only the last `MAX_PREVIEW_LOG_BYTES` UTF-8 bytes (best-effort).
+async fn studio_append_preview_log(log: &Mutex<String>, chunk: &str) {
+    let mut g = log.lock().await;
+    g.push_str(chunk);
+    if g.len() > MAX_PREVIEW_LOG_BYTES {
+        let cut = g.len() - MAX_PREVIEW_LOG_BYTES;
+        if cut < g.len() {
+            g.drain(..cut);
+        }
+    }
+}
+
+async fn studio_pump_preview_stream<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    log: Arc<Mutex<String>>,
+    stream_label: &'static str,
+) {
+    let mut buf = vec![0u8; 4096];
+    loop {
+        let n = match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        let chunk = String::from_utf8_lossy(&buf[..n]);
+        let line = format!("[{stream_label}] {chunk}");
+        studio_append_preview_log(log.as_ref(), &line).await;
+    }
 }
 
 fn studio_preview_registry() -> &'static Mutex<HashMap<String, StudioPreviewProcess>> {
@@ -44,12 +77,18 @@ fn pick_preview_port(preferred: Option<u16>) -> Option<u16> {
     None
 }
 
-/// On Windows, `npm` / `npx` are usually `*.cmd` shims — `Command::new("npm")` often returns
-/// `ErrorKind::NotFound` ("program not found"). Delegate to `cmd.exe /c` so PATH matches a shell.
+/// On Windows, `npm` / `npx` / `pnpm` / `yarn` / `corepack` are often `*.cmd` shims —
+/// `Command::new("npm")` often returns `ErrorKind::NotFound` ("program not found").
+/// Delegate to `cmd.exe /c` so PATH matches a shell.
 fn studio_command_from_argv(argv: &[String]) -> Command {
     #[cfg(windows)]
     {
-        if argv.first().is_some_and(|s| s == "npm" || s == "npx") {
+        if argv.first().is_some_and(|s| {
+            matches!(
+                s.as_str(),
+                "npm" | "npx" | "pnpm" | "yarn" | "corepack"
+            )
+        }) {
             let mut c = Command::new("cmd.exe");
             c.arg("/c");
             for a in argv {
@@ -187,6 +226,13 @@ struct StudioMeta {
     /// Free-form stack description (languages, frameworks, package manager). Injected into Code Studio messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tech_stack: Option<String>,
+    /// When true, skip automatic post-task verify (`npm run build` / `cargo check`).
+    #[serde(default)]
+    verify_skip: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verify_argv: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verify_timeout_sec: Option<u64>,
 }
 
 const MAX_TECH_STACK_CHARS: usize = 8000;
@@ -302,6 +348,112 @@ fn truncate_output(s: &str) -> String {
     }
 }
 
+/// Reject obvious LLM markdown / tool-protocol leakage in code files under Code Studio.
+pub fn studio_reject_polluted_code_content(disk_path: &Path, content: &str) -> Option<String> {
+    let ext = disk_path.extension()?.to_string_lossy().to_lowercase();
+    let code_ext = matches!(
+        ext.as_str(),
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "rs" | "py" | "go" | "java" | "kt" | "swift" | "vue" | "svelte"
+    );
+    if !code_ext {
+        return None;
+    }
+    let t = content.trim_start();
+    if t.starts_with("```") {
+        return Some(
+            "rejected: fichier code commence par une barre markdown ``` — écrire uniquement le source, sans blocs markdown."
+                .to_string(),
+        );
+    }
+    if content.lines().any(|l| {
+        let s = l.trim();
+        s.starts_with("TOOL: write_file")
+            || (s.starts_with("TOOL: ") && (s.contains("write_file") || s.contains("apply_patch")))
+    }) {
+        return Some(
+            "rejected: le fichier contient des lignes de protocole d’outil — le contenu doit être uniquement du code source."
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// After an agent task on a studio disk, run build/check when possible. Err = verify failed (task should fail).
+pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), String> {
+    let meta = load_studio_meta(project_root);
+    if meta.as_ref().map(|m| m.verify_skip).unwrap_or(false) {
+        return Ok(());
+    }
+    let timeout_sec = meta
+        .as_ref()
+        .and_then(|m| m.verify_timeout_sec)
+        .unwrap_or(DEFAULT_BUILD_TIMEOUT_SEC)
+        .min(3600);
+    let argv: Vec<String> = if let Some(v) = meta.as_ref().and_then(|m| m.verify_argv.as_ref()) {
+        if v.is_empty() {
+            return Ok(());
+        }
+        v.clone()
+    } else if project_root.join("package.json").is_file() {
+        vec!["npm".into(), "run".into(), "build".into()]
+    } else if project_root.join("Cargo.toml").is_file() {
+        vec!["cargo".into(), "check".into()]
+    } else {
+        return Ok(());
+    };
+    if !argv_looks_safe(&argv) {
+        return Err("verify_argv in .akasha-studio.json is invalid or unsafe".into());
+    }
+    match studio_run_command_capture(project_root, &argv, timeout_sec).await {
+        Ok((Some(0), _, _)) => Ok(()),
+        Ok((code, out, err)) => Err(format!(
+            "Vérification post-tâche échouée (code {:?}).\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            code,
+            out.chars().take(4000).collect::<String>(),
+            err.chars().take(4000).collect::<String>()
+        )),
+        Err(e) => Err(format!("Vérification post-tâche: {}", e)),
+    }
+}
+
+fn write_initial_code_studio_plan(project_root: &Path, name: &str, tech_stack: Option<&str>) -> Result<(), String> {
+    let plan_path = project_root.join("CODE_STUDIO_PLAN.md");
+    if plan_path.exists() {
+        return Ok(());
+    }
+    let stack_block = tech_stack
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("## Stack\n\n{s}\n\n"))
+        .unwrap_or_default();
+    let body = format!(
+        r#"# Projet Code Studio — {name}
+
+## Métadonnées
+
+- Créé : automatiquement à la création du projet dans Akasha Code Studio
+- Dépôt : ce dossier (Git local)
+
+{stack_block}## Objectif
+
+(Décrire ici le but du projet.)
+
+## Étapes prévues
+
+1. …
+
+## Historique des changements
+
+- (Les agents doivent ajouter une ligne datée à chaque lot de modifications importantes.)
+
+---
+*Ce fichier est la référence de suivi du projet. Les agents Code Studio doivent le mettre à jour après des modifications suite à une demande d’évolution.*
+"#,
+        name = name,
+        stack_block = stack_block,
+    );
+    fs::write(&plan_path, body).map_err(|e| e.to_string())
+}
+
 async fn git_output(project_root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
     let mut c = Command::new("git");
     c.args(args).current_dir(project_root).kill_on_drop(true);
@@ -313,6 +465,22 @@ async fn is_git_repo(project_root: &Path) -> bool {
         Ok(o) => o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true",
         Err(_) => false,
     }
+}
+
+/// Current branch and whether the worktree is clean (`git status --porcelain` empty).
+async fn git_branch_and_clean_status(project_root: &Path) -> (Option<String>, Option<bool>) {
+    if !is_git_repo(project_root).await {
+        return (None, None);
+    }
+    let branch = match git_output(project_root, &["rev-parse", "--abbrev-ref", "HEAD"]).await {
+        Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).trim().to_string()),
+        _ => None,
+    };
+    let clean = match git_output(project_root, &["status", "--porcelain"]).await {
+        Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).trim().is_empty()),
+        _ => None,
+    };
+    (branch, clean)
 }
 
 async fn git_checkout_mainish(project_root: &Path) -> Result<(), String> {
@@ -410,8 +578,12 @@ pub async fn handle_studio_route(
             created_at: chrono::Utc::now().to_rfc3339(),
             evolutions: Vec::new(),
             tech_stack,
+            verify_skip: false,
+            verify_argv: None,
+            verify_timeout_sec: None,
         };
         let _ = save_studio_meta(&dir, &meta);
+        let _ = write_initial_code_studio_plan(&dir, &meta.name, meta.tech_stack.as_deref());
         if !dir.join(".git").exists() {
             let mut g = Command::new("git");
             g.arg("init").current_dir(&dir).kill_on_drop(true);
@@ -453,9 +625,17 @@ pub async fn handle_studio_route(
                     created_at: String::new(),
                     evolutions: Vec::new(),
                     tech_stack: None,
+                    verify_skip: false,
+                    verify_argv: None,
+                    verify_timeout_sec: None,
                 });
-                let body = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_string());
-                return Some(json_response("200 OK", &body));
+                let mut body = serde_json::to_value(&meta).unwrap_or_else(|_| serde_json::json!({}));
+                if let Some(obj) = body.as_object_mut() {
+                    let (branch, clean) = git_branch_and_clean_status(&root).await;
+                    obj.insert("git_branch".into(), serde_json::json!(branch));
+                    obj.insert("git_worktree_clean".into(), serde_json::json!(clean));
+                }
+                return Some(json_response("200 OK", &body.to_string()));
             }
         }
     }
@@ -486,10 +666,13 @@ pub async fn handle_studio_route(
                 };
                 let has_name = body_v.get("name").is_some();
                 let has_stack = body_v.get("tech_stack").is_some();
-                if !has_name && !has_stack {
+                let has_verify_skip = body_v.get("verify_skip").is_some();
+                let has_verify_argv = body_v.get("verify_argv").is_some();
+                let has_verify_timeout = body_v.get("verify_timeout_sec").is_some();
+                if !has_name && !has_stack && !has_verify_skip && !has_verify_argv && !has_verify_timeout {
                     return Some(json_response(
                         "400 Bad Request",
-                        r#"{"error":"provide \"name\" and/or \"tech_stack\""}"#,
+                        r#"{"error":"provide at least one of: name, tech_stack, verify_skip, verify_argv, verify_timeout_sec"}"#,
                     ));
                 }
                 let mut meta = load_studio_meta(&root).unwrap_or(StudioMeta {
@@ -498,6 +681,9 @@ pub async fn handle_studio_route(
                     created_at: chrono::Utc::now().to_rfc3339(),
                     evolutions: Vec::new(),
                     tech_stack: None,
+                    verify_skip: false,
+                    verify_argv: None,
+                    verify_timeout_sec: None,
                 });
                 if has_name {
                     let new_name = match body_v.get("name").and_then(|x| x.as_str()).map(str::trim) {
@@ -543,6 +729,59 @@ pub async fn handle_studio_route(
                         None => {}
                     }
                 }
+                if has_verify_skip {
+                    meta.verify_skip = body_v
+                        .get("verify_skip")
+                        .and_then(|x| x.as_bool())
+                        .unwrap_or(false);
+                }
+                if has_verify_argv {
+                    match body_v.get("verify_argv") {
+                        Some(v) if v.is_null() => {
+                            meta.verify_argv = None;
+                        }
+                        Some(v) => {
+                            let Some(a) = v.as_array() else {
+                                return Some(json_response(
+                                    "400 Bad Request",
+                                    r#"{"error":"verify_argv must be array or null"}"#,
+                                ));
+                            };
+                            let mut out: Vec<String> = Vec::new();
+                            for x in a {
+                                let Some(s) = x.as_str() else {
+                                    return Some(json_response(
+                                        "400 Bad Request",
+                                        r#"{"error":"verify_argv elements must be strings"}"#,
+                                    ));
+                                };
+                                out.push(s.to_string());
+                            }
+                            meta.verify_argv = if out.is_empty() { None } else { Some(out) };
+                        }
+                        None => {}
+                    }
+                }
+                if has_verify_timeout {
+                    match body_v.get("verify_timeout_sec") {
+                        Some(v) if v.is_null() => {
+                            meta.verify_timeout_sec = None;
+                        }
+                        Some(v) => {
+                            let n = v.as_u64().or_else(|| v.as_i64().map(|x| x.max(1) as u64));
+                            match n {
+                                Some(n) if n > 0 && n <= 3600 => meta.verify_timeout_sec = Some(n),
+                                _ => {
+                                    return Some(json_response(
+                                        "400 Bad Request",
+                                        r#"{"error":"verify_timeout_sec must be 1..=3600 or null"}"#,
+                                    ));
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
                 if let Err(e) = save_studio_meta(&root, &meta) {
                     return Some(json_response(
                         "500 Internal Server Error",
@@ -554,6 +793,9 @@ pub async fn handle_studio_route(
                     "id": id,
                     "name": meta.name,
                     "tech_stack": meta.tech_stack,
+                    "verify_skip": meta.verify_skip,
+                    "verify_argv": meta.verify_argv,
+                    "verify_timeout_sec": meta.verify_timeout_sec,
                 })
                 .to_string();
                 return Some(json_response("200 OK", &body));
@@ -824,6 +1066,119 @@ pub async fn handle_studio_route(
         return Some(json_response("200 OK", r#"{"ok":true,"stopped":false}"#));
     }
 
+    // GET /api/studio/projects/:id/preview/logs — stdout/stderr du serveur dev (tampon borné).
+    if method == "GET" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/preview/logs") {
+        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+        let id = rest
+            .strip_suffix("/preview/logs")
+            .unwrap_or(rest)
+            .trim_end_matches('/');
+        let id = id.split('/').next().unwrap_or("");
+        if id.is_empty() {
+            return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+        }
+        if resolve_studio_project_dir(data_dir, id).is_err() {
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"invalid studio_project_id"}"#,
+            ));
+        }
+        let mut map = studio_preview_registry().lock().await;
+        if let Some(prev) = map.get_mut(id) {
+            let running = match prev.child.try_wait() {
+                Ok(None) => true,
+                Ok(Some(_)) => false,
+                Err(_) => false,
+            };
+            let log_text = prev.log.lock().await.clone();
+            let body = serde_json::json!({
+                "running": running,
+                "log": log_text,
+            });
+            return Some(json_response("200 OK", &body.to_string()));
+        }
+        return Some(json_response(
+            "200 OK",
+            r#"{"running":false,"log":"","preview_inactive":true}"#,
+        ));
+    }
+
+    // POST /api/studio/projects/:id/preview/install — npm install uniquement (pas de serveur dev).
+    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/preview/install") {
+        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+        let id = rest
+            .strip_suffix("/preview/install")
+            .unwrap_or(rest)
+            .trim_end_matches('/');
+        let id = id.split('/').next().unwrap_or("");
+        if id.is_empty() {
+            return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+        }
+        let root = match resolve_studio_project_dir(data_dir, id) {
+            Ok(d) => d,
+            Err(e) => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        };
+        if !root.is_dir() {
+            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+        }
+        let pkg = root.join("package.json");
+        if !pkg.is_file() {
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"package_json_required_for_preview"}"#,
+            ));
+        }
+        let body_v = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let force = body_v
+            .as_ref()
+            .and_then(|v| v.get("force"))
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        let node_modules = root.join("node_modules");
+        if !force && node_modules.is_dir() {
+            return Some(json_response(
+                "200 OK",
+                r#"{"ok":true,"skipped":true,"reason":"node_modules_present"}"#,
+            ));
+        }
+        let _permit = match studio_ops_semaphore().acquire().await {
+            Ok(p) => p,
+            Err(_) => {
+                return Some(json_response(
+                    "503 Service Unavailable",
+                    r#"{"error":"studio_ops_semaphore_closed"}"#,
+                ));
+            }
+        };
+        let argv = vec!["npm".to_string(), "install".to_string()];
+        match studio_run_command_capture(&root, &argv, NPM_INSTALL_TIMEOUT_SEC).await {
+            Ok((code, stdout, stderr)) => {
+                let ok = code == Some(0);
+                let body = serde_json::json!({
+                    "ok": ok,
+                    "install": {
+                        "exit_code": code,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                    }
+                });
+                let status = if ok { "200 OK" } else { "500 Internal Server Error" };
+                return Some(json_response(status, &body.to_string()));
+            }
+            Err(e) => {
+                return Some(json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        }
+    }
+
     // POST /api/studio/projects/:id/preview/start — npm install if needed, then npm run dev (background).
     if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/preview/start") {
         let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
@@ -932,11 +1287,12 @@ pub async fn handle_studio_route(
                 r#"{"error":"invalid preview argv"}"#,
             ));
         }
+        let log = Arc::new(Mutex::new(String::new()));
         let mut cmd = studio_command_from_argv(&argv);
         cmd.current_dir(&root).kill_on_drop(false);
         cmd.stdin(std::process::Stdio::null());
-        cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -944,8 +1300,18 @@ pub async fn handle_studio_route(
             cmd.as_std_mut().creation_flags(CREATE_NO_WINDOW);
         }
         match cmd.spawn() {
-            Ok(child) => {
-                map.insert(id.to_string(), StudioPreviewProcess { child });
+            Ok(mut child) => {
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
+                let log_out = Arc::clone(&log);
+                let log_err = Arc::clone(&log);
+                if let Some(s) = stdout {
+                    tokio::spawn(studio_pump_preview_stream(s, log_out, "stdout"));
+                }
+                if let Some(s) = stderr {
+                    tokio::spawn(studio_pump_preview_stream(s, log_err, "stderr"));
+                }
+                map.insert(id.to_string(), StudioPreviewProcess { child, log });
                 let url = format!("http://127.0.0.1:{port}");
                 let mut body = serde_json::json!({
                     "ok": true,
@@ -1018,12 +1384,9 @@ pub async fn handle_studio_route(
             })
             .unwrap_or(DEFAULT_BUILD_TIMEOUT_SEC)
             .min(3600);
-        let prog = match argv.first() {
-            Some(p) => PathBuf::from(p),
-            None => {
-                return Some(json_response("400 Bad Request", r#"{"error":"argv required"}"#));
-            }
-        };
+        if argv.first().is_none() {
+            return Some(json_response("400 Bad Request", r#"{"error":"argv required"}"#));
+        }
         let _permit = match studio_ops_semaphore().acquire().await {
             Ok(p) => p,
             Err(_) => {
@@ -1033,10 +1396,7 @@ pub async fn handle_studio_route(
                 ));
             }
         };
-        let mut cmd = Command::new(&prog);
-        if argv.len() > 1 {
-            cmd.args(&argv[1..]);
-        }
+        let mut cmd = studio_command_from_argv(&argv);
         cmd.current_dir(&root).kill_on_drop(true);
         #[cfg(windows)]
         {
@@ -1125,6 +1485,9 @@ pub async fn handle_studio_route(
                 created_at: String::new(),
                 evolutions: Vec::new(),
                 tech_stack: None,
+                verify_skip: false,
+                verify_argv: None,
+                verify_timeout_sec: None,
             });
             let body = serde_json::json!({ "evolutions": meta.evolutions }).to_string();
             return Some(json_response("200 OK", &body));
@@ -1203,6 +1566,9 @@ pub async fn handle_studio_route(
                 created_at: chrono::Utc::now().to_rfc3339(),
                 evolutions: Vec::new(),
                 tech_stack: None,
+                verify_skip: false,
+                verify_argv: None,
+                verify_timeout_sec: None,
             });
             meta.evolutions.push(StudioEvolution {
                 id: evo_id.clone(),
@@ -1394,4 +1760,34 @@ fn guess_mime_and_text(rel: &str, bytes: &[u8]) -> (&'static str, bool) {
     };
     let is_text = text_ext || std::str::from_utf8(bytes).is_ok();
     (mime, is_text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::studio_command_from_argv;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn studio_command_npm_argv_uses_cmd_on_windows() {
+        let argv = vec!["npm".to_string(), "run".to_string(), "build".to_string()];
+        let cmd = studio_command_from_argv(&argv);
+        let program: &OsStr = cmd.as_std().get_program();
+        #[cfg(windows)]
+        {
+            assert_eq!(program, "cmd.exe");
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(program, "npm");
+        }
+    }
+
+    #[test]
+    fn studio_reject_polluted_detects_fence() {
+        use super::studio_reject_polluted_code_content;
+        use std::path::Path;
+        let p = Path::new("src/App.tsx");
+        assert!(studio_reject_polluted_code_content(p, "```tsx\nconst x = 1;\n").is_some());
+        assert!(studio_reject_polluted_code_content(p, "const x = 1;\n").is_none());
+    }
 }
