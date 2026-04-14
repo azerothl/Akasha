@@ -5342,11 +5342,15 @@ pub async fn summarize_yesterday_and_promote(
         return;
     }
     let blob = ShortTermStore::turns_to_context(&turns);
+    let blob_capped = crate::llm_prompt_cap::truncate_utf8_bytes(
+        &blob,
+        crate::llm_prompt_cap::SYSTEM_PROMPT_FIELD_MAX_BYTES,
+    );
     let summary_prompt = format!(
         "Summarize in a short synthetic paragraph (5 to 10 lines) the day of {}: topics covered, decisions, projects or important information. \
 Factual response in English.\n\n{}",
         session_id.trim_start_matches("day-"),
-        blob
+        blob_capped
     );
     let summary_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
         .ok()
@@ -8490,8 +8494,14 @@ AGENT_CAN: what the agent can do (allowed)\n\
 AGENT_CANNOT: what the agent must not do (forbidden)\n\
 Write only lines with these prefixes, or NOTHING if none. No other text.\n\
 Extract only facts explicitly mentioned (by the user or the assistant). Do not invent anything.\n\nUser: {}\n\nAssistant: {}",
-                msg.trim(),
-                reply.trim()
+                crate::llm_prompt_cap::truncate_utf8_bytes(
+                    msg.trim(),
+                    crate::llm_prompt_cap::SYSTEM_PROMPT_FIELD_MAX_BYTES,
+                ),
+                crate::llm_prompt_cap::truncate_utf8_bytes(
+                    reply.trim(),
+                    crate::llm_prompt_cap::SYSTEM_PROMPT_FIELD_MAX_BYTES,
+                )
             );
                 let extract_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
                     .ok()

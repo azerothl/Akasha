@@ -26,6 +26,7 @@ pub mod image_generation;
 pub mod latency;
 pub mod voice;
 pub mod memory;
+pub mod llm_prompt_cap;
 pub mod memory_actor;
 pub mod memory_relation_inference;
 pub mod memory_relation_semantic;

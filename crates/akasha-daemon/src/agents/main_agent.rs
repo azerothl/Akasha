@@ -363,6 +363,10 @@ impl MainAgent {
         }
 
         let started = Instant::now();
+        let message_capped = crate::llm_prompt_cap::truncate_utf8_bytes(
+            message,
+            crate::llm_prompt_cap::SELECTOR_USER_MESSAGE_MAX_BYTES,
+        );
         let prompt = format!(
             "You are a strict routing selector for Akasha.\n\
 Return ONLY compact JSON with schema:\n\
@@ -372,7 +376,7 @@ Rules:\n\
 - task_type must be one of: conversation, code_generation, creative_writing, scientific_analysis, data_analysis, system_diagnostic, system, orchestrator, image_generation.\n\
 - If unsure, use answer_mode=delegate and task_type=conversation.\n\
 User message:\n{}",
-            message
+            message_capped
         );
         let req = CompletionRequest {
             prompt,

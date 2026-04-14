@@ -2804,8 +2804,14 @@ Formatting rules (Markdown):
         if !qa_pass {
             final_aggregated = format!(
                 "La réponse agrégée est jugée incomplète par le QA gate.\n\nDemande initiale:\n{}\n\nRéponse actuelle:\n{}",
-                user_message.trim(),
-                final_aggregated.trim()
+                crate::llm_prompt_cap::truncate_utf8_bytes(
+                    user_message.trim(),
+                    crate::llm_prompt_cap::SYSTEM_PROMPT_FIELD_MAX_BYTES,
+                ),
+                crate::llm_prompt_cap::truncate_utf8_bytes(
+                    final_aggregated.trim(),
+                    crate::llm_prompt_cap::SYSTEM_PROMPT_FIELD_MAX_BYTES,
+                )
             );
         }
 
@@ -2813,8 +2819,14 @@ Formatting rules (Markdown):
         if critical_review_enabled(&user_message) {
             let review_prompt = format!(
                 "You are an external reviewer. Check if the answer fully satisfies the request. Reply with:\nPASS|<short reason>\nor\nFAIL|<short reason>\n\nREQUEST:\n{}\n\nANSWER:\n{}",
-                user_message.trim(),
-                final_aggregated.trim()
+                crate::llm_prompt_cap::truncate_utf8_bytes(
+                    user_message.trim(),
+                    crate::llm_prompt_cap::SYSTEM_PROMPT_FIELD_MAX_BYTES,
+                ),
+                crate::llm_prompt_cap::truncate_utf8_bytes(
+                    final_aggregated.trim(),
+                    crate::llm_prompt_cap::SYSTEM_PROMPT_FIELD_MAX_BYTES,
+                )
             );
             let review_req = CompletionRequest {
                 prompt: review_prompt,
