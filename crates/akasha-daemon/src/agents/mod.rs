@@ -17,5 +17,5 @@ pub use main_agent::{MainAgent, OrchestratorSender, OrchestratorTask, TaskPriori
 pub use interpretation::interpret_message;
 pub use supervisor::{classify_execution_mode, ExecutionMode};
 pub use orchestrator::Orchestrator;
-pub use progress_subscriber::{run_events_subscriber, run_progress_subscriber};
+pub use progress_subscriber::{run_events_subscriber, run_progress_subscriber, TaskPersistenceMsg, TaskPersistenceTx};
 pub use worker::run_worker;

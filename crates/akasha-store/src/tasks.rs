@@ -92,6 +92,8 @@ impl TaskStore {
         // Multiple TaskStore connections hit the same file (API + persistence threads); wait on locks
         // instead of failing immediately with SQLITE_BUSY.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // WAL: readers (API) can proceed while the writer persists; reduces "database is locked" vs rollback journal.
+        let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS tasks (

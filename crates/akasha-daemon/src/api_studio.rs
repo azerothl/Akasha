@@ -649,6 +649,82 @@ pub async fn handle_studio_route(
         }
     }
 
+    // PUT /api/studio/projects/:id/raw?path=
+    // Body: `{ "content": "<utf-8 text>" }` — same path rules and size cap as GET.
+    if method == "PUT" && path_only.ends_with("/raw") {
+        if let Some(rest) = strip_studio_projects_prefix(path_only) {
+            let id = rest.strip_suffix("/raw").unwrap_or(rest);
+            let root = match resolve_studio_project_dir(data_dir, id) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Some(json_response(
+                        "400 Bad Request",
+                        &serde_json::json!({ "error": e }).to_string(),
+                    ));
+                }
+            };
+            let Some(rel) = query_param(query_str, "path").map(|c| c.to_string()).filter(|s| !s.trim().is_empty()) else {
+                return Some(json_response("400 Bad Request", r#"{"error":"path query required"}"#));
+            };
+            if rel.contains("..") {
+                return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+            }
+            let full = strip_verbatim(&root.join(&rel));
+            if !is_strictly_under_studio_root(&full, &root) {
+                return Some(json_response("400 Bad Request", r#"{"error":"path outside project"}"#));
+            }
+            if full.is_dir() {
+                return Some(json_response("400 Bad Request", r#"{"error":"path is a directory"}"#));
+            }
+            let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+                Some(v) => v,
+                None => {
+                    return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#));
+                }
+            };
+            let content = match body_v.get("content") {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(serde_json::Value::Null) => String::new(),
+                None => {
+                    return Some(json_response("400 Bad Request", r#"{"error":"content field required"}"#));
+                }
+                _ => {
+                    return Some(json_response(
+                        "400 Bad Request",
+                        r#"{"error":"content must be a JSON string"}"#,
+                    ));
+                }
+            };
+            let bytes = content.as_bytes();
+            if bytes.len() > MAX_RAW_BYTES {
+                return Some(json_response(
+                    "413 Payload Too Large",
+                    &serde_json::json!({ "error": "content_too_large", "size": bytes.len() }).to_string(),
+                ));
+            }
+            if let Some(parent) = full.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    return Some(json_response(
+                        "500 Internal Server Error",
+                        &serde_json::json!({ "error": e.to_string() }).to_string(),
+                    ));
+                }
+            }
+            match fs::write(&full, bytes) {
+                Ok(()) => {
+                    let body = serde_json::json!({ "ok": true, "path": rel }).to_string();
+                    return Some(json_response("200 OK", &body));
+                }
+                Err(e) => {
+                    return Some(json_response(
+                        "500 Internal Server Error",
+                        &serde_json::json!({ "error": e.to_string() }).to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
     // POST /api/studio/projects/:id/git/clone
     if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/git/clone") {
         let rest = path_only

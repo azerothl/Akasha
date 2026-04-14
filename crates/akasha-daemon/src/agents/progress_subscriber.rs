@@ -11,12 +11,26 @@ use crate::api::{
     EventsCache, ProgressCache, ProgressEntry, TaskEventEntry, MAX_EVENTS_PER_TASK, MAX_PROGRESS_PER_TASK,
 };
 
-/// Optional sender to persist progress to DB (daemon passes this for fast GET /api/tasks/:id).
-pub type ProgressPersistenceTx = Option<mpsc::Sender<(Uuid, u8, String)>>;
-/// Optional sender to persist task events to DB so details survive daemon restarts.
-pub type EventPersistenceTx = Option<mpsc::Sender<(Uuid, String, Option<serde_json::Value>, String)>>;
+/// Messages queued for a single TaskStore writer thread (avoids concurrent SQLite writes / "database is locked").
+#[derive(Debug)]
+pub enum TaskPersistenceMsg {
+    Progress {
+        task_id: Uuid,
+        progress_pct: u8,
+        message: String,
+    },
+    Event {
+        task_id: Uuid,
+        event_type: String,
+        payload: Option<serde_json::Value>,
+        at: String,
+    },
+}
 
-pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, persistence_tx: ProgressPersistenceTx) {
+/// Optional sender to persist progress and events to DB (same queue → serialized writes).
+pub type TaskPersistenceTx = Option<mpsc::Sender<TaskPersistenceMsg>>;
+
+pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, persistence_tx: TaskPersistenceTx) {
     let mut rx = bus.subscribe();
     while let Ok(ev) = rx.recv().await {
         let payload = match &ev.payload {
@@ -29,7 +43,11 @@ pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, per
             let message = payload.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let Some(task_id) = task_id else { continue };
             if let Some(ref tx) = persistence_tx {
-                let _ = tx.send((task_id, progress_pct, message.clone()));
+                let _ = tx.send(TaskPersistenceMsg::Progress {
+                    task_id,
+                    progress_pct,
+                    message: message.clone(),
+                });
             }
             let entry = ProgressEntry { progress_pct, message };
             let mut g = progress.write().await;
@@ -66,7 +84,11 @@ pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, per
                 "Annulé.".to_string()
             };
             if let Some(ref tx) = persistence_tx {
-                let _ = tx.send((task_id, 100, message.clone()));
+                let _ = tx.send(TaskPersistenceMsg::Progress {
+                    task_id,
+                    progress_pct: 100,
+                    message: message.clone(),
+                });
             }
             let mut g = progress.write().await;
             let q = g.entry(task_id).or_insert_with(VecDeque::new);
@@ -88,7 +110,7 @@ pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, per
 
 /// Subscribes to event bus and fills events cache (all events with correlation_id) for GET /api/tasks/:id/events.
 /// Resilient to Lagged: continues processing instead of exiting so root task events are never lost.
-pub async fn run_events_subscriber(bus: EventBus, events: EventsCache, persistence_tx: EventPersistenceTx) {
+pub async fn run_events_subscriber(bus: EventBus, events: EventsCache, persistence_tx: TaskPersistenceTx) {
     let mut rx = bus.subscribe();
     loop {
         match rx.recv().await {
@@ -102,12 +124,12 @@ pub async fn run_events_subscriber(bus: EventBus, events: EventsCache, persisten
                     task_id: Some(task_id.to_string()),
                 };
                 if let Some(ref tx) = persistence_tx {
-                    let _ = tx.send((
+                    let _ = tx.send(TaskPersistenceMsg::Event {
                         task_id,
-                        entry.event_type.clone(),
-                        entry.payload.clone(),
+                        event_type: entry.event_type.clone(),
+                        payload: entry.payload.clone(),
                         at,
-                    ));
+                    });
                 }
                 let mut g = events.write().await;
                 let q = g.entry(task_id).or_insert_with(VecDeque::new);

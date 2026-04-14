@@ -2799,6 +2799,28 @@ const GITHUB_VAULT_REMINDER: &str = "\n[Reminder GitHub + vault: you MUST run th
 const CODE_DEV_SANDBOX_REMINDER: &str = "\n[Reminder — code / project work: use workspace:/ paths for files in this task when no absolute path is given. For Git operations prefer TOOL: git_status, git_diff, git_log, git_rev_parse on the repo path (e.g. workspace:/ or an allowed folder) instead of raw git via run_command, unless you need a subcommand not covered. For file comparison use diff_unified or file_diff; for two trees use dir_compare. For build/test commands use TOOL: run_command --cwd workspace:/ cargo test (or npm test, etc.) so the command runs in the project root; or set run_command_default_cwd_workspace: true in tools_policy.yaml. For isolated execution with a toolchain image, use run_in_container when policy allows.]\n\n";
 const STUDIO_DISK_REMINDER: &str = "\n[Code Studio — périmètre disque: cette tâche s'exécute sous le dossier projet studio uniquement (miroir workspace:/ et cwd des outils). Ne pas cibler de chemins hors de ce répertoire. Pour npm install / builds à risque, privilégier run_in_container si la politique d'outils l'autorise.]\n\n";
 
+/// Injected with STUDIO_DISK_REMINDER: raise quality bar and user-visible wrap-up for Code Studio agents.
+const STUDIO_AGENT_QUALITY_REMINDER: &str = concat!(
+    "\n[Code Studio — exigences avant de considérer la demande comme terminée]\n",
+    "- Quand tu écris un fichier, son contenu doit être STRICTEMENT le contenu attendu du fichier (code, JSON, Markdown, config). ",
+    "Interdiction d'y ajouter du texte conversationnel, des explications, des statuts, des raisonnements, ou des phrases comme ",
+    "\"fichier corrigé\", \"je relance le build\", \"voici la correction\". Ces messages vont uniquement dans la réponse chat.\n",
+    "- Pour les fichiers de code (ex: .ts, .tsx, .js, .rs, .py), n'écris que du code syntaxiquement valide pour ce langage ; ",
+    "ne mets jamais de prose libre hors commentaires valides du langage.\n",
+    "- Ne déclare PAS la tâche terminée tant que le livrable n'est pas vérifié quand c'est possible : lance un build ou des tests ",
+    "via TOOL: run_command avec --cwd workspace:/ (ou la racine du projet) quand la politique d'outils le permet — ",
+    "par ex. npm run build, npm test, cargo build, cargo test, pytest, tsc --noEmit. Corrige les erreurs de compilation ",
+    "ou de typage que tu peux corriger sans dériver du besoin utilisateur.\n",
+    "- Après des changements qui touchent au comportement à l'exécution, exécute aussi une vérification d'exécution minimale ",
+    "quand c'est raisonnable (tests automatisés, ou une commande courte qui exerce le chemin modifié avec timeout). ",
+    "Ne te contente pas d'un build seul si la demande porte sur un bug ou un comportement runtime.\n",
+    "- Si un build complet est trop lourd ou bloqué par la politique, exécute au moins une vérification ciblée (lint, typecheck) ",
+    "ou explique clairement ce que tu n'as pas pu valider et pourquoi.\n",
+    "- Ta dernière réponse à l'utilisateur (même langue que lui) doit résumer en langage accessible : ce qui a été ajouté ou modifié, ",
+    "comment lancer ou essayer le résultat, et les limites éventuelles. Pas de jargon inutile sauf si l'utilisateur demande le détail technique.\n",
+    "- N'achève pas seulement par « Terminé » / « Done » : fournis un paragraphe utile lisible sans ouvrir les fichiers.\n\n",
+);
+
 /// Application context injected into the prompt: the agent knows it runs inside Akasha and can talk about it.
 const APP_CONTEXT: &str = concat!(
     "[Akasha context] You are the assistant embedded in Akasha. Akasha is the application you are currently running in. ",
@@ -2859,10 +2881,10 @@ pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
         "qa" => Some("You are the quality control agent. You prevent false 'work done'. Verify coherence, requirement coverage, missing files, hidden TODOs, incomplete sections. Do not rewrite; report defects and gaps by severity. Do not validate if acceptance criteria are incomplete; output a clear report for rework."),
         "system" => Some("You are the system agent. You have full knowledge of the Akasha application: commands (akasha start, init, doctor), interfaces (TUI, Chat, Router, Memory, Doc, Calendar), slash commands, skills, tools, and configuration. You can resolve issues and answer any question about how Akasha works. Be precise and refer to real features only."),
         "image_generation" => Some("You are the image generation agent. Produce images from text prompts using the generate_image tool. Focus on clear, concrete prompts that yield the requested visual. One precise deliverable per request."),
-        "studio_scaffold" => Some("You are the Code Studio scaffold agent. Create a minimal, runnable project skeleton (README, package.json or Cargo.toml, clear entrypoints). Prefer workspace:/ paths when no absolute path is given; mirror files to the studio disk root. When the user message contains a [Stack technique du projet] block at the top, follow it strictly for languages, frameworks, package manager, and tooling; otherwise default to Vite + React + TypeScript for web. Do not add dead files; keep structure conventional."),
-        "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. When a [Stack technique du projet] block is present in the user message, obey it for UI libraries, bundler, CSS approach, and TypeScript/JavaScript choice. Verify dependencies exist in package.json before importing. Use read_file before editing. Run builds with run_command --cwd workspace:/ when policy allows."),
-        "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history."),
-        "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message."),
+        "studio_scaffold" => Some("You are the Code Studio scaffold agent. Create a minimal, runnable project skeleton (README, package.json or Cargo.toml, clear entrypoints). Prefer workspace:/ paths when no absolute path is given; mirror files to the studio disk root. When the user message contains a [Stack technique du projet] block at the top, follow it strictly for languages, frameworks, package manager, and tooling; otherwise default to Vite + React + TypeScript for web. Do not add dead files; keep structure conventional. FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If a previous generation polluted a file with prose, clean it and keep only valid file content. Before finishing: run an appropriate build or typecheck when possible; in your final reply summarize what you created and how to run it in plain language."),
+        "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. When a [Stack technique du projet] block is present in the user message, obey it for UI libraries, bundler, CSS approach, and TypeScript/JavaScript choice. Verify dependencies exist in package.json before importing. Use read_file before editing. FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Run build/lint/typecheck via run_command --cwd workspace:/ when policy allows, and fix issues you introduced. End with a clear user-facing summary of changes and how to preview or test — not only \"Done\"."),
+        "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history. FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Before declaring completion: run tests or at least start/build checks when feasible; summarize APIs and behavior for the user in accessible terms."),
+        "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message. FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If prose was accidentally inserted in a source file, remove it and keep only valid syntax for that file type. Verify end-to-end coherence; run combined build/test when policy allows. Close with a plain-language recap of what changed and how to run the app."),
         _ => None,
     }
 }
@@ -6513,6 +6535,13 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
+    let studio_quality_reminder = if tool_disk_workspace_root
+        .starts_with(crate::studio::studio_projects_base(data_dir_for_studio))
+    {
+        STUDIO_AGENT_QUALITY_REMINDER
+    } else {
+        ""
+    };
     // When user clearly wants a photo from camera, prefix the message with an imperative so the model responds with device_invoke directly (no ask_user).
     let user_message = if !device_camera_reminder.is_empty() {
         format!(
@@ -6524,7 +6553,7 @@ pub(crate) async fn run_message_via_llm(
     };
     let mut current_prompt = if user_prefix.trim().is_empty() {
         format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
             guardrail_reminder_block,
             write_reminder,
             web_search_reminder,
@@ -6538,11 +6567,12 @@ pub(crate) async fn run_message_via_llm(
             github_vault_reminder,
             code_dev_sandbox_reminder,
             studio_disk_reminder,
+            studio_quality_reminder,
             user_message
         )
     } else {
         format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
             user_prefix.trim_end(),
             guardrail_reminder_block,
             write_reminder,
@@ -6557,6 +6587,7 @@ pub(crate) async fn run_message_via_llm(
             github_vault_reminder,
             code_dev_sandbox_reminder,
             studio_disk_reminder,
+            studio_quality_reminder,
             user_message
         )
     };
