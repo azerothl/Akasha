@@ -53,10 +53,6 @@ fn canonicalize_path_for_studio_check(path: &Path) -> Option<PathBuf> {
         }
     }
 
-    if !existing_ancestor.exists() {
-        return None;
-    }
-
     let mut canonical = std::fs::canonicalize(existing_ancestor).ok()?;
     for component in missing_suffix.iter().rev() {
         canonical.push(component);

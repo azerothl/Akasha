@@ -145,7 +145,9 @@ async fn studio_run_command_capture(
                 let mut buf = vec![0u8; 8192];
                 loop {
                     let n = r.read(&mut buf).await?;
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     if out.len() < MAX_BUILD_OUTPUT_BYTES {
                         let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(out.len()));
                         out.push_str(&String::from_utf8_lossy(&buf[..take]));
@@ -162,7 +164,9 @@ async fn studio_run_command_capture(
                 let mut buf = vec![0u8; 8192];
                 loop {
                     let n = r.read(&mut buf).await?;
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     if err.len() < MAX_BUILD_OUTPUT_BYTES {
                         let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(err.len()));
                         err.push_str(&String::from_utf8_lossy(&buf[..take]));
@@ -1435,7 +1439,9 @@ pub async fn handle_studio_route(
                     let mut buf = vec![0u8; 8192];
                     loop {
                         let n = r.read(&mut buf).await?;
-                        if n == 0 { break; }
+                        if n == 0 {
+                            break;
+                        }
                         if out.len() < MAX_BUILD_OUTPUT_BYTES {
                             let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(out.len()));
                             out.push_str(&String::from_utf8_lossy(&buf[..take]));
@@ -1452,7 +1458,9 @@ pub async fn handle_studio_route(
                     let mut buf = vec![0u8; 8192];
                     loop {
                         let n = r.read(&mut buf).await?;
-                        if n == 0 { break; }
+                        if n == 0 {
+                            break;
+                        }
                         if err.len() < MAX_BUILD_OUTPUT_BYTES {
                             let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(err.len()));
                             err.push_str(&String::from_utf8_lossy(&buf[..take]));
