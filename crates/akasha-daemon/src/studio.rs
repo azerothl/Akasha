@@ -27,18 +27,52 @@ pub fn resolve_studio_project_dir(data_dir: &Path, project_id: &str) -> Result<P
     Ok(dir)
 }
 
-/// Ensure `path` is equal to `dir` or a strict descendant (after canonicalize when possible).
+/// Resolve a path for sandbox containment checks.
+///
+/// If the full path exists, canonicalize it (resolves symlinks).  For paths
+/// that do not yet exist (e.g. create/write targets), canonicalize the nearest
+/// existing ancestor and append the remaining suffix lexically.
+fn canonicalize_path_for_studio_check(path: &Path) -> Option<PathBuf> {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return Some(canonical);
+    }
+
+    let mut existing_ancestor = path;
+    let mut missing_suffix: Vec<std::ffi::OsString> = Vec::new();
+
+    loop {
+        if existing_ancestor.exists() {
+            break;
+        }
+        if let Some(name) = existing_ancestor.file_name() {
+            missing_suffix.push(name.to_os_string());
+        }
+        match existing_ancestor.parent() {
+            Some(p) => existing_ancestor = p,
+            None => return None,
+        }
+    }
+
+    if !existing_ancestor.exists() {
+        return None;
+    }
+
+    let mut canonical = std::fs::canonicalize(existing_ancestor).ok()?;
+    for component in missing_suffix.iter().rev() {
+        canonical.push(component);
+    }
+    Some(canonical)
+}
+
+/// Ensure `path` is equal to `root` or a strict descendant (resolves symlinks).
 pub fn is_strictly_under_studio_root(path: &Path, root: &Path) -> bool {
-    let root_norm = root.to_string_lossy().replace('\\', "/");
-    let path_norm = path.to_string_lossy().replace('\\', "/");
-    let root_slash = if root_norm.ends_with('/') {
-        root_norm.clone()
-    } else {
-        format!("{}/", root_norm.trim_end_matches('/'))
+    let Some(root_canonical) = canonicalize_path_for_studio_check(root) else {
+        return false;
     };
-    let p = path_norm.trim_end_matches('/');
-    let r = root_norm.trim_end_matches('/');
-    p == r || p.starts_with(&root_slash)
+    let Some(path_canonical) = canonicalize_path_for_studio_check(path) else {
+        return false;
+    };
+    path_canonical == root_canonical || path_canonical.starts_with(&root_canonical)
 }
 
 /// Register the disk root for a new root task (API message). Keyed by `task_id` (root of lineage).

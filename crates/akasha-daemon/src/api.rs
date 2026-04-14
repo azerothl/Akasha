@@ -41,32 +41,6 @@ fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
     p
 }
 
-// #region agent log
-fn agent_debug_9c5756(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
-    use std::io::Write;
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../debug-9c5756.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let line = serde_json::json!({
-            "sessionId": "9c5756",
-            "timestamp": ts,
-            "location": location,
-            "message": message,
-            "hypothesisId": hypothesis_id,
-            "data": data,
-        });
-        let _ = writeln!(f, "{}", line);
-    }
-}
-// #endregion
-
 /// Normalize common Unicode apostrophes in filenames (e.g. ’ -> ').
 /// LLM tool calls may use typographic quotes, while files on disk typically use ASCII quotes.
 fn normalize_apostrophes(s: &str) -> String {
@@ -1365,27 +1339,7 @@ fn build_plugin_routing_reminders(
             lines.push(format!("- {}", instruction));
         }
     }
-    // #region agent log
-    agent_debug_9c5756(
-        "H1",
-        "api.rs:build_plugin_routing_reminders",
-        "after_rule_loop",
-        serde_json::json!({
-            "lines_count": lines.len(),
-            "geolocation_handled": geolocation_handled,
-            "matched_plugin_entries": matched_plugins.len(),
-        }),
-    );
-    // #endregion
     if lines.is_empty() {
-        // #region agent log
-        agent_debug_9c5756(
-            "H1",
-            "api.rs:build_plugin_routing_reminders",
-            "return_empty_reminder_lines",
-            serde_json::json!({ "geolocation_handled": geolocation_handled }),
-        );
-        // #endregion
         return (String::new(), geolocation_handled);
     }
 
@@ -1393,14 +1347,6 @@ fn build_plugin_routing_reminders(
         "\n[Dynamic plugin routing rules — auto-loaded from installed plugin manifests]\n{}\n\n",
         lines.join("\n")
     );
-    // #region agent log
-    agent_debug_9c5756(
-        "H1",
-        "api.rs:build_plugin_routing_reminders",
-        "return_with_reminder_block",
-        serde_json::json!({ "block_len": block.len(), "lines_count": lines.len() }),
-    );
-    // #endregion
     (block, geolocation_handled)
 }
 
@@ -3554,14 +3500,6 @@ async fn execute_tool_call(
     workspace_root: Option<&std::path::Path>,
 ) -> (bool, String, Option<String>) {
     use std::path::Path;
-    // #region agent log
-    agent_debug_9c5756(
-        "H3",
-        "api.rs:execute_tool_call",
-        "enter",
-        serde_json::json!({ "tool": tool_name, "args_count": args.len() }),
-    );
-    // #endregion
     let plugin_invocation = parse_plugin_tool_invocation(plugin_registry, tool_name, args);
     let is_plugin_candidate = plugin_invocation.is_some();
     let can_use_named_tool = executor.policy.can_use_tool(tool_name);
@@ -6417,17 +6355,6 @@ pub(crate) async fn run_message_via_llm(
         &intent_flags,
         tools_executor_snapshot.as_ref(),
     );
-    // #region agent log
-    agent_debug_9c5756(
-        "H4",
-        "api.rs:prompt_build",
-        "after_runtime_tool_routing_enforcer",
-        serde_json::json!({
-            "has_enforcer": runtime_tool_routing_enforcer.is_some(),
-            "preferred_tools_count": runtime_tool_routing_enforcer.as_ref().map(|e| e.preferred_tools.len()).unwrap_or(0),
-        }),
-    );
-    // #endregion
     let write_reminder = if intent_flags.save_file {
         WRITE_FILE_REMINDER
     } else {
@@ -6609,17 +6536,6 @@ pub(crate) async fn run_message_via_llm(
             user_message
         )
     };
-    // #region agent log
-    agent_debug_9c5756(
-        "H2",
-        "api.rs:prompt_build",
-        "current_prompt_built",
-        serde_json::json!({
-            "current_prompt_len": current_prompt.len(),
-            "user_prefix_nonempty": !user_prefix.trim().is_empty(),
-        }),
-    );
-    // #endregion
     let reply_text;
     let mut last_llm_model_used: Option<String> = None;
     let mut first_meaningful_progress_sent = false;
@@ -6749,18 +6665,6 @@ pub(crate) async fn run_message_via_llm(
             .unwrap_or_else(|| llm_timeout_secs.min(300));
 
         'tool_rounds: loop {
-            // #region agent log
-            agent_debug_9c5756(
-                "H3",
-                "api.rs:tool_rounds",
-                "loop_iter",
-                serde_json::json!({
-                    "round": round,
-                    "strict_tools_first": strict_tools_first,
-                    "strict_mode_active": strict_tools_first && strict_successful_tool_calls == 0,
-                }),
-            );
-            // #endregion
             let strict_mode_active = strict_tools_first && strict_successful_tool_calls == 0;
             if strict_mode_active {
                 let _ = bus.send(

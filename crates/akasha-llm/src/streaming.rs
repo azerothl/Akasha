@@ -29,7 +29,7 @@ pub async fn read_openai_compatible_sse_stream(
     let mut model_used: Option<String> = None;
     let mut finish_reason: Option<String> = None;
 
-    loop {
+    'sse_stream: loop {
         let chunk = resp.chunk().await.map_err(|e| {
             if e.is_timeout() {
                 ProviderError::Timeout
@@ -50,7 +50,7 @@ pub async fn read_openai_compatible_sse_stream(
                 None => continue,
             };
             if payload == "[DONE]" {
-                continue;
+                break 'sse_stream;
             }
             let json: serde_json::Value = match serde_json::from_str(payload) {
                 Ok(j) => j,

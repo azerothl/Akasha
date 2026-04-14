@@ -355,15 +355,26 @@ impl LLMRouter {
                         .default_timeout_secs
                         .unwrap_or(300);
                     let timeout = std::time::Duration::from_secs(timeout);
-                    // Keep a second handle: on stream failure (e.g. rate limit) we still need to push
-                    // the non-streaming fallback response to the same consumer.
+                    // Use a proxy channel to detect whether streaming emitted any chunks before a failure.
+                    // This prevents sending the full fallback text on top of already-streamed partial content.
                     let chunk_tx_fallback = chunk_tx.clone();
+                    let (proxy_tx, proxy_rx) = std::sync::mpsc::channel::<String>();
+                    let any_chunk_sent =
+                        Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let flag_bridge = any_chunk_sent.clone();
+                    let real_tx = chunk_tx;
+                    let bridge_handle = tokio::task::spawn_blocking(move || {
+                        for chunk in proxy_rx {
+                            flag_bridge.store(true, std::sync::atomic::Ordering::Relaxed);
+                            let _ = real_tx.send(chunk);
+                        }
+                    });
                     match provider
                         .complete_stream(
                             request,
                             timeout,
                             Some(&entry.model),
-                            chunk_tx,
+                            proxy_tx,
                         )
                         .await
                     {
@@ -375,6 +386,8 @@ impl LLMRouter {
                                 model = %entry.model,
                                 "Streaming failed; falling back to non-streaming completion (retries + fallback providers)"
                             );
+                            // Wait for the bridge to drain any already-queued chunks before checking.
+                            let _ = bridge_handle.await;
                             let response = self
                                 .fallback
                                 .complete(
@@ -385,7 +398,11 @@ impl LLMRouter {
                                     self.degraded_mode,
                                 )
                                 .await?;
-                            let _ = chunk_tx_fallback.send(response.text.clone());
+                            // Only forward the fallback as a chunk if streaming emitted nothing;
+                            // otherwise partial chunks + full fallback would duplicate content.
+                            if !any_chunk_sent.load(std::sync::atomic::Ordering::Relaxed) {
+                                let _ = chunk_tx_fallback.send(response.text.clone());
+                            }
                             return Ok(response);
                         }
                     }

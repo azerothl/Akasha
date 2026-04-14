@@ -33,8 +33,14 @@ async fn studio_append_preview_log(log: &Mutex<String>, chunk: &str) {
     g.push_str(chunk);
     if g.len() > MAX_PREVIEW_LOG_BYTES {
         let cut = g.len() - MAX_PREVIEW_LOG_BYTES;
-        if cut < g.len() {
-            g.drain(..cut);
+        // Find the first valid UTF-8 char boundary at or after `cut` to avoid splitting a codepoint.
+        let drain_to = g
+            .char_indices()
+            .map(|(idx, _)| idx)
+            .find(|&idx| idx >= cut)
+            .unwrap_or(g.len());
+        if drain_to > 0 {
+            g.drain(..drain_to);
         }
     }
 }
@@ -131,36 +137,42 @@ async fn studio_run_command_capture(
             .spawn()?;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let mut out = String::new();
-        let mut err = String::new();
-        if let Some(mut s) = stdout {
-            let mut r = BufReader::new(&mut s);
-            let mut buf = vec![0u8; 8192];
-            loop {
-                let n = r.read(&mut buf).await?;
-                if n == 0 {
-                    break;
-                }
-                if out.len() < MAX_BUILD_OUTPUT_BYTES {
-                    let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(out.len()));
-                    out.push_str(&String::from_utf8_lossy(&buf[..take]));
-                }
-            }
-        }
-        if let Some(mut s) = stderr {
-            let mut r = BufReader::new(&mut s);
-            let mut buf = vec![0u8; 8192];
-            loop {
-                let n = r.read(&mut buf).await?;
-                if n == 0 {
-                    break;
-                }
-                if err.len() < MAX_BUILD_OUTPUT_BYTES {
-                    let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(err.len()));
-                    err.push_str(&String::from_utf8_lossy(&buf[..take]));
+
+        let read_stdout = async move {
+            let mut out = String::new();
+            if let Some(s) = stdout {
+                let mut r = BufReader::new(s);
+                let mut buf = vec![0u8; 8192];
+                loop {
+                    let n = r.read(&mut buf).await?;
+                    if n == 0 { break; }
+                    if out.len() < MAX_BUILD_OUTPUT_BYTES {
+                        let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(out.len()));
+                        out.push_str(&String::from_utf8_lossy(&buf[..take]));
+                    }
                 }
             }
-        }
+            Ok::<_, std::io::Error>(out)
+        };
+
+        let read_stderr = async move {
+            let mut err = String::new();
+            if let Some(s) = stderr {
+                let mut r = BufReader::new(s);
+                let mut buf = vec![0u8; 8192];
+                loop {
+                    let n = r.read(&mut buf).await?;
+                    if n == 0 { break; }
+                    if err.len() < MAX_BUILD_OUTPUT_BYTES {
+                        let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(err.len()));
+                        err.push_str(&String::from_utf8_lossy(&buf[..take]));
+                    }
+                }
+            }
+            Ok::<_, std::io::Error>(err)
+        };
+
+        let (out, err) = tokio::try_join!(read_stdout, read_stderr)?;
         let status = child.wait().await?;
         Ok::<_, std::io::Error>((status, out, err))
     };
@@ -340,9 +352,16 @@ fn truncate_output(s: &str) -> String {
     if s.len() <= MAX_BUILD_OUTPUT_BYTES {
         s.to_string()
     } else {
+        // Find a valid UTF-8 char boundary at or before MAX_BUILD_OUTPUT_BYTES.
+        let cutoff = s
+            .char_indices()
+            .map(|(idx, _)| idx)
+            .take_while(|&idx| idx <= MAX_BUILD_OUTPUT_BYTES)
+            .last()
+            .unwrap_or(0);
         format!(
             "{}\n… [truncated, {} bytes total]",
-            &s[..MAX_BUILD_OUTPUT_BYTES],
+            &s[..cutoff],
             s.len()
         )
     }
@@ -1408,59 +1427,67 @@ pub async fn handle_studio_route(
             let mut child = cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn()?;
             let stdout = child.stdout.take();
             let stderr = child.stderr.take();
-            let mut out = String::new();
-            let mut err = String::new();
-            if let Some(mut s) = stdout {
-                let mut r = BufReader::new(&mut s);
-                let mut buf = vec![0u8; 8192];
-                loop {
-                    let n = r.read(&mut buf).await?;
-                    if n == 0 {
-                        break;
-                    }
-                    if out.len() < MAX_BUILD_OUTPUT_BYTES {
-                        let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(out.len()));
-                        out.push_str(&String::from_utf8_lossy(&buf[..take]));
-                    }
-                }
-            }
-            if let Some(mut s) = stderr {
-                let mut r = BufReader::new(&mut s);
-                let mut buf = vec![0u8; 8192];
-                loop {
-                    let n = r.read(&mut buf).await?;
-                    if n == 0 {
-                        break;
-                    }
-                    if err.len() < MAX_BUILD_OUTPUT_BYTES {
-                        let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(err.len()));
-                        err.push_str(&String::from_utf8_lossy(&buf[..take]));
+
+            let read_stdout = async move {
+                let mut out = String::new();
+                if let Some(s) = stdout {
+                    let mut r = BufReader::new(s);
+                    let mut buf = vec![0u8; 8192];
+                    loop {
+                        let n = r.read(&mut buf).await?;
+                        if n == 0 { break; }
+                        if out.len() < MAX_BUILD_OUTPUT_BYTES {
+                            let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(out.len()));
+                            out.push_str(&String::from_utf8_lossy(&buf[..take]));
+                        }
                     }
                 }
-            }
+                Ok::<_, std::io::Error>(out)
+            };
+
+            let read_stderr = async move {
+                let mut err = String::new();
+                if let Some(s) = stderr {
+                    let mut r = BufReader::new(s);
+                    let mut buf = vec![0u8; 8192];
+                    loop {
+                        let n = r.read(&mut buf).await?;
+                        if n == 0 { break; }
+                        if err.len() < MAX_BUILD_OUTPUT_BYTES {
+                            let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(err.len()));
+                            err.push_str(&String::from_utf8_lossy(&buf[..take]));
+                        }
+                    }
+                }
+                Ok::<_, std::io::Error>(err)
+            };
+
+            let (out, err) = tokio::try_join!(read_stdout, read_stderr)?;
             let status = child.wait().await?;
             Ok::<_, std::io::Error>((status, out, err))
         };
         let result = timeout(Duration::from_secs(timeout_sec), run).await;
-        let body = match result {
+        let (http_status, body) = match result {
             Ok(Ok((status, stdout, stderr))) => {
-                serde_json::json!({
+                let body = serde_json::json!({
                     "exit_code": status.code(),
                     "stdout": truncate_output(&stdout),
                     "stderr": truncate_output(&stderr),
                 })
-                .to_string()
+                .to_string();
+                let http_status = if status.success() { "200 OK" } else { "500 Internal Server Error" };
+                (http_status, body)
             }
-            Ok(Err(e)) => {
-                serde_json::json!({ "error": e.to_string(), "exit_code": -1 }).to_string()
-            }
-            Err(_) => serde_json::json!({
-                "error": "timeout",
-                "timeout_sec": timeout_sec,
-            })
-            .to_string(),
+            Ok(Err(e)) => (
+                "500 Internal Server Error",
+                serde_json::json!({ "error": e.to_string(), "exit_code": -1 }).to_string(),
+            ),
+            Err(_) => (
+                "504 Gateway Timeout",
+                serde_json::json!({ "error": "timeout", "timeout_sec": timeout_sec }).to_string(),
+            ),
         };
-        return Some(json_response("200 OK", &body));
+        return Some(json_response(http_status, &body));
     }
 
     // GET /api/studio/projects/:id/evolutions
