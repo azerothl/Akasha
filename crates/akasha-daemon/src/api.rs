@@ -6366,12 +6366,18 @@ pub(crate) async fn run_message_via_llm(
     if code_studio_disk_task {
         code_studio_disable_plugin_intents(&mut intent_flags);
     }
-    let runtime_tool_routing_enforcer = build_runtime_tool_routing_enforcer(
-        plugin_registry.as_ref(),
-        clean_message,
-        &intent_flags,
-        tools_executor_snapshot.as_ref(),
-    );
+    let runtime_tool_routing_enforcer = if code_studio_disk_task {
+        // Hard guard: Code Studio tasks must stay project/code oriented and must not be
+        // hijacked by dynamic plugin routing (maps/graph/external intents).
+        None
+    } else {
+        build_runtime_tool_routing_enforcer(
+            plugin_registry.as_ref(),
+            clean_message,
+            &intent_flags,
+            tools_executor_snapshot.as_ref(),
+        )
+    };
     let write_reminder = if intent_flags.save_file {
         WRITE_FILE_REMINDER
     } else {
@@ -6423,12 +6429,16 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let (plugin_routing_reminder, plugin_handles_geo_distance) = build_plugin_routing_reminders(
-        plugin_registry.as_ref(),
-        clean_message,
-        &intent_flags,
-        tools_executor_snapshot.as_ref(),
-    );
+    let (plugin_routing_reminder, plugin_handles_geo_distance) = if code_studio_disk_task {
+        (String::new(), false)
+    } else {
+        build_plugin_routing_reminders(
+            plugin_registry.as_ref(),
+            clean_message,
+            &intent_flags,
+            tools_executor_snapshot.as_ref(),
+        )
+    };
     let geolocation_distance_reminder: &str = if intent_flags.geolocation_distance
         && !plugin_handles_geo_distance
     {
