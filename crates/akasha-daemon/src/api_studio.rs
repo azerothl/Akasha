@@ -1,5 +1,6 @@
 //! HTTP handlers for `/api/studio/*` (Code Studio).
 use crate::studio::{is_strictly_under_studio_root, resolve_studio_project_dir, studio_projects_base};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -17,6 +18,8 @@ const MAX_DEPTH: usize = 8;
 const MAX_BUILD_OUTPUT_BYTES: usize = 512 * 1024;
 const DEFAULT_BUILD_TIMEOUT_SEC: u64 = 600;
 const NPM_INSTALL_TIMEOUT_SEC: u64 = 900;
+/// Plafond pour un `npm install` déclenché automatiquement après un build studio en échec.
+const AUTO_VERIFY_NPM_INSTALL_CAP_SEC: u64 = 480;
 /// Default range for Vite/webpack dev servers started by `POST .../preview/start`.
 const PREVIEW_PORT_MIN: u16 = 5180;
 const PREVIEW_PORT_MAX: u16 = 5279;
@@ -399,11 +402,22 @@ fn allowed_studio_command(cmd: &str) -> bool {
     )
 }
 
+/// `npm exec -- vite build` uniquement (secours vérification post-tâche Code Studio sans `tsc`).
+fn npm_exec_argv_allowed_for_studio_verify(argv: &[String]) -> bool {
+    argv.len() == 5
+        && argv[0] == "npm"
+        && argv[1] == "exec"
+        && argv[2] == "--"
+        && argv[3] == "vite"
+        && argv[4] == "build"
+}
+
 fn allowed_studio_subcommand(cmd: &str, argv: &[String]) -> bool {
     let subcommand = argv.get(1).map(String::as_str);
     match cmd {
         "npm" | "npm.cmd" | "pnpm" | "pnpm.cmd" => {
             matches!(subcommand, Some("run") | Some("install") | Some("ci"))
+                || (matches!(subcommand, Some("exec")) && npm_exec_argv_allowed_for_studio_verify(argv))
         }
         "yarn" | "yarn.cmd" => {
             matches!(
@@ -513,6 +527,57 @@ fn format_verify_failure(code: Option<i32>, out: &str, err: &str) -> String {
 }
 
 /// Détecte l’échec typique : fichiers `*.test.*` / `src/tests` passés dans `tsc` du build sans types Vitest/Jest.
+/// Erreurs du type « paquet non installé » / résolution de module.
+fn looks_like_missing_npm_module(stdout: &str, stderr: &str) -> bool {
+    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    combined.contains("cannot find module")
+        || combined.contains("cannot resolve")
+        || combined.contains("module not found")
+        || combined.contains("err_module_not_found")
+        || combined.contains("ts2307")
+        || combined.contains("failed to resolve import")
+        || (combined.contains("npm err!") && (combined.contains("enoent") || combined.contains("not found")))
+}
+
+/// Retire les commentaires de ligne `//` (lignes où, après espaces, le reste commence par `//`).
+/// Objectif : pouvoir fusionner des `tsconfig*.json` souvent en JSONC léger, sans dépendance jsonc.
+fn strip_tsconfig_line_comments(raw: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    for line in raw.lines() {
+        let t = line.trim_start();
+        if t.starts_with("//") {
+            continue;
+        }
+        let t2 = t.trim();
+        if t2.starts_with("/*") && t2.ends_with("*/") && !t2.contains('\n') {
+            continue;
+        }
+        kept.push(line);
+    }
+    kept.join("\n")
+}
+
+/// Parse JSON de tsconfig : strict puis sans commentaires de ligne.
+fn parse_tsconfig_json_for_merge(raw: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(raw)
+        .ok()
+        .or_else(|| serde_json::from_str(&strip_tsconfig_line_comments(raw)).ok())
+        .or_else(|| {
+            // Virgules finales simples avant `}` ou `]` (cas fréquent dans tsconfig Vite).
+            let relaxed = strip_tsconfig_line_comments(raw);
+            let re = Regex::new(r",(\s*[\]}])").ok()?;
+            let mut collapsed = relaxed;
+            for _ in 0..8 {
+                let next = re.replace_all(&collapsed, "$1").to_string();
+                if next == collapsed {
+                    break;
+                }
+                collapsed = next;
+            }
+            serde_json::from_str(&collapsed).ok()
+        })
+}
+
 fn looks_like_ts_tests_compiled_in_app_build(stdout: &str, stderr: &str) -> bool {
     let combined = format!("{stdout}\n{stderr}");
     let test_path = combined.contains(".test.")
@@ -537,6 +602,22 @@ fn looks_like_ts_tests_compiled_in_app_build(stdout: &str, stderr: &str) -> bool
     test_path && (ts_runner || jest_hint || ts_noise_in_tests)
 }
 
+/// Erreurs `tsc` typiques quand le code généré est partiellement incohérent (exports, props, imports) alors que Vite peut encore produire un bundle.
+fn looks_like_tsc_codegen_errors_for_vite_fallback(stdout: &str, stderr: &str) -> bool {
+    let c = format!("{stdout}\n{stderr}");
+    if !c.contains("error TS") {
+        return false;
+    }
+    c.contains("TS2305")
+        || c.contains("TS2613")
+        || c.contains("TS2339")
+        || c.contains("TS2459")
+        || c.contains("TS2322")
+        || c.contains("TS2345")
+        || c.contains("TS2741")
+        || c.contains("TS6133")
+}
+
 /// Ne pas modifier les `tsconfig.json` « solution » (références uniquement) : ils n’acceptent pas `exclude` utile pour les sous-projets.
 fn tsconfig_eligible_for_exclude_patch(v: &serde_json::Value) -> bool {
     let Some(o) = v.as_object() else {
@@ -557,9 +638,9 @@ fn try_merge_exclude_into_tsconfig(path: &Path) -> Result<bool, String> {
         return Ok(false);
     }
     let raw = fs::read_to_string(path).map_err(|e| format!("lecture {}: {e}", path.display()))?;
-    let mut v: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return Ok(false),
+    let mut v: serde_json::Value = match parse_tsconfig_json_for_merge(&raw) {
+        Some(v) => v,
+        None => return Ok(false),
     };
     if !tsconfig_eligible_for_exclude_patch(&v) {
         return Ok(false);
@@ -595,7 +676,7 @@ fn try_merge_exclude_into_tsconfig(path: &Path) -> Result<bool, String> {
 /// Tente de corriger les tsconfig pour exclure les tests, puis indique ce qui a été modifié (pour les messages d’erreur).
 fn try_autofix_tsconfig_exclude_tests_for_build(project_root: &Path) -> Result<Option<String>, String> {
     let mut patched = Vec::new();
-    for name in ["tsconfig.app.json", "tsconfig.json"] {
+    for name in ["tsconfig.app.json", "tsconfig.json", "tsconfig.node.json"] {
         let p = project_root.join(name);
         if try_merge_exclude_into_tsconfig(&p)? {
             patched.push(name.to_string());
@@ -611,8 +692,144 @@ fn try_autofix_tsconfig_exclude_tests_for_build(project_root: &Path) -> Result<O
     }
 }
 
+const AKASHA_TEST_SHIM_REL: &str = "src/akasha-studio-test-globals.d.ts";
+const AKASHA_TEST_SHIM_MARKER: &str = "akasha-studio-auto: test globals shim";
+
+/// Déclarations minimales pour que `tsc` du build d’application accepte les fichiers `*.test.*` sans @types/jest.
+fn try_write_test_globals_shim(project_root: &Path) -> Result<bool, String> {
+    let p = project_root.join(AKASHA_TEST_SHIM_REL);
+    if p.is_file() {
+        let existing = fs::read_to_string(&p).map_err(|e| e.to_string())?;
+        if existing.contains(AKASHA_TEST_SHIM_MARKER) {
+            return Ok(false);
+        }
+        return Ok(false);
+    }
+    if let Some(parent) = p.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let body = format!(
+        "// {AKASHA_TEST_SHIM_MARKER}\n\
+         // Ajouté automatiquement par Akasha pour la vérification post-tâche (build) Code Studio.\n\
+         declare function describe(...args: unknown[]): void;\n\
+         declare function it(...args: unknown[]): void;\n\
+         declare function expect(...args: unknown[]): unknown;\n"
+    );
+    fs::write(&p, body).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+async fn try_npm_install_autofix(project_root: &Path, timeout_sec: u64) {
+    let argv = vec!["npm".into(), "install".into()];
+    if !argv_looks_safe(&argv) {
+        return;
+    }
+    let cap = timeout_sec
+        .min(AUTO_VERIFY_NPM_INSTALL_CAP_SEC)
+        .max(90);
+    let _ = studio_run_command_capture(project_root, &argv, cap).await;
+}
+
+/// Sections canoniques du plan — si l’une apparaît plus d’une fois, c’est en général un second gabarit collé en bas.
+const CODE_STUDIO_PLAN_SECTION_HEADINGS: &[&str] = &[
+    "## Description",
+    "## Scope",
+    "## Stack",
+    "## Structure du projet",
+    "## Commandes",
+    "## Fichiers hors scope",
+    "## Demandes d'évolutions utilisateur par phase",
+    "## Recommandations",
+    "## Todos",
+    "## Informations complémentaires",
+];
+
+fn studio_reject_polluted_plan_content(content: &str) -> Option<String> {
+    for heading in CODE_STUDIO_PLAN_SECTION_HEADINGS {
+        if content.matches(heading).count() > 1 {
+            return Some(format!(
+                "rejected: section « {heading} » dupliquée dans CODE_STUDIO_PLAN.md — modifier la section existante (search_replace sur ce bloc), ne pas recoller un second gabarit ni réécrire tout le fichier en bas."
+            ));
+        }
+    }
+    let titre_lines = content
+        .lines()
+        .filter(|l| l.trim().starts_with("# Titre"))
+        .count();
+    if titre_lines > 1 {
+        return Some(
+            "rejected: plusieurs lignes « # Titre » dans CODE_STUDIO_PLAN.md — conserver une seule ligne de titre en tête du fichier."
+                .to_string(),
+        );
+    }
+    None
+}
+
+fn is_ts_js_like_ext(ext: &str) -> bool {
+    matches!(
+        ext,
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs"
+    )
+}
+
+/// Lignes type « **4. foo.ts** - … » ou inventaire markdown dans du code (hors commentaires de ligne simples).
+fn code_file_has_markdown_instruction_lines(ext: &str, content: &str) -> bool {
+    if !is_ts_js_like_ext(ext) {
+        return false;
+    }
+    let bold_line = match Regex::new(r"^\s*\*\*.+\*\*") {
+        Ok(re) => re,
+        Err(_) => return false,
+    };
+    let numbered_file_hint = match Regex::new(r"^\s*\d+\.\s+\S+\.(ts|tsx|js|jsx)\b") {
+        Ok(re) => re,
+        Err(_) => return false,
+    };
+    for line in content.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t.starts_with("//") {
+            continue;
+        }
+        if t.starts_with("/*") {
+            continue;
+        }
+        // Ne pas confondre « * ligne de bloc » avec du gras markdown « **…** ».
+        if t.starts_with('*') && !t.starts_with("**") {
+            continue;
+        }
+        if bold_line.is_match(t)
+            && (t.contains(" - ")
+                || t.contains(" — ")
+                || t.contains('—')
+                || t.contains(".ts")
+                || t.contains(".tsx")
+                || t.contains(".js")
+                || t.contains(".jsx"))
+        {
+            return true;
+        }
+        if numbered_file_hint.is_match(t)
+            && (t.contains(" - ") || t.contains(" — ") || t.contains('—'))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Reject obvious LLM markdown / tool-protocol leakage in code files under Code Studio.
 pub fn studio_reject_polluted_code_content(disk_path: &Path, content: &str) -> Option<String> {
+    if disk_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("CODE_STUDIO_PLAN.md"))
+    {
+        return studio_reject_polluted_plan_content(content);
+    }
+
     let ext = disk_path.extension()?.to_string_lossy().to_lowercase();
     let code_ext = matches!(
         ext.as_str(),
@@ -635,6 +852,12 @@ pub fn studio_reject_polluted_code_content(disk_path: &Path, content: &str) -> O
     }) {
         return Some(
             "rejected: le fichier contient des lignes de protocole d’outil — le contenu doit être uniquement du code source."
+                .to_string(),
+        );
+    }
+    if code_file_has_markdown_instruction_lines(ext.as_str(), content) {
+        return Some(
+            "rejected: le fichier code contient des lignes de type markdown / consigne utilisateur (**…**, « N. fichier.ts — … ») — ce texte doit aller uniquement dans la réponse chat, pas dans le source."
                 .to_string(),
         );
     }
@@ -671,29 +894,127 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
         argv.len() == 3 && argv[0] == "npm" && argv[1] == "run" && argv[2] == "build";
     match studio_run_command_capture(project_root, &argv, timeout_sec).await {
         Ok((Some(0), _, _)) => Ok(()),
-        Ok((code, out, err)) => {
+        Ok((mut code, mut out, mut err)) => {
             let first_err = format_verify_failure(code, &out, &err);
-            if is_npm_run_build && looks_like_ts_tests_compiled_in_app_build(&out, &err) {
+            if !is_npm_run_build {
+                return Err(first_err);
+            }
+
+            let mut fix_notes: Vec<String> = Vec::new();
+
+            if looks_like_missing_npm_module(&out, &err) {
+                fix_notes.push("npm install (dépendances manquantes détectées)".to_string());
+                try_npm_install_autofix(project_root, timeout_sec).await;
+                match studio_run_command_capture(project_root, &argv, timeout_sec).await {
+                    Ok((Some(0), _, _)) => return Ok(()),
+                    Ok((c, o, e)) => {
+                        code = c;
+                        out = o;
+                        err = e;
+                    }
+                    Err(e2) => {
+                        return Err(format!(
+                            "{first_err}\n\n[Tentatives automatiques : {}]\nVérification post-tâche après npm install: {e2}",
+                            fix_notes.join(" ; ")
+                        ));
+                    }
+                }
+            }
+
+            if looks_like_ts_tests_compiled_in_app_build(&out, &err) {
                 match try_autofix_tsconfig_exclude_tests_for_build(project_root) {
-                    Ok(Some(fix_note)) => {
+                    Ok(Some(note)) => {
+                        fix_notes.push(note.clone());
                         match studio_run_command_capture(project_root, &argv, timeout_sec).await {
-                            Ok((Some(0), _, _)) => Ok(()),
-                            Ok((c2, o2, e2)) => Err(format!(
-                                "{first_err}\n\n[Réparation automatique : {fix_note} — nouvelle vérification]\n{}",
-                                format_verify_failure(c2, &o2, &e2)
-                            )),
-                            Err(e2) => Err(format!(
-                                "{first_err}\n\n[Réparation automatique : {fix_note} — nouvelle vérification]\nVérification post-tâche: {e2}"
-                            )),
+                            Ok((Some(0), _, _)) => return Ok(()),
+                            Ok((c, o, e)) => {
+                                code = c;
+                                out = o;
+                                err = e;
+                            }
+                            Err(e2) => {
+                                return Err(format!(
+                                    "{first_err}\n\n[Tentatives automatiques : {}]\n{}",
+                                    fix_notes.join(" ; "),
+                                    e2
+                                ));
+                            }
                         }
                     }
-                    Ok(None) => Err(first_err),
-                    Err(fix_err) => Err(format!(
-                        "{first_err}\n\n[Réparation automatique impossible : {fix_err}]"
-                    )),
+                    Ok(None) => {}
+                    Err(fix_err) => fix_notes.push(format!("tsconfig exclude : {fix_err}")),
                 }
+
+                if looks_like_ts_tests_compiled_in_app_build(&out, &err) {
+                    match try_write_test_globals_shim(project_root) {
+                        Ok(true) => {
+                            fix_notes.push(format!(
+                                "fichier {AKASHA_TEST_SHIM_REL} (globals describe/it/expect)"
+                            ));
+                            match studio_run_command_capture(project_root, &argv, timeout_sec).await {
+                                Ok((Some(0), _, _)) => return Ok(()),
+                                Ok((c2, o2, e2)) => {
+                                    return Err(format!(
+                                        "{first_err}\n\n[Tentatives automatiques : {}]\n{}",
+                                        fix_notes.join(" ; "),
+                                        format_verify_failure(c2, &o2, &e2)
+                                    ));
+                                }
+                                Err(e2) => {
+                                    return Err(format!(
+                                        "{first_err}\n\n[Tentatives automatiques : {}]\nVérification post-tâche: {e2}",
+                                        fix_notes.join(" ; ")
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(shim_err) => fix_notes.push(format!("shim tests : {shim_err}")),
+                    }
+                }
+            }
+
+            // Dernier secours : le script `npm run build` enchaîne souvent `tsc` puis Vite ; si le code généré
+            // est incohérent pour TypeScript mais Vite peut encore bundler, on tente uniquement `vite build`
+            // (local, sans réseau — exige `node_modules/vite`).
+            if project_root.join("node_modules/vite/package.json").is_file()
+                && looks_like_tsc_codegen_errors_for_vite_fallback(&out, &err)
+            {
+                let vite_argv = vec![
+                    "npm".into(),
+                    "exec".into(),
+                    "--".into(),
+                    "vite".into(),
+                    "build".into(),
+                ];
+                if argv_looks_safe(&vite_argv) {
+                    fix_notes.push(
+                        "secours: npm exec -- vite build (sans étape tsc du script build)".into(),
+                    );
+                    match studio_run_command_capture(project_root, &vite_argv, timeout_sec).await {
+                        Ok((Some(0), _, _)) => return Ok(()),
+                        Ok((cv, ov, ev)) => {
+                            fix_notes.push(format!(
+                                "vite build secours — {}",
+                                format_verify_failure(cv, &ov, &ev)
+                                    .chars()
+                                    .take(900)
+                                    .collect::<String>()
+                            ));
+                        }
+                        Err(ve) => fix_notes.push(format!("vite build secours: {ve}")),
+                    }
+                }
+            }
+
+            let last = format_verify_failure(code, &out, &err);
+            if fix_notes.is_empty() {
+                Err(last)
             } else {
-                Err(first_err)
+                Err(format!(
+                    "{last}\n\n[Tentatives automatiques : {}]",
+                    fix_notes.join(" ; ")
+                ))
             }
         }
         Err(e) => Err(format!("Vérification post-tâche: {}", e)),
@@ -2116,6 +2437,40 @@ mod tests {
     }
 
     #[test]
+    fn studio_reject_polluted_detects_markdown_instruction_in_ts() {
+        use super::studio_reject_polluted_code_content;
+        use std::path::Path;
+        let p = Path::new("src/gameLogic.ts");
+        let bad = "function f() {}\n\n**4. gameLogic.ts** - Ajouter l'export de minimax\n";
+        assert!(studio_reject_polluted_code_content(p, bad).is_some());
+        let bad2 = "function f() {}\n\n4. gameLogic.ts — ajouter export\n";
+        assert!(studio_reject_polluted_code_content(p, bad2).is_some());
+        let ok = "function f() {}\n// **note** fichier.ts — pour humain\n";
+        assert!(studio_reject_polluted_code_content(p, ok).is_none());
+    }
+
+    #[test]
+    fn studio_reject_polluted_plan_rejects_duplicate_section() {
+        use super::studio_reject_polluted_code_content;
+        use std::path::Path;
+        let p = Path::new("CODE_STUDIO_PLAN.md");
+        let dup = "## Description\nA\n## Scope\nB\n## Description\nC\n";
+        let msg = studio_reject_polluted_code_content(p, dup).expect("expected rejection");
+        assert!(msg.contains("## Description"));
+        let ok = "# Titre : jeu\n\n## Description\nUne seule fois.\n## Scope\nx\n";
+        assert!(studio_reject_polluted_code_content(p, ok).is_none());
+    }
+
+    #[test]
+    fn studio_reject_polluted_plan_rejects_duplicate_titre_line() {
+        use super::studio_reject_polluted_code_content;
+        use std::path::Path;
+        let p = Path::new("CODE_STUDIO_PLAN.md");
+        let dup = "# Titre : a\n\n## Description\nx\n\n# Titre : b\n";
+        assert!(studio_reject_polluted_code_content(p, dup).is_some());
+    }
+
+    #[test]
     fn studio_code_plan_message_prefix_includes_plan_text() {
         use super::studio_code_plan_message_prefix;
         let dir = std::env::temp_dir().join(format!(
@@ -2151,6 +2506,43 @@ Try `npm i --save-dev @types/jest`";
             "src/App.tsx(1,1): error TS2322: Type 'number' is not assignable to type 'string'.",
             ""
         ));
+    }
+
+    #[test]
+    fn strip_tsconfig_line_comments_drops_slash_slash_lines() {
+        use super::strip_tsconfig_line_comments;
+        let raw = "{\n  // hi\n  \"x\": 1\n}";
+        let s = strip_tsconfig_line_comments(raw);
+        assert!(serde_json::from_str::<serde_json::Value>(&s).is_ok());
+    }
+
+    #[test]
+    fn parse_tsconfig_json_for_merge_accepts_trailing_comma() {
+        use super::parse_tsconfig_json_for_merge;
+        let raw = r#"{"compilerOptions": { "strict": true, },}"#;
+        assert!(parse_tsconfig_json_for_merge(raw).is_some());
+    }
+
+    #[test]
+    fn looks_like_tsc_codegen_errors_for_vite_fallback_detects_export_mismatch() {
+        use super::looks_like_tsc_codegen_errors_for_vite_fallback;
+        let s = "src/ai.ts(6,15): error TS2305: Module '\"./gameLogic\"' has no exported member 'Player'.";
+        assert!(looks_like_tsc_codegen_errors_for_vite_fallback(s, ""));
+        assert!(!looks_like_tsc_codegen_errors_for_vite_fallback("no type errors here", ""));
+    }
+
+    #[test]
+    fn npm_exec_vite_build_argv_is_whitelisted() {
+        use super::{argv_looks_safe, npm_exec_argv_allowed_for_studio_verify};
+        let v = vec![
+            "npm".into(),
+            "exec".into(),
+            "--".into(),
+            "vite".into(),
+            "build".into(),
+        ];
+        assert!(npm_exec_argv_allowed_for_studio_verify(&v));
+        assert!(argv_looks_safe(&v));
     }
 
     #[test]

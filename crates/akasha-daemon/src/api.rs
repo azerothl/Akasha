@@ -2760,6 +2760,7 @@ const STUDIO_AGENT_QUALITY_REMINDER: &str = concat!(
     "\"fichier corrigé\", \"je relance le build\", \"voici la correction\". Ces messages vont uniquement dans la réponse chat.\n",
     "- Pour les fichiers de code (ex: .ts, .tsx, .js, .rs, .py), n'écris que du code syntaxiquement valide pour ce langage ; ",
     "ne mets jamais de prose libre hors commentaires valides du langage.\n",
+    "- Interdiction dans les fichiers .ts / .tsx / .js / .jsx : lignes « documentation » pour l’utilisateur (titres markdown `**…**`, listes du type « 4. fichier.ts — … », résumés de lot) — le daemon **rejette** l’écriture ; ce texte va **uniquement** dans le chat.\n",
     "- Ne déclare PAS la tâche terminée tant que le livrable n'est pas vérifié quand c'est possible : lance un build ou des tests ",
     "via TOOL: run_command avec --cwd workspace:/ (ou la racine du projet) quand la politique d'outils le permet — ",
     "par ex. npm run build, npm test, cargo build, cargo test, pytest, tsc --noEmit. Corrige les erreurs de compilation ",
@@ -2774,6 +2775,7 @@ const STUDIO_AGENT_QUALITY_REMINDER: &str = concat!(
     "- N'achève pas seulement par « Terminé » / « Done » : fournis un paragraphe utile lisible sans ouvrir les fichiers.\n",
     "- Fichier `CODE_STUDIO_PLAN.md` (racine) : **gabarit fixe** — ligne d'ouverture `# Titre : …` puis dans l'ordre les sections `## Description`, `## Scope`, `## Stack`, `## Structure du projet`, `## Commandes`, `## Fichiers hors scope`, `## Demandes d'évolutions utilisateur par phase`, `## Recommandations`, `## Todos`, `## Informations complémentaires` (conserver ces titres et cet ordre).\n",
     "  Avant d'écrire : `read_file workspace:/CODE_STUDIO_PLAN.md`. Ne **pas** remplacer tout le fichier pour une modification ciblée : mettre à jour **par section** (search_replace ciblé ou une seule section réécrite), en conservant les titres `##` et le reste inchangé.\n",
+    "  Ne **jamais** dupliquer une section `## …` déjà présente (pas de second gabarit collé en bas du fichier) : le daemon rejette les écritures qui répètent les titres de section.\n",
     "  Suivi des lots : ajouter une **ligne datée courte** dans `## Informations complémentaires` ou `## Demandes d'évolutions utilisateur par phase` plutôt que de réécrire l'ensemble du plan.\n",
     "  Si le fichier est absent (import), le créer avec ce gabarit en synthétisant le dépôt. Remplacement complet réservé à une demande **explicite** de réinitialisation du plan (bouton ou consigne utilisateur).\n\n",
 );
