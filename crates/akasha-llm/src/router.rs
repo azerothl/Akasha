@@ -378,7 +378,12 @@ impl LLMRouter {
                         )
                         .await
                     {
-                        Ok(resp) => return Ok(resp),
+                        Ok(resp) => {
+                            // proxy_tx was moved into complete_stream and is now dropped.
+                            // Await the bridge so all queued chunks are forwarded before returning.
+                            let _ = bridge_handle.await;
+                            return Ok(resp);
+                        }
                         Err(e) => {
                             warn!(
                                 error = %e,

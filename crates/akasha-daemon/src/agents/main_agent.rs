@@ -508,6 +508,9 @@ User message:\n{}",
         }
 
         let mut message_for_llm = message.to_string();
+        // Keep the unmodified user message for routing decisions (recall detection, selector).
+        // The studio prefix is only for the LLM prompt — routing logic should see the original intent.
+        let original_user_message = message.to_string();
         if let Some(ref b) = studio_evolution_branch {
             message_for_llm = format!(
                 "[Studio: apply changes on git branch `{b}`]\n\n{}",
@@ -534,17 +537,20 @@ User message:\n{}",
         let agent_clone = self.clone();
         let studio_forced_spawn = studio_forced_agent.clone();
         let message_owned = message_for_llm;
+        let original_user_message_owned = original_user_message;
         let session_id_owned = session_id.to_string();
         let store_path_buf = store_path.to_path_buf();
         let preliminary_agent_str = preliminary_agent.to_string();
         tokio::spawn(async move {
             let store_path = store_path_buf.as_path();
             let message = message_owned.as_str();
+            let original_message = original_user_message_owned.as_str();
             let session_id = session_id_owned.as_str();
             let preliminary_agent = preliminary_agent_str.as_str();
 
             // Run the LLM selector after the task is safely persisted.
-            let skip_selector_for_recall = forward_to_orchestrator && is_session_recall_message(message);
+            // Use the original (unprefixed) message so studio prefixes don't break recall detection.
+            let skip_selector_for_recall = forward_to_orchestrator && is_session_recall_message(original_message);
             let selector_result = if let Some(agent) = studio_forced_spawn
                 .as_ref()
                 .filter(|a| SPECIALIST_AGENTS.contains(&a.as_str()))

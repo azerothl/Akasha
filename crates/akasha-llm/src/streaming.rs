@@ -40,8 +40,9 @@ pub async fn read_openai_compatible_sse_stream(
         let Some(chunk) = chunk else { break };
         pending.push_str(&String::from_utf8_lossy(&chunk));
         while let Some(pos) = pending.find('\n') {
+            let end = pos + 1;
             let line = pending[..pos].trim_end_matches('\r').trim().to_string();
-            pending = pending[pos + 1..].to_string();
+            pending.drain(..end);
             if line.is_empty() || line.starts_with(':') {
                 continue;
             }
@@ -174,8 +175,9 @@ pub async fn read_anthropic_messages_sse_stream(
         pending.push_str(&String::from_utf8_lossy(&chunk));
 
         while let Some(pos) = pending.find('\n') {
+            let end = pos + 1;
             let line = pending[..pos].trim_end_matches('\r').trim().to_string();
-            pending = pending[pos + 1..].to_string();
+            pending.drain(..end);
             if line.is_empty() || line.starts_with(':') {
                 continue;
             }
@@ -267,8 +269,9 @@ pub async fn read_google_gemini_sse_stream(
         pending.push_str(&String::from_utf8_lossy(&chunk));
 
         while let Some(pos) = pending.find('\n') {
+            let end = pos + 1;
             let line = pending[..pos].trim_end_matches('\r').trim().to_string();
-            pending = pending[pos + 1..].to_string();
+            pending.drain(..end);
             if line.is_empty() || line.starts_with(':') {
                 continue;
             }

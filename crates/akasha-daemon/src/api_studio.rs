@@ -346,10 +346,19 @@ fn collect_files_recursive(root: &Path, rel: &Path, depth: usize, out: &mut Vec<
         if name == ".git" || name == "node_modules" {
             continue;
         }
+        // Use file_type() (does not follow symlinks) to skip symlinked entries entirely.
+        // Following symlinks could traverse outside the studio sandbox root.
+        let ft = match e.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if ft.is_symlink() {
+            continue;
+        }
         let mut sub = rel.to_path_buf();
         sub.push(&name);
         let sub_s = sub.to_string_lossy().replace('\\', "/");
-        if e.path().is_dir() {
+        if ft.is_dir() {
             collect_files_recursive(root, &sub, depth + 1, out);
         } else if name != ".akasha-studio.json" {
             out.push(sub_s);
@@ -373,18 +382,85 @@ fn strip_studio_projects_prefix(path_only: &str) -> Option<&str> {
     path_only.strip_prefix("/api/studio/projects/")
 }
 
+fn allowed_studio_command(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "npm"
+            | "npm.cmd"
+            | "pnpm"
+            | "pnpm.cmd"
+            | "yarn"
+            | "yarn.cmd"
+            | "cargo"
+            | "cargo.exe"
+            | "git"
+            | "git.exe"
+    )
+}
+
+fn allowed_studio_subcommand(cmd: &str, argv: &[String]) -> bool {
+    let subcommand = argv.get(1).map(String::as_str);
+    match cmd {
+        "npm" | "npm.cmd" | "pnpm" | "pnpm.cmd" => {
+            matches!(subcommand, Some("run") | Some("install") | Some("ci"))
+        }
+        "yarn" | "yarn.cmd" => {
+            matches!(
+                subcommand,
+                Some("run")
+                    | Some("install")
+                    | Some("build")
+                    | Some("preview")
+                    | Some("dev")
+                    | Some("start")
+                    | Some("test")
+            )
+        }
+        "cargo" | "cargo.exe" => {
+            matches!(
+                subcommand,
+                Some("build")
+                    | Some("check")
+                    | Some("run")
+                    | Some("test")
+                    | Some("fmt")
+                    | Some("clippy")
+            )
+        }
+        "git" | "git.exe" => {
+            matches!(subcommand, Some("rev-parse") | Some("status") | Some("diff"))
+        }
+        _ => false,
+    }
+}
+
 fn argv_looks_safe(argv: &[String]) -> bool {
     if argv.is_empty() {
         return false;
     }
-    for a in argv {
-        if a.contains("..")
+
+    let cmd = argv[0].as_str();
+    let cmd_path = Path::new(cmd);
+    if cmd_path.is_absolute()
+        || cmd.contains('/')
+        || cmd.contains('\\')
+        || !allowed_studio_command(cmd)
+        || !allowed_studio_subcommand(cmd, argv)
+    {
+        return false;
+    }
+
+    for a in argv.iter().skip(1) {
+        let arg_path = Path::new(a);
+        if a.is_empty()
+            || a.contains("..")
             || a.contains(';')
             || a.contains('|')
             || a.contains('&')
             || a.contains('`')
             || a.contains('\n')
             || a.contains('\r')
+            || arg_path.is_absolute()
         {
             return false;
         }
