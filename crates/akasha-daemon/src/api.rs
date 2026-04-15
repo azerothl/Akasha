@@ -8734,16 +8734,28 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         "completed"
     };
 
+    let mut final_payload = serde_json::json!({
+        "task_id": task_id.to_string(),
+        "status": final_status_str,
+        "model_used": last_llm_model_used
+    });
+    if studio_verify_error.is_some() {
+        if let Some(obj) = final_payload.as_object_mut() {
+            obj.insert(
+                "reason".to_string(),
+                serde_json::Value::String(
+                    studio_verify_error
+                        .as_deref()
+                        .unwrap_or("")
+                        .chars()
+                        .take(2000)
+                        .collect(),
+                ),
+            );
+        }
+    }
     let _ = bus.send(
-        EventEnvelope::new(
-            final_event_type,
-            Some(serde_json::json!({
-                "task_id": task_id.to_string(),
-                "status": final_status_str,
-                "model_used": last_llm_model_used
-            })),
-        )
-        .with_correlation(task_id),
+        EventEnvelope::new(final_event_type, Some(final_payload)).with_correlation(task_id),
     );
     emit_timeline_once_for_task(
         &bus,
@@ -12219,6 +12231,18 @@ async fn get_task_status(
             })
         })
         .collect();
+    let failure_detail: Option<String> = if matches!(
+        task.status,
+        TaskStatus::Failed | TaskStatus::Cancelled
+    ) {
+        progress_list
+            .iter()
+            .rev()
+            .find(|e| !task_progress_is_chat_stub(&e.message))
+            .map(|e| e.message.chars().take(4000).collect::<String>())
+    } else {
+        None
+    };
     let mut body = serde_json::json!({
         "task_id": task.id.to_string(),
         "status": task.status.as_str(),
@@ -12232,6 +12256,9 @@ async fn get_task_status(
     });
     if let Some(u) = todos_updated_at {
         body["todos_updated_at"] = serde_json::Value::String(u);
+    }
+    if let Some(fd) = failure_detail {
+        body["failure_detail"] = serde_json::Value::String(fd);
     }
     json_response("200 OK", &body.to_string())
 }

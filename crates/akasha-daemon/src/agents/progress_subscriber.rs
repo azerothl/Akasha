@@ -67,11 +67,18 @@ pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, per
         {
             let task_id = payload.get("task_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
             let Some(task_id) = task_id else { continue };
+            let generic = [
+                "Terminé.",
+                "Done.",
+                "Échec.",
+                "Annulé.",
+                "Failed.",
+                "Cancelled.",
+            ];
             let message: String = if ev.event_type == EventType::TaskCompleted {
                 let mut g = progress.write().await;
                 let q = g.entry(task_id).or_insert_with(VecDeque::new);
                 let last_msg = q.back().map(|e| e.message.trim()).unwrap_or("");
-                let generic = ["Terminé.", "Done.", "Échec.", "Annulé."];
                 let chosen = if !last_msg.is_empty() && !generic.contains(&last_msg) {
                     last_msg.to_string()
                 } else {
@@ -79,9 +86,50 @@ pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, per
                 };
                 chosen
             } else if ev.event_type == EventType::TaskFailed {
-                "Échec.".to_string()
+                // Do not wipe the last substantive ProgressUpdate (e.g. studio verify stderr, LLM error text).
+                let q_snapshot = {
+                    let g = progress.read().await;
+                    g.get(&task_id).cloned().unwrap_or_default()
+                };
+                let last_substantive = q_snapshot.iter().rev().find_map(|e| {
+                    let t = e.message.trim();
+                    if t.is_empty() || generic.contains(&t) {
+                        None
+                    } else {
+                        Some(t.to_string())
+                    }
+                });
+                let payload_reason = payload
+                    .get("reason")
+                    .or_else(|| payload.get("detail"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if let Some(s) = last_substantive {
+                    s
+                } else if !payload_reason.is_empty() {
+                    format!("Échec — {}", payload_reason)
+                } else {
+                    "Échec.".to_string()
+                }
             } else {
-                "Annulé.".to_string()
+                let q_snapshot = {
+                    let g = progress.read().await;
+                    g.get(&task_id).cloned().unwrap_or_default()
+                };
+                let last_substantive = q_snapshot.iter().rev().find_map(|e| {
+                    let t = e.message.trim();
+                    if t.is_empty() || generic.contains(&t) {
+                        None
+                    } else {
+                        Some(t.to_string())
+                    }
+                });
+                if let Some(s) = last_substantive {
+                    s
+                } else {
+                    "Annulé.".to_string()
+                }
             };
             if let Some(ref tx) = persistence_tx {
                 let _ = tx.send(TaskPersistenceMsg::Progress {
