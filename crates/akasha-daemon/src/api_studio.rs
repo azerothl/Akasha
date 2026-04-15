@@ -252,6 +252,34 @@ struct StudioMeta {
 }
 
 const MAX_TECH_STACK_CHARS: usize = 8000;
+/// Upper bound on characters injected from `CODE_STUDIO_PLAN.md` into each Code Studio message.
+const MAX_CODE_STUDIO_PLAN_INJECT_CHARS: usize = 12_000;
+
+/// Embeds `CODE_STUDIO_PLAN.md` so multi-turn and evolution tasks keep product scope (game type, goals, history).
+/// Truncates with an explicit hint to use `read_file` for the full file.
+pub fn studio_code_plan_message_prefix(project_root: &Path) -> Option<String> {
+    let plan_path = project_root.join("CODE_STUDIO_PLAN.md");
+    let raw = fs::read_to_string(&plan_path).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let n = trimmed.chars().count();
+    let body: String = if n > MAX_CODE_STUDIO_PLAN_INJECT_CHARS {
+        let head: String = trimmed
+            .chars()
+            .take(MAX_CODE_STUDIO_PLAN_INJECT_CHARS)
+            .collect();
+        format!(
+            "{head}…\n[… fin de CODE_STUDIO_PLAN.md tronquée pour la limite de contexte — utiliser read_file workspace:/CODE_STUDIO_PLAN.md pour le fichier complet.]\n"
+        )
+    } else {
+        trimmed.to_string()
+    };
+    Some(format!(
+        "[Contexte projet — CODE_STUDIO_PLAN.md (référence produit, objectif, historique ; à respecter tant que l’utilisateur ne demande pas explicitement autre chose) :\n{body}\n]\n\n"
+    ))
+}
 
 /// Prefix prepended to the user message when `tech_stack` is set (read by LLM + studio agents).
 pub fn studio_tech_stack_message_prefix(project_root: &Path) -> Option<String> {
@@ -1824,5 +1852,24 @@ mod tests {
         let p = Path::new("src/App.tsx");
         assert!(studio_reject_polluted_code_content(p, "```tsx\nconst x = 1;\n").is_some());
         assert!(studio_reject_polluted_code_content(p, "const x = 1;\n").is_none());
+    }
+
+    #[test]
+    fn studio_code_plan_message_prefix_includes_plan_text() {
+        use super::studio_code_plan_message_prefix;
+        let dir = std::env::temp_dir().join(format!(
+            "akasha_studio_plan_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("CODE_STUDIO_PLAN.md"),
+            "# Puissance 4\n\nObjectif : grille 7×6, IA locale.",
+        )
+        .unwrap();
+        let p = studio_code_plan_message_prefix(&dir).unwrap();
+        assert!(p.contains("Puissance 4"));
+        assert!(p.contains("7×6"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

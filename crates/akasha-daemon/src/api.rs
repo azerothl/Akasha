@@ -10813,6 +10813,15 @@ pub async fn handle_api(
         let ack_message = build_ack_message(&message);
         let mut message_for_llm = message;
         if let Some(ref root) = studio_disk_root {
+            if let Some(plan) = crate::api_studio::studio_code_plan_message_prefix(root) {
+                message_for_llm = format!("{plan}{message_for_llm}");
+            }
+            if studio_evolution_branch.is_some() {
+                message_for_llm = format!(
+                    "[Évolution Code Studio — conserver le même périmètre produit et le même type d’application que le dépôt (cf. CODE_STUDIO_PLAN.md ci-dessus et code existant) ; ne pas remplacer par un autre jeu, une autre app ou un autre domaine fonctionnel sauf instruction explicite de l’utilisateur.]\n\n{}",
+                    message_for_llm
+                );
+            }
             if let Some(prefix) = crate::api_studio::studio_tech_stack_message_prefix(root) {
                 message_for_llm = format!("{prefix}{message_for_llm}");
             }
