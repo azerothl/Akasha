@@ -2890,6 +2890,7 @@ pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
         "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. When a [Stack technique du projet] block is present in the user message, obey it for UI libraries, bundler, CSS approach, and TypeScript/JavaScript choice. Verify dependencies exist in package.json before importing. Use read_file before editing. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Run build/lint/typecheck via run_command --cwd workspace:/ when policy allows, and fix issues you introduced. End with a clear user-facing summary of changes and how to preview or test — not only \"Done\"."),
         "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Before declaring completion: run tests or at least start/build checks when feasible; summarize APIs and behavior for the user in accessible terms."),
         "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If prose was accidentally inserted in a source file, remove it and keep only valid syntax for that file type. Verify end-to-end coherence; run combined build/test when policy allows. Close with a plain-language recap of what changed and how to run the app."),
+        "studio_planner" => Some("You are the Code Studio planning agent. READ-ONLY on application source: do NOT write_file, edit_file, delete_file, search_replace, or apply_patch to any path except workspace:/CODE_STUDIO_PLAN.md. Do NOT run_command except read-only diagnostics (git status, git log, git diff, ls, cat, npm/yarn/pnpm only if the user explicitly asked for a read-only check). You MAY update workspace:/CODE_STUDIO_PLAN.md by sections to capture the plan. Explore with read_file, list_directory, grep_codebase. Deliver a clear implementation plan, critical files, and risks; end with next steps for a human or for an implement agent."),
         _ => None,
     }
 }
@@ -11065,6 +11066,20 @@ pub async fn handle_api(
                 }
             })
             .unwrap_or(TaskPriority::UserNormal);
+        let studio_code_mode = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_code_mode").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
+        let studio_policy_hint = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_policy_hint").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let studio_delegate_single_level = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_delegate_single_level").and_then(|x| x.as_bool()))
+            .unwrap_or(false);
         let studio_disk_root = if let Some(pid) = body_json
             .as_ref()
             .and_then(|v| v.get("studio_project_id").and_then(|x| x.as_str()))
@@ -11112,6 +11127,12 @@ pub async fn handle_api(
             if let Some(plan) = crate::api_studio::studio_code_plan_message_prefix(root) {
                 message_for_llm = format!("{plan}{message_for_llm}");
             }
+            if let Some(p) = crate::api_studio::studio_evolution_summary_prefix(root) {
+                message_for_llm = format!("{p}{message_for_llm}");
+            }
+            if let Some(p) = crate::api_studio::studio_policy_notes_prefix(root) {
+                message_for_llm = format!("{p}{message_for_llm}");
+            }
             if studio_evolution_branch.is_some() {
                 message_for_llm = format!(
                     "[Évolution Code Studio — conserver le même périmètre produit et le même type d’application que le dépôt (cf. CODE_STUDIO_PLAN.md ci-dessus et code existant) ; ne pas remplacer par un autre jeu, une autre app ou un autre domaine fonctionnel sauf instruction explicite de l’utilisateur.]\n\n{}",
@@ -11120,6 +11141,22 @@ pub async fn handle_api(
             }
             if let Some(prefix) = crate::api_studio::studio_tech_stack_message_prefix(root) {
                 message_for_llm = format!("{prefix}{message_for_llm}");
+            }
+            if let Some(ref m) = studio_code_mode {
+                if let Some(p) = crate::api_studio::studio_code_mode_message_prefix(m) {
+                    message_for_llm = format!("{p}{message_for_llm}");
+                }
+            }
+            if let Some(ref h) = studio_policy_hint {
+                if let Some(p) = crate::api_studio::studio_one_shot_policy_hint_prefix(h) {
+                    message_for_llm = format!("{p}{message_for_llm}");
+                }
+            }
+            if studio_delegate_single_level {
+                message_for_llm = format!(
+                    "[Délégation : privilégier une seule passe agent — éviter les sous-agents ou tâches parallèles implicites sans accord utilisateur.]\n\n{}",
+                    message_for_llm
+                );
             }
         }
         let mut envelope = crate::gateway::MessageEnvelope::api(

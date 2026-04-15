@@ -149,6 +149,7 @@ const SPECIALIST_AGENTS: &[&str] = &[
     "studio_frontend",
     "studio_backend",
     "studio_fullstack",
+    "studio_planner",
 ];
 /// Priority for the task queue: high-priority tasks are processed before normal/scheduled (Phase 4.1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
