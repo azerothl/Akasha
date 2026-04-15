@@ -251,30 +251,42 @@ struct StudioMeta {
     verify_timeout_sec: Option<u64>,
 }
 
-const MAX_TECH_STACK_CHARS: usize = 8000;
+const MAX_TECH_STACK_CHARS: usize = 4000;
 /// Upper bound on characters injected from `CODE_STUDIO_PLAN.md` into each Code Studio message.
-const MAX_CODE_STUDIO_PLAN_INJECT_CHARS: usize = 12_000;
+const MAX_CODE_STUDIO_PLAN_INJECT_CHARS: usize = 4000;
+
+/// Keep only prompt-safe characters:
+/// - drop NUL and non-printable control chars (except LF/CR/TAB)
+/// - trim surrounding whitespace
+/// - bound final size in characters
+fn sanitize_for_prompt(raw: &str, max_chars: usize) -> String {
+    let cleaned: String = raw
+        .chars()
+        .filter(|&ch| ch == '\n' || ch == '\r' || ch == '\t' || !ch.is_control())
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    trimmed.chars().take(max_chars).collect::<String>()
+}
 
 /// Embeds `CODE_STUDIO_PLAN.md` so multi-turn and evolution tasks keep product scope (game type, goals, history).
 /// Truncates with an explicit hint to use `read_file` for the full file.
 pub fn studio_code_plan_message_prefix(project_root: &Path) -> Option<String> {
     let plan_path = project_root.join("CODE_STUDIO_PLAN.md");
     let raw = fs::read_to_string(&plan_path).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    let cleaned = sanitize_for_prompt(&raw, MAX_CODE_STUDIO_PLAN_INJECT_CHARS);
+    if cleaned.is_empty() {
         return None;
     }
-    let n = trimmed.chars().count();
-    let body: String = if n > MAX_CODE_STUDIO_PLAN_INJECT_CHARS {
-        let head: String = trimmed
-            .chars()
-            .take(MAX_CODE_STUDIO_PLAN_INJECT_CHARS)
-            .collect();
+    let was_truncated = raw.trim().chars().count() > cleaned.chars().count();
+    let body: String = if was_truncated {
         format!(
-            "{head}…\n[… fin de CODE_STUDIO_PLAN.md tronquée pour la limite de contexte — utiliser read_file workspace:/CODE_STUDIO_PLAN.md pour le fichier complet.]\n"
+            "{cleaned}…\n[… CODE_STUDIO_PLAN.md réduit (sécurité/limite contexte) — utiliser read_file workspace:/CODE_STUDIO_PLAN.md pour le contenu complet.]\n"
         )
     } else {
-        trimmed.to_string()
+        cleaned
     };
     Some(format!(
         "[Contexte projet — CODE_STUDIO_PLAN.md (référence produit, objectif, historique ; à respecter tant que l’utilisateur ne demande pas explicitement autre chose) :\n{body}\n]\n\n"
@@ -284,7 +296,7 @@ pub fn studio_code_plan_message_prefix(project_root: &Path) -> Option<String> {
 /// Prefix prepended to the user message when `tech_stack` is set (read by LLM + studio agents).
 pub fn studio_tech_stack_message_prefix(project_root: &Path) -> Option<String> {
     let meta = load_studio_meta(project_root)?;
-    let t = meta.tech_stack.as_deref()?.trim();
+    let t = sanitize_for_prompt(meta.tech_stack.as_deref()?, MAX_TECH_STACK_CHARS);
     if t.is_empty() {
         return None;
     }
@@ -1871,5 +1883,12 @@ mod tests {
         assert!(p.contains("Puissance 4"));
         assert!(p.contains("7×6"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sanitize_for_prompt_removes_control_chars() {
+        use super::sanitize_for_prompt;
+        let out = sanitize_for_prompt("abc\0def\n\tghi\u{0007}", 100);
+        assert_eq!(out, "abcdef\n\tghi");
     }
 }

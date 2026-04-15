@@ -1288,6 +1288,13 @@ fn active_intents_from_flags(flags: &MessageIntentFlags) -> Vec<&'static str> {
     out
 }
 
+fn code_studio_disable_plugin_intents(flags: &mut MessageIntentFlags) {
+    // Code Studio requests are code/project scoped; plugin routing intents for travel/geolocation
+    // can hijack tool selection and force unrelated plugins.
+    flags.transport = false;
+    flags.geolocation_distance = false;
+}
+
 fn build_plugin_routing_reminders(
     plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
     message: &str,
@@ -6352,7 +6359,13 @@ pub(crate) async fn run_message_via_llm(
              Follow your identity, personality, and traits from the system instructions.]\n",
         );
     }
-    let intent_flags = compute_message_intent_flags(&message);
+    // IMPORTANT: intent classification must use the clean user message (without guardrail/prefix
+    // injections). Using the raw `message` can falsely trigger intents (e.g. transport/maps)
+    // from injected context blocks and activate unrelated plugin routing.
+    let mut intent_flags = compute_message_intent_flags(clean_message);
+    if code_studio_disk_task {
+        code_studio_disable_plugin_intents(&mut intent_flags);
+    }
     let runtime_tool_routing_enforcer = build_runtime_tool_routing_enforcer(
         plugin_registry.as_ref(),
         clean_message,
