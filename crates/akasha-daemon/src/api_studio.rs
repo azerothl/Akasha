@@ -1,6 +1,7 @@
 //! HTTP handlers for `/api/studio/*` (Code Studio).
 use crate::studio::{is_strictly_under_studio_root, resolve_studio_project_dir, studio_projects_base};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -289,7 +290,7 @@ pub fn studio_code_plan_message_prefix(project_root: &Path) -> Option<String> {
         cleaned
     };
     Some(format!(
-        "[Contexte projet — CODE_STUDIO_PLAN.md (référence produit, objectif, historique ; à respecter tant que l’utilisateur ne demande pas explicitement autre chose) :\n{body}\n]\n\n"
+        "[Contexte projet — CODE_STUDIO_PLAN.md (gabarit à sections fixes ; à respecter tant que l’utilisateur ne demande pas explicitement autre chose ; les agents doivent le mettre à jour **par section**, pas en réécriture totale systématique) :\n{body}\n]\n\n"
     ))
 }
 
@@ -487,6 +488,129 @@ fn truncate_output(s: &str) -> String {
     }
 }
 
+/// Motifs d’exclusion ajoutés automatiquement quand `tsc` compile des tests comme du code d’app (describe/it/expect).
+const TSC_EXCLUDE_TEST_PATTERNS: &[&str] = &[
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.test.js",
+    "**/*.test.jsx",
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    "**/*.spec.js",
+    "**/*.spec.jsx",
+    "src/tests",
+    "src/test",
+    "src/__tests__",
+];
+
+fn format_verify_failure(code: Option<i32>, out: &str, err: &str) -> String {
+    format!(
+        "Vérification post-tâche échouée (code {:?}).\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        code,
+        out.chars().take(4000).collect::<String>(),
+        err.chars().take(4000).collect::<String>()
+    )
+}
+
+/// Détecte l’échec typique : fichiers `*.test.*` / `src/tests` passés dans `tsc` du build sans types Vitest/Jest.
+fn looks_like_ts_tests_compiled_in_app_build(stdout: &str, stderr: &str) -> bool {
+    let combined = format!("{stdout}\n{stderr}");
+    let test_path = combined.contains(".test.")
+        || combined.contains(".spec.")
+        || combined.contains("src/tests/")
+        || combined.contains("src\\tests\\")
+        || combined.contains("/tests/")
+        || combined.contains("\\tests\\");
+    if !test_path {
+        return false;
+    }
+    let jest_hint = combined.contains("@types/jest")
+        || combined.contains("@types/mocha")
+        || combined.contains("vitest/globals")
+        || combined.contains("Try `npm i --save-dev @types/jest`");
+    let ts_runner = (combined.contains("TS2582") && combined.contains("describe"))
+        || (combined.contains("TS2582") && combined.contains("'it'"))
+        || (combined.contains("TS2582") && combined.contains("`it`"))
+        || (combined.contains("TS2304") && combined.contains("expect"));
+    let ts_noise_in_tests =
+        combined.contains("TS6196") || combined.contains("TS6133");
+    test_path && (ts_runner || jest_hint || ts_noise_in_tests)
+}
+
+/// Ne pas modifier les `tsconfig.json` « solution » (références uniquement) : ils n’acceptent pas `exclude` utile pour les sous-projets.
+fn tsconfig_eligible_for_exclude_patch(v: &serde_json::Value) -> bool {
+    let Some(o) = v.as_object() else {
+        return false;
+    };
+    if o.contains_key("compilerOptions") {
+        return true;
+    }
+    if let Some(serde_json::Value::Array(a)) = o.get("include") {
+        return !a.is_empty();
+    }
+    false
+}
+
+/// Fusionne `exclude` pour retirer les tests du périmètre `tsc`. Retourne `true` si le fichier a été modifié.
+fn try_merge_exclude_into_tsconfig(path: &Path) -> Result<bool, String> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let raw = fs::read_to_string(path).map_err(|e| format!("lecture {}: {e}", path.display()))?;
+    let mut v: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    if !tsconfig_eligible_for_exclude_patch(&v) {
+        return Ok(false);
+    }
+    let Some(obj) = v.as_object_mut() else {
+        return Ok(false);
+    };
+    let mut list: Vec<String> = match obj.get("exclude") {
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect(),
+        None => Vec::new(),
+        Some(_) => return Ok(false),
+    };
+    let mut changed = false;
+    for p in TSC_EXCLUDE_TEST_PATTERNS {
+        if !list.iter().any(|e| e == p) {
+            list.push((*p).to_string());
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(false);
+    }
+    obj.insert("exclude".to_string(), json!(list));
+    let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+    fs::write(path, format!("{pretty}\n"))
+        .map_err(|e| format!("écriture {}: {e}", path.display()))?;
+    Ok(true)
+}
+
+/// Tente de corriger les tsconfig pour exclure les tests, puis indique ce qui a été modifié (pour les messages d’erreur).
+fn try_autofix_tsconfig_exclude_tests_for_build(project_root: &Path) -> Result<Option<String>, String> {
+    let mut patched = Vec::new();
+    for name in ["tsconfig.app.json", "tsconfig.json"] {
+        let p = project_root.join(name);
+        if try_merge_exclude_into_tsconfig(&p)? {
+            patched.push(name.to_string());
+        }
+    }
+    if patched.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(format!(
+            "fusion des exclusions de tests dans {}",
+            patched.join(", ")
+        )))
+    }
+}
+
 /// Reject obvious LLM markdown / tool-protocol leakage in code files under Code Studio.
 pub fn studio_reject_polluted_code_content(disk_path: &Path, content: &str) -> Option<String> {
     let ext = disk_path.extension()?.to_string_lossy().to_lowercase();
@@ -543,14 +667,35 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
     if !argv_looks_safe(&argv) {
         return Err("verify_argv in .akasha-studio.json is invalid or unsafe".into());
     }
+    let is_npm_run_build =
+        argv.len() == 3 && argv[0] == "npm" && argv[1] == "run" && argv[2] == "build";
     match studio_run_command_capture(project_root, &argv, timeout_sec).await {
         Ok((Some(0), _, _)) => Ok(()),
-        Ok((code, out, err)) => Err(format!(
-            "Vérification post-tâche échouée (code {:?}).\n--- stdout ---\n{}\n--- stderr ---\n{}",
-            code,
-            out.chars().take(4000).collect::<String>(),
-            err.chars().take(4000).collect::<String>()
-        )),
+        Ok((code, out, err)) => {
+            let first_err = format_verify_failure(code, &out, &err);
+            if is_npm_run_build && looks_like_ts_tests_compiled_in_app_build(&out, &err) {
+                match try_autofix_tsconfig_exclude_tests_for_build(project_root) {
+                    Ok(Some(fix_note)) => {
+                        match studio_run_command_capture(project_root, &argv, timeout_sec).await {
+                            Ok((Some(0), _, _)) => Ok(()),
+                            Ok((c2, o2, e2)) => Err(format!(
+                                "{first_err}\n\n[Réparation automatique : {fix_note} — nouvelle vérification]\n{}",
+                                format_verify_failure(c2, &o2, &e2)
+                            )),
+                            Err(e2) => Err(format!(
+                                "{first_err}\n\n[Réparation automatique : {fix_note} — nouvelle vérification]\nVérification post-tâche: {e2}"
+                            )),
+                        }
+                    }
+                    Ok(None) => Err(first_err),
+                    Err(fix_err) => Err(format!(
+                        "{first_err}\n\n[Réparation automatique impossible : {fix_err}]"
+                    )),
+                }
+            } else {
+                Err(first_err)
+            }
+        }
         Err(e) => Err(format!("Vérification post-tâche: {}", e)),
     }
 }
@@ -560,35 +705,63 @@ fn write_initial_code_studio_plan(project_root: &Path, name: &str, tech_stack: O
     if plan_path.exists() {
         return Ok(());
     }
-    let stack_block = tech_stack
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| format!("## Stack\n\n{s}\n\n"))
-        .unwrap_or_default();
+    let stack_body = tech_stack
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "(À compléter — stack enregistrée dans `.akasha-studio.json` ou déduite du manifeste.)".to_string());
     let body = format!(
-        r#"# Projet Code Studio — {name}
+        r#"# Titre : {name}
 
-## Métadonnées
+## Description
 
-- Créé : automatiquement à la création du projet dans Akasha Code Studio
-- Dépôt : ce dossier (Git local)
+(Brève description du produit et de l’usage attendu.)
 
-{stack_block}## Objectif
+## Scope
 
-(Décrire ici le but du projet.)
+- **Inclus** : …
+- **Exclus / hors périmètre actuel** : …
 
-## Étapes prévues
+## Stack
 
-1. …
+{stack_body}
 
-## Historique des changements
+## Structure du projet
 
-- (Les agents doivent ajouter une ligne datée à chaque lot de modifications importantes.)
+(Grands dossiers ou modules importants ; rester concis.)
+
+## Commandes
+
+- **Dev** : …
+- **Build** : …
+- **Tests** : …
+
+## Fichiers hors scope
+
+(Fichiers ou zones que les agents ne modifient pas sans instruction explicite — ex. `node_modules`, artefacts de build.)
+
+## Demandes d'évolutions utilisateur par phase
+
+- (Une ligne datée par demande ou regroupement logique ; lier à la phase ou au lot concerné.)
+
+## Recommandations
+
+(Pièges connus, ordre de lecture du code, conventions à respecter.)
+
+## Todos
+
+- [ ] …
+
+## Informations complémentaires
+
+(Notes diverses, liens internes, détails d’exécution, résultats de commandes utiles.)
 
 ---
-*Ce fichier est la référence de suivi du projet. Les agents Code Studio doivent le mettre à jour après des modifications suite à une demande d’évolution.*
+
+_Gabarit Code Studio (Akasha) : **conserver ces titres de section** (`## …`). Pour une modification mineure, **ne pas** réécrire tout le fichier : éditer uniquement les sections concernées et ajouter des **lignes datées** dans *Informations complémentaires* ou *Demandes d'évolutions utilisateur par phase* pour l’historique des lots._
 "#,
         name = name,
-        stack_block = stack_block,
+        stack_body = stack_body,
     );
     fs::write(&plan_path, body).map_err(|e| e.to_string())
 }
@@ -1966,5 +2139,40 @@ mod tests {
         use super::sanitize_for_prompt;
         let out = sanitize_for_prompt("abc\0def\n\tghi\u{0007}", 100);
         assert_eq!(out, "abcdef\n\tghi");
+    }
+
+    #[test]
+    fn looks_like_ts_tests_in_app_build_detects_tsc_test_errors() {
+        use super::looks_like_ts_tests_compiled_in_app_build;
+        let sample = r"src/tests/AntiAIMode.test.tsx(8,1): error TS2582: Cannot find name 'describe'.
+Try `npm i --save-dev @types/jest`";
+        assert!(looks_like_ts_tests_compiled_in_app_build(sample, ""));
+        assert!(!looks_like_ts_tests_compiled_in_app_build(
+            "src/App.tsx(1,1): error TS2322: Type 'number' is not assignable to type 'string'.",
+            ""
+        ));
+    }
+
+    #[test]
+    fn merge_tsconfig_exclude_adds_test_globs() {
+        use super::try_merge_exclude_into_tsconfig;
+        let dir = std::env::temp_dir().join(format!(
+            "akasha_tsconfig_exclude_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tsconfig.app.json");
+        std::fs::write(
+            &path,
+            r#"{"compilerOptions":{"strict":true},"include":["src"]}"#,
+        )
+        .unwrap();
+        assert!(try_merge_exclude_into_tsconfig(&path).unwrap());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let ex = v["exclude"].as_array().unwrap();
+        assert!(ex.iter().any(|x| x == "**/*.test.tsx"));
+        assert!(!try_merge_exclude_into_tsconfig(&path).unwrap());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
