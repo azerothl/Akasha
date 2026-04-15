@@ -153,6 +153,37 @@ fn parse_write_file_request(args: &[String]) -> Option<(String, String)> {
     Some((path, content))
 }
 
+/// If the model wrapped the entire `write_file` body in a markdown fence, strip one layer (repeat up to 3×).
+fn strip_markdown_fences_from_write_content(content: &str) -> String {
+    let mut s = content.to_string();
+    for _ in 0..3 {
+        let lead = s.trim_start();
+        if !lead.starts_with("```") {
+            break;
+        }
+        s = if let Some(i) = s.find('\n') {
+            s[i + 1..].to_string()
+        } else {
+            String::new()
+        };
+        let te = s.trim_end();
+        if te.ends_with("```") {
+            if let Some(i) = te.rfind('\n') {
+                let last = te[i + 1..].trim();
+                if last == "```" {
+                    s = te[..i].to_string();
+                    continue;
+                }
+            } else if te.trim() == "```" {
+                s.clear();
+                break;
+            }
+        }
+        break;
+    }
+    s
+}
+
 /// Parse `memory_store` optional `link_to:` / `link_kind:` into `(target_uuid, relation_kind)` pairs.
 /// Supports `link_to: uuid1+excludes,uuid2+relates_to` (per-target kind after `+`) or
 /// `link_to: uuid1,uuid2` with `link_kind: relates_to` (one kind for all UUIDs; default `related`).
@@ -1057,6 +1088,7 @@ pub fn json_response(status: &str, body: &str) -> String {
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Pour les fichiers .pdf, le texte est extrait automatiquement (équivalent à pdf <path>) ; ne vous attendez pas au binaire PDF. Pour les gros fichiers, lire d'abord le fichier puis cibler seulement les sections utiles avec grep_content/search_files avant d'éditer. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
     ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (création/remplacement complet). Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). TOUJOURS utiliser le chemin EXACT fourni par l'utilisateur. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace plutôt que de tout réécrire. Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel."),
+    ("delete_file", "delete_file <path> — supprimer un fichier (pas un répertoire). Chemin workspace:/ ou disque autorisé par tools_policy (mêmes règles que write_file). Code Studio : préférer workspace:/chemin/relatif."),
     ("search_files", "search_files <dir> <pattern> [--no-ignore] — chercher des fichiers (glob) sous un répertoire ; par défaut respecte .gitignore et ignore node_modules/target/dist/… ; --no-ignore pour tout parcourir."),
     ("grep_content", "grep_content <dir> <pattern> [file_glob] [--regex|-r] [--no-ignore] — chercher dans les fichiers ; défaut = sous-chaîne insensible à la casse + .gitignore ; --regex = motif regex insensible à la casse ; --no-ignore = ignorer .gitignore."),
     ("run_command", "run_command [--cwd <path>] <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique). Optionnel : --cwd workspace:/ ou chemin disque (allowed_read_paths). Si tools_policy run_command_default_cwd_workspace: true, cwd par défaut = workspace de la tâche. Pour GitHub depuis le shell, préférer gh-axi (npm install -g gh-axi ; principes AXI https://axi.md/) s'il est installé — sorties compactes pour l'agent. Pour l'automation navigateur en CLI, chrome-devtools-axi (même dépôt https://github.com/kunchenguid/axi) en complément d'Akasha browser."),
@@ -2773,11 +2805,25 @@ const STUDIO_AGENT_QUALITY_REMINDER: &str = concat!(
     "- Ta dernière réponse à l'utilisateur (même langue que lui) doit résumer en langage accessible : ce qui a été ajouté ou modifié, ",
     "comment lancer ou essayer le résultat, et les limites éventuelles. Pas de jargon inutile sauf si l'utilisateur demande le détail technique.\n",
     "- N'achève pas seulement par « Terminé » / « Done » : fournis un paragraphe utile lisible sans ouvrir les fichiers.\n",
+    "- Après un **échec de tests** ou de build : lire la sortie d’erreur ; corriger le **minimum** de fichiers (idéalement ceux cités par la stack trace) ; **interdiction** de refactoriser ou réécrire tout le projet « au hasard ». Ne pas modifier les fichiers de tests sauf demande explicite de l’utilisateur. Si trois tentatives ciblées échouent encore, utiliser `ask_user` plutôt que de boucler.\n",
     "- Fichier `CODE_STUDIO_PLAN.md` (racine) : **gabarit fixe** — ligne d'ouverture `# Titre : …` puis dans l'ordre les sections `## Description`, `## Scope`, `## Stack`, `## Structure du projet`, `## Commandes`, `## Fichiers hors scope`, `## Demandes d'évolutions utilisateur par phase`, `## Recommandations`, `## Todos`, `## Informations complémentaires` (conserver ces titres et cet ordre).\n",
     "  Avant d'écrire : `read_file workspace:/CODE_STUDIO_PLAN.md`. Ne **pas** remplacer tout le fichier pour une modification ciblée : mettre à jour **par section** (search_replace ciblé ou une seule section réécrite), en conservant les titres `##` et le reste inchangé.\n",
     "  Ne **jamais** dupliquer une section `## …` déjà présente (pas de second gabarit collé en bas du fichier) : le daemon rejette les écritures qui répètent les titres de section.\n",
     "  Suivi des lots : ajouter une **ligne datée courte** dans `## Informations complémentaires` ou `## Demandes d'évolutions utilisateur par phase` plutôt que de réécrire l'ensemble du plan.\n",
     "  Si le fichier est absent (import), le créer avec ce gabarit en synthétisant le dépôt. Remplacement complet réservé à une demande **explicite** de réinitialisation du plan (bouton ou consigne utilisateur).\n\n",
+);
+
+/// Contexte système court pour les tâches dont le disque outil est sous `studio-projects/` (Code Studio).
+/// Remplace le bloc général `APP_CONTEXT` (TUI, skills globales, caméra, etc.).
+const CODE_STUDIO_APP_CONTEXT: &str = concat!(
+    "[Code Studio — contexte]\n",
+    "Tu travailles sur le dépôt du projet ouvert dans Akasha Code Studio. ",
+    "Chemins : préfère `workspace:/…` (racine virtuelle de la tâche) ; les fichiers sont synchronisés sur le disque du projet studio.\n",
+    "Outils usuels : read_file, write_file, delete_file (si autorisé), search_replace, edit_file, apply_patch, run_command (avec `--cwd workspace:/` pour builds/tests), git_* si exposés, ask_user pour une question bloquante dans la même tâche.\n",
+    "Concentre-toi sur le code et la documentation de ce dépôt — pas sur l’interface générale d’Akasha (TUI, onglets, skills hors projet, caméra, météo). ",
+    "Si une capacité externe est indispensable, indique brièvement ce qu’il faudrait côté utilisateur (clé, politique d’outils).\n",
+    "Réponds dans la même langue que le dernier message utilisateur. ",
+    "Avant d’éditer : lire les fichiers concernés ; ne pas inventer de dépendances — vérifier le manifeste (package.json, Cargo.toml, etc.).\n\n",
 );
 
 /// Application context injected into the prompt: the agent knows it runs inside Akasha and can talk about it.
@@ -2850,7 +2896,8 @@ pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
 
 /// If AKASHA_TOOLS_JOURNAL_PATH is set, append a line for write tool invocations (Phase 4 modification journal).
 async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: &str) {
-    const WRITE_TOOLS: &[&str] = &["write_file", "search_replace", "edit_file", "apply_patch"];
+    const WRITE_TOOLS: &[&str] =
+        &["write_file", "delete_file", "search_replace", "edit_file", "apply_patch"];
     if !WRITE_TOOLS.contains(&tool) {
         return;
     }
@@ -3085,7 +3132,7 @@ fn line_rest_after_leading_tool_at_start(line: &str) -> Option<&str> {
 fn tool_supports_multiline_body(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "apply_patch" | "edit_file" | "write_file" | "ask_user"
+        "apply_patch" | "edit_file" | "write_file" | "delete_file" | "ask_user"
     )
 }
 
@@ -4530,6 +4577,7 @@ async fn execute_tool_call(
             let Some((path_str, content)) = parse_write_file_request(args) else {
                 return (false, "[write_file] usage: write_file <path> <content>".to_string(), None);
             };
+            let content = strip_markdown_fences_from_write_content(&content);
             if is_workspace_virtual_path(&path_str) {
                 match workspace_store {
                     Some(ws) => {
@@ -4611,6 +4659,154 @@ async fn execute_tool_call(
                     (res.success, msg, None)
                 }
                 Err(e) => (false, format!("[write_file] error: {}", e), None),
+            }
+        }
+        "delete_file" => {
+            let path_str = path_arg_joined(args);
+            if path_str.is_empty() {
+                return (
+                    false,
+                    "[delete_file] usage: delete_file <path>".to_string(),
+                    None,
+                );
+            }
+            let path_str = normalize_tool_path_hint(path_str.trim());
+            if path_str.contains("..") {
+                return (
+                    false,
+                    "[delete_file] invalid path (..)".to_string(),
+                    None,
+                );
+            }
+            if is_workspace_virtual_path(&path_str) {
+                match workspace_store {
+                    Some(ws) => {
+                        let key = path_str
+                            .trim_start_matches("workspace:/")
+                            .trim_start_matches("workspace:")
+                            .trim_start_matches('/')
+                            .to_string();
+                        let mut key = key.trim().trim_matches('`').trim_matches('"').to_string();
+                        if key.ends_with('#') {
+                            key.pop();
+                        }
+                        let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
+                        let (key, _) =
+                            rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
+                        {
+                            let mut guard = ws.write().await;
+                            if let Some(per_task) = guard.get_mut(&lineage_task_id) {
+                                per_task.remove(&key);
+                            }
+                        }
+                        let rel_path = Path::new(&key);
+                        if !executor.policy.can_write(rel_path) {
+                            return (
+                                false,
+                                "[delete_file] path not allowed by policy".to_string(),
+                                None,
+                            );
+                        }
+                        let disk_path_opt = workspace_root
+                            .map(|root| root.join(&key))
+                            .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                            .map(strip_verbatim_prefix);
+                        if let Some(disk_path) = disk_path_opt {
+                            if disk_path.is_dir() {
+                                return (
+                                    false,
+                                    "[delete_file] path is a directory".to_string(),
+                                    None,
+                                );
+                            }
+                            if let Some(r) = workspace_root {
+                                if crate::studio::is_strictly_under_studio_root(&disk_path, r)
+                                    && !disk_path.exists()
+                                {
+                                    return (
+                                        true,
+                                        format!("[delete_file workspace:{}] absent (disk).", key),
+                                        None,
+                                    );
+                                }
+                            }
+                            match tokio::fs::remove_file(&disk_path).await {
+                                Ok(()) => {
+                                    return (
+                                        true,
+                                        format!("[delete_file workspace:{}] deleted (disk).", key),
+                                        None,
+                                    );
+                                }
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                    return (
+                                        true,
+                                        format!("[delete_file workspace:{}] absent (disk).", key),
+                                        None,
+                                    );
+                                }
+                                Err(e) => {
+                                    return (
+                                        false,
+                                        format!("[delete_file] {}", e),
+                                        None,
+                                    );
+                                }
+                            }
+                        }
+                        return (
+                            true,
+                            format!("[delete_file workspace:{}] removed from workspace store.", key),
+                            None,
+                        );
+                    }
+                    None => {
+                        return (
+                            false,
+                            "[delete_file] workspace paths require a workspace store.".to_string(),
+                            None,
+                        );
+                    }
+                }
+            }
+            let disk_path = resolve_tool_disk_path(path_str.trim(), workspace_root);
+            if disk_path.is_dir() {
+                return (
+                    false,
+                    "[delete_file] path is a directory".to_string(),
+                    None,
+                );
+            }
+            if !executor.policy.can_write(&disk_path) {
+                return (
+                    false,
+                    "[delete_file] path not allowed by policy".to_string(),
+                    None,
+                );
+            }
+            if let Some(root) = workspace_root {
+                if crate::studio::is_strictly_under_studio_root(&disk_path, root)
+                    && !disk_path.exists()
+                {
+                    return (
+                        true,
+                        format!("[delete_file {}] absent.", disk_path.display()),
+                        None,
+                    );
+                }
+            }
+            match tokio::fs::remove_file(&disk_path).await {
+                Ok(()) => (
+                    true,
+                    format!("[delete_file {}] deleted.", disk_path.display()),
+                    None,
+                ),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+                    true,
+                    format!("[delete_file {}] absent.", disk_path.display()),
+                    None,
+                ),
+                Err(e) => (false, format!("[delete_file] {}", e), None),
             }
         }
         "search_replace" => {
@@ -6056,6 +6252,44 @@ pub(crate) async fn run_message_via_llm(
             }
         }
         let base = available_tools_instruction(allowed_tools.as_deref());
+        let run_command_os_rule = match std::env::consts::OS {
+            "windows" => "RUN_COMMAND OS: You are on Windows. Prefer cmd, PowerShell, curl.exe; avoid grep, cat, sed (not in default PATH). Use full path or .exe when needed. To test that the vault token works (e.g. GitHub API), use Invoke-WebRequest: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN powershell -NoProfile -Command \"Invoke-WebRequest -Uri 'https://api.github.com/repos/owner/repo' -Headers @{ Authorization = 'Bearer ' + $env:GITHUB_TOKEN } | Select-Object -Expand Content\" (replace owner/repo). Ensure 'powershell' is in allowed_commands in tools_policy.yaml. The system injects the vault value into the environment for the command.\n\
+             ",
+            _ => "RUN_COMMAND OS: You are on Linux/macos. Standard Unix commands (curl, grep, etc.) are available.\n\
+             ",
+        };
+        if code_studio_disk_task {
+            let skills_part_studio = match &skill_registry {
+                Some(reg) => {
+                    let list = reg.list().await;
+                    if list.is_empty() {
+                        String::new()
+                    } else {
+                        let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
+                        format!(
+                            " ; Skills (n’utiliser que si pertinent pour ce dépôt ; sinon ignorer) : {}",
+                            names.join(", ")
+                        )
+                    }
+                }
+                None => String::new(),
+            };
+            format!(
+                "\n\n[Code Studio — outils]\n\
+                 Une ligne par invocation : `TOOL: nom_outil arg1 …`.\n\
+                 Disponibles : {}{}.\n\
+                 Règles :\n\
+                 - Outils strictement nécessaires à la demande sur ce dépôt ; pas d’exemples hors sujet.\n\
+                 - write_file : ligne `TOOL: write_file <chemin>` puis le corps du fichier seul (sans enveloppe markdown ```…``` autour du fichier entier).\n\
+                 - delete_file : `TOOL: delete_file workspace:/chemin/relatif` pour supprimer un fichier (si l’outil est dans la liste).\n\
+                 - ask_user : JSON question/context/choices pour continuer la même tâche.\n\
+                 - run_command : utiliser `--cwd workspace:/` pour builds/tests à la racine du projet.\n\
+                 - write_todos / merge_todos si exposés par la politique.\n\
+                 {}\n\
+                 Si aucun outil n’est nécessaire, répondre en texte.",
+                base, skills_part_studio, run_command_os_rule
+            )
+        } else {
         let (skills_part, skills_rule) = match &skill_registry {
             Some(reg) => {
                 let list = reg.list().await;
@@ -6080,12 +6314,6 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
             None => (String::new(), String::new()),
-        };
-        let run_command_os_rule = match std::env::consts::OS {
-            "windows" => "RUN_COMMAND OS: You are on Windows. Prefer cmd, PowerShell, curl.exe; avoid grep, cat, sed (not in default PATH). Use full path or .exe when needed. To test that the vault token works (e.g. GitHub API), use Invoke-WebRequest: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN powershell -NoProfile -Command \"Invoke-WebRequest -Uri 'https://api.github.com/repos/owner/repo' -Headers @{ Authorization = 'Bearer ' + $env:GITHUB_TOKEN } | Select-Object -Expand Content\" (replace owner/repo). Ensure 'powershell' is in allowed_commands in tools_policy.yaml. The system injects the vault value into the environment for the command.\n\
-             ",
-            _ => "RUN_COMMAND OS: You are on Linux/macos. Standard Unix commands (curl, grep, etc.) are available.\n\
-             ",
         };
         let compact_worker_tool_instruction = format!(
             "\n\nYou may request tools by writing a single line exactly like: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
@@ -6126,6 +6354,7 @@ pub(crate) async fn run_message_via_llm(
             base, skills_part, run_command_os_rule, skills_rule
         )
         }
+        }
     } else {
         String::new()
     };
@@ -6136,48 +6365,75 @@ pub(crate) async fn run_message_via_llm(
         Some(cache) => get_or_load_agent_profile(data_dir, cache).await,
         None => AgentProfile::load(data_dir),
     };
-    let profile_block = crate::personality::build_personality_prompt(
-        spec_dir.as_path(),
-        &agent_profile,
-        Some(&assigned_agent),
-    );
+    let profile_block = if code_studio_disk_task {
+        String::new()
+    } else {
+        crate::personality::build_personality_prompt(
+            spec_dir.as_path(),
+            &agent_profile,
+            Some(&assigned_agent),
+        )
+    };
     let os_env_block = match std::env::consts::OS {
         "windows" => "[Environment] The daemon runs on Windows. For run_command, prefer cmd, PowerShell, curl.exe; avoid Unix-only commands (grep, cat, sed) that are not in the default PATH (except WSL).\n\n",
         _ => "[Environment] The daemon runs on Linux/macOS. You can use usual Unix commands (curl, grep, etc.).\n\n",
     };
     let mut system_prompt = String::with_capacity(8192);
-    system_prompt.push_str(APP_CONTEXT);
+    if code_studio_disk_task {
+        system_prompt.push_str(CODE_STUDIO_APP_CONTEXT);
+    } else {
+        system_prompt.push_str(APP_CONTEXT);
+    }
     system_prompt.push_str(os_env_block);
     if let Some(role_prompt) = agent_role_system_prompt(role_agent_for_system_prompt) {
         system_prompt.push_str("[Role]\n");
         system_prompt.push_str(role_prompt);
         system_prompt.push_str("\n\n");
     }
-    if !profile_block.is_empty() {
+    if code_studio_disk_task {
+        system_prompt.push_str(
+            "[Code Studio — ton]\n\
+             Assistant technique pour ce dépôt : concision, pas de digressions sur l’UI Akasha ; tutoyer en français si l’utilisateur écrit en français.\n\n",
+        );
+    } else if !profile_block.is_empty() {
         system_prompt.push_str(&profile_block);
     }
     // Enforce language and personality so the model does not switch language (e.g. when tool output is in English).
-    system_prompt.push_str(
-        "\n\n[Response]\n\
-        - Language: reply ONLY in the same language as the user's message. If the user writes in French, reply entirely in French; in English, in English. Do not adopt the language of tool results or context.\n\
-        - Personality: always apply your identity (name), tone, and form of address as defined in [Agent profile and instructions] (including formality when set).\n\n",
-    );
+    if code_studio_disk_task {
+        system_prompt.push_str(
+            "\n\n[Response]\n\
+            - Langue : répondre uniquement dans la même langue que le message utilisateur.\n\
+            - Fichiers : respecter les règles Code Studio du préfixe message (pas de prose dans le source ; pas de barres markdown ``` autour du contenu write_file).\n\n",
+        );
+    } else {
+        system_prompt.push_str(
+            "\n\n[Response]\n\
+            - Language: reply ONLY in the same language as the user's message. If the user writes in French, reply entirely in French; in English, in English. Do not adopt the language of tool results or context.\n\
+            - Personality: always apply your identity (name), tone, and form of address as defined in [Agent profile and instructions] (including formality when set).\n\n",
+        );
+    }
     let system_prompt: Option<String> = if system_prompt.trim().is_empty() {
         None
     } else {
         Some(system_prompt.trim_end().to_string())
     };
 
-    let personality_reminder = crate::personality::build_personality_reminder_line(
-        spec_dir.as_path(),
-        &agent_profile,
-        Some(&assigned_agent),
-    );
+    let personality_reminder = if code_studio_disk_task {
+        String::new()
+    } else {
+        crate::personality::build_personality_reminder_line(
+            spec_dir.as_path(),
+            &agent_profile,
+            Some(&assigned_agent),
+        )
+    };
     let mut user_prefix = String::with_capacity(8192);
     user_prefix.push_str(&personality_reminder);
-    user_prefix.push_str(
-        "Reply in the same language as the user message below (French, English, etc.).\n\n",
-    );
+    user_prefix.push_str(if code_studio_disk_task {
+        "Réponds dans la même langue que le message utilisateur ci-dessous.\n\n"
+    } else {
+        "Reply in the same language as the user message below (French, English, etc.).\n\n"
+    });
     if let Some(ref am) = autonomous_mission {
         let g = am.read().await;
         if g.enabled && g.status == MissionStatusYaml::Active && session_id == g.session_id {
@@ -7284,7 +7540,7 @@ pub(crate) async fn run_message_via_llm(
                                     const MAX_APPROVAL_ARG_LEN: usize = 80;
                                     let args_preview: String = if matches!(
                                         actual_tool.as_str(),
-                                        "apply_patch" | "edit_file" | "write_file"
+                                        "apply_patch" | "edit_file" | "write_file" | "delete_file"
                                     ) {
                                         "[redacted]".to_string()
                                     } else {
@@ -7956,7 +8212,7 @@ pub(crate) async fn run_message_via_llm(
                         // Redact or truncate args in the event to avoid leaking large blobs or secrets.
                         let redacted_args: Vec<String> = if matches!(
                             actual_tool.as_str(),
-                            "apply_patch" | "edit_file" | "write_file"
+                            "apply_patch" | "edit_file" | "write_file" | "delete_file"
                         ) {
                             vec!["[redacted for write-like tool]".to_string()]
                         } else {
@@ -12803,7 +13059,7 @@ mod tests {
         parse_device_invoke_params, parse_generate_image_tool_args,
         parse_memory_store_explicit_links, parse_plugin_reputation_reset_body, parse_run_command_args,
         parse_skill_install_url, parse_tool_calls, parse_write_file_request,
-        resolve_run_command_working_dir,
+        resolve_run_command_working_dir, strip_markdown_fences_from_write_content,
         response_looks_off_topic_for_small_talk, rewrite_workspace_plan_key_to_lineage_root,
         rewrite_workspace_plan_path_str, small_talk_fast_lane, PluginReputationResetBody,
         SessionRecallIntent, SessionRecallRange, SmallTalkLanguage,
@@ -13123,6 +13379,18 @@ mod tests {
         let (path, content) = parse_write_file_request(&args).expect("json payload should parse");
         assert_eq!(path, "workspace:/project_plan.md");
         assert!(content.contains("# Plan"));
+    }
+
+    #[test]
+    fn strip_markdown_fences_removes_wrapping_fence() {
+        let raw = "```tsx\nconst x = 1;\n```";
+        assert_eq!(strip_markdown_fences_from_write_content(raw), "const x = 1;");
+        let raw2 = "```\nhello\n```\n";
+        assert_eq!(strip_markdown_fences_from_write_content(raw2), "hello");
+        assert_eq!(
+            strip_markdown_fences_from_write_content("no fence here"),
+            "no fence here"
+        );
     }
 
     #[test]

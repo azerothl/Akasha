@@ -1600,6 +1600,50 @@ pub async fn handle_studio_route(
         }
     }
 
+    // DELETE /api/studio/projects/:id/raw?path= — supprime un fichier (même règles de chemin que GET/PUT).
+    if method == "DELETE" && path_only.ends_with("/raw") {
+        if let Some(rest) = strip_studio_projects_prefix(path_only) {
+            let id = rest.strip_suffix("/raw").unwrap_or(rest);
+            let root = match resolve_studio_project_dir(data_dir, id) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Some(json_response(
+                        "400 Bad Request",
+                        &serde_json::json!({ "error": e }).to_string(),
+                    ));
+                }
+            };
+            let Some(rel) = query_param(query_str, "path").map(|c| c.to_string()).filter(|s| !s.trim().is_empty()) else {
+                return Some(json_response("400 Bad Request", r#"{"error":"path query required"}"#));
+            };
+            if rel.contains("..") {
+                return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+            }
+            let full = strip_verbatim(&root.join(&rel));
+            if !is_strictly_under_studio_root(&full, &root) {
+                return Some(json_response("400 Bad Request", r#"{"error":"path outside project"}"#));
+            }
+            if full.is_dir() {
+                return Some(json_response("400 Bad Request", r#"{"error":"path is a directory"}"#));
+            }
+            match fs::remove_file(&full) {
+                Ok(()) => {
+                    let body = serde_json::json!({ "ok": true, "path": rel }).to_string();
+                    return Some(json_response("200 OK", &body));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Some(json_response("404 Not Found", r#"{"error":"not_found"}"#));
+                }
+                Err(e) => {
+                    return Some(json_response(
+                        "500 Internal Server Error",
+                        &serde_json::json!({ "error": e.to_string() }).to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
     // POST /api/studio/projects/:id/git/clone
     if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/git/clone") {
         let rest = path_only

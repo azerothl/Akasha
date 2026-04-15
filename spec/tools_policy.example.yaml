@@ -67,6 +67,7 @@ command_timeout_secs: 60
 #   dev_sandbox:
 #     - read_file
 #     - write_file
+#     - delete_file
 #     - search_files
 #     - grep_content
 #     - run_command
