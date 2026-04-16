@@ -305,9 +305,8 @@ pub fn studio_code_plan_message_prefix(project_root: &Path) -> Option<String> {
     ))
 }
 
-/// Prefix prepended to the user message when `tech_stack` is set (read by LLM + studio agents).
-pub fn studio_tech_stack_message_prefix(project_root: &Path) -> Option<String> {
-    let meta = load_studio_meta(project_root)?;
+/// Build the tech-stack prefix from an already-loaded `StudioMeta`.
+fn tech_stack_prefix_from_meta(meta: &StudioMeta) -> Option<String> {
     let t = sanitize_for_prompt(meta.tech_stack.as_deref()?, MAX_TECH_STACK_CHARS);
     if t.is_empty() {
         return None;
@@ -317,9 +316,8 @@ pub fn studio_tech_stack_message_prefix(project_root: &Path) -> Option<String> {
     ))
 }
 
-/// Résumé d’évolution / mémoire courte (fichier `.akasha-studio.json`).
-pub fn studio_evolution_summary_prefix(project_root: &Path) -> Option<String> {
-    let meta = load_studio_meta(project_root)?;
+/// Build the evolution-summary prefix from an already-loaded `StudioMeta`.
+fn evolution_summary_prefix_from_meta(meta: &StudioMeta) -> Option<String> {
     let t = sanitize_for_prompt(meta.evolution_summary.as_deref()?, MAX_EVOLUTION_SUMMARY_CHARS);
     if t.is_empty() {
         return None;
@@ -329,9 +327,8 @@ pub fn studio_evolution_summary_prefix(project_root: &Path) -> Option<String> {
     ))
 }
 
-/// Notes de politique projet (périmètre outils, dossiers sensibles).
-pub fn studio_policy_notes_prefix(project_root: &Path) -> Option<String> {
-    let meta = load_studio_meta(project_root)?;
+/// Build the policy-notes prefix from an already-loaded `StudioMeta`.
+fn policy_notes_prefix_from_meta(meta: &StudioMeta) -> Option<String> {
     let t = sanitize_for_prompt(meta.policy_notes.as_deref()?, MAX_POLICY_NOTES_CHARS);
     if t.is_empty() {
         return None;
@@ -339,6 +336,37 @@ pub fn studio_policy_notes_prefix(project_root: &Path) -> Option<String> {
     Some(format!(
         "[Politique / consignes projet (outils et périmètre) :\n{t}\n]\n\n"
     ))
+}
+
+/// Load `.akasha-studio.json` once and return `(evolution_summary, policy_notes, tech_stack)` prefixes.
+/// Avoids redundant disk I/O when the caller needs all three in the same request.
+pub fn studio_meta_prefixes(project_root: &Path) -> (Option<String>, Option<String>, Option<String>) {
+    let Some(meta) = load_studio_meta(project_root) else {
+        return (None, None, None);
+    };
+    (
+        evolution_summary_prefix_from_meta(&meta),
+        policy_notes_prefix_from_meta(&meta),
+        tech_stack_prefix_from_meta(&meta),
+    )
+}
+
+/// Prefix prepended to the user message when `tech_stack` is set (read by LLM + studio agents).
+pub fn studio_tech_stack_message_prefix(project_root: &Path) -> Option<String> {
+    let meta = load_studio_meta(project_root)?;
+    tech_stack_prefix_from_meta(&meta)
+}
+
+/// Résumé d’évolution / mémoire courte (fichier `.akasha-studio.json`).
+pub fn studio_evolution_summary_prefix(project_root: &Path) -> Option<String> {
+    let meta = load_studio_meta(project_root)?;
+    evolution_summary_prefix_from_meta(&meta)
+}
+
+/// Notes de politique projet (périmètre outils, dossiers sensibles).
+pub fn studio_policy_notes_prefix(project_root: &Path) -> Option<String> {
+    let meta = load_studio_meta(project_root)?;
+    policy_notes_prefix_from_meta(&meta)
 }
 
 /// Préfixe utilisateur / UI : `plan`, `implement`, `build`, `free` (aucun préfixe).
@@ -1508,7 +1536,7 @@ pub async fn handle_studio_route(
                                     ));
                                 }
                             };
-                            if s.len() > MAX_EVOLUTION_SUMMARY_CHARS {
+                            if s.chars().count() > MAX_EVOLUTION_SUMMARY_CHARS {
                                 return Some(json_response(
                                     "400 Bad Request",
                                     &serde_json::json!({ "error": "evolution_summary too long", "max": MAX_EVOLUTION_SUMMARY_CHARS })
@@ -1540,7 +1568,7 @@ pub async fn handle_studio_route(
                                     ));
                                 }
                             };
-                            if s.len() > MAX_POLICY_NOTES_CHARS {
+                            if s.chars().count() > MAX_POLICY_NOTES_CHARS {
                                 return Some(json_response(
                                     "400 Bad Request",
                                     &serde_json::json!({ "error": "policy_notes too long", "max": MAX_POLICY_NOTES_CHARS })
