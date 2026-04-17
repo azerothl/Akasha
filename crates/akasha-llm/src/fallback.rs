@@ -8,6 +8,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::warn;
 
+fn looks_like_tool_only_reply(text: &str) -> bool {
+    let t = text.trim();
+    let normalized = t
+        .strip_prefix("- ")
+        .unwrap_or(t)
+        .trim_start_matches('*')
+        .trim_start()
+        .to_ascii_lowercase();
+    normalized.starts_with("tool:")
+        || normalized.starts_with("tool :")
+        || normalized.starts_with("tool\t:")
+}
+
 pub struct FallbackEngine {
     pub max_retries: u32,
     pub timeout_per_call: Duration,
@@ -156,6 +169,18 @@ impl FallbackEngine {
                                         thinking_length = thinking_len,
                                         eval_count = eval_count,
                                         "Brief LLM output for task_type=system (memory/fact extraction etc.); this is not the user-facing streamed reply"
+                                    );
+                                } else if looks_like_tool_only_reply(&resp.text) {
+                                    tracing::debug!(
+                                        provider = %entry.provider,
+                                        model = %entry.model,
+                                        task_type = task_type_label,
+                                        max_tokens = ?max_tokens_used,
+                                        done_reason = %resp.done_reason.as_deref().unwrap_or("stop"),
+                                        text_length = text_len,
+                                        thinking_length = thinking_len,
+                                        eval_count = eval_count,
+                                        "Brief LLM output is tool-only; short-response warning suppressed"
                                     );
                                 } else {
                                     tracing::warn!(

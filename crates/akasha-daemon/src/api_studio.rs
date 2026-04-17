@@ -609,11 +609,25 @@ const TSC_EXCLUDE_TEST_PATTERNS: &[&str] = &[
 ];
 
 fn format_verify_failure(code: Option<i32>, out: &str, err: &str) -> String {
+    let code_str = match code {
+        Some(n) => format!("code de sortie {n}"),
+        None => "terminaison sans code numérique (signal ou erreur système)".to_string(),
+    };
+    let out_s: String = out.chars().take(4000).collect();
+    let err_s: String = if err.trim().is_empty() {
+        "(vide — avec npm run build, les erreurs TypeScript sont souvent sur stdout ci-dessus.)".to_string()
+    } else {
+        err.chars().take(4000).collect()
+    };
+    let combined = format!("{out}\n{err}");
+    let syntax_hint =
+        if combined.contains("TS1128") || combined.contains("TS1005") || combined.contains("TS1434") {
+            "\n\nNote : TS1128 / TS1005 / TS1434 indiquent souvent du texte invalide dans le fichier source (markdown, phrase hors code, accolade en trop) aux lignes indiquées."
+        } else {
+            ""
+        };
     format!(
-        "Vérification post-tâche échouée (code {:?}).\n--- stdout ---\n{}\n--- stderr ---\n{}",
-        code,
-        out.chars().take(4000).collect::<String>(),
-        err.chars().take(4000).collect::<String>()
+        "Vérification post-tâche échouée ({code_str}).\n--- stdout ---\n{out_s}\n--- stderr ---\n{err_s}{syntax_hint}"
     )
 }
 

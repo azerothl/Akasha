@@ -3653,7 +3653,63 @@ async fn execute_tool_call(
             }
         }
         "read_file" => {
-            let path_str = normalize_tool_path_hint(&path_arg_joined(args));
+            let line_window = if args.len() >= 3 {
+                let maybe_limit = args.last().and_then(|s| s.parse::<usize>().ok());
+                let maybe_offset = args
+                    .get(args.len().saturating_sub(2))
+                    .and_then(|s| s.parse::<usize>().ok());
+                match (maybe_offset, maybe_limit) {
+                    (Some(off), Some(lim)) if lim > 0 => Some((off, lim)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let path_parts_len = if line_window.is_some() && args.len() >= 3 {
+                args.len() - 2
+            } else {
+                args.len()
+            };
+            let path_input = if path_parts_len == 0 {
+                String::new()
+            } else {
+                args[..path_parts_len].join(" ")
+            };
+            let path_str = normalize_tool_path_hint(&path_input);
+            let slice_for_line_window = |content: &str, path_label: &str, offset: usize, limit: usize| -> String {
+                let lines: Vec<&str> = content.lines().collect();
+                let total = lines.len();
+                if total == 0 {
+                    return format!("[read_file {}] file is empty", path_label);
+                }
+                let req_start_1 = if offset == 0 { 1 } else { offset };
+                let req_start_idx = req_start_1.saturating_sub(1);
+                let start_idx = if req_start_idx >= total {
+                    total.saturating_sub(limit)
+                } else {
+                    req_start_idx
+                };
+                let end_idx_excl = (start_idx + limit).min(total);
+                let body = if start_idx < end_idx_excl {
+                    lines[start_idx..end_idx_excl].join("\n")
+                } else {
+                    String::new()
+                };
+                let actual_start_1 = start_idx + 1;
+                let actual_end_1 = end_idx_excl;
+                let req_end_1 = req_start_1.saturating_add(limit.saturating_sub(1));
+                if actual_start_1 != req_start_1 || actual_end_1 != req_end_1 {
+                    format!(
+                        "[read_file {}] requested lines {}..{}; returned lines {}..{} (file has {} lines):\n{}",
+                        path_label, req_start_1, req_end_1, actual_start_1, actual_end_1, total, body
+                    )
+                } else {
+                    format!(
+                        "[read_file {}] lines {}..{} (file has {} lines):\n{}",
+                        path_label, actual_start_1, actual_end_1, total, body
+                    )
+                }
+            };
             if path_str.is_empty() {
                 (false, "[read_file] usage: read_file <path>".to_string(), None)
             } else if is_workspace_virtual_path(&path_str) {
@@ -3676,6 +3732,9 @@ async fn execute_tool_call(
                             // Empty in-memory entry must not mask the real file on disk (orchestrator
                             // writes `.akasha/plan_*.md` with tokio::fs, not via this map).
                             if !content.is_empty() {
+                                if let Some((off, lim)) = line_window {
+                                    return (true, slice_for_line_window(content, &format!("workspace:{}", key), off, lim), None);
+                                }
                                 let (preview, truncated, total) = crate::tool_output::read_file_preview(content);
                                 let body = format!(
                                     "[read_file workspace:{}] {} bytes: {}",
@@ -3712,6 +3771,9 @@ async fn execute_tool_call(
                 match executor.read_file(&disk_path).await {
                     Ok((content, res)) => {
                         let msg = if res.success {
+                            if let Some((off, lim)) = line_window {
+                                slice_for_line_window(&content, &disk_path.display().to_string(), off, lim)
+                            } else {
                             let (preview, truncated, total) = crate::tool_output::read_file_preview(&content);
                             let body = format!(
                                 "[read_file {}] {} bytes: {}",
@@ -3725,21 +3787,34 @@ async fn execute_tool_call(
                                 total,
                                 "use grep_content or search_files to narrow, then read_file again",
                             )
+                            }
                         } else {
                             format!("[read_file workspace] failed: {}", res.summary)
                         };
                         return (res.success, msg, None);
                     }
-                    Err(e) => return (
-                        false,
-                        format!(
-                            "[read_file workspace] failed: read error for {} at {}: {}",
-                            key,
-                            disk_path.display(),
-                            e
-                        ),
-                        None,
-                    ),
+                    Err(e) => {
+                        let detail = format!("{:#}", e);
+                        let hint = if detail.to_ascii_lowercase().contains("not found")
+                            || detail.to_ascii_lowercase().contains("cannot find")
+                            || detail.to_ascii_lowercase().contains("no such file")
+                        {
+                            " (hint: verify path/casing and use search_files . <filename> first)"
+                        } else {
+                            ""
+                        };
+                        return (
+                            false,
+                            format!(
+                                "[read_file workspace] failed: read error for {} at {}: {}{}",
+                                key,
+                                disk_path.display(),
+                                detail,
+                                hint
+                            ),
+                            None,
+                        );
+                    }
                 };
             } else {
                 let p = Path::new(&path_str);
@@ -3749,6 +3824,9 @@ async fn execute_tool_call(
                     match executor.read_file(p).await {
                         Ok((content, res)) => {
                             let msg = if res.success {
+                                if let Some((off, lim)) = line_window {
+                                    slice_for_line_window(&content, &p.display().to_string(), off, lim)
+                                } else {
                                 let (preview, truncated, total) = crate::tool_output::read_file_preview(&content);
                                 let body = format!(
                                     "[read_file {}] {} bytes: {}",
@@ -3762,12 +3840,28 @@ async fn execute_tool_call(
                                     total,
                                     "use grep_content or search_files to narrow, then read_file again",
                                 )
+                                }
                             } else {
                                 format!("[read_file] failed: {}", res.summary)
                             };
                             (res.success, msg, None)
                         }
-                        Err(e) => (false, format!("[read_file] failed: {}", e), None),
+                        Err(e) => {
+                            let detail = format!("{:#}", e);
+                            let hint = if detail.to_ascii_lowercase().contains("not found")
+                                || detail.to_ascii_lowercase().contains("cannot find")
+                                || detail.to_ascii_lowercase().contains("no such file")
+                            {
+                                " (hint: verify path/casing and use search_files . <filename> first)"
+                            } else {
+                                ""
+                            };
+                            (
+                                false,
+                                format!("[read_file] failed: {}{}", detail, hint),
+                                None,
+                            )
+                        }
                     }
                 }
             }
@@ -5991,6 +6085,429 @@ fn looks_like_off_topic_greeting(text: &str) -> bool {
     ]
     .iter()
     .any(|p| lower.contains(p))
+}
+
+/// Outils autorisés pendant la correction automatique post-échec `npm run build` / `cargo check` (Code Studio).
+const STUDIO_VERIFY_AUTOFIX_TOOLS: &[&str] = &[
+    "read_file",
+    "grep_content",
+    "search_files",
+    "search_replace",
+    "edit_file",
+    "write_file",
+    "apply_patch",
+    "file_diff",
+];
+
+fn studio_verify_extract_ts_error_paths(verify_log: &str, cap: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in verify_log.lines() {
+        if !line.contains(": error TS") {
+            continue;
+        }
+        let Some((left, _)) = line.split_once('(') else {
+            continue;
+        };
+        let p = left.trim();
+        if p.is_empty() {
+            continue;
+        }
+        if !(p.ends_with(".ts") || p.ends_with(".tsx") || p.ends_with(".js") || p.ends_with(".jsx"))
+        {
+            continue;
+        }
+        if out.iter().any(|x| x == p) {
+            continue;
+        }
+        out.push(p.to_string());
+        if out.len() >= cap {
+            break;
+        }
+    }
+    out
+}
+
+fn studio_verify_short_hash(input: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    input.hash(&mut h);
+    format!("{:08x}", (h.finish() & 0xffff_ffff) as u32)
+}
+
+/// Après un log d’échec de compilation, enchaîne quelques tours LLM + exécution d’outils pour corriger les sources.
+/// Retourne `true` si au moins un outil d’écriture a réussi au moins une fois.
+async fn studio_verify_run_llm_autofix_rounds(
+    bus: &EventBus,
+    llm_router: &std::sync::Arc<akasha_llm::LLMRouter>,
+    tools_executor: &std::sync::Arc<RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>,
+    skill_registry: Option<&std::sync::Arc<crate::skills::SkillRegistry>>,
+    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
+    process_registry: Option<&ProcessRegistry>,
+    conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
+    long_term_client: Option<&LongTermMemoryClient>,
+    workspace_store: Option<&TaskWorkspaceStore>,
+    browser_registry: Option<&crate::browser::BrowserSessionRegistry>,
+    device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
+    task_id: Uuid,
+    store_path: &Path,
+    tool_disk_root: &Path,
+    verify_log: &str,
+    max_llm_rounds: u32,
+) -> bool {
+    const VERIFY_SNIP: usize = 16_000;
+    const LLM_TIMEOUT_SECS: u64 = 180;
+    let timeline_correlation = resolve_root_task_id(store_path, task_id).unwrap_or(task_id);
+    let message_webhook_url = std::env::var("AKASHA_MESSAGE_WEBHOOK_URL").ok();
+    let system = "You repair a Code Studio project after `npm run build` or `cargo check` failed. \
+Workspace paths are relative to the project root shown in the user message. \
+Emit only lines starting with TOOL: using these tools: read_file, grep_content, search_files, search_replace, edit_file, write_file, apply_patch, file_diff. \
+STRICT tool-call format: `TOOL: <tool_name> <arg1> <arg2> ...` (space-separated args only). \
+Do NOT output JSON function-call style (invalid: `TOOL: read_file({\"path\":\"src/App.tsx\"})`). \
+Do NOT output pipe syntax (invalid: `TOOL: search_files|pattern|*|path|.`). \
+Valid examples: `TOOL: read_file src/App.tsx 320 20`, `TOOL: search_files . package.json true`. \
+Do NOT use ask_user, delegate_to_agent, run_command, browser_*, install_skill, or any tool not in that list. \
+Do not paste markdown fences or assistant prose into source files — only valid source code. \
+Fix every compiler error; prefer minimal search_replace / edit_file over rewriting whole files.";
+    let root_disp = tool_disk_root.display().to_string();
+    let log_snip: String = verify_log.chars().take(VERIFY_SNIP).collect();
+    let focus_files = studio_verify_extract_ts_error_paths(verify_log, 10);
+    let error_lines = verify_log
+        .lines()
+        .filter(|l| l.contains(": error TS"))
+        .take(18)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let known_ts_errors_hash = studio_verify_short_hash(&error_lines);
+    let sticky_context = format!(
+        "CAVEMAN CONTEXT (reuse every round):\n\
+ROOT: {}\n\
+FILES_WITH_ERRORS: {}\n\
+KNOWN_TS_ERRORS:\n{}\n",
+        root_disp,
+        if focus_files.is_empty() {
+            "(none parsed)".to_string()
+        } else {
+            focus_files.join(", ")
+        },
+        if error_lines.trim().is_empty() {
+            "(none captured)"
+        } else {
+            error_lines.as_str()
+        }
+    );
+    let first_user = format!(
+        "{}\nProject root (all relative paths are under this directory):\n{}\n\nBuild output:\n{}\n\nFix the project.",
+        sticky_context, root_disp, log_snip
+    );
+    let exec = tools_executor.read().await.clone();
+    let mut any_write_success = false;
+    let mut follow_up = String::new();
+    let mut short_or_no_tool_retries = 0u32;
+    let mut writes_ok_count = 0u32;
+    let mut last_tool = "(none)".to_string();
+    let mut last_failed_files = if focus_files.is_empty() {
+        "(none parsed)".to_string()
+    } else {
+        focus_files.join(", ")
+    };
+    for round in 0..max_llm_rounds {
+        let state_snapshot = format!(
+            "STATE SNAPSHOT:\n\
+ROUND_INDEX: {}\n\
+LAST_TOOL: {}\n\
+WRITES_OK_COUNT: {}\n\
+NO_PARSEABLE_TOOL_RETRIES: {}\n\
+KNOWN_TS_ERRORS_HASH: {}\n\
+LAST_FAILED_FILES: {}\n",
+            round + 1,
+            last_tool,
+            writes_ok_count,
+            short_or_no_tool_retries,
+            known_ts_errors_hash,
+            last_failed_files
+        );
+        let user_block = if round == 0 {
+            format!("{}\n{}", first_user, state_snapshot)
+        } else {
+            format!(
+                "{}\n{}\nRound {} — previous tool results:\n{}\n\nEmit more TOOL: lines to fix remaining errors, or a single line AUTOFIX_DONE if the project should compile.",
+                sticky_context,
+                state_snapshot,
+                round + 1,
+                follow_up
+            )
+        };
+        let req = CompletionRequest {
+            prompt: user_block,
+            max_tokens: Some(8192),
+            temperature: Some(0.15),
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repeat_penalty: None,
+            num_ctx: None,
+            num_gpu: None,
+            thinking_level: None,
+            preferred_task_type: Some("code_generation".to_string()),
+            system_prompt: Some(system.to_string()),
+            image_data_urls: None,
+        };
+        let resp_text = match tokio::time::timeout(
+            std::time::Duration::from_secs(LLM_TIMEOUT_SECS),
+            llm_router.complete(&req),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r.text,
+            Ok(Err(e)) => {
+                tracing::warn!(task_id = %task_id, error = %e, "studio verify autofix: LLM complete failed");
+                break;
+            }
+            Err(_) => {
+                tracing::warn!(task_id = %task_id, "studio verify autofix: LLM timeout");
+                break;
+            }
+        };
+        let trimmed = resp_text.trim();
+        if trimmed.contains("AUTOFIX_DONE") && parse_tool_calls(trimmed).is_empty() {
+            tracing::info!(task_id = %task_id, round, "studio verify autofix: model signalled AUTOFIX_DONE");
+            break;
+        }
+        let calls = parse_tool_calls(trimmed);
+        if calls.is_empty() {
+            let text_len = trimmed.chars().count();
+            if short_or_no_tool_retries < 2 && round + 1 < max_llm_rounds {
+                short_or_no_tool_retries += 1;
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 56,
+                            "message": "Réponse modèle trop courte / sans TOOL, nouvelle tentative de correction auto…"
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
+                );
+                follow_up = format!(
+                    "Model returned no parseable TOOL lines (len={text_len}). \
+Retry now. Return only TOOL: lines; start with read_file/grep_content on files reported by the compiler errors."
+                );
+                tracing::warn!(
+                    task_id = %task_id,
+                    round,
+                    text_len,
+                    retry = short_or_no_tool_retries,
+                    "studio verify autofix: no parseable TOOL lines, retrying"
+                );
+                continue;
+            }
+            tracing::debug!(task_id = %task_id, round, text_len, "studio verify autofix: no parseable TOOL lines");
+            break;
+        }
+        short_or_no_tool_retries = 0;
+        let mut round_results: Vec<String> = Vec::new();
+        let lanes = akasha_tools::schedule_tool_calls(&calls);
+        for (_lane, lane_calls) in lanes {
+            for (name, args) in &lane_calls {
+                let actual_tool = match skill_registry {
+                    Some(reg) => reg
+                        .get(name)
+                        .await
+                        .map(|s| s.tool_ref)
+                        .unwrap_or_else(|| name.clone()),
+                    None => name.clone(),
+                };
+                let actual_tool = canonicalize_tool_name(&actual_tool);
+                last_tool = actual_tool.clone();
+                if !STUDIO_VERIFY_AUTOFIX_TOOLS
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(&actual_tool))
+                {
+                    round_results.push(format!(
+                        "[{}] skipped in studio autofix (not an allowed repair tool)",
+                        actual_tool
+                    ));
+                    continue;
+                }
+                if exec.policy.requires_approval(&actual_tool) {
+                    round_results.push(format!(
+                        "[{}] skipped in studio autofix (requires human approval)",
+                        actual_tool
+                    ));
+                    continue;
+                }
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 58,
+                            "message": format!("Correction auto compilation : {} …", actual_tool)
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
+                );
+                let (success, res, _cap) = execute_tool_call(
+                    &exec,
+                    &actual_tool,
+                    args,
+                    process_registry,
+                    long_term_client,
+                    task_id,
+                    Some(store_path),
+                    conv_tx.clone(),
+                    message_webhook_url.as_deref(),
+                    plugin_registry,
+                    device_bridge,
+                    workspace_store,
+                    browser_registry,
+                    Some(tool_disk_root),
+                )
+                .await;
+                let write_like = matches!(
+                    actual_tool.as_str(),
+                    "write_file" | "search_replace" | "edit_file" | "apply_patch"
+                );
+                if success && write_like {
+                    any_write_success = true;
+                    writes_ok_count = writes_ok_count.saturating_add(1);
+                }
+                round_results.push(format!("[{}] success={} {}", actual_tool, success, res));
+            }
+        }
+        follow_up = round_results.join("\n");
+        let files_after_round = studio_verify_extract_ts_error_paths(&follow_up, 10);
+        if !files_after_round.is_empty() {
+            last_failed_files = files_after_round.join(", ");
+        }
+        if follow_up.trim().is_empty() {
+            break;
+        }
+    }
+    if !any_write_success {
+        let focus_files = studio_verify_extract_ts_error_paths(verify_log, 8);
+        if !focus_files.is_empty() {
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::ProgressUpdate,
+                    Some(serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "progress_pct": 57,
+                        "message": "Fallback auto-correction : lecture ciblée des fichiers en erreur TS…"
+                    })),
+                )
+                .with_correlation(timeline_correlation),
+            );
+            let mut focused_reads: Vec<String> = Vec::new();
+            for p in &focus_files {
+                let read_args = vec![p.clone()];
+                let (ok, res, _cap) = execute_tool_call(
+                    &exec,
+                    "read_file",
+                    &read_args,
+                    process_registry,
+                    long_term_client,
+                    task_id,
+                    Some(store_path),
+                    conv_tx.clone(),
+                    message_webhook_url.as_deref(),
+                    plugin_registry,
+                    device_bridge,
+                    workspace_store,
+                    browser_registry,
+                    Some(tool_disk_root),
+                )
+                .await;
+                if ok {
+                    focused_reads.push(format!(
+                        "FILE: {}\n{}",
+                        p,
+                        res.chars().take(5000).collect::<String>()
+                    ));
+                }
+            }
+            if !focused_reads.is_empty() {
+                let fallback_req = CompletionRequest {
+                    prompt: format!(
+                        "Build output:\n{}\n\nFocused file reads:\n{}\n\nReturn ONLY TOOL lines to fix the TS syntax/build errors now. \
+Use only: search_replace, edit_file, write_file, apply_patch, file_diff. \
+No prose, no ask_user, no run_command.",
+                        verify_log.chars().take(12_000).collect::<String>(),
+                        focused_reads.join("\n\n---\n\n")
+                    ),
+                    max_tokens: Some(8192),
+                    temperature: Some(0.1),
+                    top_p: None,
+                    top_k: None,
+                    frequency_penalty: None,
+                    presence_penalty: None,
+                    repeat_penalty: None,
+                    num_ctx: None,
+                    num_gpu: None,
+                    thinking_level: None,
+                    preferred_task_type: Some("code_generation".to_string()),
+                    system_prompt: Some(
+                        "You are in final deterministic Code Studio autofix fallback. Emit only TOOL lines. \
+Use STRICT format: `TOOL: <tool_name> <arg1> <arg2> ...` with plain space-separated arguments. \
+Do not use `tool(...)` JSON-call style or `|key|value|` syntax."
+                            .to_string(),
+                    ),
+                    image_data_urls: None,
+                };
+                if let Ok(Ok(resp)) = tokio::time::timeout(
+                    std::time::Duration::from_secs(LLM_TIMEOUT_SECS),
+                    llm_router.complete(&fallback_req),
+                )
+                .await
+                {
+                    let calls = parse_tool_calls(resp.text.trim());
+                    if !calls.is_empty() {
+                        let lanes = akasha_tools::schedule_tool_calls(&calls);
+                        for (_lane, lane_calls) in lanes {
+                            for (name, args) in &lane_calls {
+                                let actual_tool = canonicalize_tool_name(name);
+                                if !matches!(
+                                    actual_tool.as_str(),
+                                    "search_replace" | "edit_file" | "write_file" | "apply_patch" | "file_diff"
+                                ) {
+                                    continue;
+                                }
+                                let (success, _res, _cap) = execute_tool_call(
+                                    &exec,
+                                    &actual_tool,
+                                    args,
+                                    process_registry,
+                                    long_term_client,
+                                    task_id,
+                                    Some(store_path),
+                                    conv_tx.clone(),
+                                    message_webhook_url.as_deref(),
+                                    plugin_registry,
+                                    device_bridge,
+                                    workspace_store,
+                                    browser_registry,
+                                    Some(tool_disk_root),
+                                )
+                                .await;
+                                if success
+                                    && matches!(
+                                        actual_tool.as_str(),
+                                        "search_replace" | "edit_file" | "write_file" | "apply_patch"
+                                    )
+                                {
+                                    any_write_success = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    any_write_success
 }
 
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
@@ -8630,7 +9147,7 @@ pub(crate) async fn run_message_via_llm(
         }
     }
 
-    let reply_text = if reply_text.is_empty() {
+    let mut reply_text = if reply_text.is_empty() {
         tracing::warn!("LLM returned empty text");
         "No response from the model. Check Ollama or your LLM provider.".to_string()
     } else {
@@ -8641,6 +9158,92 @@ pub(crate) async fn run_message_via_llm(
         }
         reply_text
     };
+    let is_paused = matches!(
+        store.get(task_id),
+        Ok(Some(Task {
+            status: TaskStatus::Paused,
+            ..
+        }))
+    );
+    let mut studio_verify_error: Option<String> = None;
+    let mut studio_autofix_applied = false;
+    if !is_paused && code_studio_disk_task {
+        let max_passes: u32 = if is_session_recall {
+            1
+        } else {
+            std::env::var("AKASHA_STUDIO_VERIFY_MAX_PASSES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3)
+                .max(1)
+                .min(8)
+        };
+        for pass in 0..max_passes {
+            match crate::api_studio::studio_verify_after_agent_task(&tool_disk_workspace_root).await {
+                Ok(()) => {
+                    studio_verify_error = None;
+                    break;
+                }
+                Err(e) => {
+                    studio_verify_error = Some(e.clone());
+                    if pass + 1 >= max_passes {
+                        break;
+                    }
+                    if let Some(ref exec_arc) = tools_executor {
+                        let denom = max_passes.saturating_sub(1).max(1);
+                        let _ = bus.send(
+                            EventEnvelope::new(
+                                EventType::ProgressUpdate,
+                                Some(serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "progress_pct": 55,
+                                    "message": format!(
+                                        "Compilation du projet en échec — correction automatique (tentative {}/{}).",
+                                        pass + 1,
+                                        denom
+                                    )
+                                })),
+                            )
+                            .with_correlation(timeline_correlation),
+                        );
+                        let llm_rounds = std::env::var("AKASHA_STUDIO_VERIFY_AUTOFIX_LLM_ROUNDS")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(6)
+                            .max(1)
+                            .min(16);
+                        let did_write = studio_verify_run_llm_autofix_rounds(
+                            &bus,
+                            &llm_router,
+                            exec_arc,
+                            skill_registry.as_ref(),
+                            plugin_registry.as_ref(),
+                            process_registry.as_ref(),
+                            conv_tx.clone(),
+                            long_term_client.as_ref(),
+                            workspace_store.as_ref(),
+                            browser_registry.as_ref(),
+                            device_bridge.as_ref(),
+                            task_id,
+                            store_path.as_path(),
+                            tool_disk_workspace_root.as_path(),
+                            &e,
+                            llm_rounds,
+                        )
+                        .await;
+                        if did_write {
+                            studio_autofix_applied = true;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        if studio_verify_error.is_none() && studio_autofix_applied {
+            reply_text.push_str("\n\n_(Compilation du projet Code Studio corrigée automatiquement après échec du build.)_");
+        }
+    }
     if !first_meaningful_progress_sent && !reply_text.trim().is_empty() {
         cancel_progress_watchdog(&mut watchdog_cancel);
         if emit_timeline_once_for_task(
@@ -8935,18 +9538,6 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             .with_correlation(task_id),
         );
     }
-    // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
-    // Determine if the task was paused during execution. If so, we must not emit
-    // TaskCompleted nor mark it as completed; instead, emit TaskPaused to keep
-    // the event stream consistent with the stored status.
-    let is_paused = matches!(
-        store.get(task_id),
-        Ok(Some(Task {
-            status: TaskStatus::Paused,
-            ..
-        }))
-    );
-
     if let Some(reg) = &browser_registry {
         crate::browser::close_task(reg, task_id).await;
     }
@@ -8955,15 +9546,6 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         ws.write().await.remove(&task_id);
     }
 
-    let mut studio_verify_error: Option<String> = None;
-    if !is_paused && code_studio_disk_task {
-        match crate::api_studio::studio_verify_after_agent_task(&tool_disk_workspace_root).await {
-            Ok(()) => {}
-            Err(e) => {
-                studio_verify_error = Some(e);
-            }
-        }
-    }
     if let Some(ref err) = studio_verify_error {
         let _ = bus.send(
             EventEnvelope::new(
