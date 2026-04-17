@@ -2,7 +2,9 @@
 
 use crate::config::{RouteEntry, TaskTypeConfig};
 use crate::metrics::MetricsCollector;
-use crate::provider::{CompletionRequest, CompletionResponse, LLMProvider};
+use crate::provider::{
+    provider_error_is_context_window_exceeded, CompletionRequest, CompletionResponse, LLMProvider,
+};
 use crate::retry::{RetryClass, RetryPolicy};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -56,7 +58,7 @@ impl FallbackEngine {
         chain.extend(task_config.fallback.iter());
 
         let mut last_error: Option<String> = None;
-        for (i, entry) in chain.iter().enumerate() {
+        'providers: for (i, entry) in chain.iter().enumerate() {
             if degraded_only && !self.is_local_provider(entry.provider.as_str(), resolve) {
                 continue;
             }
@@ -257,6 +259,15 @@ impl FallbackEngine {
                             error = %e,
                             "Attempt failed, try next in chain"
                         );
+                        if provider_error_is_context_window_exceeded(&e) {
+                            warn!(
+                                provider = %entry.provider,
+                                model = %entry.model,
+                                error = %e,
+                                "Prompt exceeds context window; skipping remaining providers (same oversized request)"
+                            );
+                            break 'providers;
+                        }
                     }
                 }
             }

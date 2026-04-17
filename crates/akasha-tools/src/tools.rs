@@ -525,7 +525,13 @@ fn search_files_inner(
             },
         ));
     }
-    let full_pattern = dir.join(pattern);
+    let pattern_trimmed = pattern.trim();
+    let simple_basename_pattern = !pattern_trimmed.is_empty()
+        && !pattern_trimmed.contains('*')
+        && !pattern_trimmed.contains('?')
+        && !pattern_trimmed.contains('/')
+        && !pattern_trimmed.contains('\\');
+    let full_pattern = dir.join(pattern_trimmed);
     let glob_pattern = full_pattern.to_string_lossy();
 
     let mut wb = ignore::WalkBuilder::new(dir);
@@ -560,7 +566,15 @@ fn search_files_inner(
             continue;
         }
         let s = path.to_string_lossy().replace('\\', "/");
-        if match_glob(&glob_pattern, &s) {
+        let basename_match = if simple_basename_pattern {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.eq_ignore_ascii_case(pattern_trimmed))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if basename_match || match_glob(&glob_pattern, &s) {
             out.push(path.to_path_buf());
         }
     }

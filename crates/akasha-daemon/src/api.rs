@@ -348,7 +348,17 @@ fn resolve_tool_disk_path(raw: &str, workspace_root: Option<&Path>) -> PathBuf {
                 .unwrap_or_else(|| Path::new(&key).to_path_buf()),
         )
     } else {
-        strip_verbatim_prefix(Path::new(raw).to_path_buf())
+        let p = Path::new(raw);
+        if p.is_absolute() {
+            strip_verbatim_prefix(p.to_path_buf())
+        } else {
+            strip_verbatim_prefix(
+                workspace_root
+                    .map(|root| root.join(p))
+                    .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(p)))
+                    .unwrap_or_else(|| p.to_path_buf()),
+            )
+        }
     }
 }
 
@@ -3144,6 +3154,23 @@ fn tool_name_is_safe_identifier(tool_name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
 }
 
+/// Certains modèles enveloppent les appels outils en XML (`<tool_call>read_file …</tool_call>`)
+/// ou enchaînent avec `<tool_call>…<tool_call>…` sans fermeture. Convertir en lignes `TOOL:` pour `parse_tool_calls`.
+fn normalize_xml_tool_call_wrappers(response: &str) -> String {
+    let lower = response.to_ascii_lowercase();
+    if !lower.contains("<tool_call") {
+        return response.to_string();
+    }
+    let Ok(close_re) = regex::Regex::new(r"(?i)</tool_call\s*>") else {
+        return response.to_string();
+    };
+    let s = close_re.replace_all(response, "\n").to_string();
+    let Ok(open_re) = regex::Regex::new(r"(?i)<tool_call(?:\s[^>]*)?>\s*") else {
+        return s;
+    };
+    open_re.replace_all(&s, "\nTOOL: ").to_string()
+}
+
 /// Rewrite lines so strict `TOOL:` prefix parsing succeeds (see `parse_tool_calls`).
 ///
 /// Lines that are inside the body of a multiline tool (`write_file`, `edit_file`,
@@ -3219,7 +3246,8 @@ fn normalize_response_tool_prefixes(response: &str) -> String {
 
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
 fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
-    let normalized = normalize_response_tool_prefixes(response);
+    let xml_norm = normalize_xml_tool_call_wrappers(response);
+    let normalized = normalize_response_tool_prefixes(&xml_norm);
     parse_tool_calls_strict(&normalized)
 }
 
@@ -6163,9 +6191,11 @@ async fn studio_verify_run_llm_autofix_rounds(
 Workspace paths are relative to the project root shown in the user message. \
 Emit only lines starting with TOOL: using these tools: read_file, grep_content, search_files, search_replace, edit_file, write_file, apply_patch, file_diff. \
 STRICT tool-call format: `TOOL: <tool_name> <arg1> <arg2> ...` (space-separated args only). \
+For ALL file/dir path arguments, ALWAYS use `workspace:/...` paths (including `workspace:/.` for project root scans). \
+Never use bare relative paths like `src/...` or `.`; use `workspace:/src/...` and `workspace:/.`. \
 Do NOT output JSON function-call style (invalid: `TOOL: read_file({\"path\":\"src/App.tsx\"})`). \
 Do NOT output pipe syntax (invalid: `TOOL: search_files|pattern|*|path|.`). \
-Valid examples: `TOOL: read_file src/App.tsx 320 20`, `TOOL: search_files . package.json true`. \
+Valid examples: `TOOL: read_file workspace:/src/App.tsx 320 20`, `TOOL: search_files workspace:/. package.json true`. \
 Do NOT use ask_user, delegate_to_agent, run_command, browser_*, install_skill, or any tool not in that list. \
 Do not paste markdown fences or assistant prose into source files — only valid source code. \
 Fix every compiler error; prefer minimal search_replace / edit_file over rewriting whole files.";
@@ -6452,7 +6482,8 @@ No prose, no ask_user, no run_command.",
                     system_prompt: Some(
                         "You are in final deterministic Code Studio autofix fallback. Emit only TOOL lines. \
 Use STRICT format: `TOOL: <tool_name> <arg1> <arg2> ...` with plain space-separated arguments. \
-Do not use `tool(...)` JSON-call style or `|key|value|` syntax."
+For ALL file/dir paths, ALWAYS use `workspace:/...` arguments (for root scans, use `workspace:/.`). \
+Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-call style or `|key|value|` syntax."
                             .to_string(),
                     ),
                     image_data_urls: None,
@@ -7728,10 +7759,20 @@ pub(crate) async fn run_message_via_llm(
                             }
                         }
                         const MAX_ACCUMULATED: usize = 2 * 1024 * 1024; // 2 MiB cap to prevent unbounded allocation on long streams
-                        if accumulated.len() + chunk.len() > MAX_ACCUMULATED {
-                            accumulated.truncate(MAX_ACCUMULATED.saturating_sub(chunk.len()));
+                        let chunk_ref: &str = if chunk.len() > MAX_ACCUMULATED {
+                            tracing::warn!(
+                                chunk_len = chunk.len(),
+                                max = MAX_ACCUMULATED,
+                                "Stream chunk larger than progress cap; truncating for accumulated progress buffer"
+                            );
+                            &chunk[..MAX_ACCUMULATED]
+                        } else {
+                            chunk.as_str()
+                        };
+                        if accumulated.len() + chunk_ref.len() > MAX_ACCUMULATED {
+                            accumulated.truncate(MAX_ACCUMULATED.saturating_sub(chunk_ref.len()));
                         }
-                        accumulated.push_str(&chunk);
+                        accumulated.push_str(chunk_ref);
                         let _ = bus.send(
                             EventEnvelope::new(
                                 EventType::ProgressUpdate,
@@ -13943,6 +13984,24 @@ mod tests {
         assert_eq!(c[0].0, "write_file");
         assert_eq!(c[0].1[0], "workspace:/x.md");
         assert_eq!(c[0].1[1], "hello block");
+    }
+
+    #[test]
+    fn parse_tool_calls_xml_tool_call_tags() {
+        let s = "<tool_call>read_file workspace:/src/App.tsx 1 10</tool_call>\n<tool_call>read_file workspace:/src/b.tsx 1 5</tool_call>";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 2, "{:?}", c);
+        assert_eq!(c[0].0, "read_file");
+        assert_eq!(c[1].0, "read_file");
+    }
+
+    #[test]
+    fn parse_tool_calls_xml_tool_call_chained_without_close() {
+        let s = "<tool_call>read_file workspace:/a.tsx 1 2<tool_call>read_file workspace:/b.tsx 3 4";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 2, "{:?}", c);
+        assert_eq!(c[0].0, "read_file");
+        assert_eq!(c[1].0, "read_file");
     }
 
     #[test]
