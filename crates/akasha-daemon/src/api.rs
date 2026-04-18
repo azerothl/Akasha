@@ -1158,6 +1158,81 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("sim_compare", "sim_compare <initial> <growth_rate> <noise> <horizon> | plugin.call simulation <json> — via plugin simulation, compare scénario de base et alternatif, retourne delta + tableau de résultats."),
 ];
 
+/// Tools advertised in the Code Studio prompt: dev/repo tools only (policy still gates execution).
+/// Omits browser, delegation, memory_*, sessions_*, device_*, speech, maps plugins, etc.
+fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>) -> Vec<String> {
+    const STUDIO: &[&str] = &[
+        "read_file",
+        "write_file",
+        "delete_file",
+        "search_files",
+        "grep_content",
+        "run_command",
+        "run_terminal",
+        "run_command_background",
+        "process",
+        "file_diff",
+        "diff_unified",
+        "dir_compare",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_rev_parse",
+        "edit_file",
+        "apply_patch",
+        "search_replace",
+        "web_fetch",
+        "web_search",
+        "run_in_container",
+        "ask_user",
+        "write_todos",
+        "merge_todos",
+        "read_todos",
+        "update_todo",
+        "list_skills",
+        "read_skill",
+        "workspace_graph_search",
+        "pdf",
+        "image",
+    ];
+    let mut out: Vec<String> = match allowed_tools {
+        None => STUDIO.iter().map(|s| (*s).to_string()).collect(),
+        Some(list) => {
+            let allowed_lc: std::collections::HashSet<String> =
+                list.iter().map(|s| s.to_ascii_lowercase()).collect();
+            STUDIO
+                .iter()
+                .filter(|t| allowed_lc.contains(&t.to_ascii_lowercase()))
+                .map(|s| (*s).to_string())
+                .collect()
+        }
+    };
+    if out.is_empty() {
+        out.extend(
+            ["read_file", "write_file", "grep_content", "run_command", "ask_user"]
+                .iter()
+                .map(|s| (*s).to_string()),
+        );
+    }
+    out
+}
+
+/// Like [`available_tools_instruction`] but **only** listed tool names — no `always_misc` merge
+/// (Code Studio must not advertise install_skill, browser, delegate_to_agent, etc.).
+fn available_tools_instruction_exact(allowed: &[String]) -> String {
+    if allowed.is_empty() {
+        return String::new();
+    }
+    let allowed_lc: std::collections::HashSet<String> =
+        allowed.iter().map(|s| s.to_ascii_lowercase()).collect();
+    AVAILABLE_TOOLS
+        .iter()
+        .filter(|(name, _)| allowed_lc.contains(&name.to_ascii_lowercase()))
+        .map(|(_, desc)| *desc)
+        .collect::<Vec<_>>()
+        .join(" ; ")
+}
+
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
     let iter: Box<dyn Iterator<Item = &(&str, &str)>> = if let Some(allowed) = allowed_tools {
         Box::new(AVAILABLE_TOOLS.iter().filter(move |(name, _)| {
@@ -6723,6 +6798,18 @@ pub(crate) async fn run_message_via_llm(
         memory_profile.semantic_top_k = memory_profile.semantic_top_k.min(1);
         memory_profile.compact_before_prompt = false;
     }
+    // Code Studio: avoid global long-term memory, user document RAG, multi-workspace graph indexes,
+    // and cross-session episodic bleed — the prompt already carries plan/stack and disk context.
+    if code_studio_disk_task {
+        memory_profile.semantic_top_k = 0;
+        memory_profile.episodic_limit = 0;
+        memory_profile.facts_limit = 0;
+        memory_profile.user_rag_top_k = 0;
+        memory_profile.workspace_graph_top_k = 0;
+        memory_profile.expand_by_graph = false;
+        memory_profile.allow_project_recall = false;
+        memory_profile.recent_context_max_chars = memory_profile.recent_context_max_chars.min(12_000);
+    }
 
     let tools_executor_snapshot = match &tools_executor {
         Some(r) => Some((*r.read().await).clone()),
@@ -6800,7 +6887,16 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
         }
-        let base = available_tools_instruction(allowed_tools.as_deref());
+        let studio_tool_list = if code_studio_disk_task {
+            Some(code_studio_tools_for_prompt(allowed_tools.as_deref()))
+        } else {
+            None
+        };
+        let base = if let Some(ref v) = studio_tool_list {
+            available_tools_instruction_exact(v)
+        } else {
+            available_tools_instruction(allowed_tools.as_deref())
+        };
         let run_command_os_rule = match std::env::consts::OS {
             "windows" => "RUN_COMMAND OS: You are on Windows. Prefer cmd, PowerShell, curl.exe; avoid grep, cat, sed (not in default PATH). Use full path or .exe when needed. To test that the vault token works (e.g. GitHub API), use Invoke-WebRequest: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN powershell -NoProfile -Command \"Invoke-WebRequest -Uri 'https://api.github.com/repos/owner/repo' -Headers @{ Authorization = 'Bearer ' + $env:GITHUB_TOKEN } | Select-Object -Expand Content\" (replace owner/repo). Ensure 'powershell' is in allowed_commands in tools_policy.yaml. The system injects the vault value into the environment for the command.\n\
              ",
@@ -7017,7 +7113,10 @@ pub(crate) async fn run_message_via_llm(
         filter_by_session: !turns_empty,
         suggest_project: memory_profile.allow_project_recall
             && message_suggests_project(clean_message),
-        is_first_message: turns_empty && memory_profile.allow_identity_lookup,
+        // Code Studio: do not run global LT search for "user name" on first turn — it pulls unrelated memories.
+        is_first_message: turns_empty
+            && memory_profile.allow_identity_lookup
+            && !code_studio_disk_task,
         expand_by_graph: memory_profile.expand_by_graph,
         user_identity_prefix: if user_identity_prefix.is_empty()
             || !memory_profile.allow_identity_lookup
@@ -7026,12 +7125,16 @@ pub(crate) async fn run_message_via_llm(
         } else {
             Some(user_identity_prefix)
         },
+        task_outcomes_limit: if code_studio_disk_task { 6 } else { 8 },
+        task_outcomes_scope_session: code_studio_disk_task,
+        include_preference_and_personality_episodic: !code_studio_disk_task,
         ..Default::default()
     };
     if memory_profile.semantic_top_k > 0
         || memory_profile.episodic_limit > 0
         || memory_profile.facts_limit > 0
         || recall_params.user_identity_prefix.is_some()
+        || recall_params.task_outcomes_limit > 0
     {
         let fused =
             crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params)

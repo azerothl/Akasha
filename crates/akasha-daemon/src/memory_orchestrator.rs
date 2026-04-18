@@ -4,7 +4,7 @@ use crate::memory_actor::LongTermMemoryClient;
 use akasha_store::{EpisodicFilter, MemorySearchFilter};
 
 /// Parameters for memory recall.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RecallParams {
     pub message: String,
     pub session_id: String,
@@ -29,6 +29,36 @@ pub struct RecallParams {
     pub expand_by_graph: bool,
     /// Optional prefix for user identity block (e.g. from user_profile.json: how to address the user).
     pub user_identity_prefix: Option<String>,
+    /// Max rows in `[Recent task outcomes]`; `0` = omit that section.
+    pub task_outcomes_limit: usize,
+    /// When true, only `task_outcome` events for [`session_id`](RecallParams::session_id) (avoids global bleed across projects).
+    pub task_outcomes_scope_session: bool,
+    /// When false, skip global `user_preference` and `personality_memory` episodic blocks (Code Studio isolation).
+    pub include_preference_and_personality_episodic: bool,
+}
+
+impl Default for RecallParams {
+    fn default() -> Self {
+        Self {
+            message: String::new(),
+            session_id: String::new(),
+            entity_id: None,
+            process_id: None,
+            task_id: None,
+            semantic_top_k: 5,
+            episodic_limit: 5,
+            facts_limit: 10,
+            suggest_project: false,
+            is_first_message: false,
+            filter_by_session: true,
+            policy_summary: None,
+            expand_by_graph: false,
+            user_identity_prefix: None,
+            task_outcomes_limit: 8,
+            task_outcomes_scope_session: false,
+            include_preference_and_personality_episodic: true,
+        }
+    }
 }
 
 impl RecallParams {
@@ -48,6 +78,9 @@ impl RecallParams {
             policy_summary: None,
             expand_by_graph: false,
             user_identity_prefix: None,
+            task_outcomes_limit: 8,
+            task_outcomes_scope_session: false,
+            include_preference_and_personality_episodic: true,
         }
     }
 }
@@ -226,6 +259,10 @@ pub async fn recall_context(
             };
             let events = client.search_episodic(ep_filter, params.episodic_limit);
             for e in &events {
+                // task_outcome is surfaced in [Recent task outcomes]; listing it here too duplicates content.
+                if e.event_type == "task_outcome" {
+                    continue;
+                }
                 ctx.episodic_block.push_str(&format!("{}: {}\n", e.event_type, e.payload.replace('\n', " ")));
             }
         }
@@ -250,56 +287,72 @@ pub async fn recall_context(
             ctx.policy_block.push_str(&summary);
             ctx.policy_block.push_str("\n");
         }
-        let pref_filter = EpisodicFilter {
-            event_type: Some("user_preference".to_string()),
-            session_id: None,
-            ..Default::default()
-        };
-        let prefs = client.search_episodic(pref_filter, 5);
-        for e in &prefs {
-            ctx.policy_block.push_str(&format!("Préférence enregistrée: {}\n", e.payload.replace('\n', " ")));
-        }
+        if params.include_preference_and_personality_episodic {
+            let pref_filter = EpisodicFilter {
+                event_type: Some("user_preference".to_string()),
+                session_id: None,
+                ..Default::default()
+            };
+            let prefs = client.search_episodic(pref_filter, 5);
+            for e in &prefs {
+                ctx.policy_block
+                    .push_str(&format!("Préférence enregistrée: {}\n", e.payload.replace('\n', " ")));
+            }
 
-        // Phase 3: Personality memory — structured preferences (preferred_tone, technical_depth_preference, etc.)
-        let personality_filter = EpisodicFilter {
-            event_type: Some("personality_memory".to_string()),
-            session_id: None,
-            ..Default::default()
-        };
-        let personality_events = client.search_episodic(personality_filter, 20);
-        for e in &personality_events {
-            ctx.personality_memory_block.push_str("- ");
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&e.payload) {
-                if let Some(k) = v.get("key").and_then(|x| x.as_str()) {
-                    let val_str = v.get("value").map(|x| x.to_string()).unwrap_or_else(|| "".to_string());
-                    ctx.personality_memory_block.push_str(&format!("{}: {}\n", k, val_str.trim_matches('"')));
+            // Phase 3: Personality memory — structured preferences (preferred_tone, technical_depth_preference, etc.)
+            let personality_filter = EpisodicFilter {
+                event_type: Some("personality_memory".to_string()),
+                session_id: None,
+                ..Default::default()
+            };
+            let personality_events = client.search_episodic(personality_filter, 20);
+            for e in &personality_events {
+                ctx.personality_memory_block.push_str("- ");
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&e.payload) {
+                    if let Some(k) = v.get("key").and_then(|x| x.as_str()) {
+                        let val_str = v.get("value").map(|x| x.to_string()).unwrap_or_else(|| "".to_string());
+                        ctx.personality_memory_block.push_str(&format!("{}: {}\n", k, val_str.trim_matches('"')));
+                    } else {
+                        ctx.personality_memory_block.push_str(&e.payload.replace('\n', " "));
+                        ctx.personality_memory_block.push_str("\n");
+                    }
                 } else {
                     ctx.personality_memory_block.push_str(&e.payload.replace('\n', " "));
                     ctx.personality_memory_block.push_str("\n");
                 }
-            } else {
-                ctx.personality_memory_block.push_str(&e.payload.replace('\n', " "));
-                ctx.personality_memory_block.push_str("\n");
             }
         }
 
         // Cognitive loop: recent task outcomes (request, status, result) for continuity
-        let outcome_filter = EpisodicFilter {
-            event_type: Some("task_outcome".to_string()),
-            session_id: None,
-            ..Default::default()
-        };
-        let outcome_events = client.search_episodic(outcome_filter, 8);
-        for e in &outcome_events {
-            ctx.recent_outcomes_block.push_str("- ");
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&e.payload) {
-                let req = v.get("initial_message_preview").and_then(|x| x.as_str()).unwrap_or("");
-                let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("");
-                let summary = v.get("summary_preview").and_then(|x| x.as_str()).unwrap_or("").replace('\n', " ");
-                ctx.recent_outcomes_block.push_str(&format!("Requête: {} | Statut: {} | Résultat: {}\n", req, status, summary));
-            } else {
-                ctx.recent_outcomes_block.push_str(&e.payload.replace('\n', " "));
-                ctx.recent_outcomes_block.push_str("\n");
+        if params.task_outcomes_limit > 0 {
+            let outcome_filter = EpisodicFilter {
+                event_type: Some("task_outcome".to_string()),
+                session_id: if params.task_outcomes_scope_session {
+                    Some(params.session_id.clone())
+                } else {
+                    None
+                },
+                ..Default::default()
+            };
+            let outcome_events = client.search_episodic(outcome_filter, params.task_outcomes_limit);
+            for e in &outcome_events {
+                ctx.recent_outcomes_block.push_str("- ");
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&e.payload) {
+                    let req = v.get("initial_message_preview").and_then(|x| x.as_str()).unwrap_or("");
+                    let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("");
+                    let summary = v
+                        .get("summary_preview")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .replace('\n', " ");
+                    ctx.recent_outcomes_block.push_str(&format!(
+                        "Requête: {} | Statut: {} | Résultat: {}\n",
+                        req, status, summary
+                    ));
+                } else {
+                    ctx.recent_outcomes_block.push_str(&e.payload.replace('\n', " "));
+                    ctx.recent_outcomes_block.push_str("\n");
+                }
             }
         }
 
