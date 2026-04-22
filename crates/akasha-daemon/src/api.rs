@@ -2911,7 +2911,7 @@ const GITHUB_VAULT_REMINDER: &str = "\n[Reminder GitHub + vault: you MUST run th
 
 /// Injected when the message looks like code/script work: prefer workspace paths, git/diff tools, and explicit cwd for commands.
 const CODE_DEV_SANDBOX_REMINDER: &str = "\n[Reminder — code / project work: use workspace:/ paths for files in this task when no absolute path is given. For Git operations prefer TOOL: git_status, git_diff, git_log, git_rev_parse on the repo path (e.g. workspace:/ or an allowed folder) instead of raw git via run_command, unless you need a subcommand not covered. For file comparison use diff_unified or file_diff; for two trees use dir_compare. For build/test commands use TOOL: run_command --cwd workspace:/ cargo test (or npm test, etc.) so the command runs in the project root; or set run_command_default_cwd_workspace: true in tools_policy.yaml. For isolated execution with a toolchain image, use run_in_container when policy allows.]\n\n";
-const STUDIO_DISK_REMINDER: &str = "\n[Code Studio — périmètre disque: cette tâche s'exécute sous le dossier projet studio uniquement (miroir workspace:/ et cwd des outils). Ne pas cibler de chemins hors de ce répertoire. Pour npm install / builds à risque, privilégier run_in_container si la politique d'outils l'autorise.]\n\n";
+const STUDIO_DISK_REMINDER: &str = "\n[Code Studio — périmètre disque: cette tâche s'exécute sous le dossier projet studio uniquement (miroir workspace:/ et cwd des outils). Ne pas cibler de chemins hors de ce répertoire. Pour npm install / builds à risque, privilégier run_in_container si la politique d'outils l'autorise. Renommer/déplacer un dossier: si `run_command` est autorisé, utiliser `git mv` ou `mv` avec `--cwd workspace:/` puis corriger tous les imports; sinon `read_file` chaque fichier concerné puis `write_file workspace:/nouveau/chemin/...` (les répertoires parents sont créés) et `grep_content`/`search_replace` pour les imports — ne pas boucler sur une tactique qui ne modifie pas réellement les chemins sur disque.]\n\n";
 
 /// Injected with STUDIO_DISK_REMINDER: raise quality bar and user-visible wrap-up for Code Studio agents.
 const STUDIO_AGENT_QUALITY_REMINDER: &str = concat!(
@@ -6270,7 +6270,18 @@ const STUDIO_VERIFY_AUTOFIX_TOOLS: &[&str] = &[
     "write_file",
     "apply_patch",
     "file_diff",
+    "delete_file",
 ];
+
+/// Injecté quand deux tours consécutifs produisent le même résumé d’outils (risque de boucle).
+const STUDIO_VERIFY_AUTOFIX_STALL_WARNING: &str = "\n\n[STALL / ANTI-LOOP — READ CAREFULLY]\n\
+The previous round’s tool results fingerprint matches this round’s: you are likely repeating a failing strategy.\n\
+Rules for this sandbox:\n\
+- There is NO `run_command`, NO shell, NO `mv`/`mkdir`/`git mv` here — do not try to rename folders with a non-existent rename tool.\n\
+- To move or rename a *folder*: `read_file` each source under the old path, then `write_file workspace:/new/path/...` with the same contents (write_file creates parent directories). Then `grep_content` + `search_replace` across the repo to fix imports. Optionally `delete_file` obsolete duplicates only if policy allows and you are sure.\n\
+- If TS2305 says a symbol is not exported: `read_file` the module that the import resolves to on disk (path shown in the error) before editing; add the export OR change the import to a file that actually exists (`search_files workspace:/. <basename> true`).\n\
+- If TS2554 wrong arity: fix the call site or the callee — read both sides.\n\
+- Do NOT repeat the same import-only edit without ensuring the target file exists at that path.\n";
 
 fn studio_verify_extract_ts_error_paths(verify_log: &str, cap: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -6563,7 +6574,7 @@ async fn studio_verify_run_llm_autofix_rounds(
     let message_webhook_url = std::env::var("AKASHA_MESSAGE_WEBHOOK_URL").ok();
     let system = "You repair a Code Studio project after `npm run build` or `cargo check` failed. \
 Workspace paths are relative to the project root shown in the user message. \
-Emit only lines starting with TOOL: using these tools: read_file, grep_content, search_files, search_replace, edit_file, write_file, apply_patch, file_diff. \
+Emit only lines starting with TOOL: using these tools: read_file, grep_content, search_files, search_replace, edit_file, write_file, apply_patch, file_diff, delete_file. \
 STRICT tool-call format: `TOOL: <tool_name> <arg1> <arg2> ...` (space-separated args only). \
 For ALL file/dir path arguments, ALWAYS use `workspace:/...` paths (including `workspace:/.` for project root scans). \
 Never use bare relative paths like `src/...` or `.`; use `workspace:/src/...` and `workspace:/.`. \
@@ -6571,8 +6582,12 @@ Do NOT output JSON function-call style (invalid: `TOOL: read_file({\"path\":\"sr
 Do NOT output pipe syntax (invalid: `TOOL: search_files|pattern|*|path|.`). \
 Valid examples: `TOOL: read_file workspace:/src/App.tsx 320 20`, `TOOL: search_files workspace:/. package.json true`. \
 Do NOT use ask_user, delegate_to_agent, run_command, browser_*, install_skill, or any tool not in that list. \
+IMPORTANT — this autofix sandbox has NO shell: you cannot `mv`, `git mv`, `mkdir` via run_command (it is disabled). \
+To \"rename\" or split a directory tree: read each file under the old path, then write_file to `workspace:/new/dir/...` (parent dirs are created automatically), then search_replace / grep_content to fix imports across the project. \
+If the build says a module has no exported member: read_file that module on disk at the path the error shows; either export the symbol or change imports to a module that actually exists (use search_files to locate the real file). \
 Do not paste markdown fences or assistant prose into source files — only valid source code. \
-Fix every compiler error; prefer minimal search_replace / edit_file over rewriting whole files.";
+Fix every compiler error; prefer minimal search_replace / edit_file over rewriting whole files. \
+If tool results repeat without progress, change strategy (see any [STALL / ANTI-LOOP] block in the user message).";
     let root_disp = tool_disk_root.display().to_string();
     let log_snip: String = verify_log.chars().take(VERIFY_SNIP).collect();
     let focus_files = studio_verify_extract_ts_error_paths(verify_log, 10);
@@ -6615,6 +6630,8 @@ KNOWN_TS_ERRORS:\n{}\n",
     } else {
         focus_files.join(", ")
     };
+    let mut prev_round_tool_fp: Option<String> = None;
+    let mut pending_stall: Option<String> = None;
     for round in 0..max_llm_rounds {
         let state_snapshot = format!(
             "STATE SNAPSHOT:\n\
@@ -6635,7 +6652,8 @@ LAST_FAILED_FILES: {}\n",
             format!("{}\n{}", first_user, state_snapshot)
         } else {
             format!(
-                "{}\n{}\nRound {} — previous tool results:\n{}\n\nEmit more TOOL: lines to fix remaining errors, or a single line AUTOFIX_DONE if the project should compile.",
+                "{}{}\n{}\nRound {} — previous tool results:\n{}\n\nEmit more TOOL: lines to fix remaining errors, or a single line AUTOFIX_DONE if the project should compile.",
+                pending_stall.take().unwrap_or_default(),
                 sticky_context,
                 state_snapshot,
                 round + 1,
@@ -6773,7 +6791,7 @@ Retry now. Return only TOOL: lines; start with read_file/grep_content on files r
                 .await;
                 let write_like = matches!(
                     actual_tool.as_str(),
-                    "write_file" | "search_replace" | "edit_file" | "apply_patch"
+                    "write_file" | "search_replace" | "edit_file" | "apply_patch" | "delete_file"
                 );
                 if success && write_like {
                     any_write_success = true;
@@ -6790,6 +6808,18 @@ Retry now. Return only TOOL: lines; start with read_file/grep_content on files r
         if follow_up.trim().is_empty() {
             break;
         }
+        let fp = studio_verify_short_hash(&follow_up.chars().take(4_500).collect::<String>());
+        if let Some(prev) = prev_round_tool_fp.as_ref() {
+            if *prev == fp && round >= 1 {
+                pending_stall = Some(STUDIO_VERIFY_AUTOFIX_STALL_WARNING.to_string());
+                tracing::warn!(
+                    task_id = %task_id,
+                    round = round + 1,
+                    "studio verify autofix: repeated tool-output fingerprint (stall guard)"
+                );
+            }
+        }
+        prev_round_tool_fp = Some(fp);
     }
     if !any_write_success {
         let focus_files = studio_verify_extract_ts_error_paths(verify_log, 8);
@@ -6837,8 +6867,8 @@ Retry now. Return only TOOL: lines; start with read_file/grep_content on files r
                 let fallback_req = CompletionRequest {
                     prompt: format!(
                         "Build output:\n{}\n\nFocused file reads:\n{}\n\nReturn ONLY TOOL lines to fix the TS syntax/build errors now. \
-Use only: search_replace, edit_file, write_file, apply_patch, file_diff. \
-No prose, no ask_user, no run_command.",
+Use only: search_replace, edit_file, write_file, apply_patch, file_diff, delete_file. \
+No prose, no ask_user, no run_command. Remember: no shell rename — use write_file to create files under new paths (parents auto-created) and fix imports.",
                         verify_log.chars().take(12_000).collect::<String>(),
                         focused_reads.join("\n\n---\n\n")
                     ),
@@ -6876,7 +6906,7 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                                 let actual_tool = canonicalize_tool_name(name);
                                 if !matches!(
                                     actual_tool.as_str(),
-                                    "search_replace" | "edit_file" | "write_file" | "apply_patch" | "file_diff"
+                                    "search_replace" | "edit_file" | "write_file" | "apply_patch" | "file_diff" | "delete_file"
                                 ) {
                                     continue;
                                 }
@@ -6900,7 +6930,7 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                                 if success
                                     && matches!(
                                         actual_tool.as_str(),
-                                        "search_replace" | "edit_file" | "write_file" | "apply_patch"
+                                        "search_replace" | "edit_file" | "write_file" | "apply_patch" | "delete_file"
                                     )
                                 {
                                     any_write_success = true;
