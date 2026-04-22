@@ -18,6 +18,7 @@ pub mod autonomous_mission_config;
 pub mod session_state;
 pub mod browser;
 pub mod channels;
+pub mod code_rag;
 pub mod daemon;
 pub mod replication;
 pub mod device_bridge;

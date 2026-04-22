@@ -226,6 +226,15 @@ struct ProjectsListOut {
     projects: Vec<ProjectMetaOut>,
 }
 
+#[derive(Serialize)]
+struct CodeRagStatusOut {
+    status: String,
+    files_indexed: usize,
+    chunks_indexed: usize,
+    built_at: Option<String>,
+    stale: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StudioEvolution {
     id: String,
@@ -1382,6 +1391,94 @@ pub async fn handle_studio_route(
                     obj.insert("git_worktree_clean".into(), serde_json::json!(clean));
                 }
                 return Some(json_response("200 OK", &body.to_string()));
+            }
+            // GET /api/studio/projects/:id/code-rag/status
+            if segments.len() == 3 && segments[1] == "code-rag" && segments[2] == "status" {
+                let id = segments[0];
+                let root = match resolve_studio_project_dir(data_dir, id) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return Some(json_response(
+                            "400 Bad Request",
+                            &serde_json::json!({ "error": e }).to_string(),
+                        ));
+                    }
+                };
+                if !root.is_dir() {
+                    return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                }
+                let data_dir_owned = data_dir.to_path_buf();
+                let id_owned = id.to_string();
+                let root_owned = root.clone();
+                let status = tokio::task::spawn_blocking(move || {
+                    let store = crate::code_rag::CodeRagStore::new(&data_dir_owned);
+                    store.get_status(&id_owned, &root_owned)
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok());
+                let Some(status) = status else {
+                    return Some(json_response(
+                        "500 Internal Server Error",
+                        r#"{"error":"code_rag_status_failed"}"#,
+                    ));
+                };
+                let body = serde_json::to_string(&CodeRagStatusOut {
+                    status: status.status,
+                    files_indexed: status.files_indexed,
+                    chunks_indexed: status.chunks_indexed,
+                    built_at: status.built_at,
+                    stale: status.stale,
+                })
+                .unwrap_or_else(|_| "{}".to_string());
+                return Some(json_response("200 OK", &body));
+            }
+        }
+    }
+
+    // POST /api/studio/projects/:id/code-rag/reindex
+    if method == "POST" {
+        if let Some(rest) = strip_studio_projects_prefix(path_only) {
+            let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+            if segments.len() == 3 && segments[1] == "code-rag" && segments[2] == "reindex" {
+                let id = segments[0];
+                let root = match resolve_studio_project_dir(data_dir, id) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return Some(json_response(
+                            "400 Bad Request",
+                            &serde_json::json!({ "error": e }).to_string(),
+                        ));
+                    }
+                };
+                if !root.is_dir() {
+                    return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                }
+                let data_dir_owned = data_dir.to_path_buf();
+                let id_owned = id.to_string();
+                let root_owned = root.clone();
+                let status = tokio::task::spawn_blocking(move || {
+                    let store = crate::code_rag::CodeRagStore::new(&data_dir_owned);
+                    store.ensure_index(&id_owned, &root_owned, true)
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok());
+                let Some(status) = status else {
+                    return Some(json_response(
+                        "500 Internal Server Error",
+                        r#"{"error":"code_rag_reindex_failed"}"#,
+                    ));
+                };
+                let body = serde_json::to_string(&CodeRagStatusOut {
+                    status: status.status,
+                    files_indexed: status.files_indexed,
+                    chunks_indexed: status.chunks_indexed,
+                    built_at: status.built_at,
+                    stale: status.stale,
+                })
+                .unwrap_or_else(|_| "{}".to_string());
+                return Some(json_response("200 OK", &body));
             }
         }
     }

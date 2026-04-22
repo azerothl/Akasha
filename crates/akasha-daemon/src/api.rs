@@ -112,6 +112,16 @@ fn parse_generate_image_tool_args(args: &[String]) -> (String, Option<String>) {
     (args.join(" "), None)
 }
 
+fn studio_code_rag_enabled() -> bool {
+    std::env::var("AKASHA_STUDIO_CODE_RAG_ENABLED")
+        .ok()
+        .map(|v| {
+            let t = v.trim().to_ascii_lowercase();
+            matches!(t.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
 fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let enabled = *ENABLED.get_or_init(|| {
@@ -11871,9 +11881,12 @@ pub async fn handle_api(
             .as_ref()
             .and_then(|v| v.get("studio_delegate_single_level").and_then(|x| x.as_bool()))
             .unwrap_or(false);
-        let studio_disk_root = if let Some(pid) = body_json
+        let studio_project_id = body_json
             .as_ref()
             .and_then(|v| v.get("studio_project_id").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let studio_disk_root = if let Some(pid) = studio_project_id.as_deref()
         {
             match crate::studio::resolve_studio_project_dir(data_dir, pid.trim()) {
                 Ok(p) => {
@@ -11900,9 +11913,7 @@ pub async fn handle_api(
             .filter(|s| !s.is_empty());
         if studio_evolution_branch.is_none() {
             if let (Some(pid), Some(eid)) = (
-                body_json
-                    .as_ref()
-                    .and_then(|v| v.get("studio_project_id").and_then(|x| x.as_str())),
+                studio_project_id.as_deref(),
                 body_json
                     .as_ref()
                     .and_then(|v| v.get("studio_evolution_id").and_then(|x| x.as_str())),
@@ -11943,6 +11954,43 @@ pub async fn handle_api(
             if let Some(ref h) = studio_policy_hint {
                 if let Some(p) = crate::api_studio::studio_one_shot_policy_hint_prefix(h) {
                     message_for_llm = format!("{p}{message_for_llm}");
+                }
+            }
+            if studio_code_rag_enabled() {
+                if let Some(pid) = studio_project_id.as_deref() {
+                    let query = message_for_llm.clone();
+                    let data_dir = data_dir.to_path_buf();
+                    let root = root.clone();
+                    let pid = pid.to_string();
+                    let top_k = std::env::var("AKASHA_STUDIO_CODE_RAG_TOP_K")
+                        .ok()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .filter(|&n| n > 0 && n <= 30)
+                        .unwrap_or(8);
+                    let max_chars = std::env::var("AKASHA_STUDIO_CODE_RAG_MAX_CHARS")
+                        .ok()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .filter(|&n| n >= 800 && n <= 30_000)
+                        .unwrap_or(6_000);
+                    let code_ctx = tokio::task::spawn_blocking(move || {
+                        let store = crate::code_rag::CodeRagStore::new(&data_dir);
+                        let chunks = store.retrieve(
+                            &pid,
+                            &root,
+                            &query,
+                            crate::code_rag::RetrieveOptions { top_k, max_chars },
+                        )?;
+                        Ok::<_, anyhow::Error>(crate::code_rag::format_retrieved_chunks(
+                            &chunks, max_chars,
+                        ))
+                    })
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .flatten();
+                    if let Some(prefix) = code_ctx {
+                        message_for_llm = format!("{prefix}{message_for_llm}");
+                    }
                 }
             }
             if studio_delegate_single_level {
