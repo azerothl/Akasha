@@ -175,6 +175,37 @@ pub enum ProviderError {
     Auth(String),
 }
 
+/// True when the provider refused the call because the **prompt** (plus reserved output) exceeds the model or API context window.
+///
+/// Used by the router's streaming path to skip non-streaming fallback with the same oversized body (it would fail again with the same 400).
+pub fn provider_error_is_context_window_exceeded(err: &ProviderError) -> bool {
+    let ProviderError::Api(msg) = err else {
+        return false;
+    };
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("context_window_exceeded") {
+        return true;
+    }
+    if lower.contains("maximum context length") {
+        return true;
+    }
+    if lower.contains("reduce the length")
+        && (lower.contains("message") || lower.contains("prompt") || lower.contains("either one"))
+    {
+        return true;
+    }
+    if lower.contains("too many tokens") && lower.contains("context") {
+        return true;
+    }
+    if lower.contains("you requested about")
+        && lower.contains("tokens")
+        && (lower.contains("maximum") || lower.contains("exceed"))
+    {
+        return true;
+    }
+    false
+}
+
 /// One NDJSON line from Ollama `POST /api/generate` with `"stream": true`.
 /// Used by [`OllamaProvider::complete_stream_async`] and unit tests.
 fn ollama_apply_stream_ndjson_line(
@@ -214,6 +245,55 @@ fn ollama_apply_stream_ndjson_line(
 }
 
 // --- Ollama (local)
+
+/// `num_predict` from routing YAML can be `u32::MAX`; Ollama would otherwise accept absurd budgets and we buffer the full JSON stream in RAM.
+const OLLAMA_MAX_NUM_PREDICT: u32 = 262_144;
+/// Hard cap on streamed `response` + `thinking` bytes before we fail closed (avoids multi‑GB growth on hung/runaway streams).
+const OLLAMA_MAX_STREAM_BODY_BYTES: usize = 64 * 1024 * 1024;
+/// Max bytes held while waiting for a complete NDJSON line (no `\n` yet).
+const OLLAMA_MAX_PENDING_BEFORE_NEWLINE_BYTES: usize = 8 * 1024 * 1024;
+/// Max `/api/generate` JSON body for non‑streaming responses (`resp.json()` would allocate the whole value).
+const OLLAMA_MAX_NONSTREAM_JSON_BYTES: usize = 64 * 1024 * 1024;
+
+fn ollama_stream_body_bytes(
+    accumulated_text: &str,
+    thinking_buf: &str,
+    thinking_final: &Option<String>,
+) -> usize {
+    accumulated_text.len()
+        + thinking_buf.len()
+        + thinking_final.as_ref().map(|s| s.len()).unwrap_or(0)
+}
+
+fn ollama_check_stream_body_cap_with(
+    accumulated_text: &str,
+    thinking_buf: &str,
+    thinking_final: &Option<String>,
+    cap: usize,
+) -> Result<(), ProviderError> {
+    let n = ollama_stream_body_bytes(accumulated_text, thinking_buf, thinking_final);
+    if n > cap {
+        return Err(ProviderError::Api(format!(
+            "ollama stream: completion buffer exceeded {} bytes (response + thinking); aborting to avoid OOM",
+            cap
+        )));
+    }
+    Ok(())
+}
+
+fn ollama_check_stream_body_cap(
+    accumulated_text: &str,
+    thinking_buf: &str,
+    thinking_final: &Option<String>,
+) -> Result<(), ProviderError> {
+    ollama_check_stream_body_cap_with(
+        accumulated_text,
+        thinking_buf,
+        thinking_final,
+        OLLAMA_MAX_STREAM_BODY_BYTES,
+    )
+}
+
 pub struct OllamaProvider {
     base_url: String,
 }
@@ -238,8 +318,18 @@ impl OllamaProvider {
             _ => request.prompt.clone(),
         };
 
+        let raw_predict = request.max_tokens.unwrap_or(4096);
+        let num_predict = raw_predict.min(OLLAMA_MAX_NUM_PREDICT).max(1);
+        if raw_predict > OLLAMA_MAX_NUM_PREDICT {
+            warn!(
+                model = %model,
+                requested_num_predict = raw_predict,
+                capped_num_predict = num_predict,
+                "Ollama num_predict capped (very large values risk huge JSON buffers and OOM)"
+            );
+        }
         let mut options = serde_json::json!({
-            "num_predict": request.max_tokens.unwrap_or(4096),
+            "num_predict": num_predict,
             "temperature": request.temperature.unwrap_or(0.7),
         });
 
@@ -308,7 +398,7 @@ impl OllamaProvider {
         if !resp.status().is_success() {
             return Err(ProviderError::Api(format!("status {}", resp.status())));
         }
-        let json: serde_json::Value = resp.json().await.map_err(|e| {
+        let bytes = resp.bytes().await.map_err(|e| {
             if e.is_timeout() {
                 warn!(
                     provider = "ollama",
@@ -324,6 +414,16 @@ impl OllamaProvider {
             } else {
                 ProviderError::Api(e.to_string())
             }
+        })?;
+        if bytes.len() > OLLAMA_MAX_NONSTREAM_JSON_BYTES {
+            return Err(ProviderError::Api(format!(
+                "ollama non-stream response too large ({} bytes, max {})",
+                bytes.len(),
+                OLLAMA_MAX_NONSTREAM_JSON_BYTES
+            )));
+        }
+        let json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+            ProviderError::Api(format!("ollama JSON: {}", e))
         })?;
         let text = json.get("response").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if text.trim().is_empty() {
@@ -433,7 +533,15 @@ impl OllamaProvider {
             let Some(chunk) = chunk else {
                 break;
             };
-            pending.push_str(&String::from_utf8_lossy(&chunk));
+            let chunk_s = String::from_utf8_lossy(&chunk);
+            if pending.len().saturating_add(chunk_s.len()) > OLLAMA_MAX_PENDING_BEFORE_NEWLINE_BYTES {
+                return Err(ProviderError::Api(format!(
+                    "ollama stream: {} bytes buffered without a newline (max {}); malformed NDJSON or missing newlines",
+                    pending.len().saturating_add(chunk_s.len()),
+                    OLLAMA_MAX_PENDING_BEFORE_NEWLINE_BYTES
+                )));
+            }
+            pending.push_str(&chunk_s);
             while let Some(pos) = pending.find('\n') {
                 let line = pending[..pos].trim_end_matches('\r').to_string();
                 pending = pending[pos + 1..].to_string();
@@ -445,6 +553,11 @@ impl OllamaProvider {
                     &mut last_done_json,
                     chunk_tx,
                 )?;
+                ollama_check_stream_body_cap(
+                    &accumulated_text,
+                    &thinking_buf,
+                    &thinking_final,
+                )?;
             }
         }
         if !pending.trim().is_empty() {
@@ -455,6 +568,11 @@ impl OllamaProvider {
                 &mut thinking_final,
                 &mut last_done_json,
                 chunk_tx,
+            )?;
+            ollama_check_stream_body_cap(
+                &accumulated_text,
+                &thinking_buf,
+                &thinking_final,
             )?;
         }
 
@@ -1872,6 +1990,36 @@ mod tests {
     fn ollama_provider_supports_streaming() {
         let p = OllamaProvider::new(None);
         assert!(LLMProvider::supports_streaming(&p));
+    }
+
+    #[test]
+    fn ollama_check_stream_body_cap_with_errors_past_limit() {
+        // "hello" (5) + "world" (5) = 10 bytes
+        assert!(ollama_check_stream_body_cap_with("hello", "world", &None, 10).is_ok());
+        assert!(ollama_check_stream_body_cap_with("hello", "world", &None, 9).is_err());
+    }
+
+    #[test]
+    fn context_window_error_detects_openrouter_glm_message() {
+        let msg = r#"400 Bad Request {"error":{"message":"This endpoint's maximum context length is 204800 tokens. However, you requested about 671046 tokens (638278 of text input, 32768 in the output). Please reduce the length of either one"}}"#;
+        assert!(provider_error_is_context_window_exceeded(&ProviderError::Api(
+            msg.into()
+        )));
+    }
+
+    #[test]
+    fn context_window_error_detects_openai_code() {
+        assert!(provider_error_is_context_window_exceeded(&ProviderError::Api(
+            "context_window_exceeded".into()
+        )));
+    }
+
+    #[test]
+    fn context_window_error_ignores_unrelated_api_errors() {
+        assert!(!provider_error_is_context_window_exceeded(&ProviderError::Api(
+            "500 internal server error".into()
+        )));
+        assert!(!provider_error_is_context_window_exceeded(&ProviderError::Timeout));
     }
 
     #[test]

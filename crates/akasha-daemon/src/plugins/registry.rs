@@ -6,7 +6,8 @@ use akasha_plugin_host::WasmPlugin;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, warn};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{debug, info, warn};
 
 use super::reputation::ReputationStore;
 
@@ -42,6 +43,36 @@ pub struct MatchedRoutingRule {
 struct LoadedPlugin {
     manifest: PluginManifest,
     wasm: WasmPlugin,
+}
+
+fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let enabled = *ENABLED.get_or_init(|| {
+        std::env::var_os("AKASHA_DEBUG_LOG")
+            .map(|v| {
+                let v = v.to_string_lossy().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    });
+    if !enabled {
+        return;
+    }
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let run_id =
+        std::env::var("AKASHA_DEBUG_RUN_ID").unwrap_or_else(|_| "pre-fix".to_string());
+    debug!(
+        run_id = %run_id,
+        hypothesis_id = hypothesis_id,
+        location = location,
+        message = message,
+        timestamp = timestamp,
+        data = %data,
+        "plugin registry debug log"
+    );
 }
 
 impl PluginRegistry {
@@ -270,6 +301,17 @@ impl PluginRegistry {
 
     /// Call a tool plugin by id. Updates reputation on success/failure/crash.
     pub fn call_tool(&self, plugin_id: &str, input: &str) -> Result<String, akasha_plugin_api::PluginError> {
+        // #region agent log
+        debug_log(
+            "H4",
+            "crates/akasha-daemon/src/plugins/registry.rs:301",
+            "Plugin call requested",
+            serde_json::json!({
+                "plugin_id": plugin_id,
+                "input_len": input.len()
+            }),
+        );
+        // #endregion
         if self.reputation.is_disabled(plugin_id) {
             return Err(akasha_plugin_api::PluginError::Disabled);
         }
@@ -285,6 +327,26 @@ impl PluginRegistry {
             Err(akasha_plugin_api::PluginError::Crashed) => self.reputation.record_crash(plugin_id),
             Err(_) => self.reputation.record_failure(plugin_id),
         }
+        // #region agent log
+        debug_log(
+            "H3",
+            "crates/akasha-daemon/src/plugins/registry.rs:325",
+            "Plugin call completed",
+            serde_json::json!({
+                "plugin_id": plugin_id,
+                "result": match &result {
+                    Ok(_) => "ok",
+                    Err(e) => {
+                        if matches!(e, akasha_plugin_api::PluginError::Crashed) {
+                            "crashed"
+                        } else {
+                            "error"
+                        }
+                    }
+                }
+            }),
+        );
+        // #endregion
         result
     }
 

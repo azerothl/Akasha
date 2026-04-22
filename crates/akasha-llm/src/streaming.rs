@@ -4,8 +4,27 @@ use crate::provider::{CompletionResponse, ProviderError, TokenUsage};
 use std::time::Duration;
 
 /// Read an OpenAI-compatible `chat/completions` **SSE** body (`text/event-stream`):
-/// lines `data: {...}` until `[DONE]`. Sends each `choices[0].delta.content` (and optional
-/// `delta.reasoning_content`) to `chunk_tx`.
+/// lines `data: {...}` until `[DONE]`. Sends only `choices[0].delta.content` to `chunk_tx`.
+/// `delta.reasoning_content` is accumulated separately in `CompletionResponse.thinking`.
+fn apply_openai_delta(
+    delta: &serde_json::Value,
+    full_text: &mut String,
+    reasoning_text: &mut String,
+    chunk_tx: &std::sync::mpsc::Sender<String>,
+) {
+    if let Some(t) = delta.get("content").and_then(|v| v.as_str()) {
+        if !t.is_empty() {
+            full_text.push_str(t);
+            let _ = chunk_tx.send(t.to_string());
+        }
+    }
+    if let Some(t) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+        if !t.is_empty() {
+            reasoning_text.push_str(t);
+        }
+    }
+}
+
 pub async fn read_openai_compatible_sse_stream(
     mut resp: reqwest::Response,
     model_fallback: &str,
@@ -25,6 +44,7 @@ pub async fn read_openai_compatible_sse_stream(
 
     let mut pending = String::new();
     let mut full_text = String::new();
+    let mut reasoning_text = String::new();
     let mut last_usage: Option<TokenUsage> = None;
     let mut model_used: Option<String> = None;
     let mut finish_reason: Option<String> = None;
@@ -87,18 +107,7 @@ pub async fn read_openai_compatible_sse_stream(
                     }
                 }
                 if let Some(delta) = c.get("delta") {
-                    if let Some(t) = delta.get("content").and_then(|v| v.as_str()) {
-                        if !t.is_empty() {
-                            full_text.push_str(t);
-                            let _ = chunk_tx.send(t.to_string());
-                        }
-                    }
-                    if let Some(t) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
-                        if !t.is_empty() {
-                            full_text.push_str(t);
-                            let _ = chunk_tx.send(t.to_string());
-                        }
-                    }
+                    apply_openai_delta(delta, &mut full_text, &mut reasoning_text, chunk_tx);
                 }
             }
         }
@@ -116,12 +125,7 @@ pub async fn read_openai_compatible_sse_stream(
                         .and_then(|a| a.first())
                     {
                         if let Some(delta) = choice0.get("delta") {
-                            if let Some(t) = delta.get("content").and_then(|v| v.as_str()) {
-                                if !t.is_empty() {
-                                    full_text.push_str(t);
-                                    let _ = chunk_tx.send(t.to_string());
-                                }
-                            }
+                            apply_openai_delta(delta, &mut full_text, &mut reasoning_text, chunk_tx);
                         }
                     }
                 }
@@ -134,7 +138,11 @@ pub async fn read_openai_compatible_sse_stream(
         usage: last_usage,
         model_used: model_used.unwrap_or_else(|| model_fallback.to_string()),
         cost_usd: None,
-        thinking: None,
+        thinking: if reasoning_text.is_empty() {
+            None
+        } else {
+            Some(reasoning_text)
+        },
         done_reason: finish_reason,
         eval_count: None,
         total_duration_ns: None,
@@ -364,6 +372,8 @@ pub async fn post_openai_chat_completions_stream(
 
 #[cfg(test)]
 mod tests {
+    use super::apply_openai_delta;
+
     #[test]
     fn openai_sse_payload_extracts_delta_content() {
         let payload = r#"{"choices":[{"delta":{"content":"Hi"},"index":0}]}"#;
@@ -388,5 +398,43 @@ mod tests {
             .and_then(|d| d.get("text"))
             .and_then(|v| v.as_str());
         assert_eq!(text, Some("Hello"));
+    }
+
+    #[test]
+    fn openai_delta_separates_reasoning_from_content() {
+        let delta: serde_json::Value = serde_json::json!({
+            "content": "TOOL: write_file workspace:/safe.txt",
+            "reasoning_content": "Reasoning\nTOOL: write_file workspace:/malicious.txt"
+        });
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let mut full_text = String::new();
+        let mut reasoning_text = String::new();
+        apply_openai_delta(&delta, &mut full_text, &mut reasoning_text, &tx);
+        drop(tx);
+
+        let streamed: Vec<String> = rx.iter().collect();
+        assert_eq!(streamed, vec!["TOOL: write_file workspace:/safe.txt".to_string()]);
+        assert_eq!(full_text, "TOOL: write_file workspace:/safe.txt");
+        assert_eq!(
+            reasoning_text,
+            "Reasoning\nTOOL: write_file workspace:/malicious.txt"
+        );
+    }
+
+    #[test]
+    fn openai_delta_handles_reasoning_only_without_streaming_chunks() {
+        let delta: serde_json::Value = serde_json::json!({
+            "reasoning_content": "step 1\nstep 2"
+        });
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let mut full_text = String::new();
+        let mut reasoning_text = String::new();
+        apply_openai_delta(&delta, &mut full_text, &mut reasoning_text, &tx);
+        drop(tx);
+
+        let streamed: Vec<String> = rx.iter().collect();
+        assert!(streamed.is_empty());
+        assert!(full_text.is_empty());
+        assert_eq!(reasoning_text, "step 1\nstep 2");
     }
 }

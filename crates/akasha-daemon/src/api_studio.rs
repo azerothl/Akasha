@@ -253,11 +253,19 @@ struct StudioMeta {
     verify_argv: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     verify_timeout_sec: Option<u64>,
+    /// Résumé court de l’évolution / session (réinjecté dans chaque message Code Studio).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evolution_summary: Option<String>,
+    /// Notes de politique outils / périmètre (réinjectées ; complètent tools_policy côté humain).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy_notes: Option<String>,
 }
 
 const MAX_TECH_STACK_CHARS: usize = 4000;
 /// Upper bound on characters injected from `CODE_STUDIO_PLAN.md` into each Code Studio message.
 const MAX_CODE_STUDIO_PLAN_INJECT_CHARS: usize = 4000;
+const MAX_EVOLUTION_SUMMARY_CHARS: usize = 6000;
+const MAX_POLICY_NOTES_CHARS: usize = 4000;
 
 /// Keep only prompt-safe characters:
 /// - drop NUL and non-printable control chars (except LF/CR/TAB)
@@ -297,15 +305,98 @@ pub fn studio_code_plan_message_prefix(project_root: &Path) -> Option<String> {
     ))
 }
 
-/// Prefix prepended to the user message when `tech_stack` is set (read by LLM + studio agents).
-pub fn studio_tech_stack_message_prefix(project_root: &Path) -> Option<String> {
-    let meta = load_studio_meta(project_root)?;
+/// Build the tech-stack prefix from an already-loaded `StudioMeta`.
+fn tech_stack_prefix_from_meta(meta: &StudioMeta) -> Option<String> {
     let t = sanitize_for_prompt(meta.tech_stack.as_deref()?, MAX_TECH_STACK_CHARS);
     if t.is_empty() {
         return None;
     }
     Some(format!(
         "[Stack projet — respecter pour fichiers, dépendances et build (sauf demande utilisateur contraire) :\n{t}\n]\n\n"
+    ))
+}
+
+/// Build the evolution-summary prefix from an already-loaded `StudioMeta`.
+fn evolution_summary_prefix_from_meta(meta: &StudioMeta) -> Option<String> {
+    let t = sanitize_for_prompt(meta.evolution_summary.as_deref()?, MAX_EVOLUTION_SUMMARY_CHARS);
+    if t.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[Résumé évolution / session (à respecter ; mettre à jour si besoin via l’UI ou une tâche dédiée) :\n{t}\n]\n\n"
+    ))
+}
+
+/// Build the policy-notes prefix from an already-loaded `StudioMeta`.
+fn policy_notes_prefix_from_meta(meta: &StudioMeta) -> Option<String> {
+    let t = sanitize_for_prompt(meta.policy_notes.as_deref()?, MAX_POLICY_NOTES_CHARS);
+    if t.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[Politique / consignes projet (outils et périmètre) :\n{t}\n]\n\n"
+    ))
+}
+
+/// Load `.akasha-studio.json` once and return `(evolution_summary, policy_notes, tech_stack)` prefixes.
+/// Avoids redundant disk I/O when the caller needs all three in the same request.
+pub fn studio_meta_prefixes(project_root: &Path) -> (Option<String>, Option<String>, Option<String>) {
+    let Some(meta) = load_studio_meta(project_root) else {
+        return (None, None, None);
+    };
+    (
+        evolution_summary_prefix_from_meta(&meta),
+        policy_notes_prefix_from_meta(&meta),
+        tech_stack_prefix_from_meta(&meta),
+    )
+}
+
+/// Prefix prepended to the user message when `tech_stack` is set (read by LLM + studio agents).
+pub fn studio_tech_stack_message_prefix(project_root: &Path) -> Option<String> {
+    let meta = load_studio_meta(project_root)?;
+    tech_stack_prefix_from_meta(&meta)
+}
+
+/// Résumé d’évolution / mémoire courte (fichier `.akasha-studio.json`).
+pub fn studio_evolution_summary_prefix(project_root: &Path) -> Option<String> {
+    let meta = load_studio_meta(project_root)?;
+    evolution_summary_prefix_from_meta(&meta)
+}
+
+/// Notes de politique projet (périmètre outils, dossiers sensibles).
+pub fn studio_policy_notes_prefix(project_root: &Path) -> Option<String> {
+    let meta = load_studio_meta(project_root)?;
+    policy_notes_prefix_from_meta(&meta)
+}
+
+/// Préfixe utilisateur / UI : `plan`, `implement`, `build`, `free` (aucun préfixe).
+pub fn studio_code_mode_message_prefix(mode: &str) -> Option<String> {
+    match mode.trim().to_lowercase().as_str() {
+        "plan" => Some(
+            "[Mode Code Studio — PLANIFICATION : priorité analyse et mise à jour de CODE_STUDIO_PLAN.md ; pas d’implémentation ni commandes mutatrices sauf demande explicite.]\n\n"
+                .to_string(),
+        ),
+        "implement" => Some(
+            "[Mode Code Studio — IMPLÉMENTATION : produire ou modifier le code dans le périmètre du plan et de la stack.]\n\n"
+                .to_string(),
+        ),
+        "build" => Some(
+            "[Mode Code Studio — BUILD / QUALITÉ : privilégier build, tests et corrections.]\n\n"
+                .to_string(),
+        ),
+        "free" | "" => None,
+        _ => None,
+    }
+}
+
+/// Consigne ponctuelle (un message) depuis l’UI.
+pub fn studio_one_shot_policy_hint_prefix(hint: &str) -> Option<String> {
+    let t = sanitize_for_prompt(hint, 2000);
+    if t.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[Consigne additionnelle pour cette requête uniquement :\n{t}\n]\n\n"
     ))
 }
 
@@ -518,11 +609,29 @@ const TSC_EXCLUDE_TEST_PATTERNS: &[&str] = &[
 ];
 
 fn format_verify_failure(code: Option<i32>, out: &str, err: &str) -> String {
+    let code_str = match code {
+        Some(n) => format!("code de sortie {n}"),
+        None => "terminaison sans code numérique (signal ou erreur système)".to_string(),
+    };
+    let out_s: String = out.chars().take(4000).collect();
+    let err_s: String = if err.trim().is_empty() {
+        "(vide — avec npm run build, les erreurs TypeScript sont souvent sur stdout ci-dessus.)".to_string()
+    } else {
+        err.chars().take(4000).collect()
+    };
+    let has_syntax_marker = out.contains("TS1128")
+        || err.contains("TS1128")
+        || out.contains("TS1005")
+        || err.contains("TS1005")
+        || out.contains("TS1434")
+        || err.contains("TS1434");
+    let syntax_hint = if has_syntax_marker {
+        "\n\nNote : TS1128 / TS1005 / TS1434 indiquent souvent du texte invalide dans le fichier source (markdown, phrase hors code, accolade en trop) aux lignes indiquées."
+    } else {
+        ""
+    };
     format!(
-        "Vérification post-tâche échouée (code {:?}).\n--- stdout ---\n{}\n--- stderr ---\n{}",
-        code,
-        out.chars().take(4000).collect::<String>(),
-        err.chars().take(4000).collect::<String>()
+        "Vérification post-tâche échouée ({code_str}).\n--- stdout ---\n{out_s}\n--- stderr ---\n{err_s}{syntax_hint}"
     )
 }
 
@@ -1214,6 +1323,8 @@ pub async fn handle_studio_route(
             verify_skip: false,
             verify_argv: None,
             verify_timeout_sec: None,
+            evolution_summary: None,
+            policy_notes: None,
         };
         let _ = save_studio_meta(&dir, &meta);
         let _ = write_initial_code_studio_plan(&dir, &meta.name, meta.tech_stack.as_deref());
@@ -1261,6 +1372,8 @@ pub async fn handle_studio_route(
                     verify_skip: false,
                     verify_argv: None,
                     verify_timeout_sec: None,
+                    evolution_summary: None,
+                    policy_notes: None,
                 });
                 let mut body = serde_json::to_value(&meta).unwrap_or_else(|_| serde_json::json!({}));
                 if let Some(obj) = body.as_object_mut() {
@@ -1302,10 +1415,19 @@ pub async fn handle_studio_route(
                 let has_verify_skip = body_v.get("verify_skip").is_some();
                 let has_verify_argv = body_v.get("verify_argv").is_some();
                 let has_verify_timeout = body_v.get("verify_timeout_sec").is_some();
-                if !has_name && !has_stack && !has_verify_skip && !has_verify_argv && !has_verify_timeout {
+                let has_evolution_summary = body_v.get("evolution_summary").is_some();
+                let has_policy_notes = body_v.get("policy_notes").is_some();
+                if !has_name
+                    && !has_stack
+                    && !has_verify_skip
+                    && !has_verify_argv
+                    && !has_verify_timeout
+                    && !has_evolution_summary
+                    && !has_policy_notes
+                {
                     return Some(json_response(
                         "400 Bad Request",
-                        r#"{"error":"provide at least one of: name, tech_stack, verify_skip, verify_argv, verify_timeout_sec"}"#,
+                        r#"{"error":"provide at least one of: name, tech_stack, verify_skip, verify_argv, verify_timeout_sec, evolution_summary, policy_notes"}"#,
                     ));
                 }
                 let mut meta = load_studio_meta(&root).unwrap_or(StudioMeta {
@@ -1317,6 +1439,8 @@ pub async fn handle_studio_route(
                     verify_skip: false,
                     verify_argv: None,
                     verify_timeout_sec: None,
+                    evolution_summary: None,
+                    policy_notes: None,
                 });
                 if has_name {
                     let new_name = match body_v.get("name").and_then(|x| x.as_str()).map(str::trim) {
@@ -1415,6 +1539,70 @@ pub async fn handle_studio_route(
                         None => {}
                     }
                 }
+                if has_evolution_summary {
+                    match body_v.get("evolution_summary") {
+                        Some(v) if v.is_null() => {
+                            meta.evolution_summary = None;
+                        }
+                        Some(v) => {
+                            let s = match v.as_str() {
+                                Some(t) => t,
+                                None => {
+                                    return Some(json_response(
+                                        "400 Bad Request",
+                                        r#"{"error":"evolution_summary must be string or null"}"#,
+                                    ));
+                                }
+                            };
+                            if s.chars().count() > MAX_EVOLUTION_SUMMARY_CHARS {
+                                return Some(json_response(
+                                    "400 Bad Request",
+                                    &serde_json::json!({ "error": "evolution_summary too long", "max": MAX_EVOLUTION_SUMMARY_CHARS })
+                                        .to_string(),
+                                ));
+                            }
+                            let t = s.trim();
+                            meta.evolution_summary = if t.is_empty() {
+                                None
+                            } else {
+                                Some(t.to_string())
+                            };
+                        }
+                        None => {}
+                    }
+                }
+                if has_policy_notes {
+                    match body_v.get("policy_notes") {
+                        Some(v) if v.is_null() => {
+                            meta.policy_notes = None;
+                        }
+                        Some(v) => {
+                            let s = match v.as_str() {
+                                Some(t) => t,
+                                None => {
+                                    return Some(json_response(
+                                        "400 Bad Request",
+                                        r#"{"error":"policy_notes must be string or null"}"#,
+                                    ));
+                                }
+                            };
+                            if s.chars().count() > MAX_POLICY_NOTES_CHARS {
+                                return Some(json_response(
+                                    "400 Bad Request",
+                                    &serde_json::json!({ "error": "policy_notes too long", "max": MAX_POLICY_NOTES_CHARS })
+                                        .to_string(),
+                                ));
+                            }
+                            let t = s.trim();
+                            meta.policy_notes = if t.is_empty() {
+                                None
+                            } else {
+                                Some(t.to_string())
+                            };
+                        }
+                        None => {}
+                    }
+                }
                 if let Err(e) = save_studio_meta(&root, &meta) {
                     return Some(json_response(
                         "500 Internal Server Error",
@@ -1429,6 +1617,8 @@ pub async fn handle_studio_route(
                     "verify_skip": meta.verify_skip,
                     "verify_argv": meta.verify_argv,
                     "verify_timeout_sec": meta.verify_timeout_sec,
+                    "evolution_summary": meta.evolution_summary,
+                    "policy_notes": meta.policy_notes,
                 })
                 .to_string();
                 return Some(json_response("200 OK", &body));
@@ -2177,6 +2367,8 @@ pub async fn handle_studio_route(
                 verify_skip: false,
                 verify_argv: None,
                 verify_timeout_sec: None,
+                evolution_summary: None,
+                policy_notes: None,
             });
             let body = serde_json::json!({ "evolutions": meta.evolutions }).to_string();
             return Some(json_response("200 OK", &body));
@@ -2258,6 +2450,8 @@ pub async fn handle_studio_route(
                 verify_skip: false,
                 verify_argv: None,
                 verify_timeout_sec: None,
+                evolution_summary: None,
+                policy_notes: None,
             });
             meta.evolutions.push(StudioEvolution {
                 id: evo_id.clone(),

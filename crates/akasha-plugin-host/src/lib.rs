@@ -5,12 +5,44 @@
 use akasha_plugin_api::{PluginError, PluginManifest, PluginNetworkConfig};
 use anyhow::{anyhow, Context};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 use wasmtime::{Caller, Engine, Linker, Module, Store};
 
 /// ABI: module exports "memory" and "run(input_len: i32) -> i32".
 const RUN_FUNC: &str = "run";
 const MEMORY_NAME: &str = "memory";
 const DEFAULT_MAX_FUEL: u64 = 100_000_000;
+
+fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let enabled = *ENABLED.get_or_init(|| {
+        std::env::var_os("AKASHA_PLUGIN_HOST_DEBUG")
+            .map(|v| {
+                let v = v.to_string_lossy().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    });
+
+    if !enabled {
+        return;
+    }
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "runId": std::env::var("AKASHA_DEBUG_RUN_ID").ok(),
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": timestamp
+    });
+
+    eprintln!("{payload}");
+}
 
 /// Per-invocation state for `run()` (network budget, policy).
 pub struct NetworkHostState {
@@ -86,6 +118,18 @@ impl WasmPlugin {
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|v| *v > 0)
             .unwrap_or(DEFAULT_MAX_FUEL);
+        // #region agent log
+        debug_log(
+            "H2",
+            "crates/akasha-plugin-host/src/lib.rs:111",
+            "Preparing wasm run with configured fuel",
+            serde_json::json!({
+                "plugin_id": self.manifest.as_ref().map(|m| m.id.clone()).unwrap_or_else(|| "unknown".to_string()),
+                "max_fuel": max_fuel,
+                "input_len": input.len()
+            }),
+        );
+        // #endregion
         store
             .set_fuel(max_fuel)
             .map_err(|_| PluginError::Message("failed to initialize wasm fuel budget".into()))?;
@@ -131,6 +175,19 @@ impl WasmPlugin {
         memory
             .write(&mut store, io_offset, data)
             .map_err(|_| PluginError::Crashed)?;
+        // #region agent log
+        debug_log(
+            "H1",
+            "crates/akasha-plugin-host/src/lib.rs:163",
+            "Calling wasm run",
+            serde_json::json!({
+                "plugin_id": self.manifest.as_ref().map(|m| m.id.clone()).unwrap_or_else(|| "unknown".to_string()),
+                "input_len": len,
+                "io_offset": io_offset,
+                "memory_size": memory.data_size(&store)
+            }),
+        );
+        // #endregion
         let out_len = run
             .call(&mut store, len as i32)
             .map_err(map_wasm_run_error)?;
@@ -345,6 +402,16 @@ pub fn default_engine() -> Engine {
 
 fn map_wasm_run_error(err: wasmtime::Error) -> PluginError {
     let msg = err.to_string().to_lowercase();
+    // #region agent log
+    debug_log(
+        "H1",
+        "crates/akasha-plugin-host/src/lib.rs:378",
+        "Wasm run returned error",
+        serde_json::json!({
+            "error": msg
+        }),
+    );
+    // #endregion
     if msg.contains("all fuel consumed") || msg.contains("out of fuel") {
         PluginError::Message("plugin execution timed out (fuel exhausted)".into())
     } else {

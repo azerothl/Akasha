@@ -4,7 +4,9 @@ use crate::classifier::classify_task_type;
 use crate::config::{RoutingConfig, TaskTypeConfig};
 use crate::fallback::{FallbackEngine, ProviderResolver};
 use crate::metrics::{MetricsCollector, MetricsPersistence};
-use crate::provider::{CompletionRequest, CompletionResponse, LLMProvider};
+use crate::provider::{
+    provider_error_is_context_window_exceeded, CompletionRequest, CompletionResponse, LLMProvider,
+};
 use crate::retry::RetryPolicy;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -385,6 +387,19 @@ impl LLMRouter {
                             return Ok(resp);
                         }
                         Err(e) => {
+                            if provider_error_is_context_window_exceeded(&e) {
+                                warn!(
+                                    error = %e,
+                                    provider = %entry.provider,
+                                    model = %entry.model,
+                                    "Streaming failed: prompt exceeds this model's context window; skipping non-streaming fallback (same payload would fail). Shorten history, attachments, or use a larger-context model."
+                                );
+                                let _ = bridge_handle.await;
+                                return Err(format!(
+                                    "LLM context limit exceeded: {}. Reduce what you send (conversation history, pasted files, Code Studio workspace size) or pick a model with a larger context.",
+                                    e
+                                ));
+                            }
                             warn!(
                                 error = %e,
                                 provider = %entry.provider,
