@@ -24,7 +24,9 @@ use akasha_store::{
 };
 use akasha_vault::Vault;
 use std::cmp::Ordering;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// On Windows, paths with verbatim prefix `\\?\` can cause "file not found" with some APIs. Return a path without it.
 #[cfg(windows)]
@@ -109,6 +111,29 @@ fn parse_generate_image_tool_args(args: &[String]) -> (String, Option<String>) {
         }
     }
     (args.join(" "), None)
+}
+
+fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "sessionId": "e533ab",
+        "runId": std::env::var("AKASHA_DEBUG_RUN_ID").unwrap_or_else(|_| "pre-fix".to_string()),
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": timestamp
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("debug-e533ab.log")
+    {
+        let _ = writeln!(file, "{payload}");
+    }
 }
 
 fn parse_write_file_request(args: &[String]) -> Option<(String, String)> {
@@ -5551,6 +5576,17 @@ async fn execute_tool_call(
                         let reg = Arc::clone(r);
                         let pid = plugin_id.clone();
                         let pl = plugin_payload.clone();
+                        // #region agent log
+                        debug_log(
+                            "H3",
+                            "crates/akasha-daemon/src/api.rs:5578",
+                            "Spawning blocking plugin call task",
+                            serde_json::json!({
+                                "plugin_id": pid,
+                                "payload_len": pl.len()
+                            }),
+                        );
+                        // #endregion
                         match tokio::task::spawn_blocking(move || reg.call_tool(&pid, &pl)).await {
                             Ok(Ok(out)) => {
                                 if out.trim().is_empty() {
@@ -5598,6 +5634,17 @@ async fn execute_tool_call(
                                     "[plugin:{}] execution failed: {}",
                                     plugin_id,
                                     if join_err.is_panic() {
+                                        // #region agent log
+                                        debug_log(
+                                            "H3",
+                                            "crates/akasha-daemon/src/api.rs:5629",
+                                            "Blocking plugin task panicked",
+                                            serde_json::json!({
+                                                "plugin_id": plugin_id,
+                                                "join_error": join_err.to_string()
+                                            }),
+                                        );
+                                        // #endregion
                                         "internal error (plugin task panicked)".to_string()
                                     } else {
                                         join_err.to_string()
