@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const INDEX_DIR: &str = "code_rag";
 const INDEX_FILENAME: &str = "index.json";
 const MAX_INDEXABLE_FILE_BYTES: u64 = 512 * 1024;
@@ -39,13 +39,16 @@ pub struct CodeRagChunk {
     pub content: String,
     #[serde(default)]
     pub symbols: Vec<String>,
+    /// Pre-computed normalised term set for this chunk (populated at index time).
+    #[serde(default)]
+    pub terms: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CodeRagFile {
     path: String,
     size: u64,
-    mtime_sec: u64,
+    mtime_nanos: u64,
     language: String,
     chunks: Vec<CodeRagChunk>,
 }
@@ -83,7 +86,7 @@ struct ScannedFile {
     abs: PathBuf,
     rel: String,
     size: u64,
-    mtime_sec: u64,
+    mtime_nanos: u64,
     language: String,
 }
 
@@ -137,9 +140,13 @@ impl CodeRagStore {
     fn save_manifest(&self, project_id: &str, manifest: &CodeRagManifest) -> anyhow::Result<()> {
         let dir = self.project_index_dir(project_id);
         fs::create_dir_all(&dir)?;
-        let p = dir.join(INDEX_FILENAME);
+        let dest = dir.join(INDEX_FILENAME);
+        let tmp = dir.join(format!("{INDEX_FILENAME}.tmp"));
         let s = serde_json::to_string_pretty(manifest)?;
-        fs::write(p, s)?;
+        fs::write(&tmp, s)?;
+        #[cfg(windows)]
+        { let _ = fs::remove_file(&dest); }
+        fs::rename(&tmp, &dest)?;
         Ok(())
     }
 
@@ -196,20 +203,30 @@ impl CodeRagStore {
         let mut files = Vec::with_capacity(scanned.len());
         for sf in scanned {
             if let Some(old) = old_by_path.get(&sf.rel) {
-                if old.size == sf.size && old.mtime_sec == sf.mtime_sec {
+                if old.size == sf.size && old.mtime_nanos == sf.mtime_nanos {
                     files.push(old.clone());
                     continue;
                 }
             }
             let content = match fs::read_to_string(&sf.abs) {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(_) => {
+                    // Record with empty chunks so staleness detection can converge.
+                    files.push(CodeRagFile {
+                        path: sf.rel,
+                        size: sf.size,
+                        mtime_nanos: sf.mtime_nanos,
+                        language: sf.language,
+                        chunks: Vec::new(),
+                    });
+                    continue;
+                }
             };
             let chunks = chunk_file(&sf.rel, &content, &sf.language);
             files.push(CodeRagFile {
                 path: sf.rel,
                 size: sf.size,
-                mtime_sec: sf.mtime_sec,
+                mtime_nanos: sf.mtime_nanos,
                 language: sf.language,
                 chunks,
             });
@@ -247,6 +264,9 @@ impl CodeRagStore {
         }
 
         let query_terms = normalize_terms(query);
+        if query_terms.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut scored = Vec::<RetrievedCodeChunk>::new();
         for file in &manifest.files {
             for chunk in &file.chunks {
@@ -298,6 +318,7 @@ pub fn format_retrieved_chunks(chunks: &[RetrievedCodeChunk], max_chars: usize) 
     let mut out = String::from(
         "[Contexte code projet (index hybride symbolique+sémantique; extraits non exhaustifs)]\n",
     );
+    let mut has_chunks = false;
     for c in chunks {
         let header = format!(
             "- {}:{}-{} (score {:.2}, sym {:.2}, sem {:.2})\n",
@@ -308,8 +329,9 @@ pub fn format_retrieved_chunks(chunks: &[RetrievedCodeChunk], max_chars: usize) 
             break;
         }
         out.push_str(&block);
+        has_chunks = true;
     }
-    if out.trim().is_empty() {
+    if !has_chunks {
         None
     } else {
         Some(format!("{out}\n"))
@@ -322,11 +344,11 @@ fn is_manifest_stale(manifest: &CodeRagManifest, scanned: &[ScannedFile]) -> boo
     }
     let mut by_path = HashMap::with_capacity(manifest.files.len());
     for f in &manifest.files {
-        by_path.insert(&f.path, (f.size, f.mtime_sec));
+        by_path.insert(&f.path, (f.size, f.mtime_nanos));
     }
     for sf in scanned {
         match by_path.get(&sf.rel) {
-            Some((size, mtime_sec)) if *size == sf.size && *mtime_sec == sf.mtime_sec => {}
+            Some((size, mtime_nanos)) if *size == sf.size && *mtime_nanos == sf.mtime_nanos => {}
             _ => return true,
         }
     }
@@ -348,7 +370,15 @@ fn scan_dir_recursive(base: &Path, dir: &Path, out: &mut Vec<ScannedFile>) -> an
     for entry in entries.flatten() {
         let p = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        // Skip symlinks entirely to avoid indexing paths outside the project root.
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             if EXCLUDED_DIRS.iter().any(|d| name.eq_ignore_ascii_case(d)) {
                 continue;
             }
@@ -362,24 +392,25 @@ fn scan_dir_recursive(base: &Path, dir: &Path, out: &mut Vec<ScannedFile>) -> an
         if !is_indexable_code_file(&rel) {
             continue;
         }
-        let meta = match fs::metadata(&p) {
+        // Use symlink_metadata so that a symlink that slipped through is not followed.
+        let meta = match fs::symlink_metadata(&p) {
             Ok(m) => m,
             Err(_) => continue,
         };
         if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_INDEXABLE_FILE_BYTES {
             continue;
         }
-        let mtime_sec = meta
+        let mtime_nanos = meta
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
+            .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
         out.push(ScannedFile {
             abs: p,
             rel: rel.clone(),
             size: meta.len(),
-            mtime_sec,
+            mtime_nanos,
             language: language_from_path(&rel).to_string(),
         });
     }
@@ -388,7 +419,11 @@ fn scan_dir_recursive(base: &Path, dir: &Path, out: &mut Vec<ScannedFile>) -> an
 
 fn is_indexable_code_file(rel: &str) -> bool {
     let lower = rel.to_ascii_lowercase();
-    if lower.contains("/.git/") || lower.contains(".min.") {
+    if lower.contains("/.git/")
+        || lower.contains(".min.")
+        || lower.starts_with("node_modules/")
+        || lower.contains("/node_modules/")
+    {
         return false;
     }
     let ext = Path::new(rel)
@@ -470,6 +505,7 @@ fn chunk_file(path: &str, content: &str, language: &str) -> Vec<CodeRagChunk> {
             block = block.chars().take(MAX_CHARS_PER_CHUNK).collect();
         }
         let symbols = extract_symbols(&block);
+        let terms = normalize_terms(&block);
         if !block.trim().is_empty() {
             chunks.push(CodeRagChunk {
                 path: path.to_string(),
@@ -477,6 +513,7 @@ fn chunk_file(path: &str, content: &str, language: &str) -> Vec<CodeRagChunk> {
                 line_end: end,
                 content: block,
                 symbols,
+                terms,
             });
         }
         if end == lines.len() {
@@ -529,7 +566,7 @@ fn normalize_terms(query: &str) -> Vec<String> {
 
 fn symbolic_score(chunk: &CodeRagChunk, query_terms: &[String], query_raw: &str) -> f64 {
     if query_terms.is_empty() {
-        return 0.1;
+        return 0.0;
     }
     let lower_path = chunk.path.to_ascii_lowercase();
     let lower_content = chunk.content.to_ascii_lowercase();
@@ -552,14 +589,10 @@ fn symbolic_score(chunk: &CodeRagChunk, query_terms: &[String], query_raw: &str)
 }
 
 fn semantic_score(chunk: &CodeRagChunk, query_terms: &[String]) -> f64 {
-    if query_terms.is_empty() {
+    if query_terms.is_empty() || chunk.terms.is_empty() {
         return 0.0;
     }
-    let chunk_terms = normalize_terms(&chunk.content);
-    if chunk_terms.is_empty() {
-        return 0.0;
-    }
-    let set: HashSet<&str> = chunk_terms.iter().map(String::as_str).collect();
+    let set: HashSet<&str> = chunk.terms.iter().map(String::as_str).collect();
     let hits = query_terms.iter().filter(|t| set.contains(t.as_str())).count();
     hits as f64 / query_terms.len() as f64
 }

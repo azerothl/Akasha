@@ -113,13 +113,16 @@ fn parse_generate_image_tool_args(args: &[String]) -> (String, Option<String>) {
 }
 
 fn studio_code_rag_enabled() -> bool {
-    std::env::var("AKASHA_STUDIO_CODE_RAG_ENABLED")
-        .ok()
-        .map(|v| {
-            let t = v.trim().to_ascii_lowercase();
-            matches!(t.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false)
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("AKASHA_STUDIO_CODE_RAG_ENABLED")
+            .ok()
+            .map(|v| {
+                let t = v.trim().to_ascii_lowercase();
+                matches!(t.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
@@ -11924,6 +11927,8 @@ pub async fn handle_api(
         }
         // Build acknowledgment message before moving `message` into the envelope.
         let ack_message = build_ack_message(&message);
+        // Capture the raw user message for code-RAG retrieval before any prefixes are injected.
+        let raw_user_message = message.clone();
         let mut message_for_llm = message;
         if let Some(ref root) = studio_disk_root {
             if let Some(plan) = crate::api_studio::studio_code_plan_message_prefix(root) {
@@ -11958,7 +11963,7 @@ pub async fn handle_api(
             }
             if studio_code_rag_enabled() {
                 if let Some(pid) = studio_project_id.as_deref() {
-                    let query = message_for_llm.clone();
+                    let query = raw_user_message.clone();
                     let data_dir = data_dir.to_path_buf();
                     let root = root.clone();
                     let pid = pid.to_string();

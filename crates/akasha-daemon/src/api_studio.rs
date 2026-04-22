@@ -226,14 +226,6 @@ struct ProjectsListOut {
     projects: Vec<ProjectMetaOut>,
 }
 
-#[derive(Serialize)]
-struct CodeRagStatusOut {
-    status: String,
-    files_indexed: usize,
-    chunks_indexed: usize,
-    built_at: Option<String>,
-    stale: bool,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StudioEvolution {
@@ -1423,13 +1415,7 @@ pub async fn handle_studio_route(
                         r#"{"error":"code_rag_status_failed"}"#,
                     ));
                 };
-                let body = serde_json::to_string(&CodeRagStatusOut {
-                    status: status.status,
-                    files_indexed: status.files_indexed,
-                    chunks_indexed: status.chunks_indexed,
-                    built_at: status.built_at,
-                    stale: status.stale,
-                })
+                let body = serde_json::to_string(&status)
                 .unwrap_or_else(|_| "{}".to_string());
                 return Some(json_response("200 OK", &body));
             }
@@ -1470,13 +1456,7 @@ pub async fn handle_studio_route(
                         r#"{"error":"code_rag_reindex_failed"}"#,
                     ));
                 };
-                let body = serde_json::to_string(&CodeRagStatusOut {
-                    status: status.status,
-                    files_indexed: status.files_indexed,
-                    chunks_indexed: status.chunks_indexed,
-                    built_at: status.built_at,
-                    stale: status.stale,
-                })
+                let body = serde_json::to_string(&status)
                 .unwrap_or_else(|_| "{}".to_string());
                 return Some(json_response("200 OK", &body));
             }
