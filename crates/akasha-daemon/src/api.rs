@@ -1143,6 +1143,8 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Pour les fichiers .pdf, le texte est extrait automatiquement (équivalent à pdf <path>) ; ne vous attendez pas au binaire PDF. Pour les gros fichiers, lire d'abord le fichier puis cibler seulement les sections utiles avec grep_content/search_files avant d'éditer. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
     ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (création/remplacement complet). Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). TOUJOURS utiliser le chemin EXACT fourni par l'utilisateur. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace plutôt que de tout réécrire. Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel."),
     ("delete_file", "delete_file <path> — supprimer un fichier (pas un répertoire). Chemin workspace:/ ou disque autorisé par tools_policy (mêmes règles que write_file). Code Studio : préférer workspace:/chemin/relatif."),
+    ("rename_path", "rename_path <from> <to> — renommer ou déplacer un fichier ou un répertoire (rename atomique si possible ; copie+suppression pour un fichier en cross-device). La destination ne doit pas exister. Deux arguments : le chemin source est le premier token ; tout le reste forme le chemin cible (espaces dans <to> OK). Pas d’espaces dans <from> sans utiliser workspace:/…"),
+    ("move_tree", "move_tree <from_dir> <to_dir> — déplacer un répertoire et son contenu (rename atomique si possible, sinon copie récursive + suppression). La destination ne doit pas exister. Même convention d’arguments que rename_path (cible = args après le premier token)."),
     ("search_files", "search_files <dir> <pattern> [--no-ignore] — chercher des fichiers (glob) sous un répertoire ; par défaut respecte .gitignore et ignore node_modules/target/dist/… ; --no-ignore pour tout parcourir."),
     ("grep_content", "grep_content <dir> <pattern> [file_glob] [--regex|-r] [--no-ignore] — chercher dans les fichiers ; défaut = sous-chaîne insensible à la casse + .gitignore ; --regex = motif regex insensible à la casse ; --no-ignore = ignorer .gitignore."),
     ("run_command", "run_command [--cwd <path>] <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique). Optionnel : --cwd workspace:/ ou chemin disque (allowed_read_paths). Si tools_policy run_command_default_cwd_workspace: true, cwd par défaut = workspace de la tâche. Pour GitHub depuis le shell, préférer gh-axi (npm install -g gh-axi ; principes AXI https://axi.md/) s'il est installé — sorties compactes pour l'agent. Pour l'automation navigateur en CLI, chrome-devtools-axi (même dépôt https://github.com/kunchenguid/axi) en complément d'Akasha browser."),
@@ -1209,6 +1211,8 @@ fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>) -> Vec<String>
         "read_file",
         "write_file",
         "delete_file",
+        "rename_path",
+        "move_tree",
         "search_files",
         "grep_content",
         "run_command",
@@ -2948,7 +2952,7 @@ const CODE_STUDIO_APP_CONTEXT: &str = concat!(
     "[Code Studio — contexte]\n",
     "Tu travailles sur le dépôt du projet ouvert dans Akasha Code Studio. ",
     "Chemins : préfère `workspace:/…` (racine virtuelle de la tâche) ; les fichiers sont synchronisés sur le disque du projet studio.\n",
-    "Outils usuels : read_file, write_file, delete_file (si autorisé), search_replace, edit_file, apply_patch, run_command (avec `--cwd workspace:/` pour builds/tests), git_* si exposés, ask_user pour une question bloquante dans la même tâche.\n",
+    "Outils usuels : read_file, write_file, delete_file, rename_path, move_tree (si autorisés), search_replace, edit_file, apply_patch, run_command (avec `--cwd workspace:/` pour builds/tests), git_* si exposés, ask_user pour une question bloquante dans la même tâche.\n",
     "Concentre-toi sur le code et la documentation de ce dépôt — pas sur l’interface générale d’Akasha (TUI, onglets, skills hors projet, caméra, météo). ",
     "Si une capacité externe est indispensable, indique brièvement ce qu’il faudrait côté utilisateur (clé, politique d’outils).\n",
     "Réponds dans la même langue que le dernier message utilisateur. ",
@@ -3019,15 +3023,22 @@ pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
         "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. When a [Stack technique du projet] block is present in the user message, obey it for UI libraries, bundler, CSS approach, and TypeScript/JavaScript choice. Verify dependencies exist in package.json before importing. Use read_file before editing. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Run build/lint/typecheck via run_command --cwd workspace:/ when policy allows, and fix issues you introduced. End with a clear user-facing summary of changes and how to preview or test — not only \"Done\"."),
         "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Before declaring completion: run tests or at least start/build checks when feasible; summarize APIs and behavior for the user in accessible terms."),
         "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If prose was accidentally inserted in a source file, remove it and keep only valid syntax for that file type. Verify end-to-end coherence; run combined build/test when policy allows. Close with a plain-language recap of what changed and how to run the app."),
-        "studio_planner" => Some("You are the Code Studio planning agent. READ-ONLY on application source: do NOT write_file, edit_file, delete_file, search_replace, or apply_patch to any path except workspace:/CODE_STUDIO_PLAN.md. Do NOT run_command except read-only diagnostics (git status, git log, git diff, ls, cat, npm/yarn/pnpm only if the user explicitly asked for a read-only check). You MAY update workspace:/CODE_STUDIO_PLAN.md by sections to capture the plan. Explore with read_file, list_dir, grep_content. Deliver a clear implementation plan, critical files, and risks; end with next steps for a human or for an implement agent."),
+        "studio_planner" => Some("You are the Code Studio planning agent. READ-ONLY on application source: do NOT write_file, edit_file, delete_file, rename_path, move_tree, search_replace, or apply_patch to any path except workspace:/CODE_STUDIO_PLAN.md. Do NOT run_command except read-only diagnostics (git status, git log, git diff, ls, cat, npm/yarn/pnpm only if the user explicitly asked for a read-only check). You MAY update workspace:/CODE_STUDIO_PLAN.md by sections to capture the plan. Explore with read_file, list_dir, grep_content. Deliver a clear implementation plan, critical files, and risks; end with next steps for a human or for an implement agent."),
         _ => None,
     }
 }
 
 /// If AKASHA_TOOLS_JOURNAL_PATH is set, append a line for write tool invocations (Phase 4 modification journal).
 async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: &str) {
-    const WRITE_TOOLS: &[&str] =
-        &["write_file", "delete_file", "search_replace", "edit_file", "apply_patch"];
+    const WRITE_TOOLS: &[&str] = &[
+        "write_file",
+        "delete_file",
+        "rename_path",
+        "move_tree",
+        "search_replace",
+        "edit_file",
+        "apply_patch",
+    ];
     if !WRITE_TOOLS.contains(&tool) {
         return;
     }
@@ -5055,6 +5066,76 @@ async fn execute_tool_call(
                 Err(e) => (false, format!("[delete_file] {}", e), None),
             }
         }
+        "rename_path" => {
+            if args.len() < 2 {
+                return (
+                    false,
+                    "[rename_path] usage: rename_path <from> <to> — disque ou workspace:/ ; la cible est tout le texte après le premier argument (espaces OK dans <to>)."
+                        .to_string(),
+                    None,
+                );
+            }
+            let from_s = normalize_tool_path_hint(args[0].trim());
+            let to_s = normalize_tool_path_hint(args[1..].join(" ").trim());
+            if from_s.is_empty() || to_s.is_empty() {
+                return (
+                    false,
+                    "[rename_path] usage: rename_path <from> <to>".to_string(),
+                    None,
+                );
+            }
+            if from_s.contains("..") || to_s.contains("..") {
+                return (
+                    false,
+                    "[rename_path] invalid path (..)".to_string(),
+                    None,
+                );
+            }
+            let from_disk = resolve_tool_disk_path(&from_s, workspace_root);
+            let to_disk = resolve_tool_disk_path(&to_s, workspace_root);
+            match executor.rename_path(&from_disk, &to_disk).await {
+                Ok(res) => {
+                    let msg = format!("[rename_path] {}", res.summary);
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[rename_path] {}", e), None),
+            }
+        }
+        "move_tree" => {
+            if args.len() < 2 {
+                return (
+                    false,
+                    "[move_tree] usage: move_tree <from_dir> <to_dir> — répertoire source uniquement ; la cible est tout le texte après le premier argument."
+                        .to_string(),
+                    None,
+                );
+            }
+            let from_s = normalize_tool_path_hint(args[0].trim());
+            let to_s = normalize_tool_path_hint(args[1..].join(" ").trim());
+            if from_s.is_empty() || to_s.is_empty() {
+                return (
+                    false,
+                    "[move_tree] usage: move_tree <from_dir> <to_dir>".to_string(),
+                    None,
+                );
+            }
+            if from_s.contains("..") || to_s.contains("..") {
+                return (
+                    false,
+                    "[move_tree] invalid path (..)".to_string(),
+                    None,
+                );
+            }
+            let from_disk = resolve_tool_disk_path(&from_s, workspace_root);
+            let to_disk = resolve_tool_disk_path(&to_s, workspace_root);
+            match executor.move_tree(&from_disk, &to_disk).await {
+                Ok(res) => {
+                    let msg = format!("[move_tree] {}", res.summary);
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[move_tree] {}", e), None),
+            }
+        }
         "search_replace" => {
             let path_str = match args.get(0) {
                 Some(s) => s.as_str(),
@@ -6271,14 +6352,18 @@ const STUDIO_VERIFY_AUTOFIX_TOOLS: &[&str] = &[
     "apply_patch",
     "file_diff",
     "delete_file",
+    "rename_path",
+    "move_tree",
 ];
 
 /// Injecté quand deux tours consécutifs produisent le même résumé d’outils (risque de boucle).
 const STUDIO_VERIFY_AUTOFIX_STALL_WARNING: &str = "\n\n[STALL / ANTI-LOOP — READ CAREFULLY]\n\
 The previous round’s tool results fingerprint matches this round’s: you are likely repeating a failing strategy.\n\
 Rules for this sandbox:\n\
-- There is NO `run_command`, NO shell, NO `mv`/`mkdir`/`git mv` here — do not try to rename folders with a non-existent rename tool.\n\
-- To move or rename a *folder*: `read_file` each source under the old path, then `write_file workspace:/new/path/...` with the same contents (write_file creates parent directories). Then `grep_content` + `search_replace` across the repo to fix imports. Optionally `delete_file` obsolete duplicates only if policy allows and you are sure.\n\
+- There is NO `run_command`, NO shell, NO `mv`/`mkdir`/`git mv` here.\n\
+- To rename/move a file or a single directory atomically: `rename_path <from> <to>` (destination must not exist).\n\
+- To move a directory tree across volumes or when rename fails: `move_tree <from_dir> <to_dir>`.\n\
+- If those are not applicable: `read_file` each source under the old path, then `write_file workspace:/new/path/...` with the same contents (write_file creates parent directories). Then `grep_content` + `search_replace` across the repo to fix imports. Optionally `delete_file` obsolete duplicates only if policy allows and you are sure.\n\
 - If TS2305 says a symbol is not exported: `read_file` the module that the import resolves to on disk (path shown in the error) before editing; add the export OR change the import to a file that actually exists (`search_files workspace:/. <basename> true`).\n\
 - If TS2554 wrong arity: fix the call site or the callee — read both sides.\n\
 - Do NOT repeat the same import-only edit without ensuring the target file exists at that path.\n";
@@ -6574,7 +6659,7 @@ async fn studio_verify_run_llm_autofix_rounds(
     let message_webhook_url = std::env::var("AKASHA_MESSAGE_WEBHOOK_URL").ok();
     let system = "You repair a Code Studio project after `npm run build` or `cargo check` failed. \
 Workspace paths are relative to the project root shown in the user message. \
-Emit only lines starting with TOOL: using these tools: read_file, grep_content, search_files, search_replace, edit_file, write_file, apply_patch, file_diff, delete_file. \
+Emit only lines starting with TOOL: using these tools: read_file, grep_content, search_files, search_replace, edit_file, write_file, apply_patch, file_diff, delete_file, rename_path, move_tree. \
 STRICT tool-call format: `TOOL: <tool_name> <arg1> <arg2> ...` (space-separated args only). \
 For ALL file/dir path arguments, ALWAYS use `workspace:/...` paths (including `workspace:/.` for project root scans). \
 Never use bare relative paths like `src/...` or `.`; use `workspace:/src/...` and `workspace:/.`. \
@@ -6583,7 +6668,9 @@ Do NOT output pipe syntax (invalid: `TOOL: search_files|pattern|*|path|.`). \
 Valid examples: `TOOL: read_file workspace:/src/App.tsx 320 20`, `TOOL: search_files workspace:/. package.json true`. \
 Do NOT use ask_user, delegate_to_agent, run_command, browser_*, install_skill, or any tool not in that list. \
 IMPORTANT — this autofix sandbox has NO shell: you cannot `mv`, `git mv`, `mkdir` via run_command (it is disabled). \
-To \"rename\" or split a directory tree: read each file under the old path, then write_file to `workspace:/new/dir/...` (parent dirs are created automatically), then search_replace / grep_content to fix imports across the project. \
+To rename/move a file or directory when the destination does not exist: `TOOL: rename_path workspace:/old/path workspace:/new/path` (second path may contain spaces). \
+To move a whole directory tree (e.g. cross-volume): `TOOL: move_tree workspace:/old_dir workspace:/new_dir`. \
+If that is not enough: read each file under the old path, then write_file to `workspace:/new/dir/...` (parent dirs are created automatically), then search_replace / grep_content to fix imports across the project. \
 If the build says a module has no exported member: read_file that module on disk at the path the error shows; either export the symbol or change imports to a module that actually exists (use search_files to locate the real file). \
 Do not paste markdown fences or assistant prose into source files — only valid source code. \
 Fix every compiler error; prefer minimal search_replace / edit_file over rewriting whole files. \
@@ -6792,6 +6879,7 @@ Retry now. Return only TOOL: lines; start with read_file/grep_content on files r
                 let write_like = matches!(
                     actual_tool.as_str(),
                     "write_file" | "search_replace" | "edit_file" | "apply_patch" | "delete_file"
+                        | "rename_path" | "move_tree"
                 );
                 if success && write_like {
                     any_write_success = true;
@@ -6867,8 +6955,8 @@ Retry now. Return only TOOL: lines; start with read_file/grep_content on files r
                 let fallback_req = CompletionRequest {
                     prompt: format!(
                         "Build output:\n{}\n\nFocused file reads:\n{}\n\nReturn ONLY TOOL lines to fix the TS syntax/build errors now. \
-Use only: search_replace, edit_file, write_file, apply_patch, file_diff, delete_file. \
-No prose, no ask_user, no run_command. Remember: no shell rename — use write_file to create files under new paths (parents auto-created) and fix imports.",
+Use only: search_replace, edit_file, write_file, apply_patch, file_diff, delete_file, rename_path, move_tree. \
+No prose, no ask_user, no run_command. Prefer rename_path / move_tree for renames; otherwise use write_file under new paths (parents auto-created) and fix imports.",
                         verify_log.chars().take(12_000).collect::<String>(),
                         focused_reads.join("\n\n---\n\n")
                     ),
@@ -6907,6 +6995,7 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                                 if !matches!(
                                     actual_tool.as_str(),
                                     "search_replace" | "edit_file" | "write_file" | "apply_patch" | "file_diff" | "delete_file"
+                                        | "rename_path" | "move_tree"
                                 ) {
                                     continue;
                                 }
@@ -6931,6 +7020,7 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                                     && matches!(
                                         actual_tool.as_str(),
                                         "search_replace" | "edit_file" | "write_file" | "apply_patch" | "delete_file"
+                                            | "rename_path" | "move_tree"
                                     )
                                 {
                                     any_write_success = true;

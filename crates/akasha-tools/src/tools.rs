@@ -1,4 +1,4 @@
-//! Tool implementations: read_file, write_file, search_files, run_command, file_diff.
+//! Tool implementations: read_file, write_file, rename_path, move_tree, search_files, run_command, file_diff.
 
 use crate::policy::ToolsPolicy;
 use anyhow::{Context, Result};
@@ -93,6 +93,287 @@ pub async fn write_file(
         success: true,
         summary: format!("wrote {} bytes", content.len()),
         detail: Some(path.display().to_string()),
+    })
+}
+
+fn rename_policy_ok(policy: &ToolsPolicy, from: &Path, to: &Path) -> Result<(), &'static str> {
+    if !policy.can_read(from) || !policy.can_write(from) {
+        return Err("source path not allowed by policy (read+write)");
+    }
+    if !policy.can_write(to) {
+        return Err("destination path not allowed by policy (write)");
+    }
+    if let Some(parent) = to.parent() {
+        if parent.as_os_str().is_empty() {
+            return Ok(());
+        }
+        if !policy.can_write(parent) {
+            return Err("destination parent path not allowed by policy (write)");
+        }
+    }
+    Ok(())
+}
+
+fn is_cross_device_rename(err: &std::io::Error) -> bool {
+    if err.kind() == std::io::ErrorKind::CrossesDevices {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        if err.raw_os_error() == Some(18) {
+            return true;
+        }
+    }
+    let msg = err.to_string().to_lowercase();
+    msg.contains("cross-device")
+        || msg.contains("different disk")
+        || msg.contains("not same device")
+}
+
+async fn copy_file_then_remove_source(
+    from: &Path,
+    to: &Path,
+    policy: &ToolsPolicy,
+) -> Result<ToolResult> {
+    if let Err(m) = rename_policy_ok(policy, from, to) {
+        return Ok(ToolResult {
+            tool: "rename_path".to_string(),
+            success: false,
+            summary: m.to_string(),
+            detail: Some(format!("{} -> {}", from.display(), to.display())),
+        });
+    }
+    if let Some(p) = to.parent() {
+        tokio::fs::create_dir_all(p)
+            .await
+            .with_context(|| format!("create_dir_all {}", p.display()))?;
+    }
+    tokio::fs::copy(from, to)
+        .await
+        .with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
+    tokio::fs::remove_file(from)
+        .await
+        .with_context(|| format!("remove_file {}", from.display()))?;
+    Ok(ToolResult {
+        tool: "rename_path".to_string(),
+        success: true,
+        summary: "moved file (copy+delete; cross-device or rename fallback)".to_string(),
+        detail: Some(format!("{} -> {}", from.display(), to.display())),
+    })
+}
+
+/// Rename or move a file or directory. `to` must not exist. Parent dirs of `to` are created.
+/// Uses a single `rename` when possible; copies then deletes for files on cross-device errors.
+pub async fn rename_path(from: &Path, to: &Path, policy: &ToolsPolicy) -> Result<ToolResult> {
+    if let Err(m) = rename_policy_ok(policy, from, to) {
+        return Ok(ToolResult {
+            tool: "rename_path".to_string(),
+            success: false,
+            summary: m.to_string(),
+            detail: Some(format!("{} -> {}", from.display(), to.display())),
+        });
+    }
+    if !tokio::fs::try_exists(from)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(ToolResult {
+            tool: "rename_path".to_string(),
+            success: false,
+            summary: "source path does not exist".to_string(),
+            detail: Some(from.display().to_string()),
+        });
+    }
+    if tokio::fs::try_exists(to).await.unwrap_or(false) {
+        return Ok(ToolResult {
+            tool: "rename_path".to_string(),
+            success: false,
+            summary: "destination already exists; refuse to overwrite".to_string(),
+            detail: Some(to.display().to_string()),
+        });
+    }
+    if let Some(p) = to.parent() {
+        if !p.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(p)
+                .await
+                .with_context(|| format!("create_dir_all {}", p.display()))?;
+        }
+    }
+    match tokio::fs::rename(from, to).await {
+        Ok(()) => Ok(ToolResult {
+            tool: "rename_path".to_string(),
+            success: true,
+            summary: "renamed".to_string(),
+            detail: Some(format!("{} -> {}", from.display(), to.display())),
+        }),
+        Err(e) => {
+            let meta = tokio::fs::metadata(from).await;
+            let is_file = meta.as_ref().map(|m| m.is_file()).unwrap_or(false);
+            if is_file && is_cross_device_rename(&e) {
+                return copy_file_then_remove_source(from, to, policy).await;
+            }
+            Ok(ToolResult {
+                tool: "rename_path".to_string(),
+                success: false,
+                summary: format!("rename failed: {e}"),
+                detail: Some(format!("{} -> {}", from.display(), to.display())),
+            })
+        }
+    }
+}
+
+/// Collect (relative_path, is_directory) under `root` (excludes `root` itself).
+async fn collect_tree_relative(root: &Path) -> Result<Vec<(PathBuf, bool)>> {
+    let mut out = Vec::new();
+    let mut stack = vec![PathBuf::new()];
+    while let Some(rel) = stack.pop() {
+        let cur = root.join(&rel);
+        let mut rd = tokio::fs::read_dir(&cur)
+            .await
+            .with_context(|| format!("read_dir {}", cur.display()))?;
+        while let Some(ent) = rd.next_entry().await? {
+            let meta = ent.metadata().await?;
+            let r = rel.join(ent.file_name());
+            if meta.is_dir() {
+                stack.push(r.clone());
+                out.push((r, true));
+            } else {
+                out.push((r, false));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Move a directory tree (`from` must be a directory). `to` must not exist.
+/// Tries atomic `rename` first; on failure uses copy+delete under policy checks.
+pub async fn move_tree(from: &Path, to: &Path, policy: &ToolsPolicy) -> Result<ToolResult> {
+    if let Err(m) = rename_policy_ok(policy, from, to) {
+        return Ok(ToolResult {
+            tool: "move_tree".to_string(),
+            success: false,
+            summary: m.to_string(),
+            detail: Some(format!("{} -> {}", from.display(), to.display())),
+        });
+    }
+    let meta = match tokio::fs::metadata(from).await {
+        Ok(m) => m,
+        Err(e) => {
+            return Ok(ToolResult {
+                tool: "move_tree".to_string(),
+                success: false,
+                summary: format!("source: {e}"),
+                detail: Some(from.display().to_string()),
+            });
+        }
+    };
+    if !meta.is_dir() {
+        return Ok(ToolResult {
+            tool: "move_tree".to_string(),
+            success: false,
+            summary: "move_tree: source must be a directory (use rename_path for a single file)".to_string(),
+            detail: Some(from.display().to_string()),
+        });
+    }
+    if tokio::fs::try_exists(to).await.unwrap_or(false) {
+        return Ok(ToolResult {
+            tool: "move_tree".to_string(),
+            success: false,
+            summary: "destination already exists; refuse to overwrite or merge".to_string(),
+            detail: Some(to.display().to_string()),
+        });
+    }
+    if let Some(p) = to.parent() {
+        if !p.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(p)
+                .await
+                .with_context(|| format!("create_dir_all {}", p.display()))?;
+        }
+    }
+    if tokio::fs::rename(from, to).await.is_ok() {
+        return Ok(ToolResult {
+            tool: "move_tree".to_string(),
+            success: true,
+            summary: "moved directory (atomic rename)".to_string(),
+            detail: Some(format!("{} -> {}", from.display(), to.display())),
+        });
+    }
+
+    let entries = collect_tree_relative(from)
+        .await
+        .with_context(|| format!("collect_tree {}", from.display()))?;
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut files: Vec<PathBuf> = Vec::new();
+    for (r, is_dir) in entries {
+        if is_dir {
+            dirs.push(r);
+        } else {
+            files.push(r);
+        }
+    }
+    if dirs.is_empty() && files.is_empty() {
+        tokio::fs::create_dir_all(to)
+            .await
+            .with_context(|| format!("create_dir_all {}", to.display()))?;
+        tokio::fs::remove_dir(from)
+            .await
+            .with_context(|| format!("remove_dir {}", from.display()))?;
+        return Ok(ToolResult {
+            tool: "move_tree".to_string(),
+            success: true,
+            summary: "moved empty directory (cross-volume fallback)".to_string(),
+            detail: Some(format!("{} -> {}", from.display(), to.display())),
+        });
+    }
+    dirs.sort_by_key(|p| p.components().count());
+    for rel in &dirs {
+        let dest = to.join(rel);
+        if !policy.can_write(&dest) {
+            return Ok(ToolResult {
+                tool: "move_tree".to_string(),
+                success: false,
+                summary: "policy blocked destination directory".to_string(),
+                detail: Some(dest.display().to_string()),
+            });
+        }
+        tokio::fs::create_dir_all(&dest)
+            .await
+            .with_context(|| format!("mkdir {}", dest.display()))?;
+    }
+    for rel in &files {
+        let src = from.join(rel);
+        let dst = to.join(rel);
+        if !policy.can_read(&src) || !policy.can_write(&src) || !policy.can_write(&dst) {
+            return Ok(ToolResult {
+                tool: "move_tree".to_string(),
+                success: false,
+                summary: "policy blocked file copy in tree".to_string(),
+                detail: Some(format!("{} -> {}", src.display(), dst.display())),
+            });
+        }
+        if let Some(p) = dst.parent() {
+            tokio::fs::create_dir_all(p).await.ok();
+        }
+        tokio::fs::copy(&src, &dst)
+            .await
+            .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
+    }
+    files.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    for rel in &files {
+        let src = from.join(rel);
+        let _ = tokio::fs::remove_file(&src).await;
+    }
+    dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    for rel in &dirs {
+        let src = from.join(rel);
+        let _ = tokio::fs::remove_dir(&src).await;
+    }
+    let _ = tokio::fs::remove_dir(from).await;
+    Ok(ToolResult {
+        tool: "move_tree".to_string(),
+        success: true,
+        summary: format!("moved directory tree ({} files)", files.len()),
+        detail: Some(format!("{} -> {}", from.display(), to.display())),
     })
 }
 
