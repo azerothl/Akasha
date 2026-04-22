@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::reputation::ReputationStore;
 
@@ -46,27 +46,30 @@ struct LoadedPlugin {
 }
 
 fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    let enabled = std::env::var_os("AKASHA_DEBUG_LOG")
+        .map(|v| {
+            let v = v.to_string_lossy();
+            matches!(v.as_ref(), "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
+        })
+        .unwrap_or(false);
+    if !enabled {
+        return;
+    }
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let payload = serde_json::json!({
-        "sessionId": "e533ab",
-        "runId": std::env::var("AKASHA_DEBUG_RUN_ID").unwrap_or_else(|_| "pre-fix".to_string()),
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": timestamp
-    });
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("debug-e533ab.log")
-    {
-        use std::io::Write as _;
-        let _ = writeln!(file, "{payload}");
-    }
+    let run_id =
+        std::env::var("AKASHA_DEBUG_RUN_ID").unwrap_or_else(|_| "pre-fix".to_string());
+    debug!(
+        run_id = %run_id,
+        hypothesis_id = hypothesis_id,
+        location = location,
+        message = message,
+        timestamp = timestamp,
+        data = %data,
+        "plugin registry debug log"
+    );
 }
 
 impl PluginRegistry {

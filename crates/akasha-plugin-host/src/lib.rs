@@ -12,30 +12,35 @@ use wasmtime::{Caller, Engine, Linker, Module, Store};
 const RUN_FUNC: &str = "run";
 const MEMORY_NAME: &str = "memory";
 const DEFAULT_MAX_FUEL: u64 = 100_000_000;
-const DEBUG_LOG_PATH: &str = "debug-e533ab.log";
 
 fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    let debug_enabled = std::env::var("AKASHA_PLUGIN_HOST_DEBUG")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "debug"
+            )
+        })
+        .unwrap_or(false);
+
+    if !debug_enabled {
+        return;
+    }
+
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let payload = serde_json::json!({
-        "sessionId": "e533ab",
-        "runId": std::env::var("AKASHA_DEBUG_RUN_ID").unwrap_or_else(|_| "pre-fix".to_string()),
+        "runId": std::env::var("AKASHA_DEBUG_RUN_ID").ok(),
         "hypothesisId": hypothesis_id,
         "location": location,
         "message": message,
         "data": data,
         "timestamp": timestamp
     });
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(DEBUG_LOG_PATH)
-    {
-        use std::io::Write as _;
-        let _ = writeln!(file, "{payload}");
-    }
+
+    eprintln!("{payload}");
 }
 
 /// Per-invocation state for `run()` (network budget, policy).

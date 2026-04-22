@@ -619,13 +619,17 @@ fn format_verify_failure(code: Option<i32>, out: &str, err: &str) -> String {
     } else {
         err.chars().take(4000).collect()
     };
-    let combined = format!("{out}\n{err}");
-    let syntax_hint =
-        if combined.contains("TS1128") || combined.contains("TS1005") || combined.contains("TS1434") {
-            "\n\nNote : TS1128 / TS1005 / TS1434 indiquent souvent du texte invalide dans le fichier source (markdown, phrase hors code, accolade en trop) aux lignes indiquées."
-        } else {
-            ""
-        };
+    let has_syntax_marker = out.contains("TS1128")
+        || err.contains("TS1128")
+        || out.contains("TS1005")
+        || err.contains("TS1005")
+        || out.contains("TS1434")
+        || err.contains("TS1434");
+    let syntax_hint = if has_syntax_marker {
+        "\n\nNote : TS1128 / TS1005 / TS1434 indiquent souvent du texte invalide dans le fichier source (markdown, phrase hors code, accolade en trop) aux lignes indiquées."
+    } else {
+        ""
+    };
     format!(
         "Vérification post-tâche échouée ({code_str}).\n--- stdout ---\n{out_s}\n--- stderr ---\n{err_s}{syntax_hint}"
     )

@@ -24,7 +24,6 @@ use akasha_store::{
 };
 use akasha_vault::Vault;
 use std::cmp::Ordering;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -114,26 +113,30 @@ fn parse_generate_image_tool_args(args: &[String]) -> (String, Option<String>) {
 }
 
 fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    let enabled = std::env::var_os("AKASHA_DEBUG_LOG")
+        .map(|v| {
+            let v = v.to_string_lossy();
+            matches!(v.as_ref(), "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
+        })
+        .unwrap_or(false);
+    if !enabled {
+        return;
+    }
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let payload = serde_json::json!({
-        "sessionId": "e533ab",
-        "runId": std::env::var("AKASHA_DEBUG_RUN_ID").unwrap_or_else(|_| "pre-fix".to_string()),
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": timestamp
-    });
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("debug-e533ab.log")
-    {
-        let _ = writeln!(file, "{payload}");
-    }
+    let run_id =
+        std::env::var("AKASHA_DEBUG_RUN_ID").unwrap_or_else(|_| "pre-fix".to_string());
+    tracing::debug!(
+        run_id = %run_id,
+        hypothesis_id = hypothesis_id,
+        location = location,
+        message = message,
+        timestamp = timestamp,
+        data = %data,
+        "api debug log"
+    );
 }
 
 fn parse_write_file_request(args: &[String]) -> Option<(String, String)> {
@@ -3257,17 +3260,21 @@ fn tool_name_is_safe_identifier(tool_name: &str) -> bool {
 /// Certains modèles enveloppent les appels outils en XML (`<tool_call>read_file …</tool_call>`)
 /// ou enchaînent avec `<tool_call>…<tool_call>…` sans fermeture. Convertir en lignes `TOOL:` pour `parse_tool_calls`.
 fn normalize_xml_tool_call_wrappers(response: &str) -> String {
+    static CLOSE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static OPEN_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
     let lower = response.to_ascii_lowercase();
     if !lower.contains("<tool_call") {
         return response.to_string();
     }
-    let Ok(close_re) = regex::Regex::new(r"(?i)</tool_call\s*>") else {
-        return response.to_string();
-    };
+    let close_re = CLOSE_RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)</tool_call\s*>").expect("hard-coded close tool_call regex must compile")
+    });
     let s = close_re.replace_all(response, "\n").to_string();
-    let Ok(open_re) = regex::Regex::new(r"(?i)<tool_call(?:\s[^>]*)?>\s*") else {
-        return s;
-    };
+    let open_re = OPEN_RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)<tool_call(?:\s[^>]*)?>\s*")
+            .expect("hard-coded open tool_call regex must compile")
+    });
     open_re.replace_all(&s, "\nTOOL: ").to_string()
 }
 
@@ -7915,12 +7922,20 @@ pub(crate) async fn run_message_via_llm(
                                 max = MAX_ACCUMULATED,
                                 "Stream chunk larger than progress cap; truncating for accumulated progress buffer"
                             );
-                            &chunk[..MAX_ACCUMULATED]
+                            let mut end = MAX_ACCUMULATED;
+                            while end > 0 && !chunk.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            &chunk[..end]
                         } else {
                             chunk.as_str()
                         };
                         if accumulated.len() + chunk_ref.len() > MAX_ACCUMULATED {
-                            accumulated.truncate(MAX_ACCUMULATED.saturating_sub(chunk_ref.len()));
+                            let mut keep_len = MAX_ACCUMULATED.saturating_sub(chunk_ref.len());
+                            while keep_len > 0 && !accumulated.is_char_boundary(keep_len) {
+                                keep_len -= 1;
+                            }
+                            accumulated.truncate(keep_len);
                         }
                         accumulated.push_str(chunk_ref);
                         let _ = bus.send(
