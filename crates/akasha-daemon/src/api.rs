@@ -11880,6 +11880,16 @@ pub async fn handle_api(
             .and_then(|v| v.get("studio_policy_hint").and_then(|x| x.as_str()))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        let studio_design_hint = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_design_hint").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let studio_design_doc = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_design_doc").and_then(|x| x.as_str()))
+            .map(|s| s.to_string())
+            .filter(|s| !s.trim().is_empty());
         let studio_delegate_single_level = body_json
             .as_ref()
             .and_then(|v| v.get("studio_delegate_single_level").and_then(|x| x.as_bool()))
@@ -11958,6 +11968,16 @@ pub async fn handle_api(
             }
             if let Some(ref h) = studio_policy_hint {
                 if let Some(p) = crate::api_studio::studio_one_shot_policy_hint_prefix(h) {
+                    message_for_llm = format!("{p}{message_for_llm}");
+                }
+            }
+            if let Some(ref h) = studio_design_hint {
+                if let Some(p) = crate::api_studio::studio_design_hint_prefix(h) {
+                    message_for_llm = format!("{p}{message_for_llm}");
+                }
+            }
+            if let Some(ref d) = studio_design_doc {
+                if let Some(p) = crate::api_studio::studio_design_doc_prefix(d) {
                     message_for_llm = format!("{p}{message_for_llm}");
                 }
             }

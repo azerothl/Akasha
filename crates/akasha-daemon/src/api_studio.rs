@@ -267,6 +267,8 @@ const MAX_TECH_STACK_CHARS: usize = 4000;
 const MAX_CODE_STUDIO_PLAN_INJECT_CHARS: usize = 4000;
 const MAX_EVOLUTION_SUMMARY_CHARS: usize = 6000;
 const MAX_POLICY_NOTES_CHARS: usize = 4000;
+const MAX_DESIGN_HINT_CHARS: usize = 4000;
+const MAX_DESIGN_DOC_CHARS: usize = 12000;
 
 /// Keep only prompt-safe characters:
 /// - drop NUL and non-printable control chars (except LF/CR/TAB)
@@ -399,6 +401,80 @@ pub fn studio_one_shot_policy_hint_prefix(hint: &str) -> Option<String> {
     Some(format!(
         "[Consigne additionnelle pour cette requête uniquement :\n{t}\n]\n\n"
     ))
+}
+
+/// Design hint ponctuel (résumé tokens/règles) envoyé par l'UI.
+pub fn studio_design_hint_prefix(hint: &str) -> Option<String> {
+    let t = sanitize_for_prompt(hint, MAX_DESIGN_HINT_CHARS);
+    if t.is_empty() {
+        return None;
+    }
+    Some(format!("[Contexte design (résumé) :\n{t}\n]\n\n"))
+}
+
+/// Contrat DESIGN.md complet envoyé par l'UI (borné pour éviter un prompt trop volumineux).
+pub fn studio_design_doc_prefix(doc: &str) -> Option<String> {
+    let t = sanitize_for_prompt(doc, MAX_DESIGN_DOC_CHARS);
+    if t.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[Contrat design — DESIGN.md (respecter tokens + prose, sauf demande explicite utilisateur) :\n{t}\n]\n\n"
+    ))
+}
+
+fn lint_design_doc(raw: &str) -> serde_json::Value {
+    let text = raw.trim();
+    let mut findings: Vec<serde_json::Value> = Vec::new();
+    if text.is_empty() {
+        findings.push(json!({"severity":"warning","path":"root","message":"DESIGN.md vide"}));
+    }
+    let has_front_matter = text.starts_with("---") && text[3..].contains("\n---");
+    if !has_front_matter {
+        findings.push(json!({"severity":"error","path":"frontmatter","message":"front matter YAML manquant"}));
+    }
+    if !text.contains("name:") {
+        findings.push(json!({"severity":"warning","path":"name","message":"token `name` absent"}));
+    }
+    if !text.contains("colors:") {
+        findings.push(json!({"severity":"warning","path":"colors","message":"section tokens `colors` absente"}));
+    }
+    if !text.contains("typography:") {
+        findings.push(json!({"severity":"warning","path":"typography","message":"section tokens `typography` absente"}));
+    }
+    if !text.contains("## ") {
+        findings.push(json!({"severity":"info","path":"body","message":"aucune section markdown `##` détectée"}));
+    }
+    let errors = findings
+        .iter()
+        .filter(|f| f.get("severity").and_then(|s| s.as_str()) == Some("error"))
+        .count();
+    let warnings = findings
+        .iter()
+        .filter(|f| f.get("severity").and_then(|s| s.as_str()) == Some("warning"))
+        .count();
+    let info = findings
+        .iter()
+        .filter(|f| f.get("severity").and_then(|s| s.as_str()) == Some("info"))
+        .count();
+    json!({
+        "findings": findings,
+        "summary": { "errors": errors, "warnings": warnings, "info": info }
+    })
+}
+
+fn extract_design_summary(v: &serde_json::Value) -> (usize, usize) {
+    let errors = v
+        .get("summary")
+        .and_then(|s| s.get("errors"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as usize;
+    let warnings = v
+        .get("summary")
+        .and_then(|s| s.get("warnings"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as usize;
+    (errors, warnings)
 }
 
 fn load_studio_meta(project_root: &Path) -> Option<StudioMeta> {
@@ -2597,6 +2673,52 @@ pub async fn handle_studio_route(
                         r#"{"error":"checkout_main_failed"}"#,
                     ));
                 }
+                let req = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+                let design_check = req
+                    .as_ref()
+                    .and_then(|v| v.get("design_check").and_then(|x| x.as_bool()))
+                    .unwrap_or(false);
+                if design_check {
+                    let base_raw = git_output(&root, &["show", "HEAD:DESIGN.md"])
+                        .await
+                        .ok()
+                        .and_then(|o| {
+                            if o.status.success() {
+                                Some(String::from_utf8_lossy(&o.stdout).to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_default();
+                    let branch_spec = format!("{branch}:DESIGN.md");
+                    let branch_raw = git_output(&root, &["show", &branch_spec])
+                        .await
+                        .ok()
+                        .and_then(|o| {
+                            if o.status.success() {
+                                Some(String::from_utf8_lossy(&o.stdout).to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_default();
+                    let base_report = lint_design_doc(&base_raw);
+                    let branch_report = lint_design_doc(&branch_raw);
+                    let (base_errors, base_warnings) = extract_design_summary(&base_report);
+                    let (branch_errors, branch_warnings) = extract_design_summary(&branch_report);
+                    if branch_errors > base_errors || branch_warnings > base_warnings {
+                        return Some(json_response(
+                            "409 Conflict",
+                            &json!({
+                                "error":"design_regression",
+                                "detail":"DESIGN.md lint worsened on evolution branch",
+                                "base": base_report,
+                                "branch": branch_report
+                            })
+                            .to_string(),
+                        ));
+                    }
+                }
                 let o = git_output(&root, &["merge", "--no-ff", &branch, "-m", "Akasha Code Studio: merge evolution"])
                     .await;
                 match o {
@@ -2624,6 +2746,34 @@ pub async fn handle_studio_route(
                     }
                 }
             }
+        }
+    }
+
+    // POST /api/studio/projects/:id/design/validate
+    if method == "POST" && path_only.ends_with("/design/validate") {
+        if let Some(rest) = strip_studio_projects_prefix(path_only) {
+            let id = rest
+                .strip_suffix("/design/validate")
+                .unwrap_or(rest)
+                .trim_end_matches('/');
+            let root = match resolve_studio_project_dir(data_dir, id) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Some(json_response(
+                        "400 Bad Request",
+                        &serde_json::json!({ "error": e }).to_string(),
+                    ));
+                }
+            };
+            let req = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+            let raw = req
+                .as_ref()
+                .and_then(|v| v.get("content").and_then(|x| x.as_str()))
+                .map(|s| s.to_string())
+                .or_else(|| fs::read_to_string(root.join("DESIGN.md")).ok())
+                .unwrap_or_default();
+            let report = lint_design_doc(&raw);
+            return Some(json_response("200 OK", &report.to_string()));
         }
     }
 
