@@ -144,9 +144,11 @@ async fn copy_file_then_remove_source(
         });
     }
     if let Some(p) = to.parent() {
-        tokio::fs::create_dir_all(p)
-            .await
-            .with_context(|| format!("create_dir_all {}", p.display()))?;
+        if !p.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(p)
+                .await
+                .with_context(|| format!("create_dir_all {}", p.display()))?;
+        }
     }
     tokio::fs::copy(from, to)
         .await
@@ -232,9 +234,15 @@ async fn collect_tree_relative(root: &Path) -> Result<Vec<(PathBuf, bool)>> {
             .await
             .with_context(|| format!("read_dir {}", cur.display()))?;
         while let Some(ent) = rd.next_entry().await? {
-            let meta = ent.metadata().await?;
+            let file_type = ent.file_type().await?;
             let r = rel.join(ent.file_name());
-            if meta.is_dir() {
+            if file_type.is_symlink() {
+                return Err(anyhow::anyhow!(
+                    "refusing to traverse symlink in move_tree source: {}",
+                    root.join(&r).display()
+                ));
+            }
+            if file_type.is_dir() {
                 stack.push(r.clone());
                 out.push((r, true));
             } else {
@@ -290,13 +298,24 @@ pub async fn move_tree(from: &Path, to: &Path, policy: &ToolsPolicy) -> Result<T
                 .with_context(|| format!("create_dir_all {}", p.display()))?;
         }
     }
-    if tokio::fs::rename(from, to).await.is_ok() {
-        return Ok(ToolResult {
-            tool: "move_tree".to_string(),
-            success: true,
-            summary: "moved directory (atomic rename)".to_string(),
-            detail: Some(format!("{} -> {}", from.display(), to.display())),
-        });
+    match tokio::fs::rename(from, to).await {
+        Ok(()) => {
+            return Ok(ToolResult {
+                tool: "move_tree".to_string(),
+                success: true,
+                summary: "moved directory (atomic rename)".to_string(),
+                detail: Some(format!("{} -> {}", from.display(), to.display())),
+            });
+        }
+        Err(e) if !is_cross_device_rename(&e) => {
+            return Ok(ToolResult {
+                tool: "move_tree".to_string(),
+                success: false,
+                summary: format!("rename failed: {e}"),
+                detail: Some(format!("{} -> {}", from.display(), to.display())),
+            });
+        }
+        Err(_) => {} // cross-device: fall through to copy+delete
     }
 
     let entries = collect_tree_relative(from)
@@ -361,14 +380,20 @@ pub async fn move_tree(from: &Path, to: &Path, policy: &ToolsPolicy) -> Result<T
     files.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
     for rel in &files {
         let src = from.join(rel);
-        let _ = tokio::fs::remove_file(&src).await;
+        tokio::fs::remove_file(&src)
+            .await
+            .with_context(|| format!("remove file {}", src.display()))?;
     }
     dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
     for rel in &dirs {
         let src = from.join(rel);
-        let _ = tokio::fs::remove_dir(&src).await;
+        tokio::fs::remove_dir(&src)
+            .await
+            .with_context(|| format!("remove dir {}", src.display()))?;
     }
-    let _ = tokio::fs::remove_dir(from).await;
+    tokio::fs::remove_dir(from)
+        .await
+        .with_context(|| format!("remove dir {}", from.display()))?;
     Ok(ToolResult {
         tool: "move_tree".to_string(),
         success: true,

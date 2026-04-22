@@ -5091,14 +5091,99 @@ async fn execute_tool_call(
                     None,
                 );
             }
-            let from_disk = resolve_tool_disk_path(&from_s, workspace_root);
-            let to_disk = resolve_tool_disk_path(&to_s, workspace_root);
-            match executor.rename_path(&from_disk, &to_disk).await {
-                Ok(res) => {
-                    let msg = format!("[rename_path] {}", res.summary);
-                    (res.success, msg, None)
+            let from_is_workspace = is_workspace_virtual_path(&from_s);
+            let to_is_workspace = is_workspace_virtual_path(&to_s);
+
+            if from_is_workspace || to_is_workspace {
+                if !(from_is_workspace && to_is_workspace) {
+                    return (
+                        false,
+                        "[rename_path] both paths must use workspace:/ or neither".to_string(),
+                        None,
+                    );
                 }
-                Err(e) => (false, format!("[rename_path] {}", e), None),
+                match workspace_store {
+                    Some(ws) => {
+                        let normalize_ws_key = |s: &str| -> String {
+                            let k = s
+                                .trim_start_matches("workspace:/")
+                                .trim_start_matches("workspace:")
+                                .trim_start_matches('/');
+                            let mut k = k.trim().trim_matches('`').trim_matches('"').to_string();
+                            if k.ends_with('#') { k.pop(); }
+                            k
+                        };
+                        let lineage_id = workspace_lineage_root_task_id(task_id, store_path);
+                        let (from_key, _) = rewrite_workspace_plan_key_to_lineage_root(
+                            &normalize_ws_key(&from_s), lineage_id,
+                        );
+                        let (to_key, _) = rewrite_workspace_plan_key_to_lineage_root(
+                            &normalize_ws_key(&to_s), lineage_id,
+                        );
+                        let mut guard = ws.write().await;
+                        let per_task = guard.entry(lineage_id).or_default();
+                        if per_task.contains_key(&to_key) {
+                            return (
+                                false,
+                                format!("[rename_path] destination workspace key already exists: {}", to_key),
+                                None,
+                            );
+                        }
+                        if let Some(content) = per_task.remove(&from_key) {
+                            per_task.insert(to_key.clone(), content);
+                            drop(guard);
+                            // Also rename on disk if workspace_root is set; log but don't fail on
+                            // disk error since the in-memory store is already updated.
+                            if let Some(root) = workspace_root {
+                                let from_disk = root.join(&from_key);
+                                let to_disk = root.join(&to_key);
+                                match executor.rename_path(&from_disk, &to_disk).await {
+                                    Ok(res) if !res.success => {
+                                        tracing::warn!(
+                                            "[rename_path] store updated but disk rename failed: {}",
+                                            res.summary
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "[rename_path] store updated but disk rename error: {}",
+                                            e
+                                        );
+                                    }
+                                    Ok(_) => {}
+                                }
+                            }
+                            (true, format!("[rename_path] workspace key renamed: {} -> {}", from_key, to_key), None)
+                        } else {
+                            drop(guard);
+                            // Key absent from store — try disk rename if workspace_root available
+                            if let Some(root) = workspace_root {
+                                let from_disk = root.join(&from_key);
+                                let to_disk = root.join(&to_key);
+                                match executor.rename_path(&from_disk, &to_disk).await {
+                                    Ok(res) => {
+                                        let msg = format!("[rename_path] {}", res.summary);
+                                        (res.success, msg, None)
+                                    }
+                                    Err(e) => (false, format!("[rename_path] {}", e), None),
+                                }
+                            } else {
+                                (false, format!("[rename_path] workspace key not found: {}", from_key), None)
+                            }
+                        }
+                    }
+                    None => (false, "[rename_path] workspace paths require a workspace store.".to_string(), None),
+                }
+            } else {
+                let from_disk = resolve_tool_disk_path(&from_s, workspace_root);
+                let to_disk = resolve_tool_disk_path(&to_s, workspace_root);
+                match executor.rename_path(&from_disk, &to_disk).await {
+                    Ok(res) => {
+                        let msg = format!("[rename_path] {}", res.summary);
+                        (res.success, msg, None)
+                    }
+                    Err(e) => (false, format!("[rename_path] {}", e), None),
+                }
             }
         }
         "move_tree" => {
@@ -5123,6 +5208,13 @@ async fn execute_tool_call(
                 return (
                     false,
                     "[move_tree] invalid path (..)".to_string(),
+                    None,
+                );
+            }
+            if is_workspace_virtual_path(&from_s) || is_workspace_virtual_path(&to_s) {
+                return (
+                    false,
+                    "[move_tree] workspace:/ paths are not supported by move_tree; use rename_path for individual workspace files".to_string(),
                     None,
                 );
             }

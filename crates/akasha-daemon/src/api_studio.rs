@@ -2765,6 +2765,9 @@ pub async fn handle_studio_route(
                     ));
                 }
             };
+            if !root.is_dir() {
+                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            }
             let req = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
             let raw = req
                 .as_ref()
