@@ -6308,12 +6308,142 @@ fn studio_verify_short_hash(input: &str) -> String {
     format!("{:08x}", (h.finish() & 0xffff_ffff) as u32)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StudioVerifyUserLanguage {
+    French,
+    English,
+    /// Spanish, German, etc. — LLM must follow the user excerpt language.
+    MatchUserExcerpt,
+}
+
+fn studio_verify_detect_user_language(clean_user_message: &str) -> StudioVerifyUserLanguage {
+    let t: String = clean_user_message.chars().take(6_000).collect();
+    if t.trim().is_empty() {
+        return StudioVerifyUserLanguage::MatchUserExcerpt;
+    }
+    let mut fr = 0i32;
+    let mut en = 0i32;
+    for ch in t.chars() {
+        if matches!(
+            ch,
+            'à' | 'â' | 'é' | 'è' | 'ê' | 'ë' | 'î' | 'ï' | 'ô' | 'ù' | 'û' | 'ü' | 'ç' | 'œ' | 'æ'
+        ) {
+            fr += 3;
+        }
+    }
+    let lower = t.to_lowercase();
+    let pad = format!(" {lower} ");
+    const FR_MARKERS: &[&str] = &[
+        " tâche ",
+        " créer ",
+        " merci ",
+        " échec ",
+        " fichier ",
+        " utilisateur ",
+        " réinitialisation ",
+        " veuillez ",
+        " c'est ",
+        " être ",
+        " dans le ",
+        " pas de ",
+        " pour ",
+        " avec ",
+        " depuis ",
+        " régénérer ",
+        " mettre à jour ",
+        " code studio ",
+        " consigne ",
+    ];
+    const EN_MARKERS: &[&str] = &[
+        " the ",
+        " and ",
+        " create ",
+        " task ",
+        " failed ",
+        " please ",
+        " update ",
+        " build ",
+        " error ",
+        " file ",
+        " user ",
+        " request ",
+        " with ",
+        " from ",
+        " regenerate ",
+        " design ",
+        " studio ",
+        " workspace ",
+    ];
+    for m in FR_MARKERS {
+        if pad.contains(m) {
+            fr += 2;
+        }
+    }
+    for m in EN_MARKERS {
+        if pad.contains(m) {
+            en += 2;
+        }
+    }
+    if fr > en + 2 {
+        StudioVerifyUserLanguage::French
+    } else if en > fr + 2 {
+        StudioVerifyUserLanguage::English
+    } else {
+        StudioVerifyUserLanguage::MatchUserExcerpt
+    }
+}
+
+fn studio_verify_failure_banner(lang: StudioVerifyUserLanguage) -> &'static str {
+    match lang {
+        StudioVerifyUserLanguage::French => {
+            "Échec vérification automatique (build/check) — la tâche est marquée en échec."
+        }
+        StudioVerifyUserLanguage::English => {
+            "Automatic build/check verification failed — the task was marked as failed."
+        }
+        StudioVerifyUserLanguage::MatchUserExcerpt => {
+            "Build/check verification failed — the task was marked as failed."
+        }
+    }
+}
+
+fn studio_verify_analyzing_progress_line(lang: StudioVerifyUserLanguage) -> &'static str {
+    match lang {
+        StudioVerifyUserLanguage::French => {
+            "Échec de la vérification build — rédaction d'une synthèse lisible…"
+        }
+        StudioVerifyUserLanguage::English => {
+            "Build verification failed — drafting a readable summary…"
+        }
+        StudioVerifyUserLanguage::MatchUserExcerpt => {
+            "Verification failed — drafting a readable summary…"
+        }
+    }
+}
+
+fn studio_verify_build_excerpt_label(lang: StudioVerifyUserLanguage) -> &'static str {
+    match lang {
+        StudioVerifyUserLanguage::French => "--- Sortie build (extrait) ---",
+        StudioVerifyUserLanguage::English => "--- Build output (excerpt) ---",
+        StudioVerifyUserLanguage::MatchUserExcerpt => "--- Build output (excerpt) ---",
+    }
+}
+
+fn studio_verify_summary_heading_markdown(lang: StudioVerifyUserLanguage) -> &'static str {
+    match lang {
+        StudioVerifyUserLanguage::French => "## Synthèse\n\n",
+        StudioVerifyUserLanguage::English => "## Summary\n\n",
+        StudioVerifyUserLanguage::MatchUserExcerpt => "",
+    }
+}
+
 /// Synthèse courte (LLM, sans outils) après échec de `studio_verify_after_agent_task`, pour l’utilisateur final.
 async fn studio_verify_explain_failure_to_user(
     llm_router: &std::sync::Arc<akasha_llm::LLMRouter>,
     user_message: &str,
     assistant_reply: &str,
     verify_log: &str,
+    lang: StudioVerifyUserLanguage,
 ) -> Option<String> {
     const MAX_USER: usize = 900;
     const MAX_ASSIST: usize = 1_400;
@@ -6321,18 +6451,51 @@ async fn studio_verify_explain_failure_to_user(
     let um: String = user_message.chars().take(MAX_USER).collect();
     let ar: String = assistant_reply.chars().take(MAX_ASSIST).collect();
     let log: String = verify_log.chars().take(MAX_LOG).collect();
-    let system = "Tu es un assistant Code Studio. Une tâche agent vient d'échouer à l'étape de vérification automatique (souvent `npm run build`, `tsc`, `vite build`, ou `cargo check`). \
-Rédige une synthèse en français, claire pour quelqu'un qui n'est pas familier avec les logs npm. \
+    let system = match lang {
+        StudioVerifyUserLanguage::French => {
+            "Tu es un assistant Code Studio. Une tâche agent vient d'échouer à l'étape de vérification automatique (souvent `npm run build`, `tsc`, `vite build`, ou `cargo check`). \
+Rédige une synthèse entièrement en français, claire pour quelqu'un qui n'est pas familier avec les logs npm. \
 Ne pas inventer de chemins ou numéros de ligne absents du log. Si l'extrait est incomplet, le dire. \
 Structure (titres ## ou **gras** courts autorisés) :\n\
 1) **Contexte** — en 1–2 phrases : objectif apparent (consigne + extrait de la réponse agent).\n\
 2) **Cause principale** — ce qui bloque le build en langage simple.\n\
 3) **Fichiers / lignes** — ceux visibles dans le log, sinon \"non précisé dans l'extrait\".\n\
 4) **Prochaines étapes** — 2 à 5 actions concrètes.\n\
-Pas de copier-coller massif du log ; pas de blocs de code de plus de 6 lignes. Réponse max ~1600 caractères.";
-    let user = format!(
-        "Consigne utilisateur (extrait) :\n{um}\n\nTravail / réponse agent (extrait) :\n{ar}\n\nSortie vérification (build/check) :\n{log}\n\nRédige la synthèse demandée."
-    );
+Pas de copier-coller massif du log ; pas de blocs de code de plus de 6 lignes. Réponse max ~1600 caractères."
+                .to_string()
+        }
+        StudioVerifyUserLanguage::English => {
+            "You are a Code Studio assistant. An agent task just failed automatic verification (often `npm run build`, `tsc`, `vite build`, or `cargo check`). \
+Write the entire summary in clear English for someone who is not used to npm logs. \
+Do not invent file paths or line numbers that are not in the log. If the excerpt is incomplete, say so. \
+Structure (short ## or **bold** headings allowed):\n\
+1) **Context** — 1–2 sentences: apparent goal (user request + agent reply excerpt).\n\
+2) **Root cause** — what broke the build in plain language.\n\
+3) **Files / lines** — those visible in the log, otherwise \"not specified in the excerpt\".\n\
+4) **Next steps** — 2–5 concrete actions.\n\
+No huge copy-paste of the log; no code blocks longer than 6 lines. Max ~1600 characters."
+                .to_string()
+        }
+        StudioVerifyUserLanguage::MatchUserExcerpt => {
+            "You are a Code Studio assistant. An agent task just failed automatic verification (often `npm run build`, `tsc`, `vite build`, or `cargo check`). \
+**Language (mandatory):** Write your entire summary in the **same natural language** as the \"User message (excerpt)\" block below (French if French, English if English, Spanish if Spanish, etc.). Use headings and bullets in that same language. \
+If that excerpt is too short to infer the language, default to **French**. Do not mix two languages. \
+Do not invent file paths or line numbers absent from the log; if the excerpt is incomplete, say so in that language. \
+Use a short structure: context (1–2 sentences), root cause, files/lines from the log (or \"not in excerpt\"), next steps (2–5 bullets). No huge log paste; max ~1600 characters."
+                .to_string()
+        }
+    };
+    let user = match lang {
+        StudioVerifyUserLanguage::French => format!(
+            "Consigne utilisateur (extrait) :\n{um}\n\nTravail / réponse agent (extrait) :\n{ar}\n\nSortie vérification (build/check) :\n{log}\n\nRédige la synthèse demandée."
+        ),
+        StudioVerifyUserLanguage::English => format!(
+            "User message (excerpt):\n{um}\n\nAgent work / reply (excerpt):\n{ar}\n\nVerification output (build/check):\n{log}\n\nWrite the requested summary."
+        ),
+        StudioVerifyUserLanguage::MatchUserExcerpt => format!(
+            "User message (excerpt):\n{um}\n\nAgent work / reply (excerpt):\n{ar}\n\nVerification output (build/check):\n{log}\n\nWrite the summary in the same language as the user message excerpt."
+        ),
+    };
     let req = CompletionRequest {
         prompt: user,
         max_tokens: Some(800),
@@ -9834,6 +9997,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         ws.write().await.remove(&task_id);
     }
 
+    let verify_user_lang = studio_verify_detect_user_language(clean_message);
     let studio_verify_display_message: Option<String> = if let Some(ref err) = studio_verify_error {
         let explain_enabled = code_studio_disk_task
             && std::env::var("AKASHA_STUDIO_VERIFY_EXPLAIN_FAILURE")
@@ -9847,25 +10011,43 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                     Some(serde_json::json!({
                         "task_id": task_id.to_string(),
                         "progress_pct": 99,
-                        "message": "Échec de la vérification build — rédaction d'une synthèse lisible…"
+                        "message": studio_verify_analyzing_progress_line(verify_user_lang)
                     })),
                 )
                 .with_correlation(task_id),
             );
-            studio_verify_explain_failure_to_user(&llm_router, &message, &reply_text, err).await
+            studio_verify_explain_failure_to_user(
+                &llm_router,
+                clean_message,
+                &reply_text,
+                err,
+                verify_user_lang,
+            )
+            .await
         } else {
             None
         };
         let summary = explain.filter(|s| !s.trim().is_empty());
+        let banner = studio_verify_failure_banner(verify_user_lang);
+        let excerpt_lbl = studio_verify_build_excerpt_label(verify_user_lang);
         Some(if let Some(ref s) = summary {
-            format!(
-                "Échec vérification automatique (build/check) — la tâche est marquée en échec.\n\n## Synthèse\n\n{}\n\n--- Sortie build (extrait) ---\n{}",
-                s.trim(),
-                err.chars().take(1_400).collect::<String>()
-            )
+            let head = studio_verify_summary_heading_markdown(verify_user_lang);
+            if head.is_empty() {
+                format!(
+                    "{banner}\n\n{}\n\n{excerpt_lbl}\n{}",
+                    s.trim(),
+                    err.chars().take(1_400).collect::<String>()
+                )
+            } else {
+                format!(
+                    "{banner}\n\n{head}{}\n\n{excerpt_lbl}\n{}",
+                    s.trim(),
+                    err.chars().take(1_400).collect::<String>()
+                )
+            }
         } else {
             format!(
-                "Échec vérification automatique (build/check) — la tâche est marquée en échec.\n{}",
+                "{banner}\n{}",
                 err.chars().take(1_800).collect::<String>()
             )
         })
