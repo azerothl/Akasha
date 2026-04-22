@@ -39,7 +39,7 @@ pub struct CodeRagChunk {
     pub content: String,
     #[serde(default)]
     pub symbols: Vec<String>,
-    /// Pre-computed normalised term set for this chunk (populated at index time).
+    /// Pre-computed normalized term set for this chunk (populated at index time).
     #[serde(default)]
     pub terms: Vec<String>,
 }
@@ -404,7 +404,7 @@ fn scan_dir_recursive(base: &Path, dir: &Path, out: &mut Vec<ScannedFile>) -> an
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos() as u64)
+            .map(|d| d.as_secs().saturating_mul(1_000_000_000).saturating_add(d.subsec_nanos() as u64))
             .unwrap_or(0);
         out.push(ScannedFile {
             abs: p,
