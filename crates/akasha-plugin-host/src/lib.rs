@@ -14,16 +14,17 @@ const MEMORY_NAME: &str = "memory";
 const DEFAULT_MAX_FUEL: u64 = 100_000_000;
 
 fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
-    let debug_enabled = std::env::var("AKASHA_PLUGIN_HOST_DEBUG")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "debug"
-            )
-        })
-        .unwrap_or(false);
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let enabled = *ENABLED.get_or_init(|| {
+        std::env::var_os("AKASHA_PLUGIN_HOST_DEBUG")
+            .map(|v| {
+                let v = v.to_string_lossy().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    });
 
-    if !debug_enabled {
+    if !enabled {
         return;
     }
 

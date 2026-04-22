@@ -113,12 +113,15 @@ fn parse_generate_image_tool_args(args: &[String]) -> (String, Option<String>) {
 }
 
 fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
-    let enabled = std::env::var_os("AKASHA_DEBUG_LOG")
-        .map(|v| {
-            let v = v.to_string_lossy();
-            matches!(v.as_ref(), "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
-        })
-        .unwrap_or(false);
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let enabled = *ENABLED.get_or_init(|| {
+        std::env::var_os("AKASHA_DEBUG_LOG")
+            .map(|v| {
+                let v = v.to_string_lossy().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    });
     if !enabled {
         return;
     }
