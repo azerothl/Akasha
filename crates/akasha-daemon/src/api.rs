@@ -6308,6 +6308,72 @@ fn studio_verify_short_hash(input: &str) -> String {
     format!("{:08x}", (h.finish() & 0xffff_ffff) as u32)
 }
 
+/// Synthèse courte (LLM, sans outils) après échec de `studio_verify_after_agent_task`, pour l’utilisateur final.
+async fn studio_verify_explain_failure_to_user(
+    llm_router: &std::sync::Arc<akasha_llm::LLMRouter>,
+    user_message: &str,
+    assistant_reply: &str,
+    verify_log: &str,
+) -> Option<String> {
+    const MAX_USER: usize = 900;
+    const MAX_ASSIST: usize = 1_400;
+    const MAX_LOG: usize = 14_000;
+    let um: String = user_message.chars().take(MAX_USER).collect();
+    let ar: String = assistant_reply.chars().take(MAX_ASSIST).collect();
+    let log: String = verify_log.chars().take(MAX_LOG).collect();
+    let system = "Tu es un assistant Code Studio. Une tâche agent vient d'échouer à l'étape de vérification automatique (souvent `npm run build`, `tsc`, `vite build`, ou `cargo check`). \
+Rédige une synthèse en français, claire pour quelqu'un qui n'est pas familier avec les logs npm. \
+Ne pas inventer de chemins ou numéros de ligne absents du log. Si l'extrait est incomplet, le dire. \
+Structure (titres ## ou **gras** courts autorisés) :\n\
+1) **Contexte** — en 1–2 phrases : objectif apparent (consigne + extrait de la réponse agent).\n\
+2) **Cause principale** — ce qui bloque le build en langage simple.\n\
+3) **Fichiers / lignes** — ceux visibles dans le log, sinon \"non précisé dans l'extrait\".\n\
+4) **Prochaines étapes** — 2 à 5 actions concrètes.\n\
+Pas de copier-coller massif du log ; pas de blocs de code de plus de 6 lignes. Réponse max ~1600 caractères.";
+    let user = format!(
+        "Consigne utilisateur (extrait) :\n{um}\n\nTravail / réponse agent (extrait) :\n{ar}\n\nSortie vérification (build/check) :\n{log}\n\nRédige la synthèse demandée."
+    );
+    let req = CompletionRequest {
+        prompt: user,
+        max_tokens: Some(800),
+        temperature: Some(0.15),
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        repeat_penalty: None,
+        num_ctx: None,
+        num_gpu: None,
+        thinking_level: None,
+        preferred_task_type: Some("conversation".to_string()),
+        system_prompt: Some(system.to_string()),
+        image_data_urls: None,
+    };
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(55),
+        llm_router.complete(&req),
+    )
+    .await
+    {
+        Ok(Ok(r)) => {
+            let t = r.text.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.chars().take(2_400).collect())
+            }
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "studio verify explain: LLM complete failed");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("studio verify explain: LLM timeout");
+            None
+        }
+    }
+}
+
 /// Après un log d’échec de compilation, enchaîne quelques tours LLM + exécution d’outils pour corriger les sources.
 /// Retourne `true` si au moins un outil d’écriture a réussi au moins une fois.
 async fn studio_verify_run_llm_autofix_rounds(
@@ -9768,17 +9834,53 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         ws.write().await.remove(&task_id);
     }
 
-    if let Some(ref err) = studio_verify_error {
+    let studio_verify_display_message: Option<String> = if let Some(ref err) = studio_verify_error {
+        let explain_enabled = code_studio_disk_task
+            && std::env::var("AKASHA_STUDIO_VERIFY_EXPLAIN_FAILURE")
+                .ok()
+                .map(|v| v != "0")
+                .unwrap_or(true);
+        let explain = if explain_enabled {
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::ProgressUpdate,
+                    Some(serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "progress_pct": 99,
+                        "message": "Échec de la vérification build — rédaction d'une synthèse lisible…"
+                    })),
+                )
+                .with_correlation(task_id),
+            );
+            studio_verify_explain_failure_to_user(&llm_router, &message, &reply_text, err).await
+        } else {
+            None
+        };
+        let summary = explain.filter(|s| !s.trim().is_empty());
+        Some(if let Some(ref s) = summary {
+            format!(
+                "Échec vérification automatique (build/check) — la tâche est marquée en échec.\n\n## Synthèse\n\n{}\n\n--- Sortie build (extrait) ---\n{}",
+                s.trim(),
+                err.chars().take(1_400).collect::<String>()
+            )
+        } else {
+            format!(
+                "Échec vérification automatique (build/check) — la tâche est marquée en échec.\n{}",
+                err.chars().take(1_800).collect::<String>()
+            )
+        })
+    } else {
+        None
+    };
+
+    if let Some(ref pm) = studio_verify_display_message {
         let _ = bus.send(
             EventEnvelope::new(
                 EventType::ProgressUpdate,
                 Some(serde_json::json!({
                     "task_id": task_id.to_string(),
                     "progress_pct": 100,
-                    "message": format!(
-                        "Échec vérification automatique (build/check) — la tâche est marquée en échec.\n{}",
-                        err.chars().take(1800).collect::<String>()
-                    )
+                    "message": pm.chars().take(6_000).collect::<String>()
                 })),
             )
             .with_correlation(task_id),
@@ -9807,17 +9909,18 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     });
     if studio_verify_error.is_some() {
         if let Some(obj) = final_payload.as_object_mut() {
-            obj.insert(
-                "reason".to_string(),
-                serde_json::Value::String(
+            let reason_text: String = studio_verify_display_message
+                .as_ref()
+                .map(|m| m.chars().take(2_000).collect::<String>())
+                .unwrap_or_else(|| {
                     studio_verify_error
                         .as_deref()
                         .unwrap_or("")
                         .chars()
-                        .take(2000)
-                        .collect(),
-                ),
-            );
+                        .take(2_000)
+                        .collect::<String>()
+                });
+            obj.insert("reason".to_string(), serde_json::Value::String(reason_text));
         }
     }
     let _ = bus.send(
@@ -9914,7 +10017,9 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             } else {
                 "completed"
             };
-            let summary_preview: String = if let Some(ref e) = studio_verify_error {
+            let summary_preview: String = if let Some(ref m) = studio_verify_display_message {
+                m.chars().take(300).collect()
+            } else if let Some(ref e) = studio_verify_error {
                 e.chars().take(300).collect()
             } else {
                 reply_text.chars().take(300).collect()
