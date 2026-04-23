@@ -17,6 +17,15 @@ pub fn studio_projects_base(data_dir: &Path) -> PathBuf {
     data_dir.join("studio-projects")
 }
 
+/// If `root` is under `<data_dir>/studio-projects/<uuid>`, returns that UUID segment (first path component under the base).
+pub fn studio_project_id_from_disk_root(data_dir: &Path, root: &Path) -> Option<String> {
+    let base = studio_projects_base(data_dir);
+    let rel = root.strip_prefix(&base).ok()?;
+    let first = rel.components().next()?.as_os_str().to_str()?;
+    Uuid::parse_str(first).ok()?;
+    Some(first.to_string())
+}
+
 /// Resolve and validate `<data_dir>/studio-projects/<uuid>/` (must be a canonical UUID).
 pub fn resolve_studio_project_dir(data_dir: &Path, project_id: &str) -> Result<PathBuf, String> {
     let trimmed = project_id.trim();

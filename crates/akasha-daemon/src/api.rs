@@ -2943,7 +2943,10 @@ const STUDIO_AGENT_QUALITY_REMINDER: &str = concat!(
     "  Avant d'écrire : `read_file workspace:/CODE_STUDIO_PLAN.md`. Ne **pas** remplacer tout le fichier pour une modification ciblée : mettre à jour **par section** (search_replace ciblé ou une seule section réécrite), en conservant les titres `##` et le reste inchangé.\n",
     "  Ne **jamais** dupliquer une section `## …` déjà présente (pas de second gabarit collé en bas du fichier) : le daemon rejette les écritures qui répètent les titres de section.\n",
     "  Suivi des lots : ajouter une **ligne datée courte** dans `## Informations complémentaires` ou `## Demandes d'évolutions utilisateur par phase` plutôt que de réécrire l'ensemble du plan.\n",
-    "  Si le fichier est absent (import), le créer avec ce gabarit en synthétisant le dépôt. Remplacement complet réservé à une demande **explicite** de réinitialisation du plan (bouton ou consigne utilisateur).\n\n",
+    "  Si le fichier est absent (import), le créer avec ce gabarit en synthétisant le dépôt. Remplacement complet réservé à une demande **explicite** de réinitialisation du plan (bouton ou consigne utilisateur).\n",
+    "- **Corrections sur le disque (obligatoire quand les outils le permettent)** : pour corriger du code (imports, erreurs TS/build, etc.), utiliser des lignes `TOOL:` — `search_replace` pour des changements localisés, `edit_file` pour un intervalle de lignes, `write_file` seulement si un remplacement de fichier entier est justifié, `apply_patch` si adapté. ",
+    "Ne pas faire du **chat** le canal principal de livraison : éviter « voici le fichier corrigé à coller dans workspace:/… », les longs blocs de remplacement manuel ou les résumés à la place d’écritures réelles tant que la politique d’outils autorise les écritures.\n",
+    "- **Si une écriture est impossible** (outil refusé, erreur explicite de `write_file` / `search_replace` / etc., chemin hors périmètre) : indiquer **pourquoi** tu ne peux pas appliquer la correction toi-même (citer le message d’erreur ou la contrainte), puis seulement proposer un secours (diff, extrait à copier).\n\n",
 );
 
 /// Contexte système court pour les tâches dont le disque outil est sous `studio-projects/` (Code Studio).
@@ -2956,7 +2959,9 @@ const CODE_STUDIO_APP_CONTEXT: &str = concat!(
     "Concentre-toi sur le code et la documentation de ce dépôt — pas sur l’interface générale d’Akasha (TUI, onglets, skills hors projet, caméra, météo). ",
     "Si une capacité externe est indispensable, indique brièvement ce qu’il faudrait côté utilisateur (clé, politique d’outils).\n",
     "Réponds dans la même langue que le dernier message utilisateur. ",
-    "Avant d’éditer : lire les fichiers concernés ; ne pas inventer de dépendances — vérifier le manifeste (package.json, Cargo.toml, etc.).\n\n",
+    "Avant d’éditer : lire les fichiers concernés ; ne pas inventer de dépendances — vérifier le manifeste (package.json, Cargo.toml, etc.).\n",
+    "Corrections : appliquer les changements sur le dépôt avec les outils (`search_replace`, `edit_file`, `write_file`, `apply_patch`, chemins `workspace:/…`) — ne pas se contenter de décrire ou coller un fichier entier pour que l’utilisateur le fasse à ta place. ",
+    "Si un outil d’écriture échoue ou est interdit, expliquer clairement la raison avant toute solution de secours.\n\n",
 );
 
 /// Application context injected into the prompt: the agent knows it runs inside Akasha and can talk about it.
@@ -6725,6 +6730,36 @@ Use a short structure: context (1–2 sentences), root cause, files/lines from t
     }
 }
 
+/// Path argument for `read_file` (before optional line/offset window), normalized like `execute_tool_call`.
+fn parse_read_file_tool_path(args: &[String]) -> Option<String> {
+    let line_window = if args.len() >= 3 {
+        let maybe_limit = args.last().and_then(|s| s.parse::<usize>().ok());
+        let maybe_offset = args
+            .get(args.len().saturating_sub(2))
+            .and_then(|s| s.parse::<usize>().ok());
+        match (maybe_offset, maybe_limit) {
+            (Some(off), Some(lim)) if lim > 0 => Some((off, lim)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let path_parts_len = if line_window.is_some() && args.len() >= 3 {
+        args.len() - 2
+    } else {
+        args.len()
+    };
+    if path_parts_len == 0 {
+        return None;
+    }
+    let path_input = args[..path_parts_len].join(" ");
+    let path_str = normalize_tool_path_hint(path_input.trim());
+    if path_str.is_empty() || path_str.contains("..") {
+        return None;
+    }
+    Some(path_str)
+}
+
 /// Après un log d’échec de compilation, enchaîne quelques tours LLM + exécution d’outils pour corriger les sources.
 /// Retourne `true` si au moins un outil d’écriture a réussi au moins une fois.
 async fn studio_verify_run_llm_autofix_rounds(
@@ -6741,6 +6776,7 @@ async fn studio_verify_run_llm_autofix_rounds(
     device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
     task_id: Uuid,
     store_path: &Path,
+    data_dir: &Path,
     tool_disk_root: &Path,
     verify_log: &str,
     max_llm_rounds: u32,
@@ -6766,6 +6802,10 @@ If that is not enough: read each file under the old path, then write_file to `wo
 If the build says a module has no exported member: read_file that module on disk at the path the error shows; either export the symbol or change imports to a module that actually exists (use search_files to locate the real file). \
 Do not paste markdown fences or assistant prose into source files — only valid source code. \
 Fix every compiler error; prefer minimal search_replace / edit_file over rewriting whole files. \
+If a [Code index — …] block appears in the user message, use it as orientation only — you must still apply edits with search_replace / edit_file / write_file / apply_patch. \
+When FILES_WITH_ERRORS or KNOWN_TS_ERRORS already pin down locations, prefer a concrete fix (search_replace / edit_file) over broad exploration; avoid read_file loops on the same path without editing. \
+Large projects may require many reads across different files — that is fine. \
+Do not deliver the fix only as prose or a full-file markdown block for the user to paste: emit write tools (`search_replace`, `edit_file`, `write_file`, `apply_patch`) unless a tool error or policy block forces you to explain why you cannot apply it yourself, then give a manual fallback. \
 If tool results repeat without progress, change strategy (see any [STALL / ANTI-LOOP] block in the user message).";
     let root_disp = tool_disk_root.display().to_string();
     let log_snip: String = verify_log.chars().take(VERIFY_SNIP).collect();
@@ -6794,15 +6834,56 @@ KNOWN_TS_ERRORS:\n{}\n",
             error_lines.as_str()
         }
     );
-    let first_user = format!(
+    let mut first_user = format!(
         "{}\nProject root (all relative paths are under this directory):\n{}\n\nBuild output:\n{}\n\nFix the project.",
         sticky_context, root_disp, log_snip
     );
+    if studio_code_rag_enabled() {
+        if let Some(pid) = crate::studio::studio_project_id_from_disk_root(data_dir, tool_disk_root) {
+            let query = format!(
+                "{}\n{}\n{}",
+                error_lines,
+                focus_files.join(" "),
+                log_snip.chars().take(3_000).collect::<String>()
+            );
+            let data_dir_owned = data_dir.to_path_buf();
+            let root_owned = tool_disk_root.to_path_buf();
+            let code_rag_block = tokio::task::spawn_blocking(move || {
+                let store = crate::code_rag::CodeRagStore::new(&data_dir_owned);
+                let chunks = store.retrieve(
+                    &pid,
+                    &root_owned,
+                    &query,
+                    crate::code_rag::RetrieveOptions {
+                        top_k: 8,
+                        max_chars: 6_000,
+                    },
+                );
+                let chunks = chunks.ok()?;
+                if chunks.is_empty() {
+                    return None;
+                }
+                crate::code_rag::format_retrieved_chunks(&chunks, 6_000)
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Some(block) = code_rag_block {
+                first_user = format!(
+                    "[Code index — extraits locaux (RAG Code Studio) pour guider la correction. Ce n’est pas une lecture complète des fichiers : vous devez quand même appliquer search_replace / edit_file / write_file / apply_patch sur les chemins en erreur.]\n\n{block}\n\n{first_user}"
+                );
+            }
+        }
+    }
     let exec = tools_executor.read().await.clone();
     let mut any_write_success = false;
     let mut follow_up = String::new();
     let mut short_or_no_tool_retries = 0u32;
     let mut writes_ok_count = 0u32;
+    /// Nudge only when the same file is read repeatedly without an intervening write (exploration stays allowed across many files).
+    const SAME_FILE_READ_THRESHOLD: u32 = 3;
+    let mut last_read_file_path: Option<String> = None;
+    let mut consecutive_same_file_reads: u32 = 0;
     let mut last_tool = "(none)".to_string();
     let mut last_failed_files = if focus_files.is_empty() {
         "(none parsed)".to_string()
@@ -6894,7 +6975,7 @@ LAST_FAILED_FILES: {}\n",
                 );
                 follow_up = format!(
                     "Model returned no parseable TOOL lines (len={text_len}). \
-Retry now. Return only TOOL: lines; start with read_file/grep_content on files reported by the compiler errors."
+Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read_file on the primary error file then immediately search_replace or edit_file to fix it."
                 );
                 tracing::warn!(
                     task_id = %task_id,
@@ -6976,11 +7057,35 @@ Retry now. Return only TOOL: lines; start with read_file/grep_content on files r
                 if success && write_like {
                     any_write_success = true;
                     writes_ok_count = writes_ok_count.saturating_add(1);
+                    last_read_file_path = None;
+                    consecutive_same_file_reads = 0;
+                } else if success && actual_tool.as_str() == "read_file" {
+                    if let Some(path_key) = parse_read_file_tool_path(args) {
+                        if last_read_file_path.as_ref() == Some(&path_key) {
+                            consecutive_same_file_reads =
+                                consecutive_same_file_reads.saturating_add(1);
+                        } else {
+                            last_read_file_path = Some(path_key);
+                            consecutive_same_file_reads = 1;
+                        }
+                    }
                 }
                 round_results.push(format!("[{}] success={} {}", actual_tool, success, res));
             }
         }
         follow_up = round_results.join("\n");
+        if consecutive_same_file_reads >= SAME_FILE_READ_THRESHOLD {
+            let path_disp = last_read_file_path
+                .as_deref()
+                .unwrap_or("(unknown path)");
+            follow_up.push_str(&format!(
+                "\n\n[LOOP GUARD — REPEATED read_file]\n\
+You successfully read_file `{path_disp}` {SAME_FILE_READ_THRESHOLD} times in a row without an intervening successful write tool.\n\
+The compiler output already signals what is wrong: apply a minimal fix with `TOOL: search_replace … | …` or `TOOL: edit_file …` on this file (or switch to another path from FILES_WITH_ERRORS / KNOWN_TS_ERRORS instead of re-opening the same file).\n"
+            ));
+            last_read_file_path = None;
+            consecutive_same_file_reads = 0;
+        }
         let files_after_round = studio_verify_extract_ts_error_paths(&follow_up, 10);
         if !files_after_round.is_empty() {
             last_failed_files = files_after_round.join(", ");
@@ -7544,6 +7649,19 @@ pub(crate) async fn run_message_via_llm(
     if let Some(role_prompt) = agent_role_system_prompt(role_agent_for_system_prompt) {
         system_prompt.push_str("[Role]\n");
         system_prompt.push_str(role_prompt);
+        let studio_impl_writes_expected = code_studio_disk_task
+            && matches!(
+                role_agent_for_system_prompt,
+                "studio_scaffold" | "studio_frontend" | "studio_backend" | "studio_fullstack"
+            );
+        if studio_impl_writes_expected {
+            system_prompt.push_str(
+                "\n\n[Code Studio — application des corrections]\n\
+                - Tu dois appliquer les modifications toi-même via des lignes `TOOL:` (`search_replace`, `edit_file`, `write_file`, `apply_patch`) sur `workspace:/…` lorsque ces outils sont autorisés.\n\
+                - Ne remplace pas une exécution d’outil par un long « contenu corrigé à mettre dans le fichier » dans le chat : le livrable attendu est l’écriture sur disque.\n\
+                - Si un outil d’écriture échoue ou est refusé par la politique : explique **pourquoi** tu ne peux pas l’appliquer toi-même (message d’erreur ou règle), puis seulement propose une alternative manuelle.\n",
+            );
+        }
         system_prompt.push_str("\n\n");
     }
     if code_studio_disk_task {
@@ -7559,7 +7677,8 @@ pub(crate) async fn run_message_via_llm(
         system_prompt.push_str(
             "\n\n[Response]\n\
             - Langue : répondre uniquement dans la même langue que le message utilisateur.\n\
-            - Fichiers : respecter les règles Code Studio du préfixe message (pas de prose dans le source ; pas de barres markdown ``` autour du contenu write_file).\n\n",
+            - Fichiers : respecter les règles Code Studio du préfixe message (pas de prose dans le source ; pas de barres markdown ``` autour du contenu write_file).\n\
+            - Corrections : quand tu corriges du code, le résultat doit passer par les outils sur le dépôt ; ne pas renvoyer l’utilisateur vers un copier-coller manuel comme action principale sans avoir tenté (et documenté) les outils.\n\n",
         );
     } else {
         system_prompt.push_str(
@@ -9875,6 +9994,9 @@ pub(crate) async fn run_message_via_llm(
                             .unwrap_or(6)
                             .max(1)
                             .min(16);
+                        let data_dir = store_path
+                            .parent()
+                            .unwrap_or_else(|| store_path.as_path());
                         let did_write = studio_verify_run_llm_autofix_rounds(
                             &bus,
                             &llm_router,
@@ -9889,6 +10011,7 @@ pub(crate) async fn run_message_via_llm(
                             device_bridge.as_ref(),
                             task_id,
                             store_path.as_path(),
+                            data_dir,
                             tool_disk_workspace_root.as_path(),
                             &e,
                             llm_rounds,
