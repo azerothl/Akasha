@@ -5144,9 +5144,9 @@ async fn execute_tool_call(
                                 None,
                             );
                         }
-                        if let Some(content) = per_task.get(&from_key).cloned() {
-                            drop(guard);
-                            // Rename on disk first; only update the in-memory store on success.
+                        if per_task.get(&from_key).is_some() {
+                            // Rename on disk first while holding the write lock to prevent
+                            // TOCTOU races between the disk operation and store update.
                             if let Some(root) = workspace_root {
                                 let from_disk = root.join(&from_key);
                                 let to_disk = root.join(&to_key);
@@ -5160,19 +5160,13 @@ async fn execute_tool_call(
                                     Ok(_) => {}
                                 }
                             }
-                            let mut guard = ws.write().await;
+                            // Disk rename succeeded (or no root); update the in-memory store.
                             let per_task = guard.entry(lineage_id).or_default();
-                            if per_task.contains_key(&to_key) {
-                                return (
-                                    false,
-                                    format!("[rename_path] destination workspace key already exists: {}", to_key),
-                                    None,
-                                );
-                            }
-                            if per_task.remove(&from_key).is_some() {
+                            if let Some(content) = per_task.remove(&from_key) {
                                 per_task.insert(to_key.clone(), content);
                                 (true, format!("[rename_path] workspace key renamed: {} -> {}", from_key, to_key), None)
                             } else {
+                                // Should not happen — we checked above while holding the lock.
                                 (false, format!("[rename_path] workspace key not found: {}", from_key), None)
                             }
                         } else {
