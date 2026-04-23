@@ -1286,20 +1286,49 @@ async fn is_git_repo(project_root: &Path) -> bool {
     }
 }
 
-/// Current branch and whether the worktree is clean (`git status --porcelain` empty).
-async fn git_branch_and_clean_status(project_root: &Path) -> (Option<String>, Option<bool>) {
+/// Current branch, whether the worktree is clean, and bounded porcelain lines for UI.
+async fn git_branch_clean_worktree_lines(
+    project_root: &Path,
+) -> (Option<String>, Option<bool>, Vec<serde_json::Value>) {
     if !is_git_repo(project_root).await {
-        return (None, None);
+        return (None, None, Vec::new());
     }
     let branch = match git_output(project_root, &["rev-parse", "--abbrev-ref", "HEAD"]).await {
         Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).trim().to_string()),
         _ => None,
     };
+    let mut lines_out: Vec<serde_json::Value> = Vec::new();
     let clean = match git_output(project_root, &["status", "--porcelain"]).await {
-        Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).trim().is_empty()),
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout).to_string();
+            let empty = text.trim().is_empty();
+            for (i, raw) in text.lines().enumerate() {
+                if i >= 200 {
+                    break;
+                }
+                let line = raw.trim_end();
+                if line.is_empty() {
+                    continue;
+                }
+                let status: String = line.chars().take(2).collect();
+                let path = if line.len() > 3 {
+                    line[3..].trim_start()
+                } else {
+                    ""
+                };
+                if path.is_empty() {
+                    continue;
+                }
+                lines_out.push(serde_json::json!({
+                    "status": status,
+                    "path": path.chars().take(4096).collect::<String>()
+                }));
+            }
+            Some(empty)
+        }
         _ => None,
     };
-    (branch, clean)
+    (branch, clean, lines_out)
 }
 
 async fn git_checkout_mainish(project_root: &Path) -> Result<(), String> {
@@ -1454,9 +1483,10 @@ pub async fn handle_studio_route(
                 });
                 let mut body = serde_json::to_value(&meta).unwrap_or_else(|_| serde_json::json!({}));
                 if let Some(obj) = body.as_object_mut() {
-                    let (branch, clean) = git_branch_and_clean_status(&root).await;
+                    let (branch, clean, wt_lines) = git_branch_clean_worktree_lines(&root).await;
                     obj.insert("git_branch".into(), serde_json::json!(branch));
                     obj.insert("git_worktree_clean".into(), serde_json::json!(clean));
+                    obj.insert("git_worktree_lines".into(), serde_json::json!(wt_lines));
                 }
                 return Some(json_response("200 OK", &body.to_string()));
             }

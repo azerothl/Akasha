@@ -1790,6 +1790,16 @@ struct SessionRecallIntent {
     language: SmallTalkLanguage,
 }
 
+/// True when the user likely asks for a session recap using the English word "recap".
+/// Avoid `contains("recap")` — it false-positives on phrases like "task recap" in long
+/// Code Studio DESIGN.md instructions shipped by the UI.
+fn english_session_recap_word(lower: &str) -> bool {
+    let sans_doc_phrase = lower.replace("task recap", " ");
+    sans_doc_phrase
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| w == "recap")
+}
+
 fn detect_session_recall_intent(message: &str) -> Option<SessionRecallIntent> {
     let lower = message
         .trim()
@@ -1808,12 +1818,12 @@ fn detect_session_recall_intent(message: &str) -> Option<SessionRecallIntent> {
         "on a fait",
         "what we did",
         "remind me",
-        "recap",
         "recap what we did",
         "what did we do",
     ]
     .iter()
-    .any(|k| lower.contains(k));
+    .any(|k| lower.contains(k))
+        || english_session_recap_word(&lower);
     if !asks_recall {
         return None;
     }
@@ -13969,6 +13979,81 @@ async fn resume_task(store_path: &Path, id: Uuid, main_agent: &crate::agents::Ma
     }
 }
 
+/// Short follow-up actions for Code Studio UI (`GET /api/tasks/:id` → `suggested_actions`).
+fn code_studio_suggested_actions(
+    status: &TaskStatus,
+    failure_detail: Option<&str>,
+    last_progress: Option<&ProgressEntry>,
+) -> Vec<serde_json::Value> {
+    use TaskStatus::*;
+    let mut v = Vec::new();
+    match status {
+        Completed => {
+            v.push(serde_json::json!({
+                "id": "refresh_files",
+                "label": "Rafraîchir la liste des fichiers",
+                "kind": "ui",
+                "ui_action": "refresh_files"
+            }));
+            v.push(serde_json::json!({
+                "id": "open_editor",
+                "label": "Onglet Éditeur",
+                "kind": "ui",
+                "ui_action": "open_editor"
+            }));
+            v.push(serde_json::json!({
+                "id": "open_preview",
+                "label": "Ouvrir l’aperçu",
+                "kind": "ui",
+                "ui_action": "open_preview"
+            }));
+            v.push(serde_json::json!({
+                "id": "open_design",
+                "label": "Voir DESIGN.md",
+                "kind": "ui",
+                "ui_action": "open_design"
+            }));
+        }
+        Failed | Cancelled => {
+            let hint = failure_detail
+                .map(str::to_string)
+                .or_else(|| last_progress.map(|e| e.message.clone()))
+                .unwrap_or_default();
+            let truncated = if hint.chars().count() > 500 {
+                hint.chars().take(500).collect::<String>() + "…"
+            } else {
+                hint
+            };
+            v.push(serde_json::json!({
+                "id": "analyze_failure",
+                "label": "Demander une analyse de l’échec",
+                "kind": "message",
+                "message": format!(
+                    "La dernière tâche a échoué ou été annulée. Contexte:\n{}\n\nPropose un plan de correction ciblé (fichiers et étapes) sans refaire toute l’implémentation.",
+                    truncated
+                )
+            }));
+        }
+        WaitingUserInput => {
+            v.push(serde_json::json!({
+                "id": "reply_wait",
+                "label": "Rappel : répondre à l’agent",
+                "kind": "message",
+                "message": "Je complète ma réponse pour l’agent (voir la zone « Réponse requise » dans le suivi de tâche)."
+            }));
+        }
+        Running | Queued | Pending | Paused | Interrupted => {
+            v.push(serde_json::json!({
+                "id": "wait_continue",
+                "label": "Poursuivre après la tâche",
+                "kind": "message",
+                "message": "Continue sur la base du plan actuel ; je reviens vérifier le résultat une fois la tâche terminée."
+            }));
+        }
+    }
+    v
+}
+
 async fn get_task_status(
     store_path: &Path,
     progress: &ProgressCache,
@@ -14087,6 +14172,8 @@ async fn get_task_status(
     } else {
         None
     };
+    let last_for_suggest = progress_list.last().cloned();
+    let suggested = code_studio_suggested_actions(&task.status, failure_detail.as_deref(), last_for_suggest.as_ref());
     let mut body = serde_json::json!({
         "task_id": task.id.to_string(),
         "status": task.status.as_str(),
@@ -14096,7 +14183,8 @@ async fn get_task_status(
         "progress": progress_list,
         "tokens_used": tokens_used,
         "cost_usd": cost_usd,
-        "todos": todos_json
+        "todos": todos_json,
+        "suggested_actions": suggested
     });
     if let Some(u) = todos_updated_at {
         body["todos_updated_at"] = serde_json::Value::String(u);
@@ -14863,6 +14951,25 @@ mod tests {
             .expect("intent should be detected");
         assert_eq!(intent.range, SessionRecallRange::Yesterday);
         assert_eq!(intent.language, SmallTalkLanguage::French);
+    }
+
+    #[test]
+    fn detect_session_recall_ignores_task_recap_in_design_spec() {
+        assert!(
+            detect_session_recall_intent(
+                "Nothing else (no task recap, no npm commands, no non-English text)."
+            )
+            .is_none(),
+            "DESIGN.md/Code Studio boilerplate must not trigger session-recall fast path"
+        );
+    }
+
+    #[test]
+    fn detect_session_recall_still_detects_recap_verb() {
+        let intent = detect_session_recall_intent("Can you recap what we shipped today?")
+            .expect("recap request");
+        assert_eq!(intent.range, SessionRecallRange::CurrentDay);
+        assert_eq!(intent.language, SmallTalkLanguage::English);
     }
 
     #[test]
