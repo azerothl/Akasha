@@ -371,7 +371,11 @@ pub async fn move_tree(from: &Path, to: &Path, policy: &ToolsPolicy) -> Result<T
             });
         }
         if let Some(p) = dst.parent() {
-            tokio::fs::create_dir_all(p).await.ok();
+            if !p.as_os_str().is_empty() {
+                tokio::fs::create_dir_all(p)
+                    .await
+                    .with_context(|| format!("create_dir_all {}", p.display()))?;
+            }
         }
         tokio::fs::copy(&src, &dst)
             .await

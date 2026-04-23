@@ -5144,31 +5144,37 @@ async fn execute_tool_call(
                                 None,
                             );
                         }
-                        if let Some(content) = per_task.remove(&from_key) {
-                            per_task.insert(to_key.clone(), content);
+                        if let Some(content) = per_task.get(&from_key).cloned() {
                             drop(guard);
-                            // Also rename on disk if workspace_root is set; log but don't fail on
-                            // disk error since the in-memory store is already updated.
+                            // Rename on disk first; only update the in-memory store on success.
                             if let Some(root) = workspace_root {
                                 let from_disk = root.join(&from_key);
                                 let to_disk = root.join(&to_key);
                                 match executor.rename_path(&from_disk, &to_disk).await {
                                     Ok(res) if !res.success => {
-                                        tracing::warn!(
-                                            "[rename_path] store updated but disk rename failed: {}",
-                                            res.summary
-                                        );
+                                        return (false, format!("[rename_path] {}", res.summary), None);
                                     }
                                     Err(e) => {
-                                        tracing::warn!(
-                                            "[rename_path] store updated but disk rename error: {}",
-                                            e
-                                        );
+                                        return (false, format!("[rename_path] {}", e), None);
                                     }
                                     Ok(_) => {}
                                 }
                             }
-                            (true, format!("[rename_path] workspace key renamed: {} -> {}", from_key, to_key), None)
+                            let mut guard = ws.write().await;
+                            let per_task = guard.entry(lineage_id).or_default();
+                            if per_task.contains_key(&to_key) {
+                                return (
+                                    false,
+                                    format!("[rename_path] destination workspace key already exists: {}", to_key),
+                                    None,
+                                );
+                            }
+                            if per_task.remove(&from_key).is_some() {
+                                per_task.insert(to_key.clone(), content);
+                                (true, format!("[rename_path] workspace key renamed: {} -> {}", from_key, to_key), None)
+                            } else {
+                                (false, format!("[rename_path] workspace key not found: {}", from_key), None)
+                            }
                         } else {
                             drop(guard);
                             // Key absent from store — try disk rename if workspace_root available
@@ -5226,13 +5232,8 @@ async fn execute_tool_call(
                     None,
                 );
             }
-            if is_workspace_virtual_path(&from_s) || is_workspace_virtual_path(&to_s) {
-                return (
-                    false,
-                    "[move_tree] workspace:/ paths are not supported by move_tree; use rename_path for individual workspace files".to_string(),
-                    None,
-                );
-            }
+            let from_s = rewrite_workspace_plan_path_str(&from_s, task_id, store_path);
+            let to_s = rewrite_workspace_plan_path_str(&to_s, task_id, store_path);
             let from_disk = resolve_tool_disk_path(&from_s, workspace_root);
             let to_disk = resolve_tool_disk_path(&to_s, workspace_root);
             match executor.move_tree(&from_disk, &to_disk).await {
