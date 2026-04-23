@@ -6396,6 +6396,28 @@ fn looks_like_placeholder_after_tools(text: &str) -> bool {
     placeholder_phrases.iter().any(|p| lower.contains(p))
 }
 
+/// Returns true when the model asks the user to manually apply file edits
+/// ("replace this file with...") instead of using write tools.
+fn looks_like_manual_file_patch_reply(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    let cues = [
+        "voici le contenu corrigé",
+        "à remplacer dans",
+        "copie ces blocs",
+        "replace directly in",
+        "here is the corrected content",
+        "paste this into",
+        "replace this file with",
+        "manually apply",
+        "je fournis le contenu corrigé",
+        "je fournis les corrections",
+    ];
+    cues.iter().any(|c| lower.contains(c))
+}
+
 fn looks_like_meta_agent_response(text: &str) -> bool {
     let lower = text.trim().to_lowercase();
     if lower.is_empty() {
@@ -8218,6 +8240,9 @@ pub(crate) async fn run_message_via_llm(
         let mut deterministic_preferred_attempted = false;
         // Orchestrated deliverables: re-prompts when the model returns no parseable TOOL lines.
         let mut orch_disk_write_nags = 0u32;
+        // Code Studio implementation agents: prevent "copy/paste this file" fallback
+        // when write tools are available but unused.
+        let mut studio_manual_patch_nags = 0u32;
         let mut last_captured_image_base64: Option<String> = None;
 
         let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
@@ -9851,6 +9876,39 @@ pub(crate) async fn run_message_via_llm(
                 .join("\n")
                 .trim()
                 .to_string();
+            const MAX_STUDIO_MANUAL_PATCH_NAGS: u32 = 3;
+            if code_studio_disk_task
+                && looks_like_manual_file_patch_reply(&response_for_user)
+                && tools_executor_snapshot.is_some()
+            {
+                let (policy_allows_write, write_tool_seen) = tools_executor_snapshot
+                    .as_ref()
+                    .map(|e| {
+                        let allows = e.policy.can_use_tool("write_file")
+                            || e.policy.can_use_tool("edit_file")
+                            || e.policy.can_use_tool("search_replace")
+                            || e.policy.can_use_tool("apply_patch");
+                        let seen = tool_loop_history.iter().any(|(t, _)| {
+                            matches!(
+                                t.as_str(),
+                                "write_file" | "edit_file" | "search_replace" | "apply_patch"
+                            )
+                        });
+                        (allows, seen)
+                    })
+                    .unwrap_or((false, false));
+                if policy_allows_write
+                    && !write_tool_seen
+                    && studio_manual_patch_nags < MAX_STUDIO_MANUAL_PATCH_NAGS
+                {
+                    studio_manual_patch_nags += 1;
+                    current_prompt = format!(
+                        "{}\n\n[Code Studio — mandatory runtime guard]\nYour previous reply asked the user to manually paste file changes. This is not acceptable here while write tools are available.\nEmit TOOL lines now and apply the fix directly on disk using `search_replace`, `edit_file`, `write_file`, or `apply_patch` (workspace:/ paths). Do NOT output manual replacement blocks.\nIf a write tool fails, include the tool error and explain the blocker briefly.",
+                        current_prompt
+                    );
+                    continue;
+                }
+            }
             if strict_tools_first && strict_successful_tool_calls == 0 {
                 let preferred_tools_hint = runtime_tool_routing_enforcer
                     .as_ref()
