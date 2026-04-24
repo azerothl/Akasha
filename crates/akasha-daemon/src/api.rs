@@ -48,6 +48,44 @@ fn normalize_apostrophes(s: &str) -> String {
     s.replace('’', "'").replace('‘', "'")
 }
 
+/// Lorsque `read_file` est appelé sans `<offset> <limit>` et sans `--full`, on ne renvoie que ces lignes.
+const READ_FILE_DEFAULT_MAX_LINES: usize = 500;
+/// Plafond UTF-8 pour `read_file … --full` (évite les fichiers énormes en mémoire côté prompt).
+const READ_FILE_FULL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
+/// Sous-chaîne présente dans la sortie modèle quand la fenêtre par défaut (500 lignes) a été appliquée.
+const READ_FILE_PARTIAL_DEFAULT_MARKER: &str = "(read_file partial: default window";
+
+/// Retire `--full`, détecte une fenêtre de lignes en fin d'arguments (`offset` `limit` entiers > 0).
+fn parse_read_file_args(args: &[String]) -> (Vec<String>, Option<(usize, usize)>, bool) {
+    let mut want_full = false;
+    let filtered: Vec<String> = args
+        .iter()
+        .filter_map(|a| {
+            if a == "--full" {
+                want_full = true;
+                None
+            } else {
+                Some(a.clone())
+            }
+        })
+        .collect();
+    if filtered.len() >= 3 {
+        let maybe_limit = filtered.last().and_then(|s| s.parse::<usize>().ok());
+        let maybe_offset = filtered
+            .get(filtered.len().saturating_sub(2))
+            .and_then(|s| s.parse::<usize>().ok());
+        if let (Some(off), Some(lim)) = (maybe_offset, maybe_limit) {
+            if lim > 0 {
+                let mut path = filtered;
+                path.pop();
+                path.pop();
+                return (path, Some((off, lim)), want_full);
+            }
+        }
+    }
+    (filtered, None, want_full)
+}
+
 fn normalize_tool_path_hint(raw: &str) -> String {
     let mut s = raw
         .trim()
@@ -1153,7 +1191,7 @@ pub fn json_response(status: &str, body: &str) -> String {
 /// Format: une ligne par outil "nom — usage".
 /// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
-    ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Pour les fichiers .pdf, le texte est extrait automatiquement (équivalent à pdf <path>) ; ne vous attendez pas au binaire PDF. Pour les gros fichiers, lire d'abord le fichier puis cibler seulement les sections utiles avec grep_content/search_files avant d'éditer. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
+    ("read_file", "read_file <path> [--full] [<offset_ligne> <nb_lignes>] — lire un fichier texte. Par défaut : **500 premières lignes** seulement (évite de saturer le contexte). `TOOL: read_file <chemin> --full` pour tout le fichier (plafond octets côté daemon si très gros). Fenêtre explicite : `read_file workspace:/fichier.ts 1 200`. PDF : texte extrait automatiquement. Path réel ou workspace:/<path>."),
     ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (création/remplacement complet). Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). TOUJOURS utiliser le chemin EXACT fourni par l'utilisateur. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace plutôt que de tout réécrire. Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel."),
     ("delete_file", "delete_file <path> — supprimer un fichier (pas un répertoire). Chemin workspace:/ ou disque autorisé par tools_policy (mêmes règles que write_file). Code Studio : préférer workspace:/chemin/relatif."),
     ("rename_path", "rename_path <from> <to> — renommer ou déplacer un fichier ou un répertoire (rename atomique si possible ; copie+suppression pour un fichier en cross-device). La destination ne doit pas exister. Deux arguments : le chemin source est le premier token ; tout le reste forme le chemin cible (espaces dans <to> OK). Pas d’espaces dans <from> sans utiliser workspace:/…"),
@@ -3843,28 +3881,8 @@ async fn execute_tool_call(
             }
         }
         "read_file" => {
-            let line_window = if args.len() >= 3 {
-                let maybe_limit = args.last().and_then(|s| s.parse::<usize>().ok());
-                let maybe_offset = args
-                    .get(args.len().saturating_sub(2))
-                    .and_then(|s| s.parse::<usize>().ok());
-                match (maybe_offset, maybe_limit) {
-                    (Some(off), Some(lim)) if lim > 0 => Some((off, lim)),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            let path_parts_len = if line_window.is_some() && args.len() >= 3 {
-                args.len() - 2
-            } else {
-                args.len()
-            };
-            let path_input = if path_parts_len == 0 {
-                String::new()
-            } else {
-                args[..path_parts_len].join(" ")
-            };
+            let (path_tokens, explicit_window, want_full) = parse_read_file_args(args);
+            let path_input = path_tokens.join(" ");
             let path_str = normalize_tool_path_hint(&path_input);
             let slice_for_line_window = |content: &str, path_label: &str, offset: usize, limit: usize| -> String {
                 let lines: Vec<&str> = content.lines().collect();
@@ -3900,8 +3918,57 @@ async fn execute_tool_call(
                     )
                 }
             };
+            let format_read_content = |content: &str, path_label: &str| -> String {
+                if want_full {
+                    let line_count = content.lines().count();
+                    let total_bytes = content.len();
+                    if total_bytes <= READ_FILE_FULL_OUTPUT_MAX_BYTES {
+                        format!(
+                            "[read_file {}] full file ({} lines, {} bytes):\n{}",
+                            path_label, line_count, total_bytes, content
+                        )
+                    } else {
+                        let (frag, total, truncated) = crate::tool_output::truncate_utf8_by_bytes(
+                            content,
+                            READ_FILE_FULL_OUTPUT_MAX_BYTES,
+                        );
+                        let frag_s = frag.into_owned();
+                        let mut body = format!(
+                            "[read_file {}] --full: first {} UTF-8 bytes shown ({} lines in file, {} bytes total):\n{}",
+                            path_label,
+                            frag_s.len(),
+                            line_count,
+                            total,
+                            frag_s
+                        );
+                        if truncated {
+                            body.push('\n');
+                            body.push_str(&crate::tool_output::truncation_footer_bytes(
+                                total,
+                                "narrow with grep_content/search_files or read_file with a line window",
+                            ));
+                        }
+                        body
+                    }
+                } else {
+                    let (off, lim) = explicit_window.unwrap_or((1, READ_FILE_DEFAULT_MAX_LINES));
+                    let total_lines = content.lines().count();
+                    let mut out = slice_for_line_window(content, path_label, off, lim);
+                    if explicit_window.is_none() && total_lines > READ_FILE_DEFAULT_MAX_LINES {
+                        out.push_str(&format!(
+                            "\n{} — {} lines total. Use TOOL: read_file <same_path> --full for entire file, or TOOL: read_file <same_path> <offset> <limit> for a chunk.",
+                            READ_FILE_PARTIAL_DEFAULT_MARKER, total_lines
+                        ));
+                    }
+                    out
+                }
+            };
             if path_str.is_empty() {
-                (false, "[read_file] usage: read_file <path>".to_string(), None)
+                (
+                    false,
+                    "[read_file] usage: read_file <path> [--full] [<offset_line> <limit_lines>]".to_string(),
+                    None,
+                )
             } else if is_workspace_virtual_path(&path_str) {
                 let key = path_str
                     .trim_start_matches("workspace:/")
@@ -3922,22 +3989,9 @@ async fn execute_tool_call(
                             // Empty in-memory entry must not mask the real file on disk (orchestrator
                             // writes `.akasha/plan_*.md` with tokio::fs, not via this map).
                             if !content.is_empty() {
-                                if let Some((off, lim)) = line_window {
-                                    return (true, slice_for_line_window(content, &format!("workspace:{}", key), off, lim), None);
-                                }
-                                let (preview, truncated, total) = crate::tool_output::read_file_preview(content);
-                                let body = format!(
-                                    "[read_file workspace:{}] {} bytes: {}",
-                                    key, total, preview
-                                );
                                 return (
                                     true,
-                                    crate::tool_output::with_truncation_footer(
-                                        body,
-                                        truncated,
-                                        total,
-                                        "use grep_content or search_files to narrow, then read_file again",
-                                    ),
+                                    format_read_content(content, &format!("workspace:{}", key)),
                                     None,
                                 );
                             }
@@ -3961,23 +4015,7 @@ async fn execute_tool_call(
                 match executor.read_file(&disk_path).await {
                     Ok((content, res)) => {
                         let msg = if res.success {
-                            if let Some((off, lim)) = line_window {
-                                slice_for_line_window(&content, &disk_path.display().to_string(), off, lim)
-                            } else {
-                            let (preview, truncated, total) = crate::tool_output::read_file_preview(&content);
-                            let body = format!(
-                                "[read_file {}] {} bytes: {}",
-                                disk_path.display(),
-                                total,
-                                preview
-                            );
-                            crate::tool_output::with_truncation_footer(
-                                body,
-                                truncated,
-                                total,
-                                "use grep_content or search_files to narrow, then read_file again",
-                            )
-                            }
+                            format_read_content(&content, &disk_path.display().to_string())
                         } else {
                             format!("[read_file workspace] failed: {}", res.summary)
                         };
@@ -4014,23 +4052,7 @@ async fn execute_tool_call(
                     match executor.read_file(p).await {
                         Ok((content, res)) => {
                             let msg = if res.success {
-                                if let Some((off, lim)) = line_window {
-                                    slice_for_line_window(&content, &p.display().to_string(), off, lim)
-                                } else {
-                                let (preview, truncated, total) = crate::tool_output::read_file_preview(&content);
-                                let body = format!(
-                                    "[read_file {}] {} bytes: {}",
-                                    p.display(),
-                                    total,
-                                    preview
-                                );
-                                crate::tool_output::with_truncation_footer(
-                                    body,
-                                    truncated,
-                                    total,
-                                    "use grep_content or search_files to narrow, then read_file again",
-                                )
-                                }
+                                format_read_content(&content, &p.display().to_string())
                             } else {
                                 format!("[read_file] failed: {}", res.summary)
                             };
@@ -7335,6 +7357,14 @@ pub(crate) async fn run_message_via_llm(
     let data_dir_for_studio_flags = store_path.parent().unwrap_or_else(|| store_path.as_ref());
     let code_studio_disk_task = tool_disk_workspace_root
         .starts_with(crate::studio::studio_projects_base(data_dir_for_studio_flags));
+    let studio_disk_system_append = {
+        let proj_base = crate::studio::studio_projects_base(data_dir_for_studio_flags);
+        if tool_disk_workspace_root.starts_with(proj_base) {
+            format!("{}{}", STUDIO_DISK_REMINDER, STUDIO_AGENT_QUALITY_REMINDER)
+        } else {
+            String::new()
+        }
+    };
     // NOTE: interpret_message is called below, after guardrail extraction, so it uses clean_message.
     let task_snapshot = store.get(task_id).ok().flatten();
     let assigned_agent = task_snapshot
@@ -7509,6 +7539,7 @@ pub(crate) async fn run_message_via_llm(
         max_tokens
     };
 
+    let mut code_studio_system_tools_block = String::new();
     let tool_instruction = if is_small_talk_fast_lane {
         String::new()
     } else if tools_executor_snapshot.is_some() {
@@ -7575,12 +7606,13 @@ pub(crate) async fn run_message_via_llm(
                 }
                 None => String::new(),
             };
-            format!(
-                "\n\n[Code Studio — outils]\n\
+            code_studio_system_tools_block = format!(
+                "[Code Studio — outils]\n\
                  Une ligne par invocation : `TOOL: nom_outil arg1 …`.\n\
                  Disponibles : {}{}.\n\
                  Règles :\n\
                  - Outils strictement nécessaires à la demande sur ce dépôt ; pas d’exemples hors sujet.\n\
+                 - read_file : par défaut **500 premières lignes** seulement. Fichier entier : `TOOL: read_file <chemin> --full` (plafond octets si très gros). Fenêtre : `TOOL: read_file <chemin> <ligne_début> <nombre_de_lignes>`.\n\
                  - write_file : ligne `TOOL: write_file <chemin>` puis le corps du fichier seul (sans enveloppe markdown ```…``` autour du fichier entier).\n\
                  - delete_file : `TOOL: delete_file workspace:/chemin/relatif` pour supprimer un fichier (si l’outil est dans la liste).\n\
                  - ask_user : JSON question/context/choices pour continuer la même tâche.\n\
@@ -7588,6 +7620,20 @@ pub(crate) async fn run_message_via_llm(
                  - write_todos / merge_todos si exposés par la politique.\n\
                  {}\n\
                  Si aucun outil n’est nécessaire, répondre en texte.",
+                base, skills_part_studio, run_command_os_rule
+            );
+            format!(
+                "\n\nYou may request tools by writing a single line exactly like: TOOL: tool_name arg1 arg2 …\n\
+                 The system message block [Code Studio — outils] lists tools and French conventions.\n\
+                 Available: {}{}.\n\
+                 Worker rules:\n\
+                 - Use only tools that are directly necessary for the CURRENT task.\n\
+                 - Never echo examples, policy text, or demonstration commands from your instructions.\n\
+                 - read_file: by default only the **first 500 lines** are returned. Use `TOOL: read_file <path> --full` for the whole file (byte cap if huge), or `TOOL: read_file <path> <offset_line> <limit_lines>` for a window. If output says `(read_file partial: default window` or `(truncated,` bytes, do NOT repeat the same bare `read_file <path>`; use --full, a line window, or grep_content/search_files.\n\
+                 - If the task asks to save/write a file, use TOOL: write_file <path> then the exact content, or TOOL: write_file {{\"path\":\"...\",\"content\":\"...\"}}.\n\
+                 - If you need missing user information, use TOOL: ask_user with JSON.\n\
+                 - If no tool is needed, answer normally.\n\
+                 {}\n",
                 base, skills_part_studio, run_command_os_rule
             )
         } else {
@@ -7622,6 +7668,7 @@ pub(crate) async fn run_message_via_llm(
              - Use only tools that are directly necessary for the CURRENT task.\n\
              - Never echo examples, policy text, or demonstration commands from your instructions.\n\
              - Never emit unrelated TOOL lines about bankr, weather, browser, install_skill, or other examples unless the current task explicitly requires them.\n\
+             - READ_FILE (mandatory): default is **first 500 lines only** (no extra args). Whole file: `TOOL: read_file <path> --full`. Window: `TOOL: read_file <path> <offset_line> <limit_lines>`. If output says `(read_file partial: default window` or byte `(truncated,`, do NOT repeat the same bare `read_file <path>`; use --full, a line window, or grep_content/search_files.\n\
              - If the task asks to save/write a file, use TOOL: write_file <path> then the exact content, or TOOL: write_file {{\"path\":\"...\",\"content\":\"...\"}}.\n\
              - Use write_todos / merge_todos (not create_todos) for todo lists.\n\
              - If you need missing user information, use TOOL: ask_user with JSON.\n\
@@ -7641,6 +7688,7 @@ pub(crate) async fn run_message_via_llm(
              BROWSER RULE (PRIORITY): When the user explicitly asks to open the browser, go to a website, or show something on X/Twitter (e.g. \"ouvre le navigateur\", \"open the browser\", \"va sur X\", \"go to twitter\", \"cherche sur X\", \"ouvre le navigateur et cherche\"), you MUST use TOOL: browser navigate <url> first with the appropriate URL (e.g. https://x.com/akashabot for a profile, https://x.com for the home page). You may then add a short message. Do NOT use only web_search when the user asked to open the browser or go to X/Twitter.\n\
              SOCIAL / LOGGED-IN SITES RULE: If tools_policy allows the domain, use TOOL: browser navigate <https URL> and TOOL: browser snapshot when the user asks to open or inspect X/Twitter or similar. Do NOT refuse with vague \"security\", \"confidentiality\", or \"structural policy\" claims — the user runs Akasha locally and controls tools_policy. Real limitation: you cannot type the user's password or complete interactive MFA inside the managed browser on their behalf; if a login wall blocks content, say that clearly and offer practical options (user logs in manually in that same browser session if their environment keeps the session, or official API access via TOOL: run_command with VAULT:... when applicable). Do NOT state that vault-backed API access is forbidden when the user has configured secrets — follow VAULT ENV RULE.\n\
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first, then answer from fetched content — not only from snippets. If snippets are insufficient, use TOOL: web_fetch <url> on a relevant result URL, or TOOL: browser navigate <url> then TOOL: browser snapshot so YOU retrieve the page text inside Akasha (managed browser), then summarize for the user. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. Do NOT tell the user to open links in their own browser when web_fetch or browser snapshot is available and allowed — retrieve and answer yourself.\n\
+             READ_FILE (mandatory): default is **first 500 lines only** (no extra args). Whole file: `TOOL: read_file <path> --full`. Window: `TOOL: read_file <path> <offset_line> <limit_lines>`. If output says `(read_file partial: default window` or byte `(truncated,`, do NOT repeat the same bare `read_file <path>`; use --full, a line window, or grep_content/search_files.\n\
              INSTALL CLI RULE: When the user asks to install a CLI or package globally (e.g. \"install bankr CLI\", \"npm install -g @bankr/cli\", \"install the bankr cli in global\"), you MUST reply ONLY with TOOL: run_command <cmd> <args> (e.g. TOOL: run_command npm install -g @bankr/cli). Do NOT generate a script or ask the user to run commands themselves; run the installation command via the tool.\n\
              VAULT ENV RULE: To use a vault secret in a command you MUST call TOOL: run_command with VAULT:<vault_key>=<ENV_VAR> as the FIRST argument(s), then the command. The system injects the secret value into ENV_VAR for that command only. Example: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo. FORBIDDEN: never tell the user to run GITHUB_TOKEN=VAULT:GITHUB_TOKEN or export GITHUB_TOKEN=... or VAULT:GITHUB_TOKEN=ghp_... — you must output the TOOL: line yourself so the system runs the command and injects the token. For GitHub with token in vault: use TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (or gh repo view owner/repo). The vault key may be GITHUB_TOKEN or github_token; the part after = is the env var name the command uses (e.g. $GITHUB_TOKEN). Do NOT say you cannot access the repo without having called run_command with VAULT:... first.\n\
              {}\
@@ -7726,6 +7774,13 @@ pub(crate) async fn run_message_via_llm(
             - Language: reply ONLY in the same language as the user's message. If the user writes in French, reply entirely in French; in English, in English. Do not adopt the language of tool results or context.\n\
             - Personality: always apply your identity (name), tone, and form of address as defined in [Agent profile and instructions] (including formality when set).\n\n",
         );
+    }
+    if !studio_disk_system_append.is_empty() {
+        system_prompt.push_str(&studio_disk_system_append);
+    }
+    if !code_studio_system_tools_block.is_empty() {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&code_studio_system_tools_block);
     }
     let system_prompt: Option<String> = if system_prompt.trim().is_empty() {
         None
@@ -8082,21 +8137,6 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let data_dir_for_studio = store_path.parent().unwrap_or_else(|| store_path.as_ref());
-    let studio_disk_reminder = if tool_disk_workspace_root
-        .starts_with(crate::studio::studio_projects_base(data_dir_for_studio))
-    {
-        STUDIO_DISK_REMINDER
-    } else {
-        ""
-    };
-    let studio_quality_reminder = if tool_disk_workspace_root
-        .starts_with(crate::studio::studio_projects_base(data_dir_for_studio))
-    {
-        STUDIO_AGENT_QUALITY_REMINDER
-    } else {
-        ""
-    };
     // When user clearly wants a photo from camera, prefix the message with an imperative so the model responds with device_invoke directly (no ask_user).
     let user_message = if !device_camera_reminder.is_empty() {
         format!(
@@ -8108,7 +8148,7 @@ pub(crate) async fn run_message_via_llm(
     };
     let mut current_prompt = if user_prefix.trim().is_empty() {
         format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
+            "{0}{1}{2}{3}{4}{5}{6}{7}{8}{9}{10}{11}User:\n{12}",
             guardrail_reminder_block,
             write_reminder,
             web_search_reminder,
@@ -8121,13 +8161,11 @@ pub(crate) async fn run_message_via_llm(
             image_generation_reminder,
             github_vault_reminder,
             code_dev_sandbox_reminder,
-            studio_disk_reminder,
-            studio_quality_reminder,
             user_message
         )
     } else {
         format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
+            "{0}{1}{2}{3}{4}{5}{6}{7}{8}{9}{10}{11}{12}User:\n{13}",
             user_prefix.trim_end(),
             guardrail_reminder_block,
             write_reminder,
@@ -8141,8 +8179,6 @@ pub(crate) async fn run_message_via_llm(
             image_generation_reminder,
             github_vault_reminder,
             code_dev_sandbox_reminder,
-            studio_disk_reminder,
-            studio_quality_reminder,
             user_message
         )
     };
@@ -8223,11 +8259,23 @@ pub(crate) async fn run_message_via_llm(
         }
         let mut round = 0u32;
         let mut social_snapshot_seen = false;
-        let mut tool_loop_history: Vec<(String, String)> = Vec::new();
+        // Loop detection history is tracked per "agent key".
+        // For now, agent key = current task_id (sub-agent tasks each have their own task_id).
+        let mut tool_loop_history_by_agent: std::collections::HashMap<
+            String,
+            Vec<(String, String)>,
+        > = std::collections::HashMap::new();
+        let loop_agent_key = task_id.to_string();
         let mut last_tool_results_blob: Option<String> = None;
         let mut force_synthesis_attempted = false;
         let mut meta_response_retry_count = 0u32;
         let mut small_talk_off_topic_retries = 0u32;
+        // Per-agent (agent key = task_id) set of paths where a full read_file was truncated.
+        // Used to hard-block repeated full-file reads and force chunked/windowed reads.
+        let mut truncated_read_file_paths_by_agent: std::collections::HashMap<
+            String,
+            std::collections::HashSet<String>,
+        > = std::collections::HashMap::new();
         let strict_tools_first = runtime_tool_routing_enforcer
             .as_ref()
             .map(|e| !e.preferred_tools.is_empty())
@@ -8372,10 +8420,13 @@ pub(crate) async fn run_message_via_llm(
                             EventEnvelope::new(EventType::TimelineMilestone, Some(milestone))
                                 .with_correlation(timeline_correlation),
                         );
-                        tool_loop_history.push((
-                            preferred_tool.clone(),
-                            if success { "success" } else { "failure" }.to_string(),
-                        ));
+                        tool_loop_history_by_agent
+                            .entry(loop_agent_key.clone())
+                            .or_default()
+                            .push((
+                                preferred_tool.clone(),
+                                if success { "success" } else { "failure" }.to_string(),
+                            ));
                         if let Some(img) = captured_image {
                             last_captured_image_base64 = Some(img);
                         }
@@ -8463,7 +8514,11 @@ pub(crate) async fn run_message_via_llm(
                 temperature: Some(0.7),
                 preferred_task_type,
                 system_prompt: system_prompt.clone(),
-                image_data_urls: if tool_loop_history.is_empty() {
+                image_data_urls: if tool_loop_history_by_agent
+                    .get(&loop_agent_key)
+                    .map(|v| v.is_empty())
+                    .unwrap_or(true)
+                {
                     image_data_urls.clone()
                 } else {
                     None
@@ -8823,12 +8878,53 @@ pub(crate) async fn run_message_via_llm(
                                 continue;
                             }
                         }
+                        // Hard guardrail: if read_file on this path was already truncated for this
+                        // agent key, block repeated full-file reads and require chunked/windowed read.
+                        if actual_tool.eq_ignore_ascii_case("read_file") {
+                            let (path_tokens, explicit_window, want_full) =
+                                parse_read_file_args(&tool_args);
+                            let allows_escape_truncation_guard =
+                                want_full || explicit_window.is_some();
+                            if !allows_escape_truncation_guard {
+                                let path_input = path_tokens.join(" ");
+                                let path_str = normalize_tool_path_hint(&path_input);
+                                let previously_truncated = truncated_read_file_paths_by_agent
+                                    .get(&loop_agent_key)
+                                    .map(|s| s.contains(&path_str))
+                                    .unwrap_or(false);
+                                if previously_truncated {
+                                    let blocked = format!(
+                                        "[read_file] blocked repeated default read after partial output for path={}. Use TOOL: read_file {} --full, or a line window (e.g. TOOL: read_file {} 1 200 then 201 200), or narrow with grep_content/search_files.",
+                                        path_str,
+                                        if path_str.is_empty() { "<path>" } else { &path_str },
+                                        if path_str.is_empty() { "<path>" } else { &path_str }
+                                    );
+                                    let payload = serde_json::json!({
+                                        "tool": "read_file",
+                                        "args": tool_args,
+                                        "result_preview": blocked,
+                                        "success": false,
+                                        "reason": "read_file_truncated_requires_chunking"
+                                    });
+                                    let _ = bus.send(
+                                        EventEnvelope::new(EventType::ToolInvoked, Some(payload))
+                                            .with_correlation(timeline_correlation),
+                                    );
+                                    tool_results.push(blocked);
+                                    continue;
+                                }
+                            }
+                        }
                         let args_str = tool_args.join(" ");
-                        tool_loop_history.push((actual_tool.clone(), args_str.clone()));
+                        let history = tool_loop_history_by_agent
+                            .entry(loop_agent_key.clone())
+                            .or_default();
+                        history.push((actual_tool.clone(), args_str.clone()));
                         // Phase 4: loop detection — same tool+args repeated 3 times
-                        if tool_loop_history.len() >= 3 {
-                            let last = tool_loop_history.last().unwrap();
-                            if tool_loop_history
+                        // for the same agent key (agent = sub-agent task_id).
+                        if history.len() >= 3 {
+                            let last = history.last().unwrap();
+                            if history
                                 .iter()
                                 .rev()
                                 .take(3)
@@ -9636,6 +9732,24 @@ pub(crate) async fn run_message_via_llm(
                                 strict_successful_tool_calls =
                                     strict_successful_tool_calls.saturating_add(1);
                             }
+                            if actual_tool.eq_ignore_ascii_case("read_file") {
+                                let (path_tokens, explicit_window, want_full) =
+                                    parse_read_file_args(&tool_args);
+                                if !want_full && explicit_window.is_none() {
+                                    let path_input = path_tokens.join(" ");
+                                    let path_str = normalize_tool_path_hint(&path_input);
+                                    let was_truncated = res.contains("[read_file")
+                                        && !path_str.is_empty()
+                                        && (res.contains("(truncated,")
+                                            || res.contains(READ_FILE_PARTIAL_DEFAULT_MARKER));
+                                    if was_truncated {
+                                        truncated_read_file_paths_by_agent
+                                            .entry(loop_agent_key.clone())
+                                            .or_default()
+                                            .insert(path_str);
+                                    }
+                                }
+                            }
                             log_tool_journal_if_write(&actual_tool, tool_args, &res).await;
                         }
                         tool_results.push(res);
@@ -9648,6 +9762,10 @@ pub(crate) async fn run_message_via_llm(
                 }
                 let round_had_ask_user = calls.iter().any(|(name, _)| name == "ask_user");
                 let msg_social = compute_message_intent_flags(&message).social_feed_fetch;
+                let tool_loop_history = tool_loop_history_by_agent
+                    .get(&loop_agent_key)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
                 let had_web_search = tool_loop_history.iter().any(|(t, _)| t == "web_search");
                 let browser_ok = tools_executor_snapshot
                     .as_ref()
@@ -9870,6 +9988,10 @@ pub(crate) async fn run_message_via_llm(
                     .map(|e| e.policy.can_use_tool("write_file"))
                     .unwrap_or(false);
                 if policy_allows_write {
+                    let tool_loop_history = tool_loop_history_by_agent
+                        .get(&loop_agent_key)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]);
                     let disk_write_attempted = tool_loop_history.iter().any(|(t, _)| {
                         matches!(
                             t.as_str(),
@@ -9902,6 +10024,10 @@ pub(crate) async fn run_message_via_llm(
                 let (policy_allows_write, write_tool_seen) = tools_executor_snapshot
                     .as_ref()
                     .map(|e| {
+                        let tool_loop_history = tool_loop_history_by_agent
+                            .get(&loop_agent_key)
+                            .map(|v| v.as_slice())
+                            .unwrap_or(&[]);
                         let allows = e.policy.can_use_tool("write_file")
                             || e.policy.can_use_tool("edit_file")
                             || e.policy.can_use_tool("search_replace")
@@ -9943,6 +10069,10 @@ pub(crate) async fn run_message_via_llm(
                 break;
             }
             // If we already ran tools but the model returned a placeholder ("Je vais… Une seconde."), force one more round to get the actual answer.
+            let tool_loop_history = tool_loop_history_by_agent
+                .get(&loop_agent_key)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             if !tool_loop_history.is_empty()
                 && last_tool_results_blob
                     .as_ref()
