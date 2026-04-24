@@ -2017,6 +2017,102 @@ pub async fn handle_studio_route(
         }
     }
 
+    // POST /api/studio/projects/:id/fs/rename — renomme ou déplace un fichier ou un répertoire (rename atomique).
+    if method == "POST" && path_only.ends_with("/fs/rename") {
+        if let Some(rest) = strip_studio_projects_prefix(path_only) {
+            let id = rest.strip_suffix("/fs/rename").unwrap_or(rest).trim_end_matches('/');
+            let root = match resolve_studio_project_dir(data_dir, id) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Some(json_response(
+                        "400 Bad Request",
+                        &serde_json::json!({ "error": e }).to_string(),
+                    ));
+                }
+            };
+            if !root.is_dir() {
+                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            }
+            let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+                Some(v) => v,
+                None => {
+                    return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#));
+                }
+            };
+            let from_rel = match body_v.get("from").and_then(|x| x.as_str()) {
+                Some(s) if !s.trim().is_empty() => s.trim().replace('\\', "/"),
+                _ => {
+                    return Some(json_response("400 Bad Request", r#"{"error":"from required"}"#));
+                }
+            };
+            let to_rel = match body_v.get("to").and_then(|x| x.as_str()) {
+                Some(s) if !s.trim().is_empty() => s.trim().replace('\\', "/"),
+                _ => {
+                    return Some(json_response("400 Bad Request", r#"{"error":"to required"}"#));
+                }
+            };
+            if from_rel.contains("..") || to_rel.contains("..") {
+                return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+            }
+            if from_rel == to_rel {
+                return Some(json_response("400 Bad Request", r#"{"error":"same_path"}"#));
+            }
+            fn blocked_studio_rel_segment(rel: &str) -> bool {
+                rel.split('/').any(|seg| {
+                    seg == ".git" || seg == "node_modules" || seg == ".akasha-studio.json"
+                })
+            }
+            if blocked_studio_rel_segment(&from_rel) || blocked_studio_rel_segment(&to_rel) {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"path segment not allowed"}"#,
+                ));
+            }
+            let from_full = strip_verbatim(&root.join(&from_rel));
+            let to_full = strip_verbatim(&root.join(&to_rel));
+            if !is_strictly_under_studio_root(&from_full, &root) || !is_strictly_under_studio_root(&to_full, &root) {
+                return Some(json_response("400 Bad Request", r#"{"error":"path outside project"}"#));
+            }
+            if !from_full.exists() {
+                return Some(json_response("404 Not Found", r#"{"error":"not_found"}"#));
+            }
+            if to_full.exists() {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"destination_exists"}"#,
+                ));
+            }
+            let from_s = from_full.to_string_lossy().replace('\\', "/");
+            let to_s = to_full.to_string_lossy().replace('\\', "/");
+            if from_full.is_dir() && to_s.starts_with(&(from_s.clone() + "/")) {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"cannot_move_into_subdirectory"}"#,
+                ));
+            }
+            if let Some(parent) = to_full.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    return Some(json_response(
+                        "500 Internal Server Error",
+                        &serde_json::json!({ "error": e.to_string() }).to_string(),
+                    ));
+                }
+            }
+            match fs::rename(&from_full, &to_full) {
+                Ok(()) => {
+                    let body = serde_json::json!({ "ok": true, "from": from_rel, "to": to_rel }).to_string();
+                    return Some(json_response("200 OK", &body));
+                }
+                Err(e) => {
+                    return Some(json_response(
+                        "500 Internal Server Error",
+                        &serde_json::json!({ "error": e.to_string() }).to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
     // POST /api/studio/projects/:id/git/clone
     if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/git/clone") {
         let rest = path_only

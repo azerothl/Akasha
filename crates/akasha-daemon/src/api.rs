@@ -599,7 +599,13 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
         }
         let g = events.read().await;
         if let Some(q) = g.get(&id) {
-            root_events.extend(q.iter().cloned());
+            root_events.extend(q.iter().map(|e| {
+                let mut e = e.clone();
+                if e.task_id.is_none() {
+                    e.task_id = Some(id.to_string());
+                }
+                e
+            }));
         }
         root_events
     };
@@ -621,7 +627,11 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
         let g = events.read().await;
         for child_id in child_ids {
             if let Some(q) = g.get(&child_id) {
-                list.extend(q.iter().cloned());
+                list.extend(q.iter().map(|e| {
+                    let mut e = e.clone();
+                    e.task_id = Some(child_id.to_string());
+                    e
+                }));
             }
         }
         drop(g);
@@ -677,6 +687,9 @@ pub const MAX_EVENTS_PER_TASK: usize = 64;
 pub struct ProgressEntry {
     pub progress_pct: u8,
     pub message: String,
+    /// Tâche à laquelle cette ligne se rapporte (pour dédoublonnage côté UI).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 pub type ProgressCache = Arc<RwLock<std::collections::HashMap<Uuid, VecDeque<ProgressEntry>>>>;
@@ -14071,6 +14084,7 @@ async fn get_task_status(
                 .map(|(pct, msg)| ProgressEntry {
                     progress_pct: pct,
                     message: msg,
+                    task_id: Some(id.to_string()),
                 })
                 .collect()
         })
@@ -14117,6 +14131,7 @@ async fn get_task_status(
                 progress_list.push(ProgressEntry {
                     progress_pct: display_pct,
                     message: "Sous-tâches en cours.".to_string(),
+                    task_id: Some(id.to_string()),
                 });
             } else if let Some(last) = progress_list.last_mut() {
                 last.progress_pct = display_pct;
@@ -14169,6 +14184,31 @@ async fn get_task_status(
     };
     let last_for_suggest = progress_list.last().cloned();
     let suggested = code_studio_suggested_actions(&task.status, failure_detail.as_deref(), last_for_suggest.as_ref());
+    // Dernière ligne de progression par sous-tâche pour le détail Studio (dédoublonnage côté client par task_id).
+    if let Ok(children) = store.get_children(id) {
+        if !children.is_empty() {
+            let mem_snapshot: std::collections::HashMap<Uuid, VecDeque<ProgressEntry>> = {
+                let g = progress.read().await;
+                g.iter().map(|(k, v)| (*k, v.clone())).collect()
+            };
+            for c in &children {
+                let from_mem = mem_snapshot.get(&c.id).and_then(|q| q.back().cloned());
+                let from_disk = store.get_progress(c.id).ok().and_then(|v| {
+                    v.last().map(|(pct, msg)| ProgressEntry {
+                        progress_pct: *pct,
+                        message: msg.clone(),
+                        task_id: Some(c.id.to_string()),
+                    })
+                });
+                if let Some(mut e) = from_mem.or(from_disk) {
+                    if e.task_id.is_none() {
+                        e.task_id = Some(c.id.to_string());
+                    }
+                    progress_list.push(e);
+                }
+            }
+        }
+    }
     let mut body = serde_json::json!({
         "task_id": task.id.to_string(),
         "status": task.status.as_str(),
