@@ -86,6 +86,33 @@ fn parse_read_file_args(args: &[String]) -> (Vec<String>, Option<(usize, usize)>
     (filtered, None, want_full)
 }
 
+/// Séparateur recommandé entre l’ancien et le nouveau texte (`TOOL:` est découpé sur les espaces, d’où un token `|` seul).
+const SEARCH_REPLACE_DELIM: &str = " | ";
+
+/// `args[0]` = chemin ; le reste = « ancien » puis ` | ` (recommandé) ou `|`, puis « nouveau ».
+/// Retire les `|` initiaux issus du découpage (`path | old | new` → `old | new`).
+fn parse_search_replace_payload(args: &[String]) -> Result<(String, String), &'static str> {
+    let mut rest: String = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
+    rest = rest.trim().to_string();
+    while rest.starts_with('|') {
+        rest = rest.trim_start_matches('|').trim_start().to_string();
+    }
+    if rest.is_empty() {
+        return Err("usage");
+    }
+    let (search, replace) = if let Some((s, r)) = rest.split_once(SEARCH_REPLACE_DELIM) {
+        (s.trim().to_string(), r.trim().to_string())
+    } else if let Some((s, r)) = rest.split_once('|') {
+        (s.trim().to_string(), r.trim().to_string())
+    } else {
+        return Err("usage");
+    };
+    if search.is_empty() {
+        return Err("empty_search");
+    }
+    Ok((search, replace))
+}
+
 fn normalize_tool_path_hint(raw: &str) -> String {
     let mut s = raw
         .trim()
@@ -1212,7 +1239,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("git_rev_parse", "git_rev_parse <repo> — git rev-parse HEAD"),
     ("edit_file", "edit_file <path> <start_line> <end_line> <new_content> — remplacer les lignes start..end par new_content (lignes 1-based)"),
     ("apply_patch", "apply_patch <path> <patch_content> — appliquer un patch unifié (contenu du patch après le path)"),
-    ("search_replace", "search_replace <path> <search> | <replace> — remplacer toutes les occurrences de search par replace dans le fichier (séparateur \" | \")"),
+    ("search_replace", "search_replace <path> <ancien_texte> | <nouveau_texte> — une seule ligne TOOL:. Séparateur : **espace | espace** (` | `). Après le chemin, mettre tout de suite le texte exact à remplacer (pas un `|` seul : le découpage sur espaces le transforme en token et vide la recherche). Si le motif contient ` | `, utiliser edit_file ou apply_patch. Exemple : TOOL: search_replace workspace:/src/App.tsx const x = 1 | const x = 2"),
     ("web_fetch", "web_fetch <url> — récupérer le contenu d'une URL (domaine autorisé dans tools_policy allowed_web_domains)"),
     ("web_search", "web_search <query> [max_results] — rechercher sur le web (Brave API; BRAVE_API_KEY, web_search_enabled)"),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
@@ -3350,6 +3377,218 @@ fn tool_name_is_safe_identifier(tool_name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
 }
 
+/// DeepSeek / variantes : balises style `<｜DSML｜tool_calls>…<｜DSML｜invoke name="…">…</｜DSML｜invoke>`.
+/// Le découpage sur espaces ne s’applique pas au XML ; on convertit en lignes `TOOL:` avant `parse_tool_calls`.
+fn normalize_dsml_tool_calls(response: &str) -> String {
+    let lower = response.to_ascii_lowercase();
+    if !lower.contains("dsml") || !lower.contains("invoke") || !response.contains('<') {
+        return response.to_string();
+    }
+    static DSML_TOOL_CALLS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static DSML_INVOKE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static DSML_PARAM: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let tc = DSML_TOOL_CALLS.get_or_init(|| {
+        regex::Regex::new(
+            r"(?is)<[^>]{0,160}?\bdsml[^>]{0,160}?\btool_calls[^>]*>([\s\S]*?)</[^>]{0,160}?\bdsml[^>]{0,160}?\btool_calls[^>]*>",
+        )
+        .expect("dsml tool_calls regex")
+    });
+    let inv = DSML_INVOKE.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?is)<[^>]{0,160}?\binvoke\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</[^>]{0,160}?\binvoke[^>]*>"#,
+        )
+        .expect("dsml invoke regex")
+    });
+    let par = DSML_PARAM.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?is)<[^>]{0,160}?\bparameter\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>\s*(.*?)\s*</[^>]{0,160}?\bparameter[^>]*>"#,
+        )
+        .expect("dsml parameter regex")
+    });
+
+    let mut s = tc
+        .replace_all(response, |caps: &regex::Captures| {
+            let inner = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let lines = dsml_fragment_invokes_to_tool_lines(inner, inv, par);
+            if lines.is_empty() {
+                return caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default();
+            }
+            lines.join("\n")
+        })
+        .into_owned();
+
+    // Invokes restants (hors bloc tool_calls, ou variante sans wrapper)
+    static DSML_STANDALONE_INVOKE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let sinv = DSML_STANDALONE_INVOKE.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?is)<[^>]{0,160}?\bdsml[^>]{0,160}?\binvoke\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</[^>]{0,160}?\bdsml[^>]{0,160}?\binvoke[^>]*>"#,
+        )
+        .expect("dsml standalone invoke regex")
+    });
+    s = sinv
+        .replace_all(&s, |caps: &regex::Captures| {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+            let body = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            let params = dsml_parse_parameters(body, par);
+            let args = dsml_params_to_tool_args(name, &params);
+            format!("TOOL: {} {}", name, args.join(" "))
+        })
+        .into_owned();
+
+    s
+}
+
+fn dsml_simple_entity_decode(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}
+
+fn dsml_truthy_param(v: &str) -> bool {
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on" | ""
+    )
+}
+
+fn dsml_parse_parameters(body: &str, par: &regex::Regex) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for c in par.captures_iter(body) {
+        let name = c.get(1).map(|m| m.as_str()).unwrap_or("").trim().to_string();
+        let val = dsml_simple_entity_decode(c.get(2).map(|m| m.as_str()).unwrap_or("").trim());
+        if !name.is_empty() {
+            out.push((name, val));
+        }
+    }
+    out
+}
+
+fn dsml_params_to_tool_args(tool: &str, params: &[(String, String)]) -> Vec<String> {
+    let tl = tool.trim().to_ascii_lowercase();
+    match tl.as_str() {
+        "search_files" => {
+            let mut dir = ".".to_string();
+            let mut pat = "*".to_string();
+            let mut no_ignore = false;
+            for (k, v) in params {
+                let kl = k.to_ascii_lowercase();
+                match kl.as_str() {
+                    "dir" => {
+                        if !v.is_empty() {
+                            dir = v.clone();
+                        }
+                    }
+                    "pattern" | "glob" => {
+                        if !v.is_empty() {
+                            pat = v.clone();
+                        }
+                    }
+                    "--no-ignore" | "--no-gitignore" | "no_ignore" => {
+                        if dsml_truthy_param(v) {
+                            no_ignore = true;
+                        }
+                    }
+                    "limit" | "offset" | "max" | "max_results" | "top_k" | "string" => {}
+                    _ => {}
+                }
+            }
+            let mut out = vec![dir, pat];
+            if no_ignore {
+                out.push("--no-ignore".to_string());
+            }
+            out
+        }
+        "grep_content" => {
+            let mut dir = ".".to_string();
+            let mut pattern = String::new();
+            let mut file_glob: Option<String> = None;
+            let mut no_ignore = false;
+            let mut use_regex = false;
+            for (k, v) in params {
+                let kl = k.to_ascii_lowercase();
+                match kl.as_str() {
+                    "dir" => {
+                        if !v.is_empty() {
+                            dir = v.clone();
+                        }
+                    }
+                    "pattern" | "query" => pattern = v.clone(),
+                    "file_glob" | "glob" => {
+                        if !v.is_empty() {
+                            file_glob = Some(v.clone());
+                        }
+                    }
+                    "--no-ignore" | "--no-gitignore" | "no_ignore" => {
+                        if dsml_truthy_param(v) {
+                            no_ignore = true;
+                        }
+                    }
+                    "--regex" | "-r" | "regex" => {
+                        if dsml_truthy_param(v) {
+                            use_regex = true;
+                        }
+                    }
+                    "limit" | "string" | "offset" => {}
+                    _ => {}
+                }
+            }
+            let mut out = vec![dir, pattern];
+            if let Some(g) = file_glob {
+                if !g.is_empty() {
+                    out.push(g);
+                }
+            }
+            if use_regex {
+                out.push("--regex".to_string());
+            }
+            if no_ignore {
+                out.push("--no-ignore".to_string());
+            }
+            out
+        }
+        _ => dsml_generic_params_to_args(params),
+    }
+}
+
+fn dsml_generic_params_to_args(params: &[(String, String)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (k, v) in params {
+        let kt = k.trim();
+        if kt.eq_ignore_ascii_case("string") {
+            continue;
+        }
+        if kt.starts_with("--") {
+            if dsml_truthy_param(v) {
+                out.push(kt.to_string());
+            }
+        } else if !v.is_empty() {
+            out.push(v.clone());
+        }
+    }
+    out
+}
+
+fn dsml_fragment_invokes_to_tool_lines(
+    inner: &str,
+    inv: &regex::Regex,
+    par: &regex::Regex,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for c in inv.captures_iter(inner) {
+        let name = c.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+        if name.is_empty() {
+            continue;
+        }
+        let body = c.get(2).map(|m| m.as_str()).unwrap_or("");
+        let params = dsml_parse_parameters(body, par);
+        let args = dsml_params_to_tool_args(name, &params);
+        lines.push(format!("TOOL: {} {}", name, args.join(" ")));
+    }
+    lines
+}
+
 /// Certains modèles enveloppent les appels outils en XML (`<tool_call>read_file …</tool_call>`)
 /// ou enchaînent avec `<tool_call>…<tool_call>…` sans fermeture. Convertir en lignes `TOOL:` pour `parse_tool_calls`.
 fn normalize_xml_tool_call_wrappers(response: &str) -> String {
@@ -3446,7 +3685,8 @@ fn normalize_response_tool_prefixes(response: &str) -> String {
 
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
 fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
-    let xml_norm = normalize_xml_tool_call_wrappers(response);
+    let dsml_norm = normalize_dsml_tool_calls(response);
+    let xml_norm = normalize_xml_tool_call_wrappers(&dsml_norm);
     let normalized = normalize_response_tool_prefixes(&xml_norm);
     parse_tool_calls_strict(&normalized)
 }
@@ -5276,18 +5516,39 @@ async fn execute_tool_call(
         "search_replace" => {
             let path_str = match args.get(0) {
                 Some(s) => s.as_str(),
-                None => return (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None),
+                None => return (
+                    false,
+                    "[search_replace] usage: search_replace <path> <old_snippet> | <new_snippet> — delimiter must be SPACE PIPE SPACE (` | `); one TOOL line".to_string(),
+                    None,
+                ),
             };
             let is_workspace = path_str.starts_with("workspace:/") || path_str.starts_with("workspace:");
             let path_str_rewritten = rewrite_workspace_plan_path_str(path_str, task_id, store_path);
             let path_str = path_str_rewritten.as_str();
             let disk_path = resolve_tool_disk_path(path_str, workspace_root);
-            let rest = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
-            let Some((search, replace)) = rest
-                .split_once('|')
-                .map(|(s, r)| (s.trim().to_string(), r.trim().to_string()))
-            else {
-                return (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None);
+            let (search, replace) = match parse_search_replace_payload(args) {
+                Ok(pair) => pair,
+                Err("usage") => {
+                    return (
+                        false,
+                        "[search_replace] usage: search_replace <path> <old_snippet> | <new_snippet> — use delimiter ` | ` (space-pipe-space) between the exact text to find and the replacement. Example: TOOL: search_replace workspace:/src/App.tsx const x = 1 | const x = 2".to_string(),
+                        None,
+                    );
+                }
+                Err("empty_search") => {
+                    return (
+                        false,
+                        "[search_replace] search string is empty — the tokenizer often emits `|` as its own token after the path, so the payload must start with the OLD text to find, then ` | `, then the NEW text (not `| …` right after the path). Example: TOOL: search_replace workspace:/f.tsx oldLine | newLine".to_string(),
+                        None,
+                    );
+                }
+                Err(_) => {
+                    return (
+                        false,
+                        "[search_replace] could not parse old/new segments".to_string(),
+                        None,
+                    );
+                }
             };
             match executor.search_replace(&disk_path, &search, &replace).await {
                 Ok(res) => {
@@ -7614,6 +7875,7 @@ pub(crate) async fn run_message_via_llm(
                  - Outils strictement nécessaires à la demande sur ce dépôt ; pas d’exemples hors sujet.\n\
                  - read_file : par défaut **500 premières lignes** seulement. Fichier entier : `TOOL: read_file <chemin> --full` (plafond octets si très gros). Fenêtre : `TOOL: read_file <chemin> <ligne_début> <nombre_de_lignes>`.\n\
                  - write_file : ligne `TOOL: write_file <chemin>` puis le corps du fichier seul (sans enveloppe markdown ```…``` autour du fichier entier).\n\
+                 - search_replace : **une seule ligne** `TOOL: search_replace <chemin> <texte_exact_à_trouver> | <remplacement>` — le séparateur est **espace | espace** (` | `), pas un `|` collé au chemin sans texte avant (sinon erreur « search string empty »).\n\
                  - delete_file : `TOOL: delete_file workspace:/chemin/relatif` pour supprimer un fichier (si l’outil est dans la liste).\n\
                  - ask_user : JSON question/context/choices pour continuer la même tâche.\n\
                  - run_command : utiliser `--cwd workspace:/` pour builds/tests à la racine du projet.\n\
@@ -7631,6 +7893,7 @@ pub(crate) async fn run_message_via_llm(
                  - Never echo examples, policy text, or demonstration commands from your instructions.\n\
                  - read_file: by default only the **first 500 lines** are returned. Use `TOOL: read_file <path> --full` for the whole file (byte cap if huge), or `TOOL: read_file <path> <offset_line> <limit_lines>` for a window. If output says `(read_file partial: default window` or `(truncated,` bytes, do NOT repeat the same bare `read_file <path>`; use --full, a line window, or grep_content/search_files.\n\
                  - If the task asks to save/write a file, use TOOL: write_file <path> then the exact content, or TOOL: write_file {{\"path\":\"...\",\"content\":\"...\"}}.\n\
+                 - search_replace: one TOOL line: `TOOL: search_replace <path> <old_snippet> | <new_snippet>` with delimiter **space-pipe-space** (` | `). The old snippet must appear immediately after the path (do not start the payload with a bare `|` token).\n\
                  - If you need missing user information, use TOOL: ask_user with JSON.\n\
                  - If no tool is needed, answer normally.\n\
                  {}\n",
@@ -7669,6 +7932,7 @@ pub(crate) async fn run_message_via_llm(
              - Never echo examples, policy text, or demonstration commands from your instructions.\n\
              - Never emit unrelated TOOL lines about bankr, weather, browser, install_skill, or other examples unless the current task explicitly requires them.\n\
              - READ_FILE (mandatory): default is **first 500 lines only** (no extra args). Whole file: `TOOL: read_file <path> --full`. Window: `TOOL: read_file <path> <offset_line> <limit_lines>`. If output says `(read_file partial: default window` or byte `(truncated,`, do NOT repeat the same bare `read_file <path>`; use --full, a line window, or grep_content/search_files.\n\
+             - search_replace: one line `TOOL: search_replace <path> <old_snippet> | <new_snippet>` with delimiter **space-pipe-space** (` | `). Put the exact old text right after the path (not a bare `|` token first).\n\
              - If the task asks to save/write a file, use TOOL: write_file <path> then the exact content, or TOOL: write_file {{\"path\":\"...\",\"content\":\"...\"}}.\n\
              - Use write_todos / merge_todos (not create_todos) for todo lists.\n\
              - If you need missing user information, use TOOL: ask_user with JSON.\n\
@@ -7689,6 +7953,7 @@ pub(crate) async fn run_message_via_llm(
              SOCIAL / LOGGED-IN SITES RULE: If tools_policy allows the domain, use TOOL: browser navigate <https URL> and TOOL: browser snapshot when the user asks to open or inspect X/Twitter or similar. Do NOT refuse with vague \"security\", \"confidentiality\", or \"structural policy\" claims — the user runs Akasha locally and controls tools_policy. Real limitation: you cannot type the user's password or complete interactive MFA inside the managed browser on their behalf; if a login wall blocks content, say that clearly and offer practical options (user logs in manually in that same browser session if their environment keeps the session, or official API access via TOOL: run_command with VAULT:... when applicable). Do NOT state that vault-backed API access is forbidden when the user has configured secrets — follow VAULT ENV RULE.\n\
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first, then answer from fetched content — not only from snippets. If snippets are insufficient, use TOOL: web_fetch <url> on a relevant result URL, or TOOL: browser navigate <url> then TOOL: browser snapshot so YOU retrieve the page text inside Akasha (managed browser), then summarize for the user. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. Do NOT tell the user to open links in their own browser when web_fetch or browser snapshot is available and allowed — retrieve and answer yourself.\n\
              READ_FILE (mandatory): default is **first 500 lines only** (no extra args). Whole file: `TOOL: read_file <path> --full`. Window: `TOOL: read_file <path> <offset_line> <limit_lines>`. If output says `(read_file partial: default window` or byte `(truncated,`, do NOT repeat the same bare `read_file <path>`; use --full, a line window, or grep_content/search_files.\n\
+             SEARCH_REPLACE: one line `TOOL: search_replace <path> <old_snippet> | <new_snippet>` — delimiter **space-pipe-space** (` | `). The old snippet must follow the path immediately (tokenizer may emit `|` as its own token; do not start the payload with `|` alone).\n\
              INSTALL CLI RULE: When the user asks to install a CLI or package globally (e.g. \"install bankr CLI\", \"npm install -g @bankr/cli\", \"install the bankr cli in global\"), you MUST reply ONLY with TOOL: run_command <cmd> <args> (e.g. TOOL: run_command npm install -g @bankr/cli). Do NOT generate a script or ask the user to run commands themselves; run the installation command via the tool.\n\
              VAULT ENV RULE: To use a vault secret in a command you MUST call TOOL: run_command with VAULT:<vault_key>=<ENV_VAR> as the FIRST argument(s), then the command. The system injects the secret value into ENV_VAR for that command only. Example: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo. FORBIDDEN: never tell the user to run GITHUB_TOKEN=VAULT:GITHUB_TOKEN or export GITHUB_TOKEN=... or VAULT:GITHUB_TOKEN=ghp_... — you must output the TOOL: line yourself so the system runs the command and injects the token. For GitHub with token in vault: use TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (or gh repo view owner/repo). The vault key may be GITHUB_TOKEN or github_token; the part after = is the env var name the command uses (e.g. $GITHUB_TOKEN). Do NOT say you cannot access the repo without having called run_command with VAULT:... first.\n\
              {}\
@@ -15195,6 +15460,34 @@ mod tests {
         assert_eq!(c.len(), 2, "{:?}", c);
         assert_eq!(c[0].0, "read_file");
         assert_eq!(c[1].0, "read_file");
+    }
+
+    /// DeepSeek-style `<｜DSML｜…>` (U+FF5C fullwidth vertical line).
+    #[test]
+    fn parse_tool_calls_dsml_search_files_fullwidth_delimiters() {
+        let d = "\u{ff5c}";
+        let s = format!(
+            "<{d}DSML{d}tool_calls>\n\
+             <{d}DSML{d}invoke name=\"search_files\">\n\
+             <{d}DSML{d}parameter name=\"dir\" string=\"true\">workspace:/</{d}DSML{d}parameter>\n\
+             <{d}DSML{d}parameter name=\"pattern\" string=\"true\">**/*</{d}DSML{d}parameter>\n\
+             <{d}DSML{d}parameter name=\"--no-ignore\" string=\"false\">true</{d}DSML{d}parameter>\n\
+             <{d}DSML{d}parameter name=\"limit\" string=\"false\">200</{d}DSML{d}parameter>\n\
+             </{d}DSML{d}invoke>\n\
+             </{d}DSML{d}tool_calls>",
+            d = d
+        );
+        let c = parse_tool_calls(&s);
+        assert_eq!(c.len(), 1, "{:?}", c);
+        assert_eq!(c[0].0, "search_files");
+        assert_eq!(c[0].1[0], "workspace:/");
+        assert_eq!(c[0].1[1], "**/*");
+        assert!(c[0].1.contains(&"--no-ignore".to_string()));
+        assert!(
+            !c[0].1.iter().any(|a| a == "200"),
+            "limit must be ignored: {:?}",
+            c[0].1
+        );
     }
 
     #[test]
