@@ -782,6 +782,62 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
     json_response("200 OK", &body.to_string())
 }
 
+/// `GET /api/tasks/:id/studio-diff` — fichiers texte modifiés depuis le snapshot de début de tâche (Code Studio racine).
+async fn get_task_studio_diff(store_path: &Path, task_id: Uuid) -> String {
+    let Some(data_dir) = store_path.parent().map(Path::to_path_buf) else {
+        return json_response("500 Internal Server Error", r#"{"error":"no_data_dir"}"#);
+    };
+    let snap_path = data_dir.join("studio-task-snapshots").join(format!("{task_id}.json"));
+    if !snap_path.is_file() {
+        return json_response(
+            "404 Not Found",
+            &serde_json::json!({
+                "error": "no_snapshot",
+                "task_id": task_id.to_string(),
+                "hint": "snapshots are created for root Code Studio tasks only"
+            })
+            .to_string(),
+        );
+    }
+    let snap_json = match std::fs::read_to_string(&snap_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return json_response(
+                "500 Internal Server Error",
+                &serde_json::json!({ "error": e.to_string() }).to_string(),
+            );
+        }
+    };
+    let snap: crate::studio_task_snapshot::StudioTaskSnapshot = match serde_json::from_str(&snap_json) {
+        Ok(s) => s,
+        Err(e) => {
+            return json_response(
+                "500 Internal Server Error",
+                &serde_json::json!({ "error": e.to_string() }).to_string(),
+            );
+        }
+    };
+    let captured_at = snap.captured_at_rfc3339.clone();
+    match tokio::task::spawn_blocking(move || crate::studio_task_snapshot::compute_studio_task_diff_from_snapshot(snap)).await {
+        Ok(Ok(entries)) => {
+            let body = serde_json::json!({
+                "task_id": task_id.to_string(),
+                "captured_at": captured_at,
+                "files": entries,
+            });
+            json_response("200 OK", &body.to_string())
+        }
+        Ok(Err(e)) => json_response(
+            "500 Internal Server Error",
+            &serde_json::json!({ "error": e.to_string() }).to_string(),
+        ),
+        Err(e) => json_response(
+            "500 Internal Server Error",
+            &serde_json::json!({ "error": e.to_string() }).to_string(),
+        ),
+    }
+}
+
 pub const MAX_EVENTS_PER_TASK: usize = 64;
 
 #[derive(Clone, serde::Serialize)]
@@ -1005,20 +1061,8 @@ pub async fn run_delegation_handler(
             }
         };
         let child_id = Uuid::new_v4();
-        const WORKER_AGENT_TYPES: &[&str] = &[
-            "search",
-            "code",
-            "conversation",
-            "financial",
-            "documentalist",
-            "project_manager",
-            "technical_writer",
-            "research",
-            "security_audit",
-            "creative",
-        ];
-        let agent_type = if WORKER_AGENT_TYPES.contains(&req.agent_type.as_str()) {
-            req.agent_type.clone()
+        let agent_type = if crate::agents::is_specialist_agent(&req.agent_type) {
+            req.agent_type.trim().to_lowercase()
         } else {
             "conversation".to_string()
         };
@@ -1357,7 +1401,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
     ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Pour une réponse ouverte (chemin, texte libre, secret), omettre choices ou laisser un tableau vide. Si choices est fourni, l'UI propose quand même une saisie libre en plus des boutons. Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
-    ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent. agent_type: search | code | conversation | financial | documentalist | project_manager | technical_writer | research | security_audit | creative | analyst | architect | frontend | backend | database | integration | qa | system | image_generation. Un seul niveau de délégation autorisé."),
+    ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (Code Studio : réservé à studio_project_manager). agent_type utiles : studio_frontend | studio_backend | studio_fullstack | studio_scaffold | studio_planner | qa | code | conversation | … (voir liste des spécialistes). Un seul niveau depuis la tâche racine : les sous-agents ne rappellent pas delegate_to_agent."),
     ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
     ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
     ("device_discover", "device_discover [interface] — lister les appareils accessibles (optionnel: local_media, system, network, usb). Filtre par politique allowed_device_interfaces / blocked_device_interfaces."),
@@ -1381,8 +1425,9 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
 ];
 
 /// Tools advertised in the Code Studio prompt: dev/repo tools only (policy still gates execution).
-/// Omits browser, delegation, memory_*, sessions_*, device_*, speech, maps plugins, etc.
-fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>) -> Vec<String> {
+/// Omits browser, memory_*, sessions_*, device_*, speech, maps plugins, etc.
+/// `delegate_to_agent` n’est ajouté que pour `studio_project_manager` et seulement si la politique l’autorise.
+fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, assigned_agent: &str) -> Vec<String> {
     const STUDIO: &[&str] = &[
         "read_file",
         "write_file",
@@ -1437,6 +1482,18 @@ fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>) -> Vec<String>
                 .iter()
                 .map(|s| (*s).to_string()),
         );
+    }
+    let delegate_allowed_by_policy = allowed_tools.map_or(true, |l| {
+        l.iter()
+            .any(|t| t.eq_ignore_ascii_case("delegate_to_agent"))
+    });
+    if assigned_agent.eq_ignore_ascii_case("studio_project_manager") && delegate_allowed_by_policy {
+        if !out
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case("delegate_to_agent"))
+        {
+            out.push("delegate_to_agent".to_string());
+        }
     }
     out
 }
@@ -3212,6 +3269,14 @@ pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
         "qa" => Some("You are the quality control agent. You prevent false 'work done'. Verify coherence, requirement coverage, missing files, hidden TODOs, incomplete sections. Do not rewrite; report defects and gaps by severity. Do not validate if acceptance criteria are incomplete; output a clear report for rework."),
         "system" => Some("You are the system agent. You have full knowledge of the Akasha application: commands (akasha start, init, doctor), interfaces (TUI, Chat, Router, Memory, Doc, Calendar), slash commands, skills, tools, and configuration. You can resolve issues and answer any question about how Akasha works. Be precise and refer to real features only."),
         "image_generation" => Some("You are the image generation agent. Produce images from text prompts using the generate_image tool. Focus on clear, concrete prompts that yield the requested visual. One precise deliverable per request."),
+        "studio_project_manager" => Some("You are the Code Studio project manager (chef de projet). Tu coordonnes chaque demande sur le dépôt ouvert (chemins `workspace:/…`).\n\
+Règles d’orchestration :\n\
+- **Dossier `specs/`** : pour toute demande d’**évolution** (nouvelle fonctionnalité, changement de comportement, refonte ciblée, branche d’évolution active, ou demande explicitement traitée comme évolution), crée un fichier plan dédié `workspace:/specs/<YYYYMMDD>-<slug-court>.md` avant de lancer l’implémentation. Le plan doit contenir : objectif, périmètre, critères d’acceptation, liste d’étapes numérotées, **marquage des étapes parallélisables** (ex. « (parallèle avec 3) »), risques, et une section **Iterations** pour suivre les passes de correction.\n\
+- **Délégation** : tu es le **seul** à appeler `TOOL: delegate_to_agent <agent> <message>` vers des sous-agents (`studio_frontend`, `studio_backend`, `studio_fullstack`, `studio_scaffold`, `studio_planner` pour lecture/plan seul, `qa`, `code`, etc.). Les sous-agents **ne** doivent **pas** rappeler `delegate_to_agent`. Pour plusieurs lots parallèles, enchaîne plusieurs `delegate_to_agent` dans le même tour si la politique d’outils le permet.\n\
+- **Boucle de correction** : après chaque vague de sous-agents, lis les résultats / erreurs de build (`run_command --cwd workspace:/` quand autorisé), mets à jour le plan dans `specs/…` et relance des sous-tâches ciblées. **Maximum 5** vagues de retours sous-agents pour la même demande racine ; si au-delà le besoin n’est pas satisfait, réponds à l’utilisateur avec ce qui a été fait, les blocages, et des suggestions concrètes.\n\
+- **Synthèse utilisateur** : une fois le besoin rempli (ou en échec contrôlé), termine par un résumé clair en langage accessible.\n\
+- **Fichiers** : respecte les règles Code Studio existantes pour `CODE_STUDIO_PLAN.md` et `DESIGN.md` ; n’écrase pas le plan global sans nécessité.\n\
+Langue : aligne-toi sur le dernier message utilisateur."),
         "studio_scaffold" => Some("You are the Code Studio scaffold agent. Create a minimal, runnable project skeleton (README, package.json or Cargo.toml, clear entrypoints). Prefer workspace:/ paths when no absolute path is given; mirror files to the studio disk root. When the user message contains a [Stack technique du projet] block at the top, follow it strictly for languages, frameworks, package manager, and tooling; otherwise align with the stack recorded for the project or keep the skeleton generic. Do not add dead files; keep structure conventional. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (read_file first; section-wise edits only—never replace the whole file for a routine change). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If a previous generation polluted a file with prose, clean it and keep only valid file content. Before finishing: run an appropriate build or typecheck when possible; in your final reply summarize what you created and how to run it in plain language."),
         "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. When a [Stack technique du projet] block is present in the user message, obey it for UI libraries, bundler, CSS approach, and TypeScript/JavaScript choice. Verify dependencies exist in package.json before importing. Use read_file before editing. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Run build/lint/typecheck via run_command --cwd workspace:/ when policy allows, and fix issues you introduced. End with a clear user-facing summary of changes and how to preview or test — not only \"Done\"."),
         "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Before declaring completion: run tests or at least start/build checks when feasible; summarize APIs and behavior for the user in accessible terms."),
@@ -7797,6 +7862,20 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .and_then(|t| t.parent_task_id)
         .is_some();
+    if code_studio_disk_task && !is_subagent {
+        let dd = data_dir_for_studio_flags.to_path_buf();
+        let root = tool_disk_workspace_root.clone();
+        let tid = task_id;
+        match tokio::task::spawn_blocking(move || {
+            crate::studio_task_snapshot::capture_task_snapshot(&dd, tid, &root)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot capture failed"),
+            Err(e) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot join failed"),
+        }
+    }
     // When main_agent prepends a guardrail block on selector timeout, extract the real user message.
     // Format: "[Guardrail: …]\n\n<actual message>"
     const GUARDRAIL_MARKER: &str = "[Guardrail:";
@@ -7991,7 +8070,10 @@ pub(crate) async fn run_message_via_llm(
             }
         }
         let studio_tool_list = if code_studio_disk_task {
-            Some(code_studio_tools_for_prompt(allowed_tools.as_deref()))
+            Some(code_studio_tools_for_prompt(
+                allowed_tools.as_deref(),
+                assigned_agent.as_str(),
+            ))
         } else {
             None
         };
@@ -9677,63 +9759,74 @@ pub(crate) async fn run_message_via_llm(
                                     ),
                                 }
                             } else if actual_tool == "delegate_to_agent" {
-                                match &delegation_tx {
-                                    Some(tx) => {
-                                        let (reply_tx, reply_rx) = oneshot::channel();
-                                        let agent_type = args
-                                            .get(0)
-                                            .cloned()
-                                            .unwrap_or_else(|| "conversation".to_string());
-                                        let message =
-                                            args.get(1..).map(|a| a.join(" ")).unwrap_or_else(
-                                                || args.get(0).cloned().unwrap_or_default(),
-                                            );
-                                        if tx
-                                            .send(DelegationRequest {
-                                                requesting_task_id: task_id,
-                                                agent_type,
-                                                message,
-                                                reply_tx,
-                                            })
-                                            .await
-                                            .is_ok()
-                                        {
-                                            match tokio::time::timeout(
-                                                std::time::Duration::from_secs(310),
-                                                reply_rx,
-                                            )
-                                            .await
-                                            {
-                                                Ok(Ok(Ok(msg))) => (
-                                                    true,
-                                                    format!("[delegate_to_agent] {}", msg),
-                                                    None,
-                                                ),
-                                                Ok(Ok(Err(e))) => (
-                                                    false,
-                                                    format!("[delegate_to_agent] {}", e),
-                                                    None,
-                                                ),
-                                                _ => (
-                                                    false,
-                                                    "[delegate_to_agent] timeout or channel closed"
-                                                        .to_string(),
-                                                    None,
-                                                ),
-                                            }
-                                        } else {
-                                            (
-                                                false,
-                                                "[delegate_to_agent] channel closed".to_string(),
-                                                None,
-                                            )
-                                        }
-                                    }
-                                    None => (
+                                if code_studio_disk_task
+                                    && !assigned_agent.eq_ignore_ascii_case("studio_project_manager")
+                                {
+                                    (
                                         false,
-                                        "[delegate_to_agent] not available".to_string(),
+                                        "[delegate_to_agent] réservé à l’agent `studio_project_manager` (chef de projet Code Studio). Les sous-agents implémentent directement avec read_file / write_file / …"
+                                            .to_string(),
                                         None,
-                                    ),
+                                    )
+                                } else {
+                                    match &delegation_tx {
+                                        Some(tx) => {
+                                            let (reply_tx, reply_rx) = oneshot::channel();
+                                            let agent_type = args
+                                                .get(0)
+                                                .cloned()
+                                                .unwrap_or_else(|| "conversation".to_string());
+                                            let message = args
+                                                .get(1..)
+                                                .map(|a| a.join(" "))
+                                                .unwrap_or_else(|| args.get(0).cloned().unwrap_or_default());
+                                            if tx
+                                                .send(DelegationRequest {
+                                                    requesting_task_id: task_id,
+                                                    agent_type,
+                                                    message,
+                                                    reply_tx,
+                                                })
+                                                .await
+                                                .is_ok()
+                                            {
+                                                match tokio::time::timeout(
+                                                    std::time::Duration::from_secs(310),
+                                                    reply_rx,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(Ok(Ok(msg))) => (
+                                                        true,
+                                                        format!("[delegate_to_agent] {}", msg),
+                                                        None,
+                                                    ),
+                                                    Ok(Ok(Err(e))) => (
+                                                        false,
+                                                        format!("[delegate_to_agent] {}", e),
+                                                        None,
+                                                    ),
+                                                    _ => (
+                                                        false,
+                                                        "[delegate_to_agent] timeout or channel closed"
+                                                            .to_string(),
+                                                        None,
+                                                    ),
+                                                }
+                                            } else {
+                                                (
+                                                    false,
+                                                    "[delegate_to_agent] channel closed".to_string(),
+                                                    None,
+                                                )
+                                            }
+                                        }
+                                        None => (
+                                            false,
+                                            "[delegate_to_agent] not available".to_string(),
+                                            None,
+                                        ),
+                                    }
                                 }
                             } else if actual_tool == "install_skill" {
                                 let url = args.get(0).map(String::as_str).unwrap_or("").trim();
@@ -13207,11 +13300,17 @@ pub async fn handle_api(
         } else {
             None
         };
-        let studio_forced_agent = body_json
+        let studio_ui_agent_preference = body_json
             .as_ref()
             .and_then(|v| v.get("studio_assigned_agent").and_then(|x| x.as_str()))
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty());
+        // Code Studio : toujours router vers le chef de projet ; la valeur UI devient une préférence pour les sous-agents.
+        let studio_forced_agent = if studio_disk_root.is_some() {
+            Some("studio_project_manager".to_string())
+        } else {
+            studio_ui_agent_preference.clone()
+        };
         let mut studio_evolution_branch = body_json
             .as_ref()
             .and_then(|v| v.get("studio_evolution_branch").and_then(|x| x.as_str()))
@@ -13317,6 +13416,14 @@ pub async fn handle_api(
                     message_for_llm
                 );
             }
+            if let Some(pref) = studio_ui_agent_preference.as_ref() {
+                if !pref.is_empty() && pref != "studio_project_manager" {
+                    message_for_llm = format!(
+                        "[Préférence d’implémentation (sélection UI Code Studio) : `{pref}` — en déléguant via `delegate_to_agent`, oriente les sous-tâches vers le spécialiste le plus adapté (ex. studio_frontend, studio_backend, studio_fullstack, studio_scaffold, qa).]\n\n{}",
+                        message_for_llm
+                    );
+                }
+            }
         }
         let mut envelope = crate::gateway::MessageEnvelope::api(
             session_id.clone(),
@@ -13394,6 +13501,9 @@ pub async fn handle_api(
                 }
                 if method == "GET" && parts.get(1) == Some(&"events") {
                     return get_task_events(store_path, events, id).await;
+                }
+                if method == "GET" && parts.get(1) == Some(&"studio-diff") {
+                    return get_task_studio_diff(store_path, id).await;
                 }
                 // Human in the loop: GET pending question/context/choices for the task
                 if method == "GET" && parts.get(1) == Some(&"human-input") {

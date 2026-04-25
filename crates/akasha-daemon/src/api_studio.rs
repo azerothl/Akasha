@@ -1458,6 +1458,14 @@ pub async fn handle_studio_route(
         };
         let _ = save_studio_meta(&dir, &meta);
         let _ = write_initial_code_studio_plan(&dir, &meta.name, meta.tech_stack.as_deref());
+        let specs_dir = dir.join("specs");
+        if let Err(e) = fs::create_dir_all(&specs_dir) {
+            tracing::warn!(
+                error = %e,
+                path = %specs_dir.display(),
+                "failed to create default specs/ directory for new studio project"
+            );
+        }
         if !dir.join(".git").exists() {
             let mut g = Command::new("git");
             g.arg("init").current_dir(&dir).kill_on_drop(true);

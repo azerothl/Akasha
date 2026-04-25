@@ -84,6 +84,9 @@ command_timeout_secs: 60
 #     - edit_file
 #     - apply_patch
 #     - search_replace
+#     # Code Studio (chef de projet) : pour que `studio_project_manager` puisse déléguer via
+#     # `delegate_to_agent`, ajoutez aussi :
+#     # - delegate_to_agent
 # Avec ce profil, « git » doit rester dans allowed_commands pour les outils git_* internes.
 
 # Optionnel : hôtes autorisés pour install_skill (site web, GitLab, etc.). Par défaut : GitHub uniquement.
