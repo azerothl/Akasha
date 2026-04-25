@@ -675,11 +675,21 @@ impl Daemon {
             let delegation_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_delegations));
             tokio::spawn({
                 let conv_tx = conv_tx.clone();
+                let bus = bus.clone();
                 let progress = progress.clone();
                 let task_completion = task_completion.clone();
                 let delegation_sem = delegation_sem.clone();
                 async move {
-                    run_delegation_handler(delegation_rx, conv_tx, db_path_for_delegation, progress, task_completion, delegation_sem).await;
+                    run_delegation_handler(
+                        delegation_rx,
+                        conv_tx,
+                        db_path_for_delegation,
+                        bus,
+                        progress,
+                        task_completion,
+                        delegation_sem,
+                    )
+                    .await;
                 }
             });
             let orchestrator_sender = crate::agents::OrchestratorSender::new(high_tx, normal_tx.clone());

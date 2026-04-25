@@ -1273,6 +1273,30 @@ _Gabarit Code Studio (Akasha) : **conserver ces titres de section** (`## …`). 
     fs::write(&plan_path, body).map_err(|e| e.to_string())
 }
 
+/// Schedule Code Studio code-RAG indexing without blocking the UI / tool call.
+/// `force=false` still rescans the tree but reuses unchanged file chunks; changed/deleted files converge.
+pub fn schedule_studio_code_rag_index(
+    data_dir: &Path,
+    project_id: &str,
+    project_root: &Path,
+    force: bool,
+) {
+    let data_dir = data_dir.to_path_buf();
+    let project_id = project_id.to_string();
+    let project_root = project_root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let store = crate::code_rag::CodeRagStore::new(&data_dir);
+        if let Err(e) = store.ensure_index(&project_id, &project_root, force) {
+            tracing::warn!(
+                project_id = %project_id,
+                project_root = %project_root.display(),
+                error = %e,
+                "Code Studio code-RAG background indexing failed"
+            );
+        }
+    });
+}
+
 async fn git_output(project_root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
     let mut c = Command::new("git");
     c.args(args).current_dir(project_root).kill_on_drop(true);
@@ -1447,6 +1471,7 @@ pub async fn handle_studio_route(
                 tracing::warn!(error = %e, path = %dir.display(), "git init failed for new studio project");
             }
         }
+        schedule_studio_code_rag_index(data_dir, &id, &dir, false);
         let body = serde_json::json!({ "id": id, "path": dir.display().to_string() }).to_string();
         return Some(json_response("201 Created", &body));
     }
@@ -1549,9 +1574,13 @@ pub async fn handle_studio_route(
                 let data_dir_owned = data_dir.to_path_buf();
                 let id_owned = id.to_string();
                 let root_owned = root.clone();
+                let force = body
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+                    .and_then(|v| v.get("force").and_then(|x| x.as_bool()).or(Some(true)))
+                    .unwrap_or(true);
                 let status = tokio::task::spawn_blocking(move || {
                     let store = crate::code_rag::CodeRagStore::new(&data_dir_owned);
-                    store.ensure_index(&id_owned, &root_owned, true)
+                    store.ensure_index(&id_owned, &root_owned, force)
                 })
                 .await
                 .ok()
@@ -1960,6 +1989,7 @@ pub async fn handle_studio_route(
             }
             match fs::write(&full, bytes) {
                 Ok(()) => {
+                    schedule_studio_code_rag_index(data_dir, id, &root, false);
                     let body = serde_json::json!({ "ok": true, "path": rel }).to_string();
                     return Some(json_response("200 OK", &body));
                 }
@@ -2001,6 +2031,7 @@ pub async fn handle_studio_route(
             }
             match fs::remove_file(&full) {
                 Ok(()) => {
+                    schedule_studio_code_rag_index(data_dir, id, &root, false);
                     let body = serde_json::json!({ "ok": true, "path": rel }).to_string();
                     return Some(json_response("200 OK", &body));
                 }
@@ -2100,6 +2131,7 @@ pub async fn handle_studio_route(
             }
             match fs::rename(&from_full, &to_full) {
                 Ok(()) => {
+                    schedule_studio_code_rag_index(data_dir, id, &root, false);
                     let body = serde_json::json!({ "ok": true, "from": from_rel, "to": to_rel }).to_string();
                     return Some(json_response("200 OK", &body));
                 }

@@ -190,6 +190,21 @@ fn studio_code_rag_enabled() -> bool {
     })
 }
 
+fn schedule_code_studio_index_for_root(store_path: &Path, tool_disk_workspace_root: &Path) {
+    let data_dir = store_path.parent().unwrap_or_else(|| store_path);
+    let Some(project_id) =
+        crate::studio::studio_project_id_from_disk_root(data_dir, tool_disk_workspace_root)
+    else {
+        return;
+    };
+    crate::api_studio::schedule_studio_code_rag_index(
+        data_dir,
+        &project_id,
+        tool_disk_workspace_root,
+        false,
+    );
+}
+
 fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let enabled = *ENABLED.get_or_init(|| {
@@ -258,7 +273,28 @@ fn parse_write_file_request(args: &[String]) -> Option<(String, String)> {
     }
 
     let path = normalize_tool_path_hint(args.first()?.as_str());
-    let content = args.get(1..).map(|a| a.join("\n")).unwrap_or_default();
+    let content_args = args.get(1..).unwrap_or(&[]);
+    let content = match content_args {
+        [] => String::new(),
+        [only] => only.clone(),
+        many => {
+            // `TOOL:` headers are split on whitespace. Some models put file content on the
+            // same line as the `write_file` header (`TOOL: write_file path { "x": ... }`)
+            // and may continue it on following lines. Preserve same-line spacing while still
+            // keeping the collected multiline body as multiline text.
+            let (last, prefix) = many.split_last().expect("non-empty by match arm");
+            let header = prefix.join(" ");
+            if last.contains('\n') {
+                if header.trim().is_empty() {
+                    last.clone()
+                } else {
+                    format!("{}\n{}", header, last)
+                }
+            } else {
+                many.join(" ")
+            }
+        }
+    };
     Some((path, content))
 }
 
@@ -877,6 +913,7 @@ pub async fn run_delegation_handler(
     mut delegation_rx: mpsc::Receiver<DelegationRequest>,
     conv_tx: mpsc::Sender<OrchestratorTask>,
     store_path: PathBuf,
+    bus: EventBus,
     progress: ProgressCache,
     task_completion: TaskCompletionRegistry,
     delegation_sem: std::sync::Arc<tokio::sync::Semaphore>,
@@ -1012,6 +1049,31 @@ pub async fn run_delegation_handler(
             let _ = req.reply_tx.send(Err("store insert failed".to_string()));
             continue;
         }
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::SubAgentSpawned,
+                Some(serde_json::json!({
+                    "task_id": child_id.to_string(),
+                    "parent_id": req.requesting_task_id.to_string(),
+                    "agent": agent_type,
+                    "delegation_reason": "delegate_to_agent"
+                })),
+            )
+            .with_correlation(req.requesting_task_id),
+        );
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::SubtaskStarted,
+                Some(serde_json::json!({
+                    "schema_version": 1,
+                    "root_task_id": req.requesting_task_id.to_string(),
+                    "subtask_id": child_id.to_string(),
+                    "agent_type": agent_type,
+                    "source": "delegate_to_agent",
+                })),
+            )
+            .with_correlation(req.requesting_task_id),
+        );
         // Drop the span guard before any await point: EnteredSpan is not Send and must
         // not be held across await boundaries in a Send future.
         drop(span_guard);
@@ -1043,7 +1105,9 @@ pub async fn run_delegation_handler(
         let progress = progress.clone();
         let task_completion = task_completion.clone();
         let child_id_span = child_id;
+        let parent_task_id_span = req.requesting_task_id;
         let agent_type_span = agent_type.clone();
+        let bus_for_waiter = bus.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let span = tracing::info_span!(
@@ -1107,8 +1171,42 @@ pub async fn run_delegation_handler(
                     })
             };
             let _ = reply_tx.send(match task.status {
-                TaskStatus::Completed => Ok(msg),
-                TaskStatus::Failed => Err(msg),
+                TaskStatus::Completed => {
+                    let _ = bus_for_waiter.send(
+                        EventEnvelope::new(
+                            EventType::SubtaskCompleted,
+                            Some(serde_json::json!({
+                                "schema_version": 1,
+                                "root_task_id": parent_task_id_span.to_string(),
+                                "subtask_id": child_id_span.to_string(),
+                                "agent_type": agent_type_span,
+                                "status": "completed",
+                                "content_preview": msg.chars().take(600).collect::<String>(),
+                                "source": "delegate_to_agent",
+                            })),
+                        )
+                        .with_correlation(parent_task_id_span),
+                    );
+                    Ok(msg)
+                }
+                TaskStatus::Failed => {
+                    let _ = bus_for_waiter.send(
+                        EventEnvelope::new(
+                            EventType::SubtaskCompleted,
+                            Some(serde_json::json!({
+                                "schema_version": 1,
+                                "root_task_id": parent_task_id_span.to_string(),
+                                "subtask_id": child_id_span.to_string(),
+                                "agent_type": agent_type_span,
+                                "status": "failed",
+                                "content_preview": msg.chars().take(600).collect::<String>(),
+                                "source": "delegate_to_agent",
+                            })),
+                        )
+                        .with_correlation(parent_task_id_span),
+                    );
+                    Err(msg)
+                }
                 _ => Err("child task did not complete successfully".to_string()),
             });
         });
@@ -1219,7 +1317,7 @@ pub fn json_response(status: &str, body: &str) -> String {
 /// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_file", "read_file <path> [--full] [<offset_ligne> <nb_lignes>] — lire un fichier texte. Par défaut : **500 premières lignes** seulement (évite de saturer le contexte). `TOOL: read_file <chemin> --full` pour tout le fichier (plafond octets côté daemon si très gros). Fenêtre explicite : `read_file workspace:/fichier.ts 1 200`. PDF : texte extrait automatiquement. Path réel ou workspace:/<path>."),
-    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (création/remplacement complet). Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). TOUJOURS utiliser le chemin EXACT fourni par l'utilisateur. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace plutôt que de tout réécrire. Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel."),
+    ("write_file", "write_file <path> puis contenu sur les lignes suivantes — écrire un fichier complet (création/remplacement). Format préféré : première ligne `TOOL: write_file workspace:/fichier`, puis le corps du fichier seul sur les lignes suivantes. Ne pas compresser un fichier entier sur la même ligne que le header. Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace."),
     ("delete_file", "delete_file <path> — supprimer un fichier (pas un répertoire). Chemin workspace:/ ou disque autorisé par tools_policy (mêmes règles que write_file). Code Studio : préférer workspace:/chemin/relatif."),
     ("rename_path", "rename_path <from> <to> — renommer ou déplacer un fichier ou un répertoire (rename atomique si possible ; copie+suppression pour un fichier en cross-device). La destination ne doit pas exister. Deux arguments : le chemin source est le premier token ; tout le reste forme le chemin cible (espaces dans <to> OK). Pas d’espaces dans <from> sans utiliser workspace:/…"),
     ("move_tree", "move_tree <from_dir> <to_dir> — déplacer un répertoire et son contenu (rename atomique si possible, sinon copie récursive + suppression). La destination ne doit pas exister. Même convention d’arguments que rename_path (cible = args après le premier token)."),
@@ -2970,7 +3068,7 @@ async fn do_uninstall_skill(
     }
 }
 
-const WRITE_FILE_REMINDER: &str = "\n[Reminder: the user is asking to save a file. You MUST reply ONLY with the line TOOL: write_file <full_path> then the file content on the following lines. Never say you cannot write to disk.]\n\n";
+const WRITE_FILE_REMINDER: &str = "\n[Reminder: the user is asking to save a file. You MUST reply ONLY with a header line TOOL: write_file <full_path>, then the file content on the following lines. Do not put the full file content on the same TOOL line. Never say you cannot write to disk.]\n\n";
 
 const WEB_SEARCH_REMINDER: &str = "\n[Reminder: the user is asking for external information (weather/météo, news, etc.). You MUST use TOOL: web_search <query> first — do NOT use bankr or portfolio for weather. If search snippets do not contain the precise facts (temperatures, sky state, rain risk, figures, tables), you MUST follow up with TOOL: web_fetch <url> on a relevant result URL, or TOOL: browser navigate <url> then TOOL: browser snapshot for JS-heavy or dynamic pages (e.g. many weather portals). Do not end by telling the user to visit links yourself if web_fetch or browser snapshot is available in your tool list and policy allows those domains — fetch and summarize. Do not suggest visiting a site without having used web_search first.]\n\n";
 
@@ -3032,6 +3130,7 @@ const STUDIO_AGENT_QUALITY_REMINDER: &str = concat!(
     "  Ne **jamais** dupliquer une section `## …` déjà présente (pas de second gabarit collé en bas du fichier) : le daemon rejette les écritures qui répètent les titres de section.\n",
     "  Suivi des lots : ajouter une **ligne datée courte** dans `## Informations complémentaires` ou `## Demandes d'évolutions utilisateur par phase` plutôt que de réécrire l'ensemble du plan.\n",
     "  Si le fichier est absent (import), le créer avec ce gabarit en synthétisant le dépôt. Remplacement complet réservé à une demande **explicite** de réinitialisation du plan (bouton ou consigne utilisateur).\n",
+    "- Premier lot d'un projet Code Studio : après avoir créé ou mis à jour `CODE_STUDIO_PLAN.md`, créer `workspace:/DESIGN.md` **avant** les développements applicatifs si le fichier est absent. `DESIGN.md` doit fixer le contrat design (front matter YAML + sections markdown) à partir de la demande, de la stack et du plan ; ensuite seulement générer/modifier `src/`, configs, tests, etc.\n",
     "- **Corrections sur le disque (obligatoire quand les outils le permettent)** : pour corriger du code (imports, erreurs TS/build, etc.), utiliser des lignes `TOOL:` — `search_replace` pour des changements localisés, `edit_file` pour un intervalle de lignes, `write_file` seulement si un remplacement de fichier entier est justifié, `apply_patch` si adapté. ",
     "Ne pas faire du **chat** le canal principal de livraison : éviter « voici le fichier corrigé à coller dans workspace:/… », les longs blocs de remplacement manuel ou les résumés à la place d’écritures réelles tant que la politique d’outils autorise les écritures.\n",
     "- **Si une écriture est impossible** (outil refusé, erreur explicite de `write_file` / `search_replace` / etc., chemin hors périmètre) : indiquer **pourquoi** tu ne peux pas appliquer la correction toi-même (citer le message d’erreur ou la contrainte), puis seulement proposer un secours (diff, extrait à copier).\n\n",
@@ -3048,6 +3147,7 @@ const CODE_STUDIO_APP_CONTEXT: &str = concat!(
     "Si une capacité externe est indispensable, indique brièvement ce qu’il faudrait côté utilisateur (clé, politique d’outils).\n",
     "Réponds dans la même langue que le dernier message utilisateur. ",
     "Avant d’éditer : lire les fichiers concernés ; ne pas inventer de dépendances — vérifier le manifeste (package.json, Cargo.toml, etc.).\n",
+    "Sur le premier lot d’un projet : stabiliser d’abord `CODE_STUDIO_PLAN.md`, puis créer `workspace:/DESIGN.md` avant de commencer le développement applicatif si ce fichier est absent.\n",
     "Corrections : appliquer les changements sur le dépôt avec les outils (`search_replace`, `edit_file`, `write_file`, `apply_patch`, chemins `workspace:/…`) — ne pas se contenter de décrire ou coller un fichier entier pour que l’utilisateur le fasse à ta place. ",
     "Si un outil d’écriture échoue ou est interdit, expliquer clairement la raison avant toute solution de secours.\n\n",
 );
@@ -3079,7 +3179,7 @@ const APP_CONTEXT: &str = concat!(
     "If web_search returns an error (e.g. not enabled), you can then suggest sites and explain how to enable web search (tools_policy.yaml, web_search_enabled, BRAVE_API_KEY). ",
     "Playwright / managed browser: the daemon may auto-install Chromium on first browser use unless AKASHA_PLAYWRIGHT_AUTO_INSTALL=0. If browser fails for missing Chromium, the runner is missing, or the user must explicitly approve a large download, use TOOL: ask_user (e.g. choices agreeing to install), then TOOL: install_playwright. List install_playwright in tool_profiles when using a profile. tools_policy require_approval can include install_playwright for UI approval before the install runs. For other dependencies (npm, cargo, etc.), use run_command with allowed_commands after ask_user consent. ",
     "You have access to the write_file tool: you MUST use it whenever the user asks to save, store or write a file (e.g. \"save the code to …\", \"write to file\"). ",
-    "Reply ONLY with one line TOOL: write_file <full_path> then the file content on the following lines. ",
+    "Reply ONLY with a header line TOOL: write_file <full_path>, then the file content on the following lines. Do not put the full file content on the same TOOL line. ",
     "Never say \"I cannot write to disk\" or \"copy-paste the code yourself\" — if the path is denied by policy, the tool will return an error and you then explain how to add the prefix in tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...) or Unix. When the user did not specify a path, prefer workspace:/<filename> (e.g. workspace:/script.py) so the file is saved in the task workspace without policy errors. ",
     "Important rule: whenever you need to ask the user for a choice, confirmation or information (options to choose, path, credentials, etc.) and then continue in the same task, you MUST use the ask_user tool (TOOL: ask_user then JSON with question/context/choices). ",
     "Do not ask the question in free text, or the reply will open a new task and you will not be able to continue. ",
@@ -5122,7 +5222,7 @@ async fn execute_tool_call(
         }
         "write_file" => {
             let Some((path_str, content)) = parse_write_file_request(args) else {
-                return (false, "[write_file] usage: write_file <path> <content>".to_string(), None);
+                return (false, "[write_file] usage: write_file <path> then file content on following lines".to_string(), None);
             };
             let content = strip_markdown_fences_from_write_content(&content);
             if is_workspace_virtual_path(&path_str) {
@@ -6719,6 +6819,61 @@ fn looks_like_manual_file_patch_reply(text: &str) -> bool {
     cues.iter().any(|c| lower.contains(c))
 }
 
+/// Returns true when a Code Studio implementation task received a prose-only audit/plan
+/// even though write tools are available. This catches replies like "ce qui manque...",
+/// "recommandations pour avancer", or "je ne peux pas modifier les fichiers" instead of
+/// applying changes with `TOOL:` lines.
+fn looks_like_code_studio_prose_only_implementation_reply(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    let refusal_or_meta = [
+        "je ne peux pas modifier les fichiers",
+        "je ne peux pas modifier",
+        "i cannot modify files",
+        "i can't modify files",
+        "restriction « no tool lines »",
+        "restriction \"no tool lines\"",
+        "no tool lines",
+        "dans ce tour",
+        "in this turn",
+    ]
+    .iter()
+    .any(|p| lower.contains(p));
+    let plan_without_action = [
+        "ce qui manque",
+        "recommandations pour avancer",
+        "il faudrait",
+        "il faut ",
+        "prochaine étape",
+        "next steps",
+        "recommendations",
+        "should implement",
+        "should add",
+        "à mettre en place",
+        "mettre en place",
+    ]
+    .iter()
+    .any(|p| lower.contains(p));
+    let implementation_surface = [
+        "eslint",
+        "prettier",
+        "src/",
+        "package.json",
+        "composant",
+        "component",
+        "hook",
+        "tests",
+        "build",
+        "fichier",
+        "file",
+    ]
+    .iter()
+    .any(|p| lower.contains(p));
+    refusal_or_meta || (plan_without_action && implementation_surface)
+}
+
 fn looks_like_meta_agent_response(text: &str) -> bool {
     let lower = text.trim().to_lowercase();
     if lower.is_empty() {
@@ -7874,7 +8029,7 @@ pub(crate) async fn run_message_via_llm(
                  Règles :\n\
                  - Outils strictement nécessaires à la demande sur ce dépôt ; pas d’exemples hors sujet.\n\
                  - read_file : par défaut **500 premières lignes** seulement. Fichier entier : `TOOL: read_file <chemin> --full` (plafond octets si très gros). Fenêtre : `TOOL: read_file <chemin> <ligne_début> <nombre_de_lignes>`.\n\
-                 - write_file : ligne `TOOL: write_file <chemin>` puis le corps du fichier seul (sans enveloppe markdown ```…``` autour du fichier entier).\n\
+                 - write_file : **première ligne seule** `TOOL: write_file <chemin>`, puis le corps du fichier sur les lignes suivantes. Ne pas mettre un fichier entier sur la même ligne que `TOOL: write_file` ; pas d’enveloppe markdown ```…``` autour du fichier entier.\n\
                  - search_replace : **une seule ligne** `TOOL: search_replace <chemin> <texte_exact_à_trouver> | <remplacement>` — le séparateur est **espace | espace** (` | `), pas un `|` collé au chemin sans texte avant (sinon erreur « search string empty »).\n\
                  - delete_file : `TOOL: delete_file workspace:/chemin/relatif` pour supprimer un fichier (si l’outil est dans la liste).\n\
                  - ask_user : JSON question/context/choices pour continuer la même tâche.\n\
@@ -7892,7 +8047,7 @@ pub(crate) async fn run_message_via_llm(
                  - Use only tools that are directly necessary for the CURRENT task.\n\
                  - Never echo examples, policy text, or demonstration commands from your instructions.\n\
                  - read_file: by default only the **first 500 lines** are returned. Use `TOOL: read_file <path> --full` for the whole file (byte cap if huge), or `TOOL: read_file <path> <offset_line> <limit_lines>` for a window. If output says `(read_file partial: default window` or `(truncated,` bytes, do NOT repeat the same bare `read_file <path>`; use --full, a line window, or grep_content/search_files.\n\
-                 - If the task asks to save/write a file, use TOOL: write_file <path> then the exact content, or TOOL: write_file {{\"path\":\"...\",\"content\":\"...\"}}.\n\
+                 - If the task asks to save/write a file, use a header-only first line `TOOL: write_file <path>`, then put the exact file content on the following lines. Do not compress full file content onto the same `TOOL:` line.\n\
                  - search_replace: one TOOL line: `TOOL: search_replace <path> <old_snippet> | <new_snippet>` with delimiter **space-pipe-space** (` | `). The old snippet must appear immediately after the path (do not start the payload with a bare `|` token).\n\
                  - If you need missing user information, use TOOL: ask_user with JSON.\n\
                  - If no tool is needed, answer normally.\n\
@@ -7933,7 +8088,7 @@ pub(crate) async fn run_message_via_llm(
              - Never emit unrelated TOOL lines about bankr, weather, browser, install_skill, or other examples unless the current task explicitly requires them.\n\
              - READ_FILE (mandatory): default is **first 500 lines only** (no extra args). Whole file: `TOOL: read_file <path> --full`. Window: `TOOL: read_file <path> <offset_line> <limit_lines>`. If output says `(read_file partial: default window` or byte `(truncated,`, do NOT repeat the same bare `read_file <path>`; use --full, a line window, or grep_content/search_files.\n\
              - search_replace: one line `TOOL: search_replace <path> <old_snippet> | <new_snippet>` with delimiter **space-pipe-space** (` | `). Put the exact old text right after the path (not a bare `|` token first).\n\
-             - If the task asks to save/write a file, use TOOL: write_file <path> then the exact content, or TOOL: write_file {{\"path\":\"...\",\"content\":\"...\"}}.\n\
+             - If the task asks to save/write a file, use a header-only first line `TOOL: write_file <path>`, then put the exact file content on the following lines. Do not compress full file content onto the same `TOOL:` line.\n\
              - Use write_todos / merge_todos (not create_todos) for todo lists.\n\
              - If you need missing user information, use TOOL: ask_user with JSON.\n\
              - If no tool is needed, answer normally.\n",
@@ -7947,7 +8102,7 @@ pub(crate) async fn run_message_via_llm(
              Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
              CAMERA RULE (priority over WRITE): When the user asks for a webcam/camera photo (e.g. \"prends une photo\", \"take a photo\", \"photo depuis la webcam\", \"affiche-la dans le chat\", \"display it in the chat\"), you MUST reply ONLY with TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture. Do NOT mention tools_policy.yaml, allowed_write_paths, or file writing. After the tool returns, if the user asked to \"display in the chat\" / \"affiche-la dans le chat\" / \"show it in the chat\", reply with ONLY a short confirmation in the user's language (e.g. in French: \"Photo prise. Elle s'affiche ci-dessous.\"; in English: \"Photo captured. It is shown below.\"). Do NOT offer \"save to file\", \"get a description\", \"take another photo\", or \"What would you like to do next?\" — the image is appended automatically below your message. Use the same language as the user (French if they wrote in French).\n\
-             WRITE RULE (mandatory): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
+             WRITE RULE (mandatory): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first header line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT put full file content on the same TOOL line. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
              WEATHER RULE (PRIORITY): When the user asks for weather, météo, or forecasts (e.g. \"quel temps\", \"météo demain\", \"weather in X\"), you MUST use TOOL: web_search <query> first, then if snippets lack numeric detail use TOOL: web_fetch <url> on a trusted result URL and/or TOOL: browser navigate <url> then TOOL: browser snapshot (many weather sites are JS-heavy). Do NOT use bankr, portfolio, or any other skill for weather — use web_search plus web_fetch/browser as needed.\n\
              BROWSER RULE (PRIORITY): When the user explicitly asks to open the browser, go to a website, or show something on X/Twitter (e.g. \"ouvre le navigateur\", \"open the browser\", \"va sur X\", \"go to twitter\", \"cherche sur X\", \"ouvre le navigateur et cherche\"), you MUST use TOOL: browser navigate <url> first with the appropriate URL (e.g. https://x.com/akashabot for a profile, https://x.com for the home page). You may then add a short message. Do NOT use only web_search when the user asked to open the browser or go to X/Twitter.\n\
              SOCIAL / LOGGED-IN SITES RULE: If tools_policy allows the domain, use TOOL: browser navigate <https URL> and TOOL: browser snapshot when the user asks to open or inspect X/Twitter or similar. Do NOT refuse with vague \"security\", \"confidentiality\", or \"structural policy\" claims — the user runs Akasha locally and controls tools_policy. Real limitation: you cannot type the user's password or complete interactive MFA inside the managed browser on their behalf; if a login wall blocks content, say that clearly and offer practical options (user logs in manually in that same browser session if their environment keeps the session, or official API access via TOOL: run_command with VAULT:... when applicable). Do NOT state that vault-backed API access is forbidden when the user has configured secrets — follow VAULT ENV RULE.\n\
@@ -8574,6 +8729,7 @@ pub(crate) async fn run_message_via_llm(
         // Code Studio implementation agents: prevent "copy/paste this file" fallback
         // when write tools are available but unused.
         let mut studio_manual_patch_nags = 0u32;
+        let mut studio_prose_only_write_nags = 0u32;
         let mut last_captured_image_base64: Option<String> = None;
 
         let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
@@ -9057,6 +9213,33 @@ pub(crate) async fn run_message_via_llm(
                 response_plain
             );
                 continue;
+            }
+
+            const MAX_STUDIO_PROSE_ONLY_WRITE_NAGS: u32 = 4;
+            if code_studio_disk_task
+                && no_parseable_tools_this_round
+                && strict_successful_tool_calls == 0
+                && studio_prose_only_write_nags < MAX_STUDIO_PROSE_ONLY_WRITE_NAGS
+                && looks_like_code_studio_prose_only_implementation_reply(&response_plain)
+            {
+                let policy_allows_write = tools_executor_snapshot
+                    .as_ref()
+                    .map(|e| {
+                        e.policy.can_use_tool("write_file")
+                            || e.policy.can_use_tool("edit_file")
+                            || e.policy.can_use_tool("search_replace")
+                            || e.policy.can_use_tool("apply_patch")
+                    })
+                    .unwrap_or(false);
+                if policy_allows_write {
+                    studio_prose_only_write_nags += 1;
+                    current_prompt = format!(
+                        "User request: {}\n\nYour previous reply:\n{}\n\n[Code Studio — mandatory execution guard]\nThe user asked you to implement changes in the repository. Your previous reply was an audit/plan/refusal instead of executing available write tools. You DO have write tools in this task. Emit only executable TOOL lines now.\n\nRequired format examples:\nTOOL: write_file workspace:/path/to/file.ts\n<complete file content on following lines>\n\nTOOL: search_replace workspace:/path/to/file.ts old snippet | new snippet\n\nDo not say \"I cannot modify files\", \"No TOOL lines\", or ask where to start. Apply the requested changes on disk with `write_file`, `edit_file`, `search_replace`, or `apply_patch`.",
+                        user_message,
+                        response_plain
+                    );
+                    continue;
+                }
             }
 
             if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls)
@@ -9996,6 +10179,23 @@ pub(crate) async fn run_message_via_llm(
                             if !actual_tool.eq_ignore_ascii_case("ask_user") {
                                 strict_successful_tool_calls =
                                     strict_successful_tool_calls.saturating_add(1);
+                            }
+                            if code_studio_disk_task
+                                && matches!(
+                                    actual_tool.as_str(),
+                                    "write_file"
+                                        | "delete_file"
+                                        | "rename_path"
+                                        | "move_tree"
+                                        | "search_replace"
+                                        | "edit_file"
+                                        | "apply_patch"
+                                )
+                            {
+                                schedule_code_studio_index_for_root(
+                                    store_path.as_path(),
+                                    tool_disk_workspace_root.as_path(),
+                                );
                             }
                             if actual_tool.eq_ignore_ascii_case("read_file") {
                                 let (path_tokens, explicit_window, want_full) =
@@ -15545,6 +15745,35 @@ mod tests {
         let (path, content) = parse_write_file_request(&args).expect("json payload should parse");
         assert_eq!(path, "workspace:/project_plan.md");
         assert!(content.contains("# Plan"));
+    }
+
+    #[test]
+    fn parse_write_file_request_preserves_same_line_content_spacing() {
+        let args = vec![
+            "workspace:/tsconfig.json".to_string(),
+            "{".to_string(),
+            "\"compilerOptions\":".to_string(),
+            "{".to_string(),
+            "\"strict\":".to_string(),
+            "true".to_string(),
+            "}".to_string(),
+            "}".to_string(),
+        ];
+        let (path, content) = parse_write_file_request(&args).expect("write_file should parse");
+        assert_eq!(path, "workspace:/tsconfig.json");
+        assert_eq!(content, "{ \"compilerOptions\": { \"strict\": true } }");
+    }
+
+    #[test]
+    fn parse_write_file_request_combines_inline_prefix_and_multiline_body() {
+        let args = vec![
+            "workspace:/index.html".to_string(),
+            "<!doctype".to_string(),
+            "html>".to_string(),
+            "<html>\n<body></body>\n</html>".to_string(),
+        ];
+        let (_, content) = parse_write_file_request(&args).expect("write_file should parse");
+        assert_eq!(content, "<!doctype html>\n<html>\n<body></body>\n</html>");
     }
 
     #[test]
