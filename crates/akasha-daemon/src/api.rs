@@ -5705,14 +5705,16 @@ async fn execute_tool_call(
                             let subtree_prefix = format!("{from_prefix}/");
                             let mut guard = ws.write().await;
                             let per_task = guard.entry(lineage_id).or_default();
+                            // Collect moves first to avoid holding a mutable + immutable borrow.
                             let to_rename: Vec<(String, String, String)> = per_task
                                 .iter()
                                 .filter_map(|(key, val)| {
                                     if *key == from_prefix {
+                                        // Exact directory entry.
                                         Some((key.clone(), to_prefix.clone(), val.clone()))
-                                    } else if key.starts_with(&subtree_prefix) {
-                                        let suffix = &key[from_prefix.len()..]; // includes leading /
-                                        Some((key.clone(), format!("{to_prefix}{suffix}"), val.clone()))
+                                    } else if let Some(suffix) = key.strip_prefix(&subtree_prefix) {
+                                        // Entry inside the subtree: suffix is the part after the "/".
+                                        Some((key.clone(), format!("{to_prefix}/{suffix}"), val.clone()))
                                     } else {
                                         None
                                     }
