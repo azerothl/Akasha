@@ -49,7 +49,11 @@ pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, per
                     message: message.clone(),
                 });
             }
-            let entry = ProgressEntry { progress_pct, message };
+            let entry = ProgressEntry {
+                progress_pct,
+                message,
+                task_id: Some(task_id.to_string()),
+            };
             let mut g = progress.write().await;
             let q = g.entry(task_id).or_insert_with(VecDeque::new);
             q.push_back(entry);
@@ -148,6 +152,7 @@ pub async fn run_progress_subscriber(bus: EventBus, progress: ProgressCache, per
             q.push_back(ProgressEntry {
                 progress_pct: 100,
                 message,
+                task_id: Some(task_id.to_string()),
             });
             while q.len() > MAX_PROGRESS_PER_TASK {
                 q.pop_front();

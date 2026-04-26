@@ -150,7 +150,14 @@ const SPECIALIST_AGENTS: &[&str] = &[
     "studio_backend",
     "studio_fullstack",
     "studio_planner",
+    "studio_project_manager",
 ];
+
+/// True when `name` matches a routed specialist agent (case-insensitive).
+pub fn is_specialist_agent(name: &str) -> bool {
+    let n = name.trim();
+    SPECIALIST_AGENTS.iter().any(|a| a.eq_ignore_ascii_case(n))
+}
 /// Priority for the task queue: high-priority tasks are processed before normal/scheduled (Phase 4.1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TaskPriority {

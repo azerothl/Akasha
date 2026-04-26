@@ -5,13 +5,19 @@
 use akasha_plugin_api::{PluginError, PluginManifest, PluginNetworkConfig};
 use anyhow::{anyhow, Context};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
-use wasmtime::{Caller, Engine, Linker, Module, Store};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use wasmtime::{AsContextMut, Caller, Engine, Linker, Module, Store};
 
 /// ABI: module exports "memory" and "run(input_len: i32) -> i32".
 const RUN_FUNC: &str = "run";
 const MEMORY_NAME: &str = "memory";
-const DEFAULT_MAX_FUEL: u64 = 100_000_000;
+const DEFAULT_TIMEOUT_MS: u64 = 5_000;
+const EPOCH_TICK_MS: u64 = 10;
 
 fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -49,10 +55,11 @@ pub struct NetworkHostState {
     /// `None` if the plugin manifest does not grant `network` permission.
     pub policy: Option<PluginNetworkConfig>,
     pub requests_used: u32,
+    pub epoch_ticks: u64,
 }
 
 impl NetworkHostState {
-    fn from_manifest(manifest: Option<&PluginManifest>) -> Self {
+    fn from_manifest(manifest: Option<&PluginManifest>, epoch_ticks: u64) -> Self {
         let policy = manifest.and_then(|m| {
             if !m.permissions.iter().any(|p| p.eq_ignore_ascii_case("network")) {
                 return None;
@@ -62,6 +69,7 @@ impl NetworkHostState {
         Self {
             policy,
             requests_used: 0,
+            epoch_ticks,
         }
     }
 }
@@ -71,18 +79,21 @@ pub struct WasmPlugin {
     engine: Engine,
     module: Module,
     pub manifest: Option<PluginManifest>,
+    _epoch_ticker: EpochTicker,
 }
 
 impl WasmPlugin {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let mut config = wasmtime::Config::new();
-        config.consume_fuel(true);
+        config.epoch_interruption(true);
         let engine = Engine::new(&config)?;
         let module = Module::from_file(&engine, path)?;
+        let epoch_ticker = EpochTicker::start(&engine);
         Ok(Self {
             engine,
             module,
             manifest: None,
+            _epoch_ticker: epoch_ticker,
         })
     }
 
@@ -109,30 +120,33 @@ impl WasmPlugin {
             )
             .map_err(|e| PluginError::Message(format!("linker http_fetch: {e}")))?;
 
-        let mut store = Store::new(
-            &self.engine,
-            NetworkHostState::from_manifest(self.manifest.as_ref()),
-        );
-        let max_fuel = std::env::var("AKASHA_PLUGIN_MAX_FUEL")
+        let timeout_ms = std::env::var("AKASHA_PLUGIN_TIMEOUT_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|v| *v > 0)
-            .unwrap_or(DEFAULT_MAX_FUEL);
+            .unwrap_or(DEFAULT_TIMEOUT_MS);
+        let epoch_ticks = timeout_ms
+            .saturating_add(EPOCH_TICK_MS - 1)
+            .saturating_div(EPOCH_TICK_MS)
+            .max(1);
+        let mut store = Store::new(
+            &self.engine,
+            NetworkHostState::from_manifest(self.manifest.as_ref(), epoch_ticks),
+        );
         // #region agent log
         debug_log(
             "H2",
             "crates/akasha-plugin-host/src/lib.rs:111",
-            "Preparing wasm run with configured fuel",
+            "Preparing wasm run with configured timeout",
             serde_json::json!({
                 "plugin_id": self.manifest.as_ref().map(|m| m.id.clone()).unwrap_or_else(|| "unknown".to_string()),
-                "max_fuel": max_fuel,
+                "timeout_ms": timeout_ms,
+                "epoch_ticks": epoch_ticks,
                 "input_len": input.len()
             }),
         );
         // #endregion
-        store
-            .set_fuel(max_fuel)
-            .map_err(|_| PluginError::Message("failed to initialize wasm fuel budget".into()))?;
+        store.set_epoch_deadline(epoch_ticks);
 
         let instance = linker
             .instantiate(&mut store, &self.module)
@@ -205,6 +219,39 @@ impl WasmPlugin {
     }
 }
 
+struct EpochTicker {
+    running: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl EpochTicker {
+    fn start(engine: &Engine) -> Self {
+        let running = Arc::new(AtomicBool::new(true));
+        let thread_running = Arc::clone(&running);
+        let engine = engine.clone();
+        let handle = thread::spawn(move || {
+            while thread_running.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(EPOCH_TICK_MS));
+                engine.increment_epoch();
+            }
+        });
+
+        Self {
+            running,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for EpochTicker {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 fn http_fetch_impl(
     caller: &mut Caller<'_, NetworkHostState>,
     req_ptr: i32,
@@ -232,7 +279,7 @@ fn http_fetch_impl(
 
     let st = caller.data_mut();
     let policy = match &st.policy {
-        Some(p) => p,
+        Some(p) => p.clone(),
         None => {
             return write_fetch_error(
                 caller,
@@ -281,7 +328,7 @@ fn http_fetch_impl(
         return write_fetch_error(caller, &mem, out_ptr, out_cap, "only GET and POST allowed");
     }
 
-    if !url_allowed(url_s, policy) {
+    if !url_allowed(url_s, &policy) {
         tracing::warn!(url = %url_s, "http_fetch denied by allowlist");
         return write_fetch_error(caller, &mem, out_ptr, out_cap, "url not allowed by manifest");
     }
@@ -322,15 +369,21 @@ fn http_fetch_impl(
     let resp = match rb.send() {
         Ok(r) => r,
         Err(e) => {
+            reset_epoch_deadline(caller);
             tracing::warn!(error = %e, "http_fetch request failed");
             return write_fetch_error(caller, &mem, out_ptr, out_cap, &format!("request failed: {e}"));
         }
     };
 
     let status = resp.status().as_u16();
-    let body_bytes = resp
-        .bytes()
-        .map_err(|e| anyhow!("http_fetch body: {e}"))?;
+    let body_bytes = match resp.bytes() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            reset_epoch_deadline(caller);
+            return Err(anyhow!("http_fetch body: {e}"));
+        }
+    };
+    reset_epoch_deadline(caller);
     let max = policy.max_response_bytes.min(8_000_000) as usize;
     let slice = if body_bytes.len() > max {
         &body_bytes[..max]
@@ -361,6 +414,11 @@ fn http_fetch_impl(
     mem.write(caller, out_ptr as usize, out_bytes)
         .map_err(|_| anyhow!("http_fetch: write OOB"))?;
     Ok(out_bytes.len() as i32)
+}
+
+fn reset_epoch_deadline(caller: &mut Caller<'_, NetworkHostState>) {
+    let epoch_ticks = caller.data().epoch_ticks;
+    caller.as_context_mut().set_epoch_deadline(epoch_ticks);
 }
 
 fn write_fetch_error(
@@ -412,8 +470,12 @@ fn map_wasm_run_error(err: wasmtime::Error) -> PluginError {
         }),
     );
     // #endregion
-    if msg.contains("all fuel consumed") || msg.contains("out of fuel") {
-        PluginError::Message("plugin execution timed out (fuel exhausted)".into())
+    if msg.contains("all fuel consumed")
+        || msg.contains("out of fuel")
+        || msg.contains("interrupt")
+        || msg.contains("epoch deadline")
+    {
+        PluginError::Message("plugin execution timed out".into())
     } else {
         PluginError::Crashed
     }

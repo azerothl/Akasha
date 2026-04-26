@@ -267,6 +267,8 @@ const MAX_TECH_STACK_CHARS: usize = 4000;
 const MAX_CODE_STUDIO_PLAN_INJECT_CHARS: usize = 4000;
 const MAX_EVOLUTION_SUMMARY_CHARS: usize = 6000;
 const MAX_POLICY_NOTES_CHARS: usize = 4000;
+const MAX_DESIGN_HINT_CHARS: usize = 4000;
+const MAX_DESIGN_DOC_CHARS: usize = 12000;
 
 /// Keep only prompt-safe characters:
 /// - drop NUL and non-printable control chars (except LF/CR/TAB)
@@ -399,6 +401,80 @@ pub fn studio_one_shot_policy_hint_prefix(hint: &str) -> Option<String> {
     Some(format!(
         "[Consigne additionnelle pour cette requête uniquement :\n{t}\n]\n\n"
     ))
+}
+
+/// Design hint ponctuel (résumé tokens/règles) envoyé par l'UI.
+pub fn studio_design_hint_prefix(hint: &str) -> Option<String> {
+    let t = sanitize_for_prompt(hint, MAX_DESIGN_HINT_CHARS);
+    if t.is_empty() {
+        return None;
+    }
+    Some(format!("[Contexte design (résumé) :\n{t}\n]\n\n"))
+}
+
+/// Contrat DESIGN.md complet envoyé par l'UI (borné pour éviter un prompt trop volumineux).
+pub fn studio_design_doc_prefix(doc: &str) -> Option<String> {
+    let t = sanitize_for_prompt(doc, MAX_DESIGN_DOC_CHARS);
+    if t.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[Contrat design — DESIGN.md (respecter tokens + prose, sauf demande explicite utilisateur) :\n{t}\n]\n\n"
+    ))
+}
+
+fn lint_design_doc(raw: &str) -> serde_json::Value {
+    let text = raw.trim();
+    let mut findings: Vec<serde_json::Value> = Vec::new();
+    if text.is_empty() {
+        findings.push(json!({"severity":"warning","path":"root","message":"DESIGN.md vide"}));
+    }
+    let has_front_matter = text.starts_with("---") && text[3..].contains("\n---");
+    if !has_front_matter {
+        findings.push(json!({"severity":"error","path":"frontmatter","message":"front matter YAML manquant"}));
+    }
+    if !text.contains("name:") {
+        findings.push(json!({"severity":"warning","path":"name","message":"token `name` absent"}));
+    }
+    if !text.contains("colors:") {
+        findings.push(json!({"severity":"warning","path":"colors","message":"section tokens `colors` absente"}));
+    }
+    if !text.contains("typography:") {
+        findings.push(json!({"severity":"warning","path":"typography","message":"section tokens `typography` absente"}));
+    }
+    if !text.contains("## ") {
+        findings.push(json!({"severity":"info","path":"body","message":"aucune section markdown `##` détectée"}));
+    }
+    let errors = findings
+        .iter()
+        .filter(|f| f.get("severity").and_then(|s| s.as_str()) == Some("error"))
+        .count();
+    let warnings = findings
+        .iter()
+        .filter(|f| f.get("severity").and_then(|s| s.as_str()) == Some("warning"))
+        .count();
+    let info = findings
+        .iter()
+        .filter(|f| f.get("severity").and_then(|s| s.as_str()) == Some("info"))
+        .count();
+    json!({
+        "findings": findings,
+        "summary": { "errors": errors, "warnings": warnings, "info": info }
+    })
+}
+
+fn extract_design_summary(v: &serde_json::Value) -> (usize, usize) {
+    let errors = v
+        .get("summary")
+        .and_then(|s| s.get("errors"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as usize;
+    let warnings = v
+        .get("summary")
+        .and_then(|s| s.get("warnings"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as usize;
+    (errors, warnings)
 }
 
 fn load_studio_meta(project_root: &Path) -> Option<StudioMeta> {
@@ -1197,6 +1273,30 @@ _Gabarit Code Studio (Akasha) : **conserver ces titres de section** (`## …`). 
     fs::write(&plan_path, body).map_err(|e| e.to_string())
 }
 
+/// Schedule Code Studio code-RAG indexing without blocking the UI / tool call.
+/// `force=false` still rescans the tree but reuses unchanged file chunks; changed/deleted files converge.
+pub fn schedule_studio_code_rag_index(
+    data_dir: &Path,
+    project_id: &str,
+    project_root: &Path,
+    force: bool,
+) {
+    let data_dir = data_dir.to_path_buf();
+    let project_id = project_id.to_string();
+    let project_root = project_root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let store = crate::code_rag::CodeRagStore::new(&data_dir);
+        if let Err(e) = store.ensure_index(&project_id, &project_root, force) {
+            tracing::warn!(
+                project_id = %project_id,
+                project_root = %project_root.display(),
+                error = %e,
+                "Code Studio code-RAG background indexing failed"
+            );
+        }
+    });
+}
+
 async fn git_output(project_root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
     let mut c = Command::new("git");
     c.args(args).current_dir(project_root).kill_on_drop(true);
@@ -1210,20 +1310,49 @@ async fn is_git_repo(project_root: &Path) -> bool {
     }
 }
 
-/// Current branch and whether the worktree is clean (`git status --porcelain` empty).
-async fn git_branch_and_clean_status(project_root: &Path) -> (Option<String>, Option<bool>) {
+/// Current branch, whether the worktree is clean, and bounded porcelain lines for UI.
+async fn git_branch_clean_worktree_lines(
+    project_root: &Path,
+) -> (Option<String>, Option<bool>, Vec<serde_json::Value>) {
     if !is_git_repo(project_root).await {
-        return (None, None);
+        return (None, None, Vec::new());
     }
     let branch = match git_output(project_root, &["rev-parse", "--abbrev-ref", "HEAD"]).await {
         Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).trim().to_string()),
         _ => None,
     };
+    let mut lines_out: Vec<serde_json::Value> = Vec::new();
     let clean = match git_output(project_root, &["status", "--porcelain"]).await {
-        Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).trim().is_empty()),
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout).to_string();
+            let empty = text.trim().is_empty();
+            for (i, raw) in text.lines().enumerate() {
+                if i >= 200 {
+                    break;
+                }
+                let line = raw.trim_end();
+                if line.is_empty() {
+                    continue;
+                }
+                let status: String = line.chars().take(2).collect();
+                let path = if line.len() > 3 {
+                    line[3..].trim_start()
+                } else {
+                    ""
+                };
+                if path.is_empty() {
+                    continue;
+                }
+                lines_out.push(serde_json::json!({
+                    "status": status,
+                    "path": path.chars().take(4096).collect::<String>()
+                }));
+            }
+            Some(empty)
+        }
         _ => None,
     };
-    (branch, clean)
+    (branch, clean, lines_out)
 }
 
 async fn git_checkout_mainish(project_root: &Path) -> Result<(), String> {
@@ -1329,6 +1458,14 @@ pub async fn handle_studio_route(
         };
         let _ = save_studio_meta(&dir, &meta);
         let _ = write_initial_code_studio_plan(&dir, &meta.name, meta.tech_stack.as_deref());
+        let specs_dir = dir.join("specs");
+        if let Err(e) = fs::create_dir_all(&specs_dir) {
+            tracing::warn!(
+                error = %e,
+                path = %specs_dir.display(),
+                "failed to create default specs/ directory for new studio project"
+            );
+        }
         if !dir.join(".git").exists() {
             let mut g = Command::new("git");
             g.arg("init").current_dir(&dir).kill_on_drop(true);
@@ -1342,6 +1479,7 @@ pub async fn handle_studio_route(
                 tracing::warn!(error = %e, path = %dir.display(), "git init failed for new studio project");
             }
         }
+        schedule_studio_code_rag_index(data_dir, &id, &dir, false);
         let body = serde_json::json!({ "id": id, "path": dir.display().to_string() }).to_string();
         return Some(json_response("201 Created", &body));
     }
@@ -1378,9 +1516,10 @@ pub async fn handle_studio_route(
                 });
                 let mut body = serde_json::to_value(&meta).unwrap_or_else(|_| serde_json::json!({}));
                 if let Some(obj) = body.as_object_mut() {
-                    let (branch, clean) = git_branch_and_clean_status(&root).await;
+                    let (branch, clean, wt_lines) = git_branch_clean_worktree_lines(&root).await;
                     obj.insert("git_branch".into(), serde_json::json!(branch));
                     obj.insert("git_worktree_clean".into(), serde_json::json!(clean));
+                    obj.insert("git_worktree_lines".into(), serde_json::json!(wt_lines));
                 }
                 return Some(json_response("200 OK", &body.to_string()));
             }
@@ -1443,9 +1582,13 @@ pub async fn handle_studio_route(
                 let data_dir_owned = data_dir.to_path_buf();
                 let id_owned = id.to_string();
                 let root_owned = root.clone();
+                let force = body
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+                    .and_then(|v| v.get("force").and_then(|x| x.as_bool()).or(Some(true)))
+                    .unwrap_or(true);
                 let status = tokio::task::spawn_blocking(move || {
                     let store = crate::code_rag::CodeRagStore::new(&data_dir_owned);
-                    store.ensure_index(&id_owned, &root_owned, true)
+                    store.ensure_index(&id_owned, &root_owned, force)
                 })
                 .await
                 .ok()
@@ -1854,6 +1997,7 @@ pub async fn handle_studio_route(
             }
             match fs::write(&full, bytes) {
                 Ok(()) => {
+                    schedule_studio_code_rag_index(data_dir, id, &root, false);
                     let body = serde_json::json!({ "ok": true, "path": rel }).to_string();
                     return Some(json_response("200 OK", &body));
                 }
@@ -1895,11 +2039,109 @@ pub async fn handle_studio_route(
             }
             match fs::remove_file(&full) {
                 Ok(()) => {
+                    schedule_studio_code_rag_index(data_dir, id, &root, false);
                     let body = serde_json::json!({ "ok": true, "path": rel }).to_string();
                     return Some(json_response("200 OK", &body));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     return Some(json_response("404 Not Found", r#"{"error":"not_found"}"#));
+                }
+                Err(e) => {
+                    return Some(json_response(
+                        "500 Internal Server Error",
+                        &serde_json::json!({ "error": e.to_string() }).to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    // POST /api/studio/projects/:id/fs/rename — renomme ou déplace un fichier ou un répertoire (rename atomique).
+    if method == "POST" && path_only.ends_with("/fs/rename") {
+        if let Some(rest) = strip_studio_projects_prefix(path_only) {
+            let id = rest.strip_suffix("/fs/rename").unwrap_or(rest).trim_end_matches('/');
+            let root = match resolve_studio_project_dir(data_dir, id) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Some(json_response(
+                        "400 Bad Request",
+                        &serde_json::json!({ "error": e }).to_string(),
+                    ));
+                }
+            };
+            if !root.is_dir() {
+                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            }
+            let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+                Some(v) => v,
+                None => {
+                    return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#));
+                }
+            };
+            let from_rel = match body_v.get("from").and_then(|x| x.as_str()) {
+                Some(s) if !s.trim().is_empty() => s.trim().replace('\\', "/"),
+                _ => {
+                    return Some(json_response("400 Bad Request", r#"{"error":"from required"}"#));
+                }
+            };
+            let to_rel = match body_v.get("to").and_then(|x| x.as_str()) {
+                Some(s) if !s.trim().is_empty() => s.trim().replace('\\', "/"),
+                _ => {
+                    return Some(json_response("400 Bad Request", r#"{"error":"to required"}"#));
+                }
+            };
+            if from_rel.contains("..") || to_rel.contains("..") {
+                return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+            }
+            if from_rel == to_rel {
+                return Some(json_response("400 Bad Request", r#"{"error":"same_path"}"#));
+            }
+            fn blocked_studio_rel_segment(rel: &str) -> bool {
+                rel.split('/').any(|seg| {
+                    seg == ".git" || seg == "node_modules" || seg == ".akasha-studio.json"
+                })
+            }
+            if blocked_studio_rel_segment(&from_rel) || blocked_studio_rel_segment(&to_rel) {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"path segment not allowed"}"#,
+                ));
+            }
+            let from_full = strip_verbatim(&root.join(&from_rel));
+            let to_full = strip_verbatim(&root.join(&to_rel));
+            if !is_strictly_under_studio_root(&from_full, &root) || !is_strictly_under_studio_root(&to_full, &root) {
+                return Some(json_response("400 Bad Request", r#"{"error":"path outside project"}"#));
+            }
+            if !from_full.exists() {
+                return Some(json_response("404 Not Found", r#"{"error":"not_found"}"#));
+            }
+            if to_full.exists() {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"destination_exists"}"#,
+                ));
+            }
+            let from_s = from_full.to_string_lossy().replace('\\', "/");
+            let to_s = to_full.to_string_lossy().replace('\\', "/");
+            if from_full.is_dir() && to_s.starts_with(&(from_s.clone() + "/")) {
+                return Some(json_response(
+                    "400 Bad Request",
+                    r#"{"error":"cannot_move_into_subdirectory"}"#,
+                ));
+            }
+            if let Some(parent) = to_full.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    return Some(json_response(
+                        "500 Internal Server Error",
+                        &serde_json::json!({ "error": e.to_string() }).to_string(),
+                    ));
+                }
+            }
+            match fs::rename(&from_full, &to_full) {
+                Ok(()) => {
+                    schedule_studio_code_rag_index(data_dir, id, &root, false);
+                    let body = serde_json::json!({ "ok": true, "from": from_rel, "to": to_rel }).to_string();
+                    return Some(json_response("200 OK", &body));
                 }
                 Err(e) => {
                     return Some(json_response(
@@ -2597,6 +2839,52 @@ pub async fn handle_studio_route(
                         r#"{"error":"checkout_main_failed"}"#,
                     ));
                 }
+                let req = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+                let design_check = req
+                    .as_ref()
+                    .and_then(|v| v.get("design_check").and_then(|x| x.as_bool()))
+                    .unwrap_or(false);
+                if design_check {
+                    let base_raw = git_output(&root, &["show", "HEAD:DESIGN.md"])
+                        .await
+                        .ok()
+                        .and_then(|o| {
+                            if o.status.success() {
+                                Some(String::from_utf8_lossy(&o.stdout).to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_default();
+                    let branch_spec = format!("{branch}:DESIGN.md");
+                    let branch_raw = git_output(&root, &["show", &branch_spec])
+                        .await
+                        .ok()
+                        .and_then(|o| {
+                            if o.status.success() {
+                                Some(String::from_utf8_lossy(&o.stdout).to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_default();
+                    let base_report = lint_design_doc(&base_raw);
+                    let branch_report = lint_design_doc(&branch_raw);
+                    let (base_errors, base_warnings) = extract_design_summary(&base_report);
+                    let (branch_errors, branch_warnings) = extract_design_summary(&branch_report);
+                    if branch_errors > base_errors || branch_warnings > base_warnings {
+                        return Some(json_response(
+                            "409 Conflict",
+                            &json!({
+                                "error":"design_regression",
+                                "detail":"DESIGN.md lint worsened on evolution branch",
+                                "base": base_report,
+                                "branch": branch_report
+                            })
+                            .to_string(),
+                        ));
+                    }
+                }
                 let o = git_output(&root, &["merge", "--no-ff", &branch, "-m", "Akasha Code Studio: merge evolution"])
                     .await;
                 match o {
@@ -2624,6 +2912,37 @@ pub async fn handle_studio_route(
                     }
                 }
             }
+        }
+    }
+
+    // POST /api/studio/projects/:id/design/validate
+    if method == "POST" && path_only.ends_with("/design/validate") {
+        if let Some(rest) = strip_studio_projects_prefix(path_only) {
+            let id = rest
+                .strip_suffix("/design/validate")
+                .unwrap_or(rest)
+                .trim_end_matches('/');
+            let root = match resolve_studio_project_dir(data_dir, id) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Some(json_response(
+                        "400 Bad Request",
+                        &serde_json::json!({ "error": e }).to_string(),
+                    ));
+                }
+            };
+            if !root.is_dir() {
+                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            }
+            let req = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+            let raw = req
+                .as_ref()
+                .and_then(|v| v.get("content").and_then(|x| x.as_str()))
+                .map(|s| s.to_string())
+                .or_else(|| fs::read_to_string(root.join("DESIGN.md")).ok())
+                .unwrap_or_default();
+            let report = lint_design_doc(&raw);
+            return Some(json_response("200 OK", &report.to_string()));
         }
     }
 

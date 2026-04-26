@@ -19,6 +19,7 @@ pub mod session_state;
 pub mod browser;
 pub mod channels;
 pub mod code_rag;
+pub mod studio_task_snapshot;
 pub mod daemon;
 pub mod replication;
 pub mod device_bridge;
