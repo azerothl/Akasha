@@ -2192,21 +2192,40 @@ pub async fn handle_studio_route(
                 r#"{"error":"only https repo_url supported"}"#,
             ));
         }
-        let mut non_empty = false;
+        // Studio-managed entries that are created at project-creation time and can be safely
+        // cleared before cloning (git clone requires an empty target directory).
+        const STUDIO_METADATA_ENTRIES: &[&str] =
+            &[".akasha-studio.json", "CODE_STUDIO_PLAN.md", "specs", ".git"];
+        let mut has_user_content = false;
         if let Ok(rd) = fs::read_dir(&root) {
             for e in rd.flatten() {
                 let n = e.file_name().to_string_lossy().to_string();
-                if n != ".akasha-studio.json" {
-                    non_empty = true;
+                if !STUDIO_METADATA_ENTRIES.contains(&n.as_str()) {
+                    has_user_content = true;
                     break;
                 }
             }
         }
-        if non_empty {
+        if has_user_content {
             return Some(json_response(
                 "409 Conflict",
                 r#"{"error":"project_dir_not_empty"}"#,
             ));
+        }
+        // Save .akasha-studio.json to restore after the clone (it stores project metadata).
+        let meta_backup = tokio::fs::read(root.join(".akasha-studio.json")).await.ok();
+        // Wipe all studio-managed entries so git clone finds an empty target directory.
+        // Use DirEntry::file_type() to avoid following symlinks when deciding remove strategy.
+        if let Ok(rd) = fs::read_dir(&root) {
+            for e in rd.flatten() {
+                let p = e.path();
+                let ft = e.file_type().ok();
+                if ft.map_or(false, |t| t.is_dir()) {
+                    let _ = fs::remove_dir_all(&p);
+                } else {
+                    let _ = fs::remove_file(&p);
+                }
+            }
         }
         let _permit = studio_ops_semaphore().acquire().await.ok();
         let mut cmd = Command::new("git");
@@ -2217,7 +2236,13 @@ pub async fn handle_studio_route(
         cmd.arg(url).arg(&root);
         cmd.kill_on_drop(true);
         match cmd.status().await {
-            Ok(s) if s.success() => return Some(json_response("200 OK", r#"{"ok":true,"message":"cloned"}"#)),
+            Ok(s) if s.success() => {
+                // Restore project metadata so the daemon can still track this project.
+                if let Some(bytes) = meta_backup {
+                    let _ = tokio::fs::write(root.join(".akasha-studio.json"), bytes).await;
+                }
+                return Some(json_response("200 OK", r#"{"ok":true,"message":"cloned"}"#));
+            }
             Ok(s) => {
                 return Some(json_response(
                     "500 Internal Server Error",

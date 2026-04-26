@@ -392,20 +392,16 @@ impl LLMRouter {
                                     error = %e,
                                     provider = %entry.provider,
                                     model = %entry.model,
-                                    "Streaming failed: prompt exceeds this model's context window; skipping non-streaming fallback (same payload would fail). Shorten history, attachments, or use a larger-context model."
+                                    "Streaming failed: prompt exceeds this model's context window; falling back to non-streaming chain which may include larger-context providers."
                                 );
-                                let _ = bridge_handle.await;
-                                return Err(format!(
-                                    "LLM context limit exceeded: {}. Reduce what you send (conversation history, pasted files, Code Studio workspace size) or pick a model with a larger context.",
-                                    e
-                                ));
+                            } else {
+                                warn!(
+                                    error = %e,
+                                    provider = %entry.provider,
+                                    model = %entry.model,
+                                    "Streaming failed; falling back to non-streaming completion (retries + fallback providers)"
+                                );
                             }
-                            warn!(
-                                error = %e,
-                                provider = %entry.provider,
-                                model = %entry.model,
-                                "Streaming failed; falling back to non-streaming completion (retries + fallback providers)"
-                            );
                             // Wait for the bridge to drain any already-queued chunks before checking.
                             let _ = bridge_handle.await;
                             let response = self

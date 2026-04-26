@@ -58,7 +58,7 @@ impl FallbackEngine {
         chain.extend(task_config.fallback.iter());
 
         let mut last_error: Option<String> = None;
-        'providers: for (i, entry) in chain.iter().enumerate() {
+        for (i, entry) in chain.iter().enumerate() {
             if degraded_only && !self.is_local_provider(entry.provider.as_str(), resolve) {
                 continue;
             }
@@ -264,9 +264,9 @@ impl FallbackEngine {
                                 provider = %entry.provider,
                                 model = %entry.model,
                                 error = %e,
-                                "Prompt exceeds context window; skipping remaining providers (same oversized request)"
+                                "Prompt exceeds this provider's context window; trying next provider in chain (may have larger context)"
                             );
-                            break 'providers;
+                            break; // exit retry loop for this provider; let the chain continue
                         }
                     }
                 }

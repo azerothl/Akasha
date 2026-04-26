@@ -280,18 +280,16 @@ fn parse_write_file_request(args: &[String]) -> Option<(String, String)> {
         many => {
             // `TOOL:` headers are split on whitespace. Some models put file content on the
             // same line as the `write_file` header (`TOOL: write_file path { "x": ... }`)
-            // and may continue it on following lines. Preserve same-line spacing while still
-            // keeping the collected multiline body as multiline text.
+            // and may continue it on following lines. The multiline parser always places the
+            // collected body as the last element (including single-line bodies), so always
+            // join the header prefix and the last element with a newline to preserve line
+            // breaks between inline header content and any collected body.
             let (last, prefix) = many.split_last().expect("non-empty by match arm");
             let header = prefix.join(" ");
-            if last.contains('\n') {
-                if header.trim().is_empty() {
-                    last.clone()
-                } else {
-                    format!("{}\n{}", header, last)
-                }
+            if header.trim().is_empty() {
+                last.clone()
             } else {
-                many.join(" ")
+                format!("{}\n{}", header, last)
             }
         }
     };
@@ -3531,7 +3529,7 @@ fn line_rest_after_leading_tool_at_start(line: &str) -> Option<&str> {
 fn tool_supports_multiline_body(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "apply_patch" | "edit_file" | "write_file" | "delete_file" | "ask_user"
+        "apply_patch" | "edit_file" | "write_file" | "ask_user"
     )
 }
 
@@ -5360,11 +5358,10 @@ async fn execute_tool_call(
                     }
                 }
             }
-            let path = Path::new(&path_str);
-            match executor.write_file(path, &content).await {
+            match executor.write_file(&disk_path, &content).await {
                 Ok(res) => {
                     let msg = if res.success {
-                        format!("[write_file {}] {}", path.display(), res.summary)
+                        format!("[write_file {}] {}", disk_path.display(), res.summary)
                     } else {
                         format!("[write_file] {}", res.summary)
                     };
@@ -15919,6 +15916,9 @@ mod tests {
 
     #[test]
     fn parse_write_file_request_preserves_same_line_content_spacing() {
+        // All tokens come from the TOOL header (no collected body). The last token is joined
+        // with a newline to be consistent with the single-line-body case — the resulting JSON
+        // (with a newline before the final `}`) is still valid and parseable.
         let args = vec![
             "workspace:/tsconfig.json".to_string(),
             "{".to_string(),
@@ -15931,7 +15931,20 @@ mod tests {
         ];
         let (path, content) = parse_write_file_request(&args).expect("write_file should parse");
         assert_eq!(path, "workspace:/tsconfig.json");
-        assert_eq!(content, "{ \"compilerOptions\": { \"strict\": true } }");
+        assert_eq!(content, "{ \"compilerOptions\": { \"strict\": true }\n}");
+    }
+
+    #[test]
+    fn parse_write_file_request_combines_inline_prefix_and_single_line_body() {
+        // Inline token on the TOOL header line + exactly one body line collected by the parser.
+        let args = vec![
+            "workspace:/src/index.js".to_string(),
+            "const".to_string(),
+            "x = 1;".to_string(),
+            "return x;".to_string(),
+        ];
+        let (_, content) = parse_write_file_request(&args).expect("write_file should parse");
+        assert_eq!(content, "const x = 1;\nreturn x;");
     }
 
     #[test]
