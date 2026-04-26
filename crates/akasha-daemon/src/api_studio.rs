@@ -2214,10 +2214,14 @@ pub async fn handle_studio_route(
         }
         // Save .akasha-studio.json to restore after the clone (it stores project metadata).
         let meta_backup = tokio::fs::read(root.join(".akasha-studio.json")).await.ok();
-        // Wipe all studio-managed entries so git clone finds an empty target directory.
+        // Wipe only the known studio-managed entries so git clone finds an empty target.
         // Use DirEntry::file_type() to avoid following symlinks when deciding remove strategy.
         if let Ok(rd) = fs::read_dir(&root) {
             for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().to_string();
+                if !STUDIO_METADATA_ENTRIES.contains(&n.as_str()) {
+                    continue; // unexpected entry — skip to avoid accidental data loss
+                }
                 let p = e.path();
                 let ft = e.file_type().ok();
                 if ft.map_or(false, |t| t.is_dir()) {
