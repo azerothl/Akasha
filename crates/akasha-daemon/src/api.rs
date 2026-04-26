@@ -15829,7 +15829,11 @@ async fn schedule_run_now(
     if !s.enabled {
         return json_response(
             "400 Bad Request",
-            r#"{"error":"schedule_paused","detail":"Resume the schedule before run-now."}"#,
+            &serde_json::json!({
+                "error": "schedule_paused",
+                "detail": "Resume the schedule before run-now.",
+            })
+            .to_string(),
         );
     }
     let msg = s

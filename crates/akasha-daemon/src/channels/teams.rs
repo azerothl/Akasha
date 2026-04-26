@@ -4,7 +4,10 @@
 use crate::agents::MainAgent;
 use crate::gateway;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 const TEAMS_POLL_INTERVAL_MS: u64 = 1500;
@@ -28,6 +31,16 @@ const ALLOWED_SERVICE_URL_DOMAINS: &[&str] = &[
 
 const BOTFRAMEWORK_JWKS_URL: &str = "https://login.botframework.com/v1/.well-known/keys";
 
+/// TTL for the JWKS/cert cache (1 hour).
+const JWKS_CACHE_TTL: Duration = Duration::from_secs(3600);
+
+/// Per-`kid` PEM certificate cache with timestamps for TTL-based expiry.
+static JWKS_CERT_CACHE: OnceLock<Mutex<HashMap<String, (String, Instant)>>> = OnceLock::new();
+
+fn jwks_cert_cache() -> &'static Mutex<HashMap<String, (String, Instant)>> {
+    JWKS_CERT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn extract_bearer_token<'a>(authorization: Option<&'a str>) -> Option<&'a str> {
     let auth = authorization?;
     let lower = auth.to_ascii_lowercase();
@@ -44,8 +57,8 @@ fn extract_bearer_token<'a>(authorization: Option<&'a str>) -> Option<&'a str> {
     }
 }
 
-/// Fetch JWKS from Bot Framework and return PEM (first `x5c` cert) for `kid`.
-fn botframework_signing_pem_for_kid(kid: &str) -> Result<String, &'static str> {
+/// Inner blocking JWKS fetch: makes a network call and extracts the PEM for `kid`.
+fn fetch_pem_from_jwks(kid: &str) -> Result<String, &'static str> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -74,6 +87,32 @@ fn botframework_signing_pem_for_kid(kid: &str) -> Result<String, &'static str> {
         ));
     }
     Err("jwks_kid_not_found")
+}
+
+/// Fetch JWKS from Bot Framework and return PEM (first `x5c` cert) for `kid`.
+///
+/// Results are cached per `kid` with a [`JWKS_CACHE_TTL`] TTL to avoid a network round-trip
+/// on every webhook. The blocking HTTP call is wrapped in `block_in_place` so it does not
+/// stall other tasks on the Tokio async runtime.
+fn botframework_signing_pem_for_kid(kid: &str) -> Result<String, &'static str> {
+    // Check the in-memory cache first.
+    {
+        let cache = jwks_cert_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((pem, inserted)) = cache.get(kid) {
+            if inserted.elapsed() < JWKS_CACHE_TTL {
+                return Ok(pem.clone());
+            }
+        }
+    }
+    // Cache miss or TTL expired: fetch from network, shielding the async runtime.
+    let kid_owned = kid.to_string();
+    let pem = tokio::task::block_in_place(|| fetch_pem_from_jwks(&kid_owned))?;
+    // Populate the cache with the freshly fetched PEM.
+    {
+        let mut cache = jwks_cert_cache().lock().unwrap_or_else(|e| e.into_inner());
+        cache.insert(kid.to_string(), (pem.clone(), Instant::now()));
+    }
+    Ok(pem)
 }
 
 /// Validate the Bot Framework Authorization header: Bearer JWT with **RS256 signature**

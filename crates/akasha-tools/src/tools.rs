@@ -1816,7 +1816,8 @@ pub async fn web_crawl_start(
         .context("web_crawl send")?;
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
-    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({ "raw": text }));
+    let v: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "raw": &*text }));
     let ok_api = v.get("success").and_then(|x| x.as_bool()).unwrap_or(false);
     if !status.is_success() || !ok_api {
         let errs = v

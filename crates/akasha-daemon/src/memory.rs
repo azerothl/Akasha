@@ -208,9 +208,10 @@ impl ShortTermStore {
 
     /// Total estimated tokens with provider/model calibration (used for compaction triggers).
     pub fn turns_tokens_calibrated(provider: &str, model: &str, turns: &[ConversationTurn]) -> usize {
+        let chars_per_token_hint = Self::chars_per_token_hint(provider, model).max(1.0);
         turns
             .iter()
-            .map(|t| Self::estimate_tokens_calibrated(provider, model, &t.content))
+            .map(|t| ((t.content.chars().count().max(1) as f64) / chars_per_token_hint).ceil() as usize)
             .sum()
     }
 
