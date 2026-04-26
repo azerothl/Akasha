@@ -75,7 +75,7 @@ fn parse_read_file_args(args: &[String]) -> (Vec<String>, Option<(usize, usize)>
             .get(filtered.len().saturating_sub(2))
             .and_then(|s| s.parse::<usize>().ok());
         if let (Some(off), Some(lim)) = (maybe_offset, maybe_limit) {
-            if lim > 0 {
+            if off > 0 && lim > 0 {
                 let mut path = filtered;
                 path.pop();
                 path.pop();
@@ -5575,55 +5575,68 @@ async fn execute_tool_call(
                         let (to_key, _) = rewrite_workspace_plan_key_to_lineage_root(
                             &normalize_ws_key(&to_s), lineage_id,
                         );
-                        let mut guard = ws.write().await;
-                        let per_task = guard.entry(lineage_id).or_default();
-                        if per_task.contains_key(&to_key) {
-                            return (
-                                false,
-                                format!("[rename_path] destination workspace key already exists: {}", to_key),
-                                None,
-                            );
-                        }
-                        if per_task.get(&from_key).is_some() {
-                            // Rename on disk first while holding the write lock to prevent
-                            // TOCTOU races between the disk operation and store update.
-                            if let Some(root) = workspace_root {
-                                let from_disk = root.join(&from_key);
-                                let to_disk = root.join(&to_key);
-                                match executor.rename_path(&from_disk, &to_disk).await {
-                                    Ok(res) if !res.success => {
-                                        return (false, format!("[rename_path] {}", res.summary), None);
-                                    }
-                                    Err(e) => {
-                                        return (false, format!("[rename_path] {}", e), None);
-                                    }
-                                    Ok(_) => {}
-                                }
-                            }
-                            // Disk rename succeeded (or no root); update the in-memory store.
+                        // Phase 1: check preconditions and remove the key from the store under a
+                        // brief write lock (acts as a reservation). The lock is released before
+                        // the potentially-slow disk I/O so that unrelated read_file/write_file
+                        // operations are not blocked.
+                        let reserve_result = {
+                            let mut guard = ws.write().await;
                             let per_task = guard.entry(lineage_id).or_default();
-                            if let Some(content) = per_task.remove(&from_key) {
-                                per_task.insert(to_key.clone(), content);
-                                (true, format!("[rename_path] workspace key renamed: {} -> {}", from_key, to_key), None)
+                            if per_task.contains_key(&to_key) {
+                                Err(format!("[rename_path] destination workspace key already exists: {}", to_key))
+                            } else if let Some(content) = per_task.remove(&from_key) {
+                                Ok(Some(content))
                             } else {
-                                // Should not happen — we checked above while holding the lock.
-                                (false, format!("[rename_path] workspace key not found: {}", from_key), None)
+                                Ok(None) // key absent from store
                             }
-                        } else {
-                            drop(guard);
-                            // Key absent from store — try disk rename if workspace_root available
-                            if let Some(root) = workspace_root {
-                                let from_disk = root.join(&from_key);
-                                let to_disk = root.join(&to_key);
-                                match executor.rename_path(&from_disk, &to_disk).await {
-                                    Ok(res) => {
-                                        let msg = format!("[rename_path] {}", res.summary);
-                                        (res.success, msg, None)
+                            // write lock dropped here
+                        };
+
+                        match reserve_result {
+                            Err(msg) => (false, msg, None),
+                            Ok(Some(content)) => {
+                                // Phase 2: disk rename without holding the lock.
+                                let disk_result = if let Some(root) = workspace_root {
+                                    let from_disk = root.join(&from_key);
+                                    let to_disk = root.join(&to_key);
+                                    match executor.rename_path(&from_disk, &to_disk).await {
+                                        Ok(res) if !res.success => Err(res.summary),
+                                        Ok(_) => Ok(()),
+                                        Err(e) => Err(e.to_string()),
                                     }
-                                    Err(e) => (false, format!("[rename_path] {}", e), None),
+                                } else {
+                                    Ok(()) // no disk backing — in-memory rename only
+                                };
+
+                                // Phase 3: commit to_key or rollback from_key.
+                                let mut guard = ws.write().await;
+                                let per_task = guard.entry(lineage_id).or_default();
+                                match disk_result {
+                                    Ok(()) => {
+                                        per_task.insert(to_key.clone(), content);
+                                        (true, format!("[rename_path] workspace key renamed: {} -> {}", from_key, to_key), None)
+                                    }
+                                    Err(msg) => {
+                                        per_task.insert(from_key.clone(), content);
+                                        (false, format!("[rename_path] {}", msg), None)
+                                    }
                                 }
-                            } else {
-                                (false, format!("[rename_path] workspace key not found: {}", from_key), None)
+                            }
+                            Ok(None) => {
+                                // Key absent from store — try disk rename directly.
+                                if let Some(root) = workspace_root {
+                                    let from_disk = root.join(&from_key);
+                                    let to_disk = root.join(&to_key);
+                                    match executor.rename_path(&from_disk, &to_disk).await {
+                                        Ok(res) => {
+                                            let msg = format!("[rename_path] {}", res.summary);
+                                            (res.success, msg, None)
+                                        }
+                                        Err(e) => (false, format!("[rename_path] {}", e), None),
+                                    }
+                                } else {
+                                    (false, format!("[rename_path] workspace key not found: {}", from_key), None)
+                                }
                             }
                         }
                     }
@@ -5672,6 +5685,45 @@ async fn execute_tool_call(
             let to_disk = resolve_tool_disk_path(&to_s, workspace_root);
             match executor.move_tree(&from_disk, &to_disk).await {
                 Ok(res) => {
+                    // After a successful disk move, rename all workspace store keys whose paths
+                    // fall under the moved directory prefix (mirrors rename_path workspace sync).
+                    if res.success && is_workspace_virtual_path(&from_s) && is_workspace_virtual_path(&to_s) {
+                        if let Some(ws) = workspace_store {
+                            let lineage_id = workspace_lineage_root_task_id(task_id, store_path);
+                            let from_prefix = from_s
+                                .trim_start_matches("workspace:/")
+                                .trim_start_matches("workspace:")
+                                .trim_start_matches('/')
+                                .trim_end_matches('/')
+                                .to_string();
+                            let to_prefix = to_s
+                                .trim_start_matches("workspace:/")
+                                .trim_start_matches("workspace:")
+                                .trim_start_matches('/')
+                                .trim_end_matches('/')
+                                .to_string();
+                            let subtree_prefix = format!("{from_prefix}/");
+                            let mut guard = ws.write().await;
+                            let per_task = guard.entry(lineage_id).or_default();
+                            let to_rename: Vec<(String, String, String)> = per_task
+                                .iter()
+                                .filter_map(|(key, val)| {
+                                    if *key == from_prefix {
+                                        Some((key.clone(), to_prefix.clone(), val.clone()))
+                                    } else if key.starts_with(&subtree_prefix) {
+                                        let suffix = &key[from_prefix.len()..]; // includes leading /
+                                        Some((key.clone(), format!("{to_prefix}{suffix}"), val.clone()))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            for (old_key, new_key, content) in to_rename {
+                                per_task.remove(&old_key);
+                                per_task.insert(new_key, content);
+                            }
+                        }
+                    }
                     let msg = format!("[move_tree] {}", res.summary);
                     (res.success, msg, None)
                 }
@@ -7866,12 +7918,18 @@ pub(crate) async fn run_message_via_llm(
         let dd = data_dir_for_studio_flags.to_path_buf();
         let root = tool_disk_workspace_root.clone();
         let tid = task_id;
-        match tokio::task::spawn_blocking(move || {
-            crate::studio_task_snapshot::capture_task_snapshot(&dd, tid, &root)
+        match tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            let snap_path = dd.join("studio-task-snapshots").join(format!("{tid}.json"));
+            if snap_path.exists() {
+                return Ok(false);
+            }
+            crate::studio_task_snapshot::capture_task_snapshot(&dd, tid, &root)?;
+            Ok(true)
         })
         .await
         {
-            Ok(Ok(())) => {}
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => tracing::debug!(task_id = %tid, "studio task snapshot already captured; skipping"),
             Ok(Err(e)) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot capture failed"),
             Err(e) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot join failed"),
         }
