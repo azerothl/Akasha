@@ -12018,8 +12018,23 @@ pub async fn handle_api(
         if !gate.check_rate("automation_webhook", 120) {
             return json_response("429 Too Many Requests", r#"{"error":"rate_limited"}"#);
         }
-        let parsed: serde_json::Value = serde_json::from_slice(body_bytes)
-            .unwrap_or_else(|_| serde_json::json!({ "raw": serde_json::Value::Null }));
+        let parsed: serde_json::Value = match serde_json::from_slice(body_bytes) {
+            Ok(v) => v,
+            Err(_) => {
+                let keys_preview: Vec<&str> = vec![];
+                let body_out = serde_json::json!({
+                    "ok": true,
+                    "accepted": true,
+                    "invalid_json": true,
+                    "payload_key_count": 0,
+                    "payload_keys_preview": keys_preview,
+                });
+                return json_response(
+                    "202 Accepted",
+                    &serde_json::to_string(&body_out).unwrap_or_else(|_| "{}".to_string()),
+                );
+            }
+        };
         let keys: Vec<_> = parsed
             .as_object()
             .map(|o| o.keys().map(|k| k.as_str()).collect())
@@ -12074,12 +12089,7 @@ pub async fn handle_api(
             );
         }
         let body_trim = direct.trim();
-        let bytes = body_trim.as_bytes();
-        return format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            bytes.len(),
-            body_trim
-        );
+        return json_response("200 OK", body_trim);
     }
 
     if method == "GET" && path_only == "/api/process/watch/recent" {

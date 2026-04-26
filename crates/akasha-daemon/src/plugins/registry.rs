@@ -99,8 +99,10 @@ impl PluginRegistry {
         if !self.plugins_dir.exists() {
             if let Err(e) = std::fs::create_dir_all(&self.plugins_dir) {
                 warn!(error = %e, "Could not create plugins dir");
+                super::metrics::record_plugin_load(t0.elapsed().as_millis() as u64, 0, 1);
+            } else {
+                super::metrics::record_plugin_load(t0.elapsed().as_millis() as u64, 0, 0);
             }
-            super::metrics::record_plugin_load(t0.elapsed().as_millis() as u64, 0, 1);
             return;
         }
         let read_dir = match std::fs::read_dir(&self.plugins_dir) {
