@@ -1,5 +1,6 @@
 //! Provider trait and implementations (Ollama, Akasha Core, OpenAI, OpenRouter).
 
+use crate::streaming;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -132,8 +133,9 @@ pub trait LLMProvider: Send + Sync {
         false
     }
     /// Whether this provider can stream chunks (avoids total timeout; use idle timeout instead).
+    /// Default `true`: [`complete_stream`] falls back to [`complete`] and emits one chunk unless overridden.
     fn supports_streaming(&self) -> bool {
-        false
+        true
     }
     /// Complete with optional model override from routing config (e.g. "llama3.2", "codellama").
     async fn complete(
@@ -173,7 +175,125 @@ pub enum ProviderError {
     Auth(String),
 }
 
+/// True when the provider refused the call because the **prompt** (plus reserved output) exceeds the model or API context window.
+///
+/// Used by the router's streaming path to skip non-streaming fallback with the same oversized body (it would fail again with the same 400).
+pub fn provider_error_is_context_window_exceeded(err: &ProviderError) -> bool {
+    let ProviderError::Api(msg) = err else {
+        return false;
+    };
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("context_window_exceeded") {
+        return true;
+    }
+    if lower.contains("maximum context length") {
+        return true;
+    }
+    if lower.contains("reduce the length")
+        && (lower.contains("message") || lower.contains("prompt") || lower.contains("either one"))
+    {
+        return true;
+    }
+    if lower.contains("too many tokens") && lower.contains("context") {
+        return true;
+    }
+    if lower.contains("you requested about")
+        && lower.contains("tokens")
+        && (lower.contains("maximum") || lower.contains("exceed"))
+    {
+        return true;
+    }
+    false
+}
+
+/// One NDJSON line from Ollama `POST /api/generate` with `"stream": true`.
+/// Used by [`OllamaProvider::complete_stream_async`] and unit tests.
+fn ollama_apply_stream_ndjson_line(
+    line: &str,
+    accumulated_text: &mut String,
+    thinking_buf: &mut String,
+    thinking_final: &mut Option<String>,
+    last_done_json: &mut Option<serde_json::Value>,
+    chunk_tx: &std::sync::mpsc::Sender<String>,
+) -> Result<(), ProviderError> {
+    let line = line.trim();
+    if line.is_empty() {
+        return Ok(());
+    }
+    let json: serde_json::Value = serde_json::from_str(line)
+        .map_err(|e| ProviderError::Api(format!("ollama stream line: {}", e)))?;
+    let done = json.get("done").and_then(|v| v.as_bool()) == Some(true);
+    if let Some(delta) = json.get("response").and_then(|v| v.as_str()) {
+        if !delta.is_empty() {
+            accumulated_text.push_str(delta);
+            let _ = chunk_tx.send(delta.to_string());
+        }
+    }
+    if let Some(t) = json.get("thinking").and_then(|v| v.as_str()) {
+        if !t.is_empty() {
+            if done {
+                *thinking_final = Some(t.to_string());
+            } else {
+                thinking_buf.push_str(t);
+            }
+        }
+    }
+    if done {
+        *last_done_json = Some(json);
+    }
+    Ok(())
+}
+
 // --- Ollama (local)
+
+/// `num_predict` from routing YAML can be `u32::MAX`; Ollama would otherwise accept absurd budgets and we buffer the full JSON stream in RAM.
+const OLLAMA_MAX_NUM_PREDICT: u32 = 262_144;
+/// Hard cap on streamed `response` + `thinking` bytes before we fail closed (avoids multi‑GB growth on hung/runaway streams).
+const OLLAMA_MAX_STREAM_BODY_BYTES: usize = 64 * 1024 * 1024;
+/// Max bytes held while waiting for a complete NDJSON line (no `\n` yet).
+const OLLAMA_MAX_PENDING_BEFORE_NEWLINE_BYTES: usize = 8 * 1024 * 1024;
+/// Max `/api/generate` JSON body for non‑streaming responses (`resp.json()` would allocate the whole value).
+const OLLAMA_MAX_NONSTREAM_JSON_BYTES: usize = 64 * 1024 * 1024;
+
+fn ollama_stream_body_bytes(
+    accumulated_text: &str,
+    thinking_buf: &str,
+    thinking_final: &Option<String>,
+) -> usize {
+    accumulated_text.len()
+        + thinking_buf.len()
+        + thinking_final.as_ref().map(|s| s.len()).unwrap_or(0)
+}
+
+fn ollama_check_stream_body_cap_with(
+    accumulated_text: &str,
+    thinking_buf: &str,
+    thinking_final: &Option<String>,
+    cap: usize,
+) -> Result<(), ProviderError> {
+    let n = ollama_stream_body_bytes(accumulated_text, thinking_buf, thinking_final);
+    if n > cap {
+        return Err(ProviderError::Api(format!(
+            "ollama stream: completion buffer exceeded {} bytes (response + thinking); aborting to avoid OOM",
+            cap
+        )));
+    }
+    Ok(())
+}
+
+fn ollama_check_stream_body_cap(
+    accumulated_text: &str,
+    thinking_buf: &str,
+    thinking_final: &Option<String>,
+) -> Result<(), ProviderError> {
+    ollama_check_stream_body_cap_with(
+        accumulated_text,
+        thinking_buf,
+        thinking_final,
+        OLLAMA_MAX_STREAM_BODY_BYTES,
+    )
+}
+
 pub struct OllamaProvider {
     base_url: String,
 }
@@ -185,22 +305,31 @@ impl OllamaProvider {
         }
     }
 
-    async fn complete_async(
+    /// Shared `/api/generate` JSON body for Ollama (same options for stream and non-stream).
+    fn build_generate_body(
         &self,
         request: &CompletionRequest,
         model: &str,
-        timeout: Duration,
-    ) -> Result<CompletionResponse, ProviderError> {
-        let client = reqwest::Client::new();
+        stream: bool,
+    ) -> (String, serde_json::Value) {
         let url = format!("{}/api/generate", self.base_url);
         let prompt = match &request.system_prompt {
             Some(s) if !s.is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
             _ => request.prompt.clone(),
         };
 
-        // Build options with all supported parameters (Ollama-compatible).
+        let raw_predict = request.max_tokens.unwrap_or(4096);
+        let num_predict = raw_predict.min(OLLAMA_MAX_NUM_PREDICT).max(1);
+        if raw_predict > OLLAMA_MAX_NUM_PREDICT {
+            warn!(
+                model = %model,
+                requested_num_predict = raw_predict,
+                capped_num_predict = num_predict,
+                "Ollama num_predict capped (very large values risk huge JSON buffers and OOM)"
+            );
+        }
         let mut options = serde_json::json!({
-            "num_predict": request.max_tokens.unwrap_or(4096),
+            "num_predict": num_predict,
             "temperature": request.temperature.unwrap_or(0.7),
         });
 
@@ -220,17 +349,26 @@ impl OllamaProvider {
             options["num_gpu"] = serde_json::json!(num_gpu);
         }
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "prompt": prompt,
-            "stream": false,
+            "stream": stream,
             "options": options
         });
-        let mut body = body;
         if let Some(enabled) = ollama_think_enabled(request.thinking_level.as_deref()) {
-            // Ollama supports `think` as a boolean toggle.
             body["think"] = serde_json::json!(enabled);
         }
+        (url, body)
+    }
+
+    async fn complete_async(
+        &self,
+        request: &CompletionRequest,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let client = reqwest::Client::new();
+        let (url, body) = self.build_generate_body(request, model, false);
         let resp = client
             .post(&url)
             .json(&body)
@@ -245,7 +383,7 @@ impl OllamaProvider {
                         endpoint = %url,
                         model = %model,
                         timeout_secs = timeout.as_secs(),
-                        prompt_chars = prompt.chars().count(),
+                        prompt_chars = request.prompt.chars().count(),
                         reqwest_error = %e,
                         "Ollama request timed out (reqwest total deadline: cold model load, slow generation, or unreachable host often exceed this; check network and llm_router timeout_per_call)"
                     );
@@ -260,7 +398,7 @@ impl OllamaProvider {
         if !resp.status().is_success() {
             return Err(ProviderError::Api(format!("status {}", resp.status())));
         }
-        let json: serde_json::Value = resp.json().await.map_err(|e| {
+        let bytes = resp.bytes().await.map_err(|e| {
             if e.is_timeout() {
                 warn!(
                     provider = "ollama",
@@ -276,6 +414,16 @@ impl OllamaProvider {
             } else {
                 ProviderError::Api(e.to_string())
             }
+        })?;
+        if bytes.len() > OLLAMA_MAX_NONSTREAM_JSON_BYTES {
+            return Err(ProviderError::Api(format!(
+                "ollama non-stream response too large ({} bytes, max {})",
+                bytes.len(),
+                OLLAMA_MAX_NONSTREAM_JSON_BYTES
+            )));
+        }
+        let json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+            ProviderError::Api(format!("ollama JSON: {}", e))
         })?;
         let text = json.get("response").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if text.trim().is_empty() {
@@ -319,6 +467,169 @@ impl OllamaProvider {
             total_duration_ns,
         })
     }
+
+    async fn complete_stream_async(
+        &self,
+        request: &CompletionRequest,
+        model: &str,
+        timeout: Duration,
+        chunk_tx: &std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let client = reqwest::Client::new();
+        let (url, body) = self.build_generate_body(request, model, true);
+        let mut resp = client
+            .post(&url)
+            .json(&body)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    warn!(
+                        provider = "ollama",
+                        base_url = %self.base_url,
+                        endpoint = %url,
+                        model = %model,
+                        timeout_secs = timeout.as_secs(),
+                        reqwest_error = %e,
+                        "Ollama streaming request timed out"
+                    );
+                    ProviderError::Timeout
+                } else {
+                    ProviderError::Api(e.to_string())
+                }
+            })?;
+        if resp.status().as_u16() == 429 {
+            return Err(ProviderError::RateLimit);
+        }
+        if !resp.status().is_success() {
+            return Err(ProviderError::Api(format!("status {}", resp.status())));
+        }
+
+        let mut pending = String::new();
+        let mut accumulated_text = String::new();
+        let mut thinking_buf = String::new();
+        let mut thinking_final: Option<String> = None;
+        let mut last_done_json: Option<serde_json::Value> = None;
+
+        loop {
+            let chunk = resp.chunk().await.map_err(|e| {
+                if e.is_timeout() {
+                    warn!(
+                        provider = "ollama",
+                        base_url = %self.base_url,
+                        endpoint = %url,
+                        model = %model,
+                        timeout_secs = timeout.as_secs(),
+                        phase = "read_chunk",
+                        reqwest_error = %e,
+                        "Ollama streaming body read timed out"
+                    );
+                    ProviderError::Timeout
+                } else {
+                    ProviderError::Api(e.to_string())
+                }
+            })?;
+            let Some(chunk) = chunk else {
+                break;
+            };
+            let chunk_s = String::from_utf8_lossy(&chunk);
+            if pending.len().saturating_add(chunk_s.len()) > OLLAMA_MAX_PENDING_BEFORE_NEWLINE_BYTES {
+                return Err(ProviderError::Api(format!(
+                    "ollama stream: {} bytes buffered without a newline (max {}); malformed NDJSON or missing newlines",
+                    pending.len().saturating_add(chunk_s.len()),
+                    OLLAMA_MAX_PENDING_BEFORE_NEWLINE_BYTES
+                )));
+            }
+            pending.push_str(&chunk_s);
+            while let Some(pos) = pending.find('\n') {
+                let line = pending[..pos].trim_end_matches('\r').to_string();
+                pending = pending[pos + 1..].to_string();
+                ollama_apply_stream_ndjson_line(
+                    &line,
+                    &mut accumulated_text,
+                    &mut thinking_buf,
+                    &mut thinking_final,
+                    &mut last_done_json,
+                    chunk_tx,
+                )?;
+                ollama_check_stream_body_cap(
+                    &accumulated_text,
+                    &thinking_buf,
+                    &thinking_final,
+                )?;
+            }
+        }
+        if !pending.trim().is_empty() {
+            ollama_apply_stream_ndjson_line(
+                pending.trim(),
+                &mut accumulated_text,
+                &mut thinking_buf,
+                &mut thinking_final,
+                &mut last_done_json,
+                chunk_tx,
+            )?;
+            ollama_check_stream_body_cap(
+                &accumulated_text,
+                &thinking_buf,
+                &thinking_final,
+            )?;
+        }
+
+        let thinking = thinking_final.or_else(|| {
+            if thinking_buf.is_empty() {
+                None
+            } else {
+                Some(thinking_buf)
+            }
+        });
+
+        let json = last_done_json.as_ref();
+        let text = accumulated_text;
+        if text.trim().is_empty() {
+            let full = json
+                .map(|j| serde_json::to_string_pretty(j).unwrap_or_else(|_| j.to_string()))
+                .unwrap_or_else(|| "(no final chunk)".to_string());
+            warn!(
+                model = %model,
+                "Ollama stream returned empty text. Last JSON line (debug):\n{}",
+                full
+            );
+        }
+
+        let usage = json
+            .and_then(|j| j.get("eval_count").and_then(|v| v.as_u64()))
+            .map(|c| TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: c,
+            });
+        let done_reason = json
+            .and_then(|j| j.get("done_reason").and_then(|v| v.as_str()))
+            .map(String::from);
+        let eval_count = json.and_then(|j| j.get("eval_count").and_then(|v| v.as_u64()));
+        let total_duration_ns = json.and_then(|j| j.get("total_duration").and_then(|v| v.as_u64()));
+
+        if done_reason.as_deref() == Some("length") {
+            warn!(
+                model = %model,
+                text_len = text.len(),
+                thinking_len = thinking.as_ref().map(|t| t.len()),
+                eval_count = ?eval_count,
+                "Model response truncated due to max_tokens limit (streaming)"
+            );
+        }
+
+        Ok(CompletionResponse {
+            text,
+            usage,
+            model_used: model.to_string(),
+            cost_usd: None,
+            thinking,
+            done_reason,
+            eval_count,
+            total_duration_ns,
+        })
+    }
 }
 
 #[async_trait]
@@ -348,6 +659,18 @@ impl LLMProvider for OllamaProvider {
         let model = model_override.unwrap_or("llama3.2");
         self.complete_async(request, model, timeout).await
     }
+
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let model = model_override.unwrap_or("llama3.2");
+        self.complete_stream_async(request, model, timeout, &chunk_tx)
+            .await
+    }
 }
 
 // --- OpenAI (cloud)
@@ -367,17 +690,7 @@ impl OpenAIProvider {
         }
     }
 
-    async fn complete_async(
-        &self,
-        request: &CompletionRequest,
-        model: &str,
-        timeout: Duration,
-    ) -> Result<CompletionResponse, ProviderError> {
-        if self.api_key.is_empty() {
-            return Err(ProviderError::Auth("missing API key".into()));
-        }
-        let client = reqwest::Client::new();
-        let url = format!("{}/chat/completions", self.base_url);
+    fn build_chat_completions_body(&self, request: &CompletionRequest, model: &str) -> serde_json::Value {
         let user_content = match &request.image_data_urls {
             Some(urls) if !urls.is_empty() => {
                 let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
@@ -399,7 +712,6 @@ impl OpenAIProvider {
             _ => serde_json::json!([{ "role": "user", "content": user_content }]),
         };
 
-        // Build request body with all supported OpenAI parameters.
         let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
@@ -421,6 +733,21 @@ impl OpenAIProvider {
                 body["reasoning_effort"] = serde_json::json!(level);
             }
         }
+        body
+    }
+
+    async fn complete_async(
+        &self,
+        request: &CompletionRequest,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Auth("missing API key".into()));
+        }
+        let client = reqwest::Client::new();
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = self.build_chat_completions_body(request, model);
 
         let resp = client
             .post(&url)
@@ -504,6 +831,33 @@ impl LLMProvider for OpenAIProvider {
         // Approx gpt-4o-mini: $0.15/1M input, $0.60/1M output (simplified)
         (usage.prompt_tokens as f64 * 0.15 + usage.completion_tokens as f64 * 0.60) / 1_000_000.0
     }
+
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Auth("missing API key".into()));
+        }
+        let model = model_override.unwrap_or("gpt-4o-mini");
+        let client = reqwest::Client::new();
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = self.build_chat_completions_body(request, model);
+        let key = self.api_key.clone();
+        streaming::post_openai_chat_completions_stream(
+            &client,
+            &url,
+            move |req| req.header("Authorization", format!("Bearer {}", key)),
+            body,
+            timeout,
+            model,
+            &chunk_tx,
+        )
+        .await
+    }
 }
 
 // --- OpenRouter (cloud, unified API compatible with OpenAI format)
@@ -541,6 +895,52 @@ impl OpenRouterProvider {
             app_title,
         }
     }
+
+    fn build_chat_completions_body(&self, request: &CompletionRequest, model: &str) -> serde_json::Value {
+        let user_content = match &request.image_data_urls {
+            Some(urls) if !urls.is_empty() => {
+                let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
+                for url in urls {
+                    content.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": url }
+                    }));
+                }
+                serde_json::Value::Array(content)
+            }
+            _ => serde_json::json!(request.prompt),
+        };
+        let messages = match &request.system_prompt {
+            Some(s) if !s.trim().is_empty() => serde_json::json!([
+                { "role": "system", "content": s.trim_end() },
+                { "role": "user", "content": user_content }
+            ]),
+            _ => serde_json::json!([{ "role": "user", "content": user_content }]),
+        };
+
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "max_tokens": request.max_tokens.unwrap_or(4096),
+            "temperature": request.temperature.unwrap_or(0.7)
+        });
+
+        if let Some(top_p) = request.top_p {
+            body["top_p"] = serde_json::json!(top_p);
+        }
+        if let Some(freq_penalty) = request.frequency_penalty {
+            body["frequency_penalty"] = serde_json::json!(freq_penalty);
+        }
+        if let Some(pres_penalty) = request.presence_penalty {
+            body["presence_penalty"] = serde_json::json!(pres_penalty);
+        }
+        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
+            if level != "off" && supports_openai_reasoning_effort(model) {
+                body["reasoning_effort"] = serde_json::json!(level);
+            }
+        }
+        body
+    }
 }
 
 #[async_trait]
@@ -569,49 +969,7 @@ impl LLMProvider for OpenRouterProvider {
         let model = model_override.unwrap_or("openai/gpt-4o-mini");
         let client = reqwest::Client::new();
         let url = format!("{}/chat/completions", self.base_url);
-        let user_content = match &request.image_data_urls {
-            Some(urls) if !urls.is_empty() => {
-                let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
-                for url in urls {
-                    content.push(serde_json::json!({
-                        "type": "image_url",
-                        "image_url": { "url": url }
-                    }));
-                }
-                serde_json::Value::Array(content)
-            }
-            _ => serde_json::json!(request.prompt),
-        };
-        let messages = match &request.system_prompt {
-            Some(s) if !s.trim().is_empty() => serde_json::json!([
-                { "role": "system", "content": s.trim_end() },
-                { "role": "user", "content": user_content }
-            ]),
-            _ => serde_json::json!([{ "role": "user", "content": user_content }]),
-        };
-
-        // Build request body with all supported OpenAI/OpenRouter parameters.
-        let mut body = serde_json::json!({
-            "model": model,
-            "messages": messages,
-            "max_tokens": request.max_tokens.unwrap_or(4096),
-            "temperature": request.temperature.unwrap_or(0.7)
-        });
-
-        if let Some(top_p) = request.top_p {
-            body["top_p"] = serde_json::json!(top_p);
-        }
-        if let Some(freq_penalty) = request.frequency_penalty {
-            body["frequency_penalty"] = serde_json::json!(freq_penalty);
-        }
-        if let Some(pres_penalty) = request.presence_penalty {
-            body["presence_penalty"] = serde_json::json!(pres_penalty);
-        }
-        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
-            if level != "off" && supports_openai_reasoning_effort(model) {
-                body["reasoning_effort"] = serde_json::json!(level);
-            }
-        }
+        let body = self.build_chat_completions_body(request, model);
 
         let mut req = client
             .post(&url)
@@ -681,6 +1039,42 @@ impl LLMProvider for OpenRouterProvider {
             total_duration_ns: None,
         })
     }
+
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Auth("missing API key".into()));
+        }
+        let model = model_override.unwrap_or("openai/gpt-4o-mini");
+        let client = reqwest::Client::new();
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = self.build_chat_completions_body(request, model);
+        let api_key = self.api_key.clone();
+        let referer = self
+            .site_url
+            .clone()
+            .unwrap_or_else(|| "https://Akasha.local".into());
+        let title = self.app_title.clone().unwrap_or_else(|| "Akasha".into());
+        streaming::post_openai_chat_completions_stream(
+            &client,
+            &url,
+            move |req| {
+                req.header("Authorization", format!("Bearer {}", api_key))
+                    .header("HTTP-Referer", referer.as_str())
+                    .header("X-Title", title.as_str())
+            },
+            body,
+            timeout,
+            model,
+            &chunk_tx,
+        )
+        .await
+    }
 }
 
 // --- Anthropic (cloud, Messages API)
@@ -698,6 +1092,30 @@ impl AnthropicProvider {
                 .trim_end_matches('/')
                 .to_string(),
         }
+    }
+
+    fn build_messages_body(&self, request: &CompletionRequest, model: &str) -> serde_json::Value {
+        let prompt = match &request.system_prompt {
+            Some(s) if !s.trim().is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
+            _ => request.prompt.clone(),
+        };
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": request.max_tokens.unwrap_or(4096),
+            "messages": [{ "role": "user", "content": prompt }]
+        });
+        let mut body = body;
+        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
+            if level != "off" && supports_anthropic_thinking(model) {
+                if let Some(budget_tokens) = anthropic_thinking_budget_tokens(level) {
+                    body["thinking"] = serde_json::json!({
+                        "type": "enabled",
+                        "budget_tokens": budget_tokens
+                    });
+                }
+            }
+        }
+        body
     }
 }
 
@@ -724,26 +1142,7 @@ impl LLMProvider for AnthropicProvider {
         let model = model_override.unwrap_or("claude-3-5-sonnet-20241022");
         let client = reqwest::Client::new();
         let url = format!("{}/v1/messages", self.base_url);
-        let prompt = match &request.system_prompt {
-            Some(s) if !s.trim().is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
-            _ => request.prompt.clone(),
-        };
-        let body = serde_json::json!({
-            "model": model,
-            "max_tokens": request.max_tokens.unwrap_or(4096),
-            "messages": [{ "role": "user", "content": prompt }]
-        });
-        let mut body = body;
-        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
-            if level != "off" && supports_anthropic_thinking(model) {
-                if let Some(budget_tokens) = anthropic_thinking_budget_tokens(level) {
-                    body["thinking"] = serde_json::json!({
-                        "type": "enabled",
-                        "budget_tokens": budget_tokens
-                    });
-                }
-            }
-        }
+        let body = self.build_messages_body(request, model);
         let resp = client
             .post(&url)
             .header("x-api-key", &self.api_key)
@@ -789,6 +1188,40 @@ impl LLMProvider for AnthropicProvider {
             total_duration_ns: None,
         })
     }
+
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Auth("missing API key".into()));
+        }
+        let model = model_override.unwrap_or("claude-3-5-sonnet-20241022");
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1/messages", self.base_url);
+        let mut body = self.build_messages_body(request, model);
+        body["stream"] = serde_json::json!(true);
+        let resp = client
+            .post(&url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    ProviderError::Timeout
+                } else {
+                    ProviderError::Api(e.to_string())
+                }
+            })?;
+        streaming::read_anthropic_messages_sse_stream(resp, model, &chunk_tx).await
+    }
 }
 
 // --- Azure OpenAI (cloud, same shape as OpenAI but custom endpoint + api-key header)
@@ -807,6 +1240,38 @@ impl AzureOpenAIProvider {
             api_key: api_key.unwrap_or_default(),
             base_url: base,
         }
+    }
+
+    fn build_chat_completions_body(&self, request: &CompletionRequest, deployment: &str) -> serde_json::Value {
+        let messages = match &request.system_prompt {
+            Some(s) if !s.trim().is_empty() => serde_json::json!([
+                { "role": "system", "content": s.trim_end() },
+                { "role": "user", "content": request.prompt }
+            ]),
+            _ => serde_json::json!([{ "role": "user", "content": request.prompt }]),
+        };
+
+        let mut body = serde_json::json!({
+            "messages": messages,
+            "max_tokens": request.max_tokens.unwrap_or(4096),
+            "temperature": request.temperature.unwrap_or(0.7)
+        });
+
+        if let Some(top_p) = request.top_p {
+            body["top_p"] = serde_json::json!(top_p);
+        }
+        if let Some(freq_penalty) = request.frequency_penalty {
+            body["frequency_penalty"] = serde_json::json!(freq_penalty);
+        }
+        if let Some(pres_penalty) = request.presence_penalty {
+            body["presence_penalty"] = serde_json::json!(pres_penalty);
+        }
+        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
+            if level != "off" && supports_openai_reasoning_effort(deployment) {
+                body["reasoning_effort"] = serde_json::json!(level);
+            }
+        }
+        body
     }
 }
 
@@ -837,35 +1302,7 @@ impl LLMProvider for AzureOpenAIProvider {
             self.base_url.trim_end_matches('/'),
             deployment
         );
-        let messages = match &request.system_prompt {
-            Some(s) if !s.trim().is_empty() => serde_json::json!([
-                { "role": "system", "content": s.trim_end() },
-                { "role": "user", "content": request.prompt }
-            ]),
-            _ => serde_json::json!([{ "role": "user", "content": request.prompt }]),
-        };
-
-        // Build request body with OpenAI-compatible parameters.
-        let mut body = serde_json::json!({
-            "messages": messages,
-            "max_tokens": request.max_tokens.unwrap_or(4096),
-            "temperature": request.temperature.unwrap_or(0.7)
-        });
-
-        if let Some(top_p) = request.top_p {
-            body["top_p"] = serde_json::json!(top_p);
-        }
-        if let Some(freq_penalty) = request.frequency_penalty {
-            body["frequency_penalty"] = serde_json::json!(freq_penalty);
-        }
-        if let Some(pres_penalty) = request.presence_penalty {
-            body["presence_penalty"] = serde_json::json!(pres_penalty);
-        }
-        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
-            if level != "off" && supports_openai_reasoning_effort(deployment) {
-                body["reasoning_effort"] = serde_json::json!(level);
-            }
-        }
+        let body = self.build_chat_completions_body(request, deployment);
 
         let resp = client
             .post(&url)
@@ -912,6 +1349,37 @@ impl LLMProvider for AzureOpenAIProvider {
             total_duration_ns: None,
         })
     }
+
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Auth("missing API key".into()));
+        }
+        let deployment = model_override.unwrap_or("gpt-4o-mini");
+        let client = reqwest::Client::new();
+        let url = format!(
+            "{}/openai/deployments/{}/chat/completions?api-version=2024-02-15-preview",
+            self.base_url.trim_end_matches('/'),
+            deployment
+        );
+        let body = self.build_chat_completions_body(request, deployment);
+        let key = self.api_key.clone();
+        streaming::post_openai_chat_completions_stream(
+            &client,
+            &url,
+            move |req| req.header("api-key", key.clone()),
+            body,
+            timeout,
+            deployment,
+            &chunk_tx,
+        )
+        .await
+    }
 }
 
 // --- Google AI (Gemini, generativelanguage API)
@@ -929,6 +1397,42 @@ impl GoogleAIProvider {
                 .trim_end_matches('/')
                 .to_string(),
         }
+    }
+
+    fn build_generate_content_body(&self, request: &CompletionRequest, model: &str) -> serde_json::Value {
+        let prompt = match &request.system_prompt {
+            Some(s) if !s.trim().is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
+            _ => request.prompt.clone(),
+        };
+
+        let mut generation_config = serde_json::json!({
+            "maxOutputTokens": request.max_tokens.unwrap_or(4096),
+            "temperature": request.temperature.unwrap_or(0.7)
+        });
+
+        if let Some(top_p) = request.top_p {
+            generation_config["topP"] = serde_json::json!(top_p);
+        }
+        if let Some(top_k) = request.top_k {
+            generation_config["topK"] = serde_json::json!(top_k);
+        }
+        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
+            if supports_google_thinking(model) {
+                let budget = match level {
+                    "off" => 0u32,
+                    "low" => 512u32,
+                    "medium" => 2048u32,
+                    "high" => 4096u32,
+                    _ => 0u32,
+                };
+                generation_config["thinkingConfig"] = serde_json::json!({ "thinkingBudget": budget });
+            }
+        }
+
+        serde_json::json!({
+            "contents": [{ "parts": [{ "text": prompt }] }],
+            "generationConfig": generation_config
+        })
     }
 }
 
@@ -955,40 +1459,7 @@ impl LLMProvider for GoogleAIProvider {
         let model = model_override.unwrap_or("gemini-1.5-flash");
         let client = reqwest::Client::new();
         let url = format!("{}/v1beta/models/{}:generateContent?key={}", self.base_url, model, self.api_key);
-        let prompt = match &request.system_prompt {
-            Some(s) if !s.trim().is_empty() => format!("{}\n\n{}", s.trim_end(), request.prompt),
-            _ => request.prompt.clone(),
-        };
-
-        // Build generation config with all supported parameters.
-        let mut generation_config = serde_json::json!({
-            "maxOutputTokens": request.max_tokens.unwrap_or(4096),
-            "temperature": request.temperature.unwrap_or(0.7)
-        });
-
-        if let Some(top_p) = request.top_p {
-            generation_config["topP"] = serde_json::json!(top_p);
-        }
-        if let Some(top_k) = request.top_k {
-            generation_config["topK"] = serde_json::json!(top_k);
-        }
-        if let Some(level) = normalized_thinking_level(request.thinking_level.as_deref()) {
-            if supports_google_thinking(model) {
-                let budget = match level {
-                    "off" => 0u32,
-                    "low" => 512u32,
-                    "medium" => 2048u32,
-                    "high" => 4096u32,
-                    _ => 0u32,
-                };
-                generation_config["thinkingConfig"] = serde_json::json!({ "thinkingBudget": budget });
-            }
-        }
-
-        let body = serde_json::json!({
-            "contents": [{ "parts": [{ "text": prompt }] }],
-            "generationConfig": generation_config
-        });
+        let body = self.build_generate_content_body(request, model);
         let resp = client
             .post(&url)
             .header("Content-Type", "application/json")
@@ -1033,6 +1504,40 @@ impl LLMProvider for GoogleAIProvider {
             total_duration_ns: None,
         })
     }
+
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if self.api_key.is_empty() {
+            return Err(ProviderError::Auth("missing API key".into()));
+        }
+        let model = model_override.unwrap_or("gemini-1.5-flash");
+        let client = reqwest::Client::new();
+        let url = format!(
+            "{}/v1beta/models/{}:streamGenerateContent?key={}",
+            self.base_url, model, self.api_key
+        );
+        let body = self.build_generate_content_body(request, model);
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    ProviderError::Timeout
+                } else {
+                    ProviderError::Api(e.to_string())
+                }
+            })?;
+        streaming::read_google_gemini_sse_stream(resp, model, &chunk_tx).await
+    }
 }
 
 // --- BitNet (local: llama-server / BitNet inference server, OpenAI-compatible API)
@@ -1058,14 +1563,7 @@ impl BitNetProvider {
         }
     }
 
-    async fn complete_async(
-        &self,
-        request: &CompletionRequest,
-        model: &str,
-        timeout: Duration,
-    ) -> Result<CompletionResponse, ProviderError> {
-        let client = reqwest::Client::new();
-        let url = self.chat_completions_url();
+    fn build_chat_completions_body(&self, request: &CompletionRequest, model: &str) -> serde_json::Value {
         let user_content = match &request.image_data_urls {
             Some(urls) if !urls.is_empty() => {
                 let mut content = vec![serde_json::json!({ "type": "text", "text": request.prompt })];
@@ -1087,13 +1585,11 @@ impl BitNetProvider {
             _ => serde_json::json!([{ "role": "user", "content": user_content }]),
         };
 
-        // Build request body with all supported OpenAI-compatible parameters.
         let mut body = serde_json::json!({
             "model": model,
             "messages": messages,
             "max_tokens": request.max_tokens.unwrap_or(4096),
-            "temperature": request.temperature.unwrap_or(0.7),
-            "stream": false
+            "temperature": request.temperature.unwrap_or(0.7)
         });
 
         if let Some(top_p) = request.top_p {
@@ -1114,6 +1610,18 @@ impl BitNetProvider {
         if let Some(num_ctx) = request.num_ctx {
             body["num_ctx"] = serde_json::json!(num_ctx);
         }
+        body
+    }
+
+    async fn complete_async(
+        &self,
+        request: &CompletionRequest,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let client = reqwest::Client::new();
+        let url = self.chat_completions_url();
+        let body = self.build_chat_completions_body(request, model);
 
         let resp = client
             .post(&url)
@@ -1197,10 +1705,6 @@ impl LLMProvider for BitNetProvider {
         true
     }
 
-    fn supports_streaming(&self) -> bool {
-        false
-    }
-
     async fn complete(
         &self,
         request: &CompletionRequest,
@@ -1209,6 +1713,29 @@ impl LLMProvider for BitNetProvider {
     ) -> Result<CompletionResponse, ProviderError> {
         let model = model_override.unwrap_or("default");
         self.complete_async(request, model, timeout).await
+    }
+
+    async fn complete_stream(
+        &self,
+        request: &CompletionRequest,
+        timeout: Duration,
+        model_override: Option<&str>,
+        chunk_tx: std::sync::mpsc::Sender<String>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let model = model_override.unwrap_or("default");
+        let client = reqwest::Client::new();
+        let url = self.chat_completions_url();
+        let body = self.build_chat_completions_body(request, model);
+        streaming::post_openai_chat_completions_stream(
+            &client,
+            &url,
+            |req| req,
+            body,
+            timeout,
+            model,
+            &chunk_tx,
+        )
+        .await
     }
 }
 
@@ -1457,6 +1984,86 @@ mod tests {
     fn ollama_provider_is_available_no_panic() {
         let p = OllamaProvider::new(None);
         let _ = p.is_available();
+    }
+
+    #[test]
+    fn ollama_provider_supports_streaming() {
+        let p = OllamaProvider::new(None);
+        assert!(LLMProvider::supports_streaming(&p));
+    }
+
+    #[test]
+    fn ollama_check_stream_body_cap_with_errors_past_limit() {
+        // "hello" (5) + "world" (5) = 10 bytes
+        assert!(ollama_check_stream_body_cap_with("hello", "world", &None, 10).is_ok());
+        assert!(ollama_check_stream_body_cap_with("hello", "world", &None, 9).is_err());
+    }
+
+    #[test]
+    fn context_window_error_detects_openrouter_glm_message() {
+        let msg = r#"400 Bad Request {"error":{"message":"This endpoint's maximum context length is 204800 tokens. However, you requested about 671046 tokens (638278 of text input, 32768 in the output). Please reduce the length of either one"}}"#;
+        assert!(provider_error_is_context_window_exceeded(&ProviderError::Api(
+            msg.into()
+        )));
+    }
+
+    #[test]
+    fn context_window_error_detects_openai_code() {
+        assert!(provider_error_is_context_window_exceeded(&ProviderError::Api(
+            "context_window_exceeded".into()
+        )));
+    }
+
+    #[test]
+    fn context_window_error_ignores_unrelated_api_errors() {
+        assert!(!provider_error_is_context_window_exceeded(&ProviderError::Api(
+            "500 internal server error".into()
+        )));
+        assert!(!provider_error_is_context_window_exceeded(&ProviderError::Timeout));
+    }
+
+    #[test]
+    fn ollama_stream_ndjson_lines_accumulate_text_and_emit_chunk_deltas() {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let mut acc = String::new();
+        let mut thinking_buf = String::new();
+        let mut thinking_final: Option<String> = None;
+        let mut last_done: Option<serde_json::Value> = None;
+
+        ollama_apply_stream_ndjson_line(
+            r#"{"response":"Hel","done":false}"#,
+            &mut acc,
+            &mut thinking_buf,
+            &mut thinking_final,
+            &mut last_done,
+            &tx,
+        )
+        .unwrap();
+        ollama_apply_stream_ndjson_line(
+            r#"{"response":"lo","done":false}"#,
+            &mut acc,
+            &mut thinking_buf,
+            &mut thinking_final,
+            &mut last_done,
+            &tx,
+        )
+        .unwrap();
+        ollama_apply_stream_ndjson_line(
+            r#"{"response":"","done":true,"eval_count":2,"done_reason":"stop"}"#,
+            &mut acc,
+            &mut thinking_buf,
+            &mut thinking_final,
+            &mut last_done,
+            &tx,
+        )
+        .unwrap();
+
+        drop(tx);
+        let chunks: Vec<String> = rx.into_iter().collect();
+        assert_eq!(chunks, vec!["Hel".to_string(), "lo".to_string()]);
+        assert_eq!(acc, "Hello");
+        assert!(last_done.is_some());
+        assert_eq!(last_done.unwrap()["eval_count"], serde_json::json!(2));
     }
 
     #[test]

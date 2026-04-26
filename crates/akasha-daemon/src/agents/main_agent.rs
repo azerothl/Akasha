@@ -4,6 +4,7 @@ use akasha_core::{EventEnvelope, EventType};
 use akasha_llm::CompletionRequest;
 use akasha_store::{Task, TaskStatus, TaskStore, TodoStatus};
 use crate::agents::{classify_execution_mode, EventBus, ExecutionMode};
+use crate::studio::StudioDiskRootRegistry;
 use crate::latency::{emit_timeline_for_task, env_duration_ms};
 use chrono::Utc;
 use std::path::Path;
@@ -144,7 +145,19 @@ const SPECIALIST_AGENTS: &[&str] = &[
     "integration",
     "qa",
     "image_generation",
+    "studio_scaffold",
+    "studio_frontend",
+    "studio_backend",
+    "studio_fullstack",
+    "studio_planner",
+    "studio_project_manager",
 ];
+
+/// True when `name` matches a routed specialist agent (case-insensitive).
+pub fn is_specialist_agent(name: &str) -> bool {
+    let n = name.trim();
+    SPECIALIST_AGENTS.iter().any(|a| a.eq_ignore_ascii_case(n))
+}
 /// Priority for the task queue: high-priority tasks are processed before normal/scheduled (Phase 4.1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TaskPriority {
@@ -271,6 +284,8 @@ pub struct MainAgent {
     llm_router: Arc<akasha_llm::LLMRouter>,
     /// When Some, Direct mode tasks are sent here (conversation worker) instead of to the orchestrator.
     direct_conversation_tx: Option<mpsc::Sender<OrchestratorTask>>,
+    /// Code Studio: maps root task id → sandboxed project disk root for tool execution.
+    studio_disk_registry: StudioDiskRootRegistry,
 }
 
 impl MainAgent {
@@ -278,12 +293,14 @@ impl MainAgent {
         bus: EventBus,
         orchestrator: OrchestratorSender,
         llm_router: Arc<akasha_llm::LLMRouter>,
+        studio_disk_registry: StudioDiskRootRegistry,
     ) -> Self {
         Self {
             bus,
             orchestrator,
             llm_router,
             direct_conversation_tx: None,
+            studio_disk_registry,
         }
     }
 
@@ -354,6 +371,10 @@ impl MainAgent {
         }
 
         let started = Instant::now();
+        let message_capped = crate::llm_prompt_cap::truncate_utf8_bytes(
+            message,
+            crate::llm_prompt_cap::SELECTOR_USER_MESSAGE_MAX_BYTES,
+        );
         let prompt = format!(
             "You are a strict routing selector for Akasha.\n\
 Return ONLY compact JSON with schema:\n\
@@ -363,7 +384,7 @@ Rules:\n\
 - task_type must be one of: conversation, code_generation, creative_writing, scientific_analysis, data_analysis, system_diagnostic, system, orchestrator, image_generation.\n\
 - If unsure, use answer_mode=delegate and task_type=conversation.\n\
 User message:\n{}",
-            message
+            message_capped
         );
         let req = CompletionRequest {
             prompt,
@@ -433,6 +454,9 @@ User message:\n{}",
         session_id: &str,
         image_data_urls: Option<Vec<String>>,
         priority: TaskPriority,
+        studio_disk_root: Option<std::path::PathBuf>,
+        studio_forced_agent: Option<String>,
+        studio_evolution_branch: Option<String>,
     ) -> anyhow::Result<Uuid> {
         let session_id = if session_id.is_empty() { "default" } else { session_id };
         let task_id = Uuid::new_v4();
@@ -456,7 +480,16 @@ User message:\n{}",
         } else {
             None
         };
-        let preliminary_agent = if !forward_to_orchestrator {
+        let preliminary_agent: &str = if let Some(ref a) = studio_forced_agent {
+            let normalized = a.trim();
+            if let Some(canonical) = SPECIALIST_AGENTS.iter().find(|s| s.eq_ignore_ascii_case(normalized)) {
+                canonical
+            } else if !forward_to_orchestrator {
+                "llm"
+            } else {
+                "orchestrator"
+            }
+        } else if !forward_to_orchestrator {
             "llm"
         } else {
             "orchestrator"
@@ -479,6 +512,21 @@ User message:\n{}",
             store.insert(&task)?;
         }
 
+        if let Some(p) = studio_disk_root.clone() {
+            crate::studio::register_studio_root(&self.studio_disk_registry, task_id, p).await;
+        }
+
+        let mut message_for_llm = message.to_string();
+        // Keep the unmodified user message for routing decisions (recall detection, selector).
+        // The studio prefix is only for the LLM prompt — routing logic should see the original intent.
+        let original_user_message = message.to_string();
+        if let Some(ref b) = studio_evolution_branch {
+            message_for_llm = format!(
+                "[Studio: apply changes on git branch `{b}`]\n\n{}",
+                message_for_llm
+            );
+        }
+
         // Use task_id as correlation so GET /api/tasks/{task_id}/events returns these events.
         let _ = self.bus.send(EventEnvelope::new(EventType::UserRequestReceived, Some(serde_json::json!({ "message": message }))).with_correlation(task_id));
         emit_timeline_for_task(&self.bus, Some(store_path), task_id, "request_received", None);
@@ -496,19 +544,55 @@ User message:\n{}",
         // HTTP handler for that long causes "operation timed out" errors in the frontend even
         // though the task actually completes correctly in the background.
         let agent_clone = self.clone();
-        let message_owned = message.to_string();
+        let studio_forced_spawn = studio_forced_agent.clone();
+        let message_owned = message_for_llm;
+        let original_user_message_owned = original_user_message;
         let session_id_owned = session_id.to_string();
         let store_path_buf = store_path.to_path_buf();
         let preliminary_agent_str = preliminary_agent.to_string();
         tokio::spawn(async move {
             let store_path = store_path_buf.as_path();
             let message = message_owned.as_str();
+            let original_message = original_user_message_owned.as_str();
             let session_id = session_id_owned.as_str();
             let preliminary_agent = preliminary_agent_str.as_str();
 
             // Run the LLM selector after the task is safely persisted.
-            let skip_selector_for_recall = forward_to_orchestrator && is_session_recall_message(message);
-            let selector_result = if forward_to_orchestrator && !skip_selector_for_recall {
+            // Use the original (unprefixed) message so studio prefixes don't break recall detection.
+            let skip_selector_for_recall = forward_to_orchestrator && is_session_recall_message(original_message);
+            let selector_result = if let Some(agent) = studio_forced_spawn
+                .as_ref()
+                .filter(|a| is_specialist_agent(a.as_str()))
+                .cloned()
+            {
+                if forward_to_orchestrator && !skip_selector_for_recall {
+                    emit_timeline_for_task(&agent_clone.bus, Some(store_path), task_id, "selector_start", None);
+                    emit_timeline_for_task(
+                        &agent_clone.bus,
+                        Some(store_path),
+                        task_id,
+                        "selector_end",
+                        Some(serde_json::json!({
+                            "duration_ms": 0u64,
+                            "selector_enabled": true,
+                            "timed_out": false,
+                            "decision_found": true,
+                            "studio_forced_agent": agent,
+                        })),
+                    );
+                }
+                SelectorRunResult {
+                    decision: Some(SelectorDecision {
+                        answer_mode: SelectorAnswerMode::Direct,
+                        task_type: Some("code_generation".to_string()),
+                        target_agent: Some(agent),
+                        reason: Some("studio_assigned_agent".to_string()),
+                    }),
+                    enabled: true,
+                    timed_out: false,
+                    elapsed_ms: 0,
+                }
+            } else if forward_to_orchestrator && !skip_selector_for_recall {
                 emit_timeline_for_task(&agent_clone.bus, Some(store_path), task_id, "selector_start", None);
                 agent_clone.system_selector_decision(message).await
             } else {

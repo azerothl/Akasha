@@ -4,7 +4,7 @@
 //! See spec/48_gateway_layer.md.
 
 use crate::agents::{MainAgent, TaskPriority};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Channel type identifier for the message source.
@@ -48,6 +48,12 @@ pub struct MessageEnvelope {
     pub image_data_urls: Option<Vec<String>>,
     /// Task priority when forwarding to orchestrator.
     pub priority: TaskPriority,
+    /// When set, tools use this disk root for `workspace:/` mirror and `run_command` cwd (Code Studio).
+    pub studio_disk_root: Option<PathBuf>,
+    /// When set, skip the system selector and route direct to this specialist agent (must be in SPECIALIST_AGENTS).
+    pub studio_forced_agent: Option<String>,
+    /// Optional git branch hint prepended to the user message for agents.
+    pub studio_evolution_branch: Option<String>,
 }
 
 impl MessageEnvelope {
@@ -65,6 +71,9 @@ impl MessageEnvelope {
             raw_message: raw_message.into(),
             image_data_urls,
             priority,
+            studio_disk_root: None,
+            studio_forced_agent: None,
+            studio_evolution_branch: None,
         }
     }
 
@@ -82,6 +91,9 @@ impl MessageEnvelope {
             raw_message: raw_message.into(),
             image_data_urls: None,
             priority: TaskPriority::UserNormal,
+            studio_disk_root: None,
+            studio_forced_agent: None,
+            studio_evolution_branch: None,
         }
     }
 
@@ -99,6 +111,9 @@ impl MessageEnvelope {
             raw_message: raw_message.into(),
             image_data_urls: None,
             priority: TaskPriority::UserNormal,
+            studio_disk_root: None,
+            studio_forced_agent: None,
+            studio_evolution_branch: None,
         }
     }
 }
@@ -119,6 +134,9 @@ pub async fn handle_envelope(
         &envelope.session_id,
         envelope.image_data_urls,
         envelope.priority,
+        envelope.studio_disk_root.clone(),
+        envelope.studio_forced_agent.clone(),
+        envelope.studio_evolution_branch.clone(),
     )
         .await
 }

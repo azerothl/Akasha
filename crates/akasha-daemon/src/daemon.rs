@@ -7,13 +7,14 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::{mpsc, RwLock};
 use futures_util::future::Either;
 use tracing::{error, info, warn, Instrument};
 
-use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask};
+use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask, TaskPersistenceMsg};
 use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, new_task_workspace_store, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
+use crate::studio::new_studio_disk_root_registry;
 use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
@@ -21,6 +22,49 @@ use crate::latency::env_usize;
 
 const HEALTHCHECK_INTERVAL_SECS: u64 = 5;
 const DEFAULT_PORT: u16 = 3876;
+
+fn bind_loopback_listener(port: u16) -> std::io::Result<TcpListener> {
+    let addr = format!("127.0.0.1:{port}").parse().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid listen addr: {e}"),
+        )
+    })?;
+    let socket = TcpSocket::new_v4()?;
+    // Windows: allow immediate rebind after shutdown even with many recent connections (TIME_WAIT).
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(1024)
+}
+
+fn log_bind_port_failure(port: u16, err: &std::io::Error) {
+    let addr_in_use = matches!(err.kind(), std::io::ErrorKind::AddrInUse);
+    #[cfg(windows)]
+    let win_addr_in_use = err.raw_os_error() == Some(10048);
+    #[cfg(not(windows))]
+    let win_addr_in_use = false;
+    let likely_port_taken = addr_in_use || win_addr_in_use;
+
+    error!(
+        error = %err,
+        port = port,
+        "Impossible d'écouter sur le port (API + santé). Le port est peut-être déjà utilisé par une autre instance du daemon."
+    );
+    if likely_port_taken {
+        error!(
+            port = port,
+            "Si une ancienne instance tourne encore : exécutez « akasha stop » puis relancez (ou « akasha start --foreground »). \
+             Sous Windows : « Get-NetTCPConnection -LocalPort {port} -State Listen » pour voir le PID, puis arrêtez ce processus. \
+             Pour utiliser un autre port : définissez AKASHA_PORT (et le même port côté clients : UI Tauri, Code Studio / VITE_DAEMON_URL)."
+        );
+    }
+    eprintln!(
+        "Akasha : échec du bind sur 127.0.0.1:{port} — {err}\n\
+         → Une autre instance écoute peut-être déjà sur ce port. Essayez : akasha stop\n\
+         → Ou changez de port : AKASHA_PORT=<port> puis relancez le daemon et les clients.\n\
+         → Windows (PID) : Get-NetTCPConnection -LocalPort {port} -State Listen"
+    );
+}
 
 /// Outcome of a daemon run. Used so that main can exit with the right code (e.g. 85 for restart).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,10 +484,10 @@ impl Daemon {
                 }
             }
 
-            let listener = match TcpListener::bind(format!("127.0.0.1:{}", port)).await {
+            let listener = match bind_loopback_listener(port) {
                 Ok(l) => l,
                 Err(e) => {
-                    error!(error = %e, port = port, "Failed to bind health port");
+                    log_bind_port_failure(port, &e);
                     return Err(e.into());
                 }
             };
@@ -506,6 +550,7 @@ impl Daemon {
             let process_registry = new_process_registry();
             let human_input_store = new_human_input_store();
             let workspace_store = new_task_workspace_store();
+            let studio_disk_registry = new_studio_disk_root_registry();
             let browser_registry: crate::browser::BrowserSessionRegistry =
                 Arc::new(RwLock::new(std::collections::HashMap::new()));
             let task_usage_store = std::sync::Arc::new(crate::api::TaskUsageStore::new());
@@ -517,43 +562,54 @@ impl Daemon {
                     None
                 }
             };
-            let (progress_persistence_tx, progress_persistence_rx) = std::sync::mpsc::channel::<(uuid::Uuid, u8, String)>();
-            let (event_persistence_tx, event_persistence_rx) = std::sync::mpsc::channel::<(
-                uuid::Uuid,
-                String,
-                Option<serde_json::Value>,
-                String,
-            )>();
+            let (task_persistence_tx, task_persistence_rx) =
+                std::sync::mpsc::channel::<TaskPersistenceMsg>();
             {
                 let store_path = db_path.clone();
                 std::thread::spawn(move || {
                     let store = match akasha_store::TaskStore::open(&store_path) {
                         Ok(s) => s,
                         Err(e) => {
-                            tracing::error!(error = %e, "Progress persistence thread: failed to open TaskStore");
+                            tracing::error!(error = %e, "Task persistence thread: failed to open TaskStore");
                             return;
                         }
                     };
-                    while let Ok((task_id, progress_pct, message)) = progress_persistence_rx.recv() {
-                        if store.insert_progress(task_id, progress_pct, &message).is_err() {
-                            tracing::warn!(task_id = %task_id, "Progress persistence: insert failed");
-                        }
-                    }
-                });
-            }
-            {
-                let store_path = db_path.clone();
-                std::thread::spawn(move || {
-                    let store = match akasha_store::TaskStore::open(&store_path) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::error!(error = %e, "Event persistence thread: failed to open TaskStore");
-                            return;
-                        }
-                    };
-                    while let Ok((task_id, event_type, payload, at)) = event_persistence_rx.recv() {
-                        if store.insert_event(task_id, &event_type, payload.as_ref(), &at).is_err() {
-                            tracing::warn!(task_id = %task_id, event_type = %event_type, "Event persistence: insert failed");
+                    while let Ok(msg) = task_persistence_rx.recv() {
+                        let res = match &msg {
+                            TaskPersistenceMsg::Progress {
+                                task_id,
+                                progress_pct,
+                                message,
+                            } => store.insert_progress(*task_id, *progress_pct, message),
+                            TaskPersistenceMsg::Event {
+                                task_id,
+                                event_type,
+                                payload,
+                                at,
+                            } => store.insert_event(*task_id, event_type, payload.as_ref(), at),
+                        };
+                        if let Err(e) = res {
+                            match &msg {
+                                TaskPersistenceMsg::Progress { task_id, .. } => {
+                                    tracing::warn!(
+                                        task_id = %task_id,
+                                        error = %e,
+                                        "Progress persistence: insert failed"
+                                    );
+                                }
+                                TaskPersistenceMsg::Event {
+                                    task_id,
+                                    event_type,
+                                    ..
+                                } => {
+                                    tracing::warn!(
+                                        task_id = %task_id,
+                                        event_type = %event_type,
+                                        error = %e,
+                                        "Event persistence: insert failed"
+                                    );
+                                }
+                            }
                         }
                     }
                 });
@@ -619,15 +675,30 @@ impl Daemon {
             let delegation_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_delegations));
             tokio::spawn({
                 let conv_tx = conv_tx.clone();
+                let bus = bus.clone();
                 let progress = progress.clone();
                 let task_completion = task_completion.clone();
                 let delegation_sem = delegation_sem.clone();
                 async move {
-                    run_delegation_handler(delegation_rx, conv_tx, db_path_for_delegation, progress, task_completion, delegation_sem).await;
+                    run_delegation_handler(
+                        delegation_rx,
+                        conv_tx,
+                        db_path_for_delegation,
+                        bus,
+                        progress,
+                        task_completion,
+                        delegation_sem,
+                    )
+                    .await;
                 }
             });
             let orchestrator_sender = crate::agents::OrchestratorSender::new(high_tx, normal_tx.clone());
-            let main_agent = MainAgent::new(bus.clone(), orchestrator_sender, llm_router.clone())
+            let main_agent = MainAgent::new(
+                bus.clone(),
+                orchestrator_sender,
+                llm_router.clone(),
+                studio_disk_registry.clone(),
+            )
                 .with_direct_conversation_tx(conv_tx.clone());
             let orchestrator = Arc::new(Orchestrator::new(
                 bus.clone(),
@@ -679,6 +750,7 @@ impl Daemon {
                 let subtask_llm_sem = subtask_llm_sem.clone();
                 let delegation_tx = delegation_tx.clone();
                 let autonomous_mission_worker = autonomous_mission.clone();
+                let studio_disk_registry = studio_disk_registry.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
                         // Phase 4: skip if task was cancelled (e.g. via POST /api/tasks/:id/cancel) before worker started.
@@ -736,6 +808,7 @@ impl Daemon {
                             let workspace_store = workspace_store.clone();
                             let browser_registry = browser_registry.clone();
                             let delegation_tx = delegation_tx.clone();
+                            let studio_reg = studio_disk_registry.clone();
                             let task_id = task.task_id;
                             let message = task.message;
                             let session_id = task.session_id;
@@ -770,6 +843,7 @@ impl Daemon {
                                     Some(workspace_store),
                                     Some(browser_registry),
                                     autonomous_mission,
+                                    studio_reg,
                                 )
                                 .instrument(span)
                                 .await;
@@ -800,6 +874,7 @@ impl Daemon {
                             let workspace_store = workspace_store.clone();
                             let browser_registry = browser_registry.clone();
                             let delegation_tx = delegation_tx.clone();
+                            let studio_reg = studio_disk_registry.clone();
                             let task_id = task.task_id;
                             let message = task.message;
                             let session_id = task.session_id;
@@ -834,6 +909,7 @@ impl Daemon {
                                     Some(workspace_store),
                                     Some(browser_registry),
                                     autonomous_mission,
+                                    studio_reg,
                                 )
                                 .instrument(span)
                                 .await;
@@ -846,7 +922,7 @@ impl Daemon {
             tokio::spawn({
                 let bus = bus.clone();
                 let progress = progress.clone();
-                let persistence_tx = Some(progress_persistence_tx);
+                let persistence_tx = Some(task_persistence_tx.clone());
                 async move {
                     run_progress_subscriber(bus, progress, persistence_tx).await;
                 }
@@ -854,7 +930,7 @@ impl Daemon {
             tokio::spawn({
                 let bus = bus.clone();
                 let events = events.clone();
-                let persistence_tx = Some(event_persistence_tx);
+                let persistence_tx = Some(task_persistence_tx);
                 async move {
                     crate::agents::run_events_subscriber(bus, events, persistence_tx).await;
                 }

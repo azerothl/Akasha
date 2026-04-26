@@ -25,6 +25,7 @@ use akasha_store::{
 use akasha_vault::Vault;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// On Windows, paths with verbatim prefix `\\?\` can cause "file not found" with some APIs. Return a path without it.
 #[cfg(windows)]
@@ -45,6 +46,71 @@ fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
 /// LLM tool calls may use typographic quotes, while files on disk typically use ASCII quotes.
 fn normalize_apostrophes(s: &str) -> String {
     s.replace('’', "'").replace('‘', "'")
+}
+
+/// Lorsque `read_file` est appelé sans `<offset> <limit>` et sans `--full`, on ne renvoie que ces lignes.
+const READ_FILE_DEFAULT_MAX_LINES: usize = 500;
+/// Plafond UTF-8 pour `read_file … --full` (évite les fichiers énormes en mémoire côté prompt).
+const READ_FILE_FULL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
+/// Sous-chaîne présente dans la sortie modèle quand la fenêtre par défaut (500 lignes) a été appliquée.
+const READ_FILE_PARTIAL_DEFAULT_MARKER: &str = "(read_file partial: default window";
+
+/// Retire `--full`, détecte une fenêtre de lignes en fin d'arguments (`offset` `limit` entiers > 0).
+fn parse_read_file_args(args: &[String]) -> (Vec<String>, Option<(usize, usize)>, bool) {
+    let mut want_full = false;
+    let filtered: Vec<String> = args
+        .iter()
+        .filter_map(|a| {
+            if a == "--full" {
+                want_full = true;
+                None
+            } else {
+                Some(a.clone())
+            }
+        })
+        .collect();
+    if filtered.len() >= 3 {
+        let maybe_limit = filtered.last().and_then(|s| s.parse::<usize>().ok());
+        let maybe_offset = filtered
+            .get(filtered.len().saturating_sub(2))
+            .and_then(|s| s.parse::<usize>().ok());
+        if let (Some(off), Some(lim)) = (maybe_offset, maybe_limit) {
+            if off > 0 && lim > 0 {
+                let mut path = filtered;
+                path.pop();
+                path.pop();
+                return (path, Some((off, lim)), want_full);
+            }
+        }
+    }
+    (filtered, None, want_full)
+}
+
+/// Séparateur recommandé entre l’ancien et le nouveau texte (`TOOL:` est découpé sur les espaces, d’où un token `|` seul).
+const SEARCH_REPLACE_DELIM: &str = " | ";
+
+/// `args[0]` = chemin ; le reste = « ancien » puis ` | ` (recommandé) ou `|`, puis « nouveau ».
+/// Retire les `|` initiaux issus du découpage (`path | old | new` → `old | new`).
+fn parse_search_replace_payload(args: &[String]) -> Result<(String, String), &'static str> {
+    let mut rest: String = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
+    rest = rest.trim().to_string();
+    while rest.starts_with('|') {
+        rest = rest.trim_start_matches('|').trim_start().to_string();
+    }
+    if rest.is_empty() {
+        return Err("usage");
+    }
+    let (search, replace) = if let Some((s, r)) = rest.split_once(SEARCH_REPLACE_DELIM) {
+        (s.trim().to_string(), r.trim().to_string())
+    } else if let Some((s, r)) = rest.split_once('|') {
+        (s.trim().to_string(), r.trim().to_string())
+    } else {
+        return Err("usage");
+    };
+    if search.is_empty() {
+        return Err("empty_search");
+    }
+    Ok((search, replace))
 }
 
 fn normalize_tool_path_hint(raw: &str) -> String {
@@ -111,6 +177,64 @@ fn parse_generate_image_tool_args(args: &[String]) -> (String, Option<String>) {
     (args.join(" "), None)
 }
 
+fn studio_code_rag_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("AKASHA_STUDIO_CODE_RAG_ENABLED")
+            .ok()
+            .map(|v| {
+                let t = v.trim().to_ascii_lowercase();
+                matches!(t.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn schedule_code_studio_index_for_root(store_path: &Path, tool_disk_workspace_root: &Path) {
+    let data_dir = store_path.parent().unwrap_or_else(|| store_path);
+    let Some(project_id) =
+        crate::studio::studio_project_id_from_disk_root(data_dir, tool_disk_workspace_root)
+    else {
+        return;
+    };
+    crate::api_studio::schedule_studio_code_rag_index(
+        data_dir,
+        &project_id,
+        tool_disk_workspace_root,
+        false,
+    );
+}
+
+fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let enabled = *ENABLED.get_or_init(|| {
+        std::env::var_os("AKASHA_DEBUG_LOG")
+            .map(|v| {
+                let v = v.to_string_lossy().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    });
+    if !enabled {
+        return;
+    }
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let run_id =
+        std::env::var("AKASHA_DEBUG_RUN_ID").unwrap_or_else(|_| "pre-fix".to_string());
+    tracing::debug!(
+        run_id = %run_id,
+        hypothesis_id = hypothesis_id,
+        location = location,
+        message = message,
+        timestamp = timestamp,
+        data = %data,
+        "api debug log"
+    );
+}
+
 fn parse_write_file_request(args: &[String]) -> Option<(String, String)> {
     if args.is_empty() {
         return None;
@@ -149,8 +273,58 @@ fn parse_write_file_request(args: &[String]) -> Option<(String, String)> {
     }
 
     let path = normalize_tool_path_hint(args.first()?.as_str());
-    let content = args.get(1..).map(|a| a.join("\n")).unwrap_or_default();
+    let content_args = args.get(1..).unwrap_or(&[]);
+    let content = match content_args {
+        [] => String::new(),
+        [only] => only.clone(),
+        many => {
+            // `TOOL:` headers are split on whitespace. Some models put file content on the
+            // same line as the `write_file` header (`TOOL: write_file path { "x": ... }`)
+            // and may continue it on following lines. The multiline parser always places the
+            // collected body as the last element (including single-line bodies), so always
+            // join the header prefix and the last element with a newline to preserve line
+            // breaks between inline header content and any collected body.
+            let (last, prefix) = many.split_last().expect("non-empty by match arm");
+            let header = prefix.join(" ");
+            if header.trim().is_empty() {
+                last.clone()
+            } else {
+                format!("{}\n{}", header, last)
+            }
+        }
+    };
     Some((path, content))
+}
+
+/// If the model wrapped the entire `write_file` body in a markdown fence, strip one layer (repeat up to 3×).
+fn strip_markdown_fences_from_write_content(content: &str) -> String {
+    let mut s = content.to_string();
+    for _ in 0..3 {
+        let lead = s.trim_start();
+        if !lead.starts_with("```") {
+            break;
+        }
+        s = if let Some(i) = s.find('\n') {
+            s[i + 1..].to_string()
+        } else {
+            String::new()
+        };
+        let te = s.trim_end();
+        if te.ends_with("```") {
+            if let Some(i) = te.rfind('\n') {
+                let last = te[i + 1..].trim();
+                if last == "```" {
+                    s = te[..i].to_string();
+                    continue;
+                }
+            } else if te.trim() == "```" {
+                s.clear();
+                break;
+            }
+        }
+        break;
+    }
+    s
 }
 
 /// Parse `memory_store` optional `link_to:` / `link_kind:` into `(target_uuid, relation_kind)` pairs.
@@ -317,7 +491,17 @@ fn resolve_tool_disk_path(raw: &str, workspace_root: Option<&Path>) -> PathBuf {
                 .unwrap_or_else(|| Path::new(&key).to_path_buf()),
         )
     } else {
-        strip_verbatim_prefix(Path::new(raw).to_path_buf())
+        let p = Path::new(raw);
+        if p.is_absolute() {
+            strip_verbatim_prefix(p.to_path_buf())
+        } else {
+            strip_verbatim_prefix(
+                workspace_root
+                    .map(|root| root.join(p))
+                    .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(p)))
+                    .unwrap_or_else(|| p.to_path_buf()),
+            )
+        }
     }
 }
 
@@ -514,7 +698,13 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
         }
         let g = events.read().await;
         if let Some(q) = g.get(&id) {
-            root_events.extend(q.iter().cloned());
+            root_events.extend(q.iter().map(|e| {
+                let mut e = e.clone();
+                if e.task_id.is_none() {
+                    e.task_id = Some(id.to_string());
+                }
+                e
+            }));
         }
         root_events
     };
@@ -536,7 +726,11 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
         let g = events.read().await;
         for child_id in child_ids {
             if let Some(q) = g.get(&child_id) {
-                list.extend(q.iter().cloned());
+                list.extend(q.iter().map(|e| {
+                    let mut e = e.clone();
+                    e.task_id = Some(child_id.to_string());
+                    e
+                }));
             }
         }
         drop(g);
@@ -586,12 +780,71 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
     json_response("200 OK", &body.to_string())
 }
 
+/// `GET /api/tasks/:id/studio-diff` — fichiers texte modifiés depuis le snapshot de début de tâche (Code Studio racine).
+async fn get_task_studio_diff(store_path: &Path, task_id: Uuid) -> String {
+    let Some(data_dir) = store_path.parent().map(Path::to_path_buf) else {
+        return json_response("500 Internal Server Error", r#"{"error":"no_data_dir"}"#);
+    };
+    let snap_path = data_dir.join("studio-task-snapshots").join(format!("{task_id}.json"));
+    if !snap_path.is_file() {
+        return json_response(
+            "404 Not Found",
+            &serde_json::json!({
+                "error": "no_snapshot",
+                "task_id": task_id.to_string(),
+                "hint": "snapshots are created for root Code Studio tasks only"
+            })
+            .to_string(),
+        );
+    }
+    let snap_json = match std::fs::read_to_string(&snap_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return json_response(
+                "500 Internal Server Error",
+                &serde_json::json!({ "error": e.to_string() }).to_string(),
+            );
+        }
+    };
+    let snap: crate::studio_task_snapshot::StudioTaskSnapshot = match serde_json::from_str(&snap_json) {
+        Ok(s) => s,
+        Err(e) => {
+            return json_response(
+                "500 Internal Server Error",
+                &serde_json::json!({ "error": e.to_string() }).to_string(),
+            );
+        }
+    };
+    let captured_at = snap.captured_at_rfc3339.clone();
+    match tokio::task::spawn_blocking(move || crate::studio_task_snapshot::compute_studio_task_diff_from_snapshot(snap)).await {
+        Ok(Ok(entries)) => {
+            let body = serde_json::json!({
+                "task_id": task_id.to_string(),
+                "captured_at": captured_at,
+                "files": entries,
+            });
+            json_response("200 OK", &body.to_string())
+        }
+        Ok(Err(e)) => json_response(
+            "500 Internal Server Error",
+            &serde_json::json!({ "error": e.to_string() }).to_string(),
+        ),
+        Err(e) => json_response(
+            "500 Internal Server Error",
+            &serde_json::json!({ "error": e.to_string() }).to_string(),
+        ),
+    }
+}
+
 pub const MAX_EVENTS_PER_TASK: usize = 64;
 
 #[derive(Clone, serde::Serialize)]
 pub struct ProgressEntry {
     pub progress_pct: u8,
     pub message: String,
+    /// Tâche à laquelle cette ligne se rapporte (pour dédoublonnage côté UI).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 pub type ProgressCache = Arc<RwLock<std::collections::HashMap<Uuid, VecDeque<ProgressEntry>>>>;
@@ -714,6 +967,7 @@ pub async fn run_delegation_handler(
     mut delegation_rx: mpsc::Receiver<DelegationRequest>,
     conv_tx: mpsc::Sender<OrchestratorTask>,
     store_path: PathBuf,
+    bus: EventBus,
     progress: ProgressCache,
     task_completion: TaskCompletionRegistry,
     delegation_sem: std::sync::Arc<tokio::sync::Semaphore>,
@@ -805,20 +1059,8 @@ pub async fn run_delegation_handler(
             }
         };
         let child_id = Uuid::new_v4();
-        const WORKER_AGENT_TYPES: &[&str] = &[
-            "search",
-            "code",
-            "conversation",
-            "financial",
-            "documentalist",
-            "project_manager",
-            "technical_writer",
-            "research",
-            "security_audit",
-            "creative",
-        ];
-        let agent_type = if WORKER_AGENT_TYPES.contains(&req.agent_type.as_str()) {
-            req.agent_type.clone()
+        let agent_type = if crate::agents::is_specialist_agent(&req.agent_type) {
+            req.agent_type.trim().to_lowercase()
         } else {
             "conversation".to_string()
         };
@@ -849,6 +1091,31 @@ pub async fn run_delegation_handler(
             let _ = req.reply_tx.send(Err("store insert failed".to_string()));
             continue;
         }
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::SubAgentSpawned,
+                Some(serde_json::json!({
+                    "task_id": child_id.to_string(),
+                    "parent_id": req.requesting_task_id.to_string(),
+                    "agent": agent_type,
+                    "delegation_reason": "delegate_to_agent"
+                })),
+            )
+            .with_correlation(req.requesting_task_id),
+        );
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::SubtaskStarted,
+                Some(serde_json::json!({
+                    "schema_version": 1,
+                    "root_task_id": req.requesting_task_id.to_string(),
+                    "subtask_id": child_id.to_string(),
+                    "agent_type": agent_type,
+                    "source": "delegate_to_agent",
+                })),
+            )
+            .with_correlation(req.requesting_task_id),
+        );
         // Drop the span guard before any await point: EnteredSpan is not Send and must
         // not be held across await boundaries in a Send future.
         drop(span_guard);
@@ -880,7 +1147,9 @@ pub async fn run_delegation_handler(
         let progress = progress.clone();
         let task_completion = task_completion.clone();
         let child_id_span = child_id;
+        let parent_task_id_span = req.requesting_task_id;
         let agent_type_span = agent_type.clone();
+        let bus_for_waiter = bus.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let span = tracing::info_span!(
@@ -944,8 +1213,42 @@ pub async fn run_delegation_handler(
                     })
             };
             let _ = reply_tx.send(match task.status {
-                TaskStatus::Completed => Ok(msg),
-                TaskStatus::Failed => Err(msg),
+                TaskStatus::Completed => {
+                    let _ = bus_for_waiter.send(
+                        EventEnvelope::new(
+                            EventType::SubtaskCompleted,
+                            Some(serde_json::json!({
+                                "schema_version": 1,
+                                "root_task_id": parent_task_id_span.to_string(),
+                                "subtask_id": child_id_span.to_string(),
+                                "agent_type": agent_type_span,
+                                "status": "completed",
+                                "content_preview": msg.chars().take(600).collect::<String>(),
+                                "source": "delegate_to_agent",
+                            })),
+                        )
+                        .with_correlation(parent_task_id_span),
+                    );
+                    Ok(msg)
+                }
+                TaskStatus::Failed => {
+                    let _ = bus_for_waiter.send(
+                        EventEnvelope::new(
+                            EventType::SubtaskCompleted,
+                            Some(serde_json::json!({
+                                "schema_version": 1,
+                                "root_task_id": parent_task_id_span.to_string(),
+                                "subtask_id": child_id_span.to_string(),
+                                "agent_type": agent_type_span,
+                                "status": "failed",
+                                "content_preview": msg.chars().take(600).collect::<String>(),
+                                "source": "delegate_to_agent",
+                            })),
+                        )
+                        .with_correlation(parent_task_id_span),
+                    );
+                    Err(msg)
+                }
                 _ => Err("child task did not complete successfully".to_string()),
             });
         });
@@ -1055,8 +1358,11 @@ pub fn json_response(status: &str, body: &str) -> String {
 /// Format: une ligne par outil "nom — usage".
 /// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
-    ("read_file", "read_file <path> — lire le contenu d'un fichier texte. Pour les fichiers .pdf, le texte est extrait automatiquement (équivalent à pdf <path>) ; ne vous attendez pas au binaire PDF. Pour les gros fichiers, lire d'abord le fichier puis cibler seulement les sections utiles avec grep_content/search_files avant d'éditer. Path réel ou workspace:/<path> pour le workspace virtuel de la tâche."),
-    ("write_file", "write_file <path> <content> — écrire du texte dans un fichier (création/remplacement complet). Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin (ex. workspace:/script.py). TOUJOURS utiliser le chemin EXACT fourni par l'utilisateur. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace plutôt que de tout réécrire. Path réel (Windows/Unix) ou workspace:/ pour le workspace virtuel."),
+    ("read_file", "read_file <path> [--full] [<offset_ligne> <nb_lignes>] — lire un fichier texte. Par défaut : **500 premières lignes** seulement (évite de saturer le contexte). `TOOL: read_file <chemin> --full` pour tout le fichier (plafond octets côté daemon si très gros). Fenêtre explicite : `read_file workspace:/fichier.ts 1 200`. PDF : texte extrait automatiquement. Path réel ou workspace:/<path>."),
+    ("write_file", "write_file <path> puis contenu sur les lignes suivantes — écrire un fichier complet (création/remplacement). Format préféré : première ligne `TOOL: write_file workspace:/fichier`, puis le corps du fichier seul sur les lignes suivantes. Ne pas compresser un fichier entier sur la même ligne que le header. Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace."),
+    ("delete_file", "delete_file <path> — supprimer un fichier (pas un répertoire). Chemin workspace:/ ou disque autorisé par tools_policy (mêmes règles que write_file). Code Studio : préférer workspace:/chemin/relatif."),
+    ("rename_path", "rename_path <from> <to> — renommer ou déplacer un fichier ou un répertoire (rename atomique si possible ; copie+suppression pour un fichier en cross-device). La destination ne doit pas exister. Deux arguments : le chemin source est le premier token ; tout le reste forme le chemin cible (espaces dans <to> OK). Pas d’espaces dans <from> sans utiliser workspace:/…"),
+    ("move_tree", "move_tree <from_dir> <to_dir> — déplacer un répertoire et son contenu (rename atomique si possible, sinon copie récursive + suppression). La destination ne doit pas exister. Même convention d’arguments que rename_path (cible = args après le premier token)."),
     ("search_files", "search_files <dir> <pattern> [--no-ignore] — chercher des fichiers (glob) sous un répertoire ; par défaut respecte .gitignore et ignore node_modules/target/dist/… ; --no-ignore pour tout parcourir."),
     ("grep_content", "grep_content <dir> <pattern> [file_glob] [--regex|-r] [--no-ignore] — chercher dans les fichiers ; défaut = sous-chaîne insensible à la casse + .gitignore ; --regex = motif regex insensible à la casse ; --no-ignore = ignorer .gitignore."),
     ("run_command", "run_command [--cwd <path>] <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique). Optionnel : --cwd workspace:/ ou chemin disque (allowed_read_paths). Si tools_policy run_command_default_cwd_workspace: true, cwd par défaut = workspace de la tâche. Pour GitHub depuis le shell, préférer gh-axi (npm install -g gh-axi ; principes AXI https://axi.md/) s'il est installé — sorties compactes pour l'agent. Pour l'automation navigateur en CLI, chrome-devtools-axi (même dépôt https://github.com/kunchenguid/axi) en complément d'Akasha browser."),
@@ -1073,7 +1379,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("git_rev_parse", "git_rev_parse <repo> — git rev-parse HEAD"),
     ("edit_file", "edit_file <path> <start_line> <end_line> <new_content> — remplacer les lignes start..end par new_content (lignes 1-based)"),
     ("apply_patch", "apply_patch <path> <patch_content> — appliquer un patch unifié (contenu du patch après le path)"),
-    ("search_replace", "search_replace <path> <search> | <replace> — remplacer toutes les occurrences de search par replace dans le fichier (séparateur \" | \")"),
+    ("search_replace", "search_replace <path> <ancien_texte> | <nouveau_texte> — une seule ligne TOOL:. Séparateur : **espace | espace** (` | `). Après le chemin, mettre tout de suite le texte exact à remplacer (pas un `|` seul : le découpage sur espaces le transforme en token et vide la recherche). Si le motif contient ` | `, utiliser edit_file ou apply_patch. Exemple : TOOL: search_replace workspace:/src/App.tsx const x = 1 | const x = 2"),
     ("web_fetch", "web_fetch <url> — récupérer le contenu d'une URL (domaine autorisé dans tools_policy allowed_web_domains)"),
     ("web_search", "web_search <query> [max_results] — rechercher sur le web (Brave API; BRAVE_API_KEY, web_search_enabled)"),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
@@ -1093,7 +1399,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
     ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Pour une réponse ouverte (chemin, texte libre, secret), omettre choices ou laisser un tableau vide. Si choices est fourni, l'UI propose quand même une saisie libre en plus des boutons. Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
-    ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent. agent_type: search | code | conversation | financial | documentalist | project_manager | technical_writer | research | security_audit | creative | analyst | architect | frontend | backend | database | integration | qa | system | image_generation. Un seul niveau de délégation autorisé."),
+    ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (Code Studio : réservé à studio_project_manager). agent_type utiles : studio_frontend | studio_backend | studio_fullstack | studio_scaffold | studio_planner | qa | code | conversation | … (voir liste des spécialistes). Un seul niveau depuis la tâche racine : les sous-agents ne rappellent pas delegate_to_agent."),
     ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
     ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
     ("device_discover", "device_discover [interface] — lister les appareils accessibles (optionnel: local_media, system, network, usb). Filtre par politique allowed_device_interfaces / blocked_device_interfaces."),
@@ -1115,6 +1421,96 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("sim_run", "sim_run <initial> <growth_rate> <noise> <horizon> | plugin.call simulation <json> — via plugin simulation, exécute une simulation déterministe et retourne une vue timeseries + métriques."),
     ("sim_compare", "sim_compare <initial> <growth_rate> <noise> <horizon> | plugin.call simulation <json> — via plugin simulation, compare scénario de base et alternatif, retourne delta + tableau de résultats."),
 ];
+
+/// Tools advertised in the Code Studio prompt: dev/repo tools only (policy still gates execution).
+/// Omits browser, memory_*, sessions_*, device_*, speech, maps plugins, etc.
+/// `delegate_to_agent` n’est ajouté que pour `studio_project_manager` et seulement si la politique l’autorise.
+fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, assigned_agent: &str) -> Vec<String> {
+    const STUDIO: &[&str] = &[
+        "read_file",
+        "write_file",
+        "delete_file",
+        "rename_path",
+        "move_tree",
+        "search_files",
+        "grep_content",
+        "run_command",
+        "run_terminal",
+        "run_command_background",
+        "process",
+        "file_diff",
+        "diff_unified",
+        "dir_compare",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_rev_parse",
+        "edit_file",
+        "apply_patch",
+        "search_replace",
+        "web_fetch",
+        "web_search",
+        "run_in_container",
+        "ask_user",
+        "write_todos",
+        "merge_todos",
+        "read_todos",
+        "update_todo",
+        "list_skills",
+        "read_skill",
+        "workspace_graph_search",
+        "pdf",
+        "image",
+    ];
+    let mut out: Vec<String> = match allowed_tools {
+        None => STUDIO.iter().map(|s| (*s).to_string()).collect(),
+        Some(list) => {
+            let allowed_lc: std::collections::HashSet<String> =
+                list.iter().map(|s| s.to_ascii_lowercase()).collect();
+            STUDIO
+                .iter()
+                .filter(|t| allowed_lc.contains(&t.to_ascii_lowercase()))
+                .map(|s| (*s).to_string())
+                .collect()
+        }
+    };
+    if out.is_empty() {
+        out.extend(
+            ["read_file", "write_file", "grep_content", "run_command", "ask_user"]
+                .iter()
+                .map(|s| (*s).to_string()),
+        );
+    }
+    let delegate_allowed_by_policy = allowed_tools.map_or(true, |l| {
+        l.iter()
+            .any(|t| t.eq_ignore_ascii_case("delegate_to_agent"))
+    });
+    if assigned_agent.eq_ignore_ascii_case("studio_project_manager") && delegate_allowed_by_policy {
+        if !out
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case("delegate_to_agent"))
+        {
+            out.push("delegate_to_agent".to_string());
+        }
+    }
+    out
+}
+
+/// Like [`available_tools_instruction`] but **only** listed tool names — no `always_misc` merge
+/// (Code Studio must not advertise install_skill, browser, delegate_to_agent, etc.).
+fn available_tools_instruction_exact(allowed: &[String]) -> String {
+    if allowed.is_empty() {
+        return String::new();
+    }
+    let allowed_lc: std::collections::HashSet<String> =
+        allowed.iter().map(|s| s.to_ascii_lowercase()).collect();
+    AVAILABLE_TOOLS
+        .iter()
+        .filter(|(name, _)| allowed_lc.contains(&name.to_ascii_lowercase()))
+        .map(|(_, desc)| *desc)
+        .collect::<Vec<_>>()
+        .join(" ; ")
+}
 
 fn available_tools_instruction(allowed_tools: Option<&[String]>) -> String {
     let iter: Box<dyn Iterator<Item = &(&str, &str)>> = if let Some(allowed) = allowed_tools {
@@ -1286,6 +1682,13 @@ fn active_intents_from_flags(flags: &MessageIntentFlags) -> Vec<&'static str> {
         out.push("geolocation_distance");
     }
     out
+}
+
+fn code_studio_disable_plugin_intents(flags: &mut MessageIntentFlags) {
+    // Code Studio requests are code/project scoped; plugin routing intents for travel/geolocation
+    // can hijack tool selection and force unrelated plugins.
+    flags.transport = false;
+    flags.geolocation_distance = false;
 }
 
 fn build_plugin_routing_reminders(
@@ -1618,6 +2021,16 @@ struct SessionRecallIntent {
     language: SmallTalkLanguage,
 }
 
+/// True when the user likely asks for a session recap using the English word "recap".
+/// Avoid `contains("recap")` — it false-positives on phrases like "task recap" in long
+/// Code Studio DESIGN.md instructions shipped by the UI.
+fn english_session_recap_word(lower: &str) -> bool {
+    let sans_doc_phrase = lower.replace("task recap", " ");
+    sans_doc_phrase
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| w == "recap")
+}
+
 fn detect_session_recall_intent(message: &str) -> Option<SessionRecallIntent> {
     let lower = message
         .trim()
@@ -1636,12 +2049,12 @@ fn detect_session_recall_intent(message: &str) -> Option<SessionRecallIntent> {
         "on a fait",
         "what we did",
         "remind me",
-        "recap",
         "recap what we did",
         "what did we do",
     ]
     .iter()
-    .any(|k| lower.contains(k));
+    .any(|k| lower.contains(k))
+        || english_session_recap_word(&lower);
     if !asks_recall {
         return None;
     }
@@ -2710,7 +3123,7 @@ async fn do_uninstall_skill(
     }
 }
 
-const WRITE_FILE_REMINDER: &str = "\n[Reminder: the user is asking to save a file. You MUST reply ONLY with the line TOOL: write_file <full_path> then the file content on the following lines. Never say you cannot write to disk.]\n\n";
+const WRITE_FILE_REMINDER: &str = "\n[Reminder: the user is asking to save a file. You MUST reply ONLY with a header line TOOL: write_file <full_path>, then the file content on the following lines. Do not put the full file content on the same TOOL line. Never say you cannot write to disk.]\n\n";
 
 const WEB_SEARCH_REMINDER: &str = "\n[Reminder: the user is asking for external information (weather/météo, news, etc.). You MUST use TOOL: web_search <query> first — do NOT use bankr or portfolio for weather. If search snippets do not contain the precise facts (temperatures, sky state, rain risk, figures, tables), you MUST follow up with TOOL: web_fetch <url> on a relevant result URL, or TOOL: browser navigate <url> then TOOL: browser snapshot for JS-heavy or dynamic pages (e.g. many weather portals). Do not end by telling the user to visit links yourself if web_fetch or browser snapshot is available in your tool list and policy allows those domains — fetch and summarize. Do not suggest visiting a site without having used web_search first.]\n\n";
 
@@ -2743,6 +3156,56 @@ const GITHUB_VAULT_REMINDER: &str = "\n[Reminder GitHub + vault: you MUST run th
 
 /// Injected when the message looks like code/script work: prefer workspace paths, git/diff tools, and explicit cwd for commands.
 const CODE_DEV_SANDBOX_REMINDER: &str = "\n[Reminder — code / project work: use workspace:/ paths for files in this task when no absolute path is given. For Git operations prefer TOOL: git_status, git_diff, git_log, git_rev_parse on the repo path (e.g. workspace:/ or an allowed folder) instead of raw git via run_command, unless you need a subcommand not covered. For file comparison use diff_unified or file_diff; for two trees use dir_compare. For build/test commands use TOOL: run_command --cwd workspace:/ cargo test (or npm test, etc.) so the command runs in the project root; or set run_command_default_cwd_workspace: true in tools_policy.yaml. For isolated execution with a toolchain image, use run_in_container when policy allows.]\n\n";
+const STUDIO_DISK_REMINDER: &str = "\n[Code Studio — périmètre disque: cette tâche s'exécute sous le dossier projet studio uniquement (miroir workspace:/ et cwd des outils). Ne pas cibler de chemins hors de ce répertoire. Pour npm install / builds à risque, privilégier run_in_container si la politique d'outils l'autorise. Renommer/déplacer un dossier: si `run_command` est autorisé, utiliser `git mv` ou `mv` avec `--cwd workspace:/` puis corriger tous les imports; sinon `read_file` chaque fichier concerné puis `write_file workspace:/nouveau/chemin/...` (les répertoires parents sont créés) et `grep_content`/`search_replace` pour les imports — ne pas boucler sur une tactique qui ne modifie pas réellement les chemins sur disque.]\n\n";
+
+/// Injected with STUDIO_DISK_REMINDER: raise quality bar and user-visible wrap-up for Code Studio agents.
+const STUDIO_AGENT_QUALITY_REMINDER: &str = concat!(
+    "\n[Code Studio — exigences avant de considérer la demande comme terminée]\n",
+    "- Quand tu écris un fichier, son contenu doit être STRICTEMENT le contenu attendu du fichier (code, JSON, Markdown, config). ",
+    "Interdiction d'y ajouter du texte conversationnel, des explications, des statuts, des raisonnements, ou des phrases comme ",
+    "\"fichier corrigé\", \"je relance le build\", \"voici la correction\". Ces messages vont uniquement dans la réponse chat.\n",
+    "- Pour les fichiers de code (ex: .ts, .tsx, .js, .rs, .py), n'écris que du code syntaxiquement valide pour ce langage ; ",
+    "ne mets jamais de prose libre hors commentaires valides du langage.\n",
+    "- Interdiction dans les fichiers .ts / .tsx / .js / .jsx : lignes « documentation » pour l’utilisateur (titres markdown `**…**`, listes du type « 4. fichier.ts — … », résumés de lot) — le daemon **rejette** l’écriture ; ce texte va **uniquement** dans le chat.\n",
+    "- Ne déclare PAS la tâche terminée tant que le livrable n'est pas vérifié quand c'est possible : lance un build ou des tests ",
+    "via TOOL: run_command avec --cwd workspace:/ (ou la racine du projet) quand la politique d'outils le permet — ",
+    "par ex. npm run build, npm test, cargo build, cargo test, pytest, tsc --noEmit. Corrige les erreurs de compilation ",
+    "ou de typage que tu peux corriger sans dériver du besoin utilisateur.\n",
+    "- Après des changements qui touchent au comportement à l'exécution, exécute aussi une vérification d'exécution minimale ",
+    "quand c'est raisonnable (tests automatisés, ou une commande courte qui exerce le chemin modifié avec timeout). ",
+    "Ne te contente pas d'un build seul si la demande porte sur un bug ou un comportement runtime.\n",
+    "- Si un build complet est trop lourd ou bloqué par la politique, exécute au moins une vérification ciblée (lint, typecheck) ",
+    "ou explique clairement ce que tu n'as pas pu valider et pourquoi.\n",
+    "- Ta dernière réponse à l'utilisateur (même langue que lui) doit résumer en langage accessible : ce qui a été ajouté ou modifié, ",
+    "comment lancer ou essayer le résultat, et les limites éventuelles. Pas de jargon inutile sauf si l'utilisateur demande le détail technique.\n",
+    "- N'achève pas seulement par « Terminé » / « Done » : fournis un paragraphe utile lisible sans ouvrir les fichiers.\n",
+    "- Après un **échec de tests** ou de build : lire la sortie d’erreur ; corriger le **minimum** de fichiers (idéalement ceux cités par la stack trace) ; **interdiction** de refactoriser ou réécrire tout le projet « au hasard ». Ne pas modifier les fichiers de tests sauf demande explicite de l’utilisateur. Si trois tentatives ciblées échouent encore, utiliser `ask_user` plutôt que de boucler.\n",
+    "- Fichier `CODE_STUDIO_PLAN.md` (racine) : **gabarit fixe** — ligne d'ouverture `# Titre : …` puis dans l'ordre les sections `## Description`, `## Scope`, `## Stack`, `## Structure du projet`, `## Commandes`, `## Fichiers hors scope`, `## Demandes d'évolutions utilisateur par phase`, `## Recommandations`, `## Todos`, `## Informations complémentaires` (conserver ces titres et cet ordre).\n",
+    "  Avant d'écrire : `read_file workspace:/CODE_STUDIO_PLAN.md`. Ne **pas** remplacer tout le fichier pour une modification ciblée : mettre à jour **par section** (search_replace ciblé ou une seule section réécrite), en conservant les titres `##` et le reste inchangé.\n",
+    "  Ne **jamais** dupliquer une section `## …` déjà présente (pas de second gabarit collé en bas du fichier) : le daemon rejette les écritures qui répètent les titres de section.\n",
+    "  Suivi des lots : ajouter une **ligne datée courte** dans `## Informations complémentaires` ou `## Demandes d'évolutions utilisateur par phase` plutôt que de réécrire l'ensemble du plan.\n",
+    "  Si le fichier est absent (import), le créer avec ce gabarit en synthétisant le dépôt. Remplacement complet réservé à une demande **explicite** de réinitialisation du plan (bouton ou consigne utilisateur).\n",
+    "- Premier lot d'un projet Code Studio : après avoir créé ou mis à jour `CODE_STUDIO_PLAN.md`, créer `workspace:/DESIGN.md` **avant** les développements applicatifs si le fichier est absent. `DESIGN.md` doit fixer le contrat design (front matter YAML + sections markdown) à partir de la demande, de la stack et du plan ; ensuite seulement générer/modifier `src/`, configs, tests, etc.\n",
+    "- **Corrections sur le disque (obligatoire quand les outils le permettent)** : pour corriger du code (imports, erreurs TS/build, etc.), utiliser des lignes `TOOL:` — `search_replace` pour des changements localisés, `edit_file` pour un intervalle de lignes, `write_file` seulement si un remplacement de fichier entier est justifié, `apply_patch` si adapté. ",
+    "Ne pas faire du **chat** le canal principal de livraison : éviter « voici le fichier corrigé à coller dans workspace:/… », les longs blocs de remplacement manuel ou les résumés à la place d’écritures réelles tant que la politique d’outils autorise les écritures.\n",
+    "- **Si une écriture est impossible** (outil refusé, erreur explicite de `write_file` / `search_replace` / etc., chemin hors périmètre) : indiquer **pourquoi** tu ne peux pas appliquer la correction toi-même (citer le message d’erreur ou la contrainte), puis seulement proposer un secours (diff, extrait à copier).\n\n",
+);
+
+/// Contexte système court pour les tâches dont le disque outil est sous `studio-projects/` (Code Studio).
+/// Remplace le bloc général `APP_CONTEXT` (TUI, skills globales, caméra, etc.).
+const CODE_STUDIO_APP_CONTEXT: &str = concat!(
+    "[Code Studio — contexte]\n",
+    "Tu travailles sur le dépôt du projet ouvert dans Akasha Code Studio. ",
+    "Chemins : préfère `workspace:/…` (racine virtuelle de la tâche) ; les fichiers sont synchronisés sur le disque du projet studio.\n",
+    "Outils usuels : read_file, write_file, delete_file, rename_path, move_tree (si autorisés), search_replace, edit_file, apply_patch, run_command (avec `--cwd workspace:/` pour builds/tests), git_* si exposés, ask_user pour une question bloquante dans la même tâche.\n",
+    "Concentre-toi sur le code et la documentation de ce dépôt — pas sur l’interface générale d’Akasha (TUI, onglets, skills hors projet, caméra, météo). ",
+    "Si une capacité externe est indispensable, indique brièvement ce qu’il faudrait côté utilisateur (clé, politique d’outils).\n",
+    "Réponds dans la même langue que le dernier message utilisateur. ",
+    "Avant d’éditer : lire les fichiers concernés ; ne pas inventer de dépendances — vérifier le manifeste (package.json, Cargo.toml, etc.).\n",
+    "Sur le premier lot d’un projet : stabiliser d’abord `CODE_STUDIO_PLAN.md`, puis créer `workspace:/DESIGN.md` avant de commencer le développement applicatif si ce fichier est absent.\n",
+    "Corrections : appliquer les changements sur le dépôt avec les outils (`search_replace`, `edit_file`, `write_file`, `apply_patch`, chemins `workspace:/…`) — ne pas se contenter de décrire ou coller un fichier entier pour que l’utilisateur le fasse à ta place. ",
+    "Si un outil d’écriture échoue ou est interdit, expliquer clairement la raison avant toute solution de secours.\n\n",
+);
 
 /// Application context injected into the prompt: the agent knows it runs inside Akasha and can talk about it.
 const APP_CONTEXT: &str = concat!(
@@ -2771,7 +3234,7 @@ const APP_CONTEXT: &str = concat!(
     "If web_search returns an error (e.g. not enabled), you can then suggest sites and explain how to enable web search (tools_policy.yaml, web_search_enabled, BRAVE_API_KEY). ",
     "Playwright / managed browser: the daemon may auto-install Chromium on first browser use unless AKASHA_PLAYWRIGHT_AUTO_INSTALL=0. If browser fails for missing Chromium, the runner is missing, or the user must explicitly approve a large download, use TOOL: ask_user (e.g. choices agreeing to install), then TOOL: install_playwright. List install_playwright in tool_profiles when using a profile. tools_policy require_approval can include install_playwright for UI approval before the install runs. For other dependencies (npm, cargo, etc.), use run_command with allowed_commands after ask_user consent. ",
     "You have access to the write_file tool: you MUST use it whenever the user asks to save, store or write a file (e.g. \"save the code to …\", \"write to file\"). ",
-    "Reply ONLY with one line TOOL: write_file <full_path> then the file content on the following lines. ",
+    "Reply ONLY with a header line TOOL: write_file <full_path>, then the file content on the following lines. Do not put the full file content on the same TOOL line. ",
     "Never say \"I cannot write to disk\" or \"copy-paste the code yourself\" — if the path is denied by policy, the tool will return an error and you then explain how to add the prefix in tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...) or Unix. When the user did not specify a path, prefer workspace:/<filename> (e.g. workspace:/script.py) so the file is saved in the task workspace without policy errors. ",
     "Important rule: whenever you need to ask the user for a choice, confirmation or information (options to choose, path, credentials, etc.) and then continue in the same task, you MUST use the ask_user tool (TOOL: ask_user then JSON with question/context/choices). ",
     "Do not ask the question in free text, or the reply will open a new task and you will not be able to continue. ",
@@ -2804,13 +3267,34 @@ pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
         "qa" => Some("You are the quality control agent. You prevent false 'work done'. Verify coherence, requirement coverage, missing files, hidden TODOs, incomplete sections. Do not rewrite; report defects and gaps by severity. Do not validate if acceptance criteria are incomplete; output a clear report for rework."),
         "system" => Some("You are the system agent. You have full knowledge of the Akasha application: commands (akasha start, init, doctor), interfaces (TUI, Chat, Router, Memory, Doc, Calendar), slash commands, skills, tools, and configuration. You can resolve issues and answer any question about how Akasha works. Be precise and refer to real features only."),
         "image_generation" => Some("You are the image generation agent. Produce images from text prompts using the generate_image tool. Focus on clear, concrete prompts that yield the requested visual. One precise deliverable per request."),
+        "studio_project_manager" => Some("You are the Code Studio project manager (chef de projet). Tu coordonnes chaque demande sur le dépôt ouvert (chemins `workspace:/…`).\n\
+Règles d’orchestration :\n\
+- **Dossier `specs/`** : pour toute demande d’**évolution** (nouvelle fonctionnalité, changement de comportement, refonte ciblée, branche d’évolution active, ou demande explicitement traitée comme évolution), crée un fichier plan dédié `workspace:/specs/<YYYYMMDD>-<slug-court>.md` avant de lancer l’implémentation. Le plan doit contenir : objectif, périmètre, critères d’acceptation, liste d’étapes numérotées, **marquage des étapes parallélisables** (ex. « (parallèle avec 3) »), risques, et une section **Iterations** pour suivre les passes de correction.\n\
+- **Délégation** : tu es le **seul** à appeler `TOOL: delegate_to_agent <agent> <message>` vers des sous-agents (`studio_frontend`, `studio_backend`, `studio_fullstack`, `studio_scaffold`, `studio_planner` pour lecture/plan seul, `qa`, `code`, etc.). Les sous-agents **ne** doivent **pas** rappeler `delegate_to_agent`. Pour plusieurs lots parallèles, enchaîne plusieurs `delegate_to_agent` dans le même tour si la politique d’outils le permet.\n\
+- **Boucle de correction** : après chaque vague de sous-agents, lis les résultats / erreurs de build (`run_command --cwd workspace:/` quand autorisé), mets à jour le plan dans `specs/…` et relance des sous-tâches ciblées. **Maximum 5** vagues de retours sous-agents pour la même demande racine ; si au-delà le besoin n’est pas satisfait, réponds à l’utilisateur avec ce qui a été fait, les blocages, et des suggestions concrètes.\n\
+- **Synthèse utilisateur** : une fois le besoin rempli (ou en échec contrôlé), termine par un résumé clair en langage accessible.\n\
+- **Fichiers** : respecte les règles Code Studio existantes pour `CODE_STUDIO_PLAN.md` et `DESIGN.md` ; n’écrase pas le plan global sans nécessité.\n\
+Langue : aligne-toi sur le dernier message utilisateur."),
+        "studio_scaffold" => Some("You are the Code Studio scaffold agent. Create a minimal, runnable project skeleton (README, package.json or Cargo.toml, clear entrypoints). Prefer workspace:/ paths when no absolute path is given; mirror files to the studio disk root. When the user message contains a [Stack technique du projet] block at the top, follow it strictly for languages, frameworks, package manager, and tooling; otherwise align with the stack recorded for the project or keep the skeleton generic. Do not add dead files; keep structure conventional. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (read_file first; section-wise edits only—never replace the whole file for a routine change). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If a previous generation polluted a file with prose, clean it and keep only valid file content. Before finishing: run an appropriate build or typecheck when possible; in your final reply summarize what you created and how to run it in plain language."),
+        "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. When a [Stack technique du projet] block is present in the user message, obey it for UI libraries, bundler, CSS approach, and TypeScript/JavaScript choice. Verify dependencies exist in package.json before importing. Use read_file before editing. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Run build/lint/typecheck via run_command --cwd workspace:/ when policy allows, and fix issues you introduced. End with a clear user-facing summary of changes and how to preview or test — not only \"Done\"."),
+        "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Before declaring completion: run tests or at least start/build checks when feasible; summarize APIs and behavior for the user in accessible terms."),
+        "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If prose was accidentally inserted in a source file, remove it and keep only valid syntax for that file type. Verify end-to-end coherence; run combined build/test when policy allows. Close with a plain-language recap of what changed and how to run the app."),
+        "studio_planner" => Some("You are the Code Studio planning agent. READ-ONLY on application source: do NOT write_file, edit_file, delete_file, rename_path, move_tree, search_replace, or apply_patch to any path except workspace:/CODE_STUDIO_PLAN.md. Do NOT run_command except read-only diagnostics (git status, git log, git diff, ls, cat, npm/yarn/pnpm only if the user explicitly asked for a read-only check). You MAY update workspace:/CODE_STUDIO_PLAN.md by sections to capture the plan. Explore with read_file, list_dir, grep_content. Deliver a clear implementation plan, critical files, and risks; end with next steps for a human or for an implement agent."),
         _ => None,
     }
 }
 
 /// If AKASHA_TOOLS_JOURNAL_PATH is set, append a line for write tool invocations (Phase 4 modification journal).
 async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: &str) {
-    const WRITE_TOOLS: &[&str] = &["write_file", "search_replace", "edit_file", "apply_patch"];
+    const WRITE_TOOLS: &[&str] = &[
+        "write_file",
+        "delete_file",
+        "rename_path",
+        "move_tree",
+        "search_replace",
+        "edit_file",
+        "apply_patch",
+    ];
     if !WRITE_TOOLS.contains(&tool) {
         return;
     }
@@ -3056,6 +3540,239 @@ fn tool_name_is_safe_identifier(tool_name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
 }
 
+/// DeepSeek / variantes : balises style `<｜DSML｜tool_calls>…<｜DSML｜invoke name="…">…</｜DSML｜invoke>`.
+/// Le découpage sur espaces ne s’applique pas au XML ; on convertit en lignes `TOOL:` avant `parse_tool_calls`.
+fn normalize_dsml_tool_calls(response: &str) -> String {
+    let lower = response.to_ascii_lowercase();
+    if !lower.contains("dsml") || !lower.contains("invoke") || !response.contains('<') {
+        return response.to_string();
+    }
+    static DSML_TOOL_CALLS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static DSML_INVOKE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static DSML_PARAM: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let tc = DSML_TOOL_CALLS.get_or_init(|| {
+        regex::Regex::new(
+            r"(?is)<[^>]{0,160}?\bdsml[^>]{0,160}?\btool_calls[^>]*>([\s\S]*?)</[^>]{0,160}?\bdsml[^>]{0,160}?\btool_calls[^>]*>",
+        )
+        .expect("dsml tool_calls regex")
+    });
+    let inv = DSML_INVOKE.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?is)<[^>]{0,160}?\binvoke\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</[^>]{0,160}?\binvoke[^>]*>"#,
+        )
+        .expect("dsml invoke regex")
+    });
+    let par = DSML_PARAM.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?is)<[^>]{0,160}?\bparameter\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>\s*(.*?)\s*</[^>]{0,160}?\bparameter[^>]*>"#,
+        )
+        .expect("dsml parameter regex")
+    });
+
+    let mut s = tc
+        .replace_all(response, |caps: &regex::Captures| {
+            let inner = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let lines = dsml_fragment_invokes_to_tool_lines(inner, inv, par);
+            if lines.is_empty() {
+                return caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default();
+            }
+            lines.join("\n")
+        })
+        .into_owned();
+
+    // Invokes restants (hors bloc tool_calls, ou variante sans wrapper)
+    static DSML_STANDALONE_INVOKE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let sinv = DSML_STANDALONE_INVOKE.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?is)<[^>]{0,160}?\bdsml[^>]{0,160}?\binvoke\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</[^>]{0,160}?\bdsml[^>]{0,160}?\binvoke[^>]*>"#,
+        )
+        .expect("dsml standalone invoke regex")
+    });
+    s = sinv
+        .replace_all(&s, |caps: &regex::Captures| {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+            let body = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            let params = dsml_parse_parameters(body, par);
+            let args = dsml_params_to_tool_args(name, &params);
+            format!("TOOL: {} {}", name, args.join(" "))
+        })
+        .into_owned();
+
+    s
+}
+
+fn dsml_simple_entity_decode(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}
+
+fn dsml_truthy_param(v: &str) -> bool {
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on" | ""
+    )
+}
+
+fn dsml_parse_parameters(body: &str, par: &regex::Regex) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for c in par.captures_iter(body) {
+        let name = c.get(1).map(|m| m.as_str()).unwrap_or("").trim().to_string();
+        let val = dsml_simple_entity_decode(c.get(2).map(|m| m.as_str()).unwrap_or("").trim());
+        if !name.is_empty() {
+            out.push((name, val));
+        }
+    }
+    out
+}
+
+fn dsml_params_to_tool_args(tool: &str, params: &[(String, String)]) -> Vec<String> {
+    let tl = tool.trim().to_ascii_lowercase();
+    match tl.as_str() {
+        "search_files" => {
+            let mut dir = ".".to_string();
+            let mut pat = "*".to_string();
+            let mut no_ignore = false;
+            for (k, v) in params {
+                let kl = k.to_ascii_lowercase();
+                match kl.as_str() {
+                    "dir" => {
+                        if !v.is_empty() {
+                            dir = v.clone();
+                        }
+                    }
+                    "pattern" | "glob" => {
+                        if !v.is_empty() {
+                            pat = v.clone();
+                        }
+                    }
+                    "--no-ignore" | "--no-gitignore" | "no_ignore" => {
+                        if dsml_truthy_param(v) {
+                            no_ignore = true;
+                        }
+                    }
+                    "limit" | "offset" | "max" | "max_results" | "top_k" | "string" => {}
+                    _ => {}
+                }
+            }
+            let mut out = vec![dir, pat];
+            if no_ignore {
+                out.push("--no-ignore".to_string());
+            }
+            out
+        }
+        "grep_content" => {
+            let mut dir = ".".to_string();
+            let mut pattern = String::new();
+            let mut file_glob: Option<String> = None;
+            let mut no_ignore = false;
+            let mut use_regex = false;
+            for (k, v) in params {
+                let kl = k.to_ascii_lowercase();
+                match kl.as_str() {
+                    "dir" => {
+                        if !v.is_empty() {
+                            dir = v.clone();
+                        }
+                    }
+                    "pattern" | "query" => pattern = v.clone(),
+                    "file_glob" | "glob" => {
+                        if !v.is_empty() {
+                            file_glob = Some(v.clone());
+                        }
+                    }
+                    "--no-ignore" | "--no-gitignore" | "no_ignore" => {
+                        if dsml_truthy_param(v) {
+                            no_ignore = true;
+                        }
+                    }
+                    "--regex" | "-r" | "regex" => {
+                        if dsml_truthy_param(v) {
+                            use_regex = true;
+                        }
+                    }
+                    "limit" | "string" | "offset" => {}
+                    _ => {}
+                }
+            }
+            let mut out = vec![dir, pattern];
+            if let Some(g) = file_glob {
+                if !g.is_empty() {
+                    out.push(g);
+                }
+            }
+            if use_regex {
+                out.push("--regex".to_string());
+            }
+            if no_ignore {
+                out.push("--no-ignore".to_string());
+            }
+            out
+        }
+        _ => dsml_generic_params_to_args(params),
+    }
+}
+
+fn dsml_generic_params_to_args(params: &[(String, String)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (k, v) in params {
+        let kt = k.trim();
+        if kt.eq_ignore_ascii_case("string") {
+            continue;
+        }
+        if kt.starts_with("--") {
+            if dsml_truthy_param(v) {
+                out.push(kt.to_string());
+            }
+        } else if !v.is_empty() {
+            out.push(v.clone());
+        }
+    }
+    out
+}
+
+fn dsml_fragment_invokes_to_tool_lines(
+    inner: &str,
+    inv: &regex::Regex,
+    par: &regex::Regex,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for c in inv.captures_iter(inner) {
+        let name = c.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+        if name.is_empty() {
+            continue;
+        }
+        let body = c.get(2).map(|m| m.as_str()).unwrap_or("");
+        let params = dsml_parse_parameters(body, par);
+        let args = dsml_params_to_tool_args(name, &params);
+        lines.push(format!("TOOL: {} {}", name, args.join(" ")));
+    }
+    lines
+}
+
+/// Certains modèles enveloppent les appels outils en XML (`<tool_call>read_file …</tool_call>`)
+/// ou enchaînent avec `<tool_call>…<tool_call>…` sans fermeture. Convertir en lignes `TOOL:` pour `parse_tool_calls`.
+fn normalize_xml_tool_call_wrappers(response: &str) -> String {
+    static CLOSE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static OPEN_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
+    let lower = response.to_ascii_lowercase();
+    if !lower.contains("<tool_call") {
+        return response.to_string();
+    }
+    let close_re = CLOSE_RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)</tool_call\s*>").expect("hard-coded close tool_call regex must compile")
+    });
+    let s = close_re.replace_all(response, "\n").to_string();
+    let open_re = OPEN_RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)<tool_call(?:\s[^>]*)?>\s*")
+            .expect("hard-coded open tool_call regex must compile")
+    });
+    open_re.replace_all(&s, "\nTOOL: ").to_string()
+}
+
 /// Rewrite lines so strict `TOOL:` prefix parsing succeeds (see `parse_tool_calls`).
 ///
 /// Lines that are inside the body of a multiline tool (`write_file`, `edit_file`,
@@ -3131,7 +3848,9 @@ fn normalize_response_tool_prefixes(response: &str) -> String {
 
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
 fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
-    let normalized = normalize_response_tool_prefixes(response);
+    let dsml_norm = normalize_dsml_tool_calls(response);
+    let xml_norm = normalize_xml_tool_call_wrappers(&dsml_norm);
+    let normalized = normalize_response_tool_prefixes(&xml_norm);
     parse_tool_calls_strict(&normalized)
 }
 
@@ -3565,9 +4284,94 @@ async fn execute_tool_call(
             }
         }
         "read_file" => {
-            let path_str = normalize_tool_path_hint(&path_arg_joined(args));
+            let (path_tokens, explicit_window, want_full) = parse_read_file_args(args);
+            let path_input = path_tokens.join(" ");
+            let path_str = normalize_tool_path_hint(&path_input);
+            let slice_for_line_window = |content: &str, path_label: &str, offset: usize, limit: usize| -> String {
+                let lines: Vec<&str> = content.lines().collect();
+                let total = lines.len();
+                if total == 0 {
+                    return format!("[read_file {}] file is empty", path_label);
+                }
+                let req_start_1 = if offset == 0 { 1 } else { offset };
+                let req_start_idx = req_start_1.saturating_sub(1);
+                let start_idx = if req_start_idx >= total {
+                    total.saturating_sub(limit)
+                } else {
+                    req_start_idx
+                };
+                let end_idx_excl = (start_idx + limit).min(total);
+                let body = if start_idx < end_idx_excl {
+                    lines[start_idx..end_idx_excl].join("\n")
+                } else {
+                    String::new()
+                };
+                let actual_start_1 = start_idx + 1;
+                let actual_end_1 = end_idx_excl;
+                let req_end_1 = req_start_1.saturating_add(limit.saturating_sub(1));
+                if actual_start_1 != req_start_1 || actual_end_1 != req_end_1 {
+                    format!(
+                        "[read_file {}] requested lines {}..{}; returned lines {}..{} (file has {} lines):\n{}",
+                        path_label, req_start_1, req_end_1, actual_start_1, actual_end_1, total, body
+                    )
+                } else {
+                    format!(
+                        "[read_file {}] lines {}..{} (file has {} lines):\n{}",
+                        path_label, actual_start_1, actual_end_1, total, body
+                    )
+                }
+            };
+            let format_read_content = |content: &str, path_label: &str| -> String {
+                if want_full {
+                    let line_count = content.lines().count();
+                    let total_bytes = content.len();
+                    if total_bytes <= READ_FILE_FULL_OUTPUT_MAX_BYTES {
+                        format!(
+                            "[read_file {}] full file ({} lines, {} bytes):\n{}",
+                            path_label, line_count, total_bytes, content
+                        )
+                    } else {
+                        let (frag, total, truncated) = crate::tool_output::truncate_utf8_by_bytes(
+                            content,
+                            READ_FILE_FULL_OUTPUT_MAX_BYTES,
+                        );
+                        let frag_s = frag.into_owned();
+                        let mut body = format!(
+                            "[read_file {}] --full: first {} UTF-8 bytes shown ({} lines in file, {} bytes total):\n{}",
+                            path_label,
+                            frag_s.len(),
+                            line_count,
+                            total,
+                            frag_s
+                        );
+                        if truncated {
+                            body.push('\n');
+                            body.push_str(&crate::tool_output::truncation_footer_bytes(
+                                total,
+                                "narrow with grep_content/search_files or read_file with a line window",
+                            ));
+                        }
+                        body
+                    }
+                } else {
+                    let (off, lim) = explicit_window.unwrap_or((1, READ_FILE_DEFAULT_MAX_LINES));
+                    let total_lines = content.lines().count();
+                    let mut out = slice_for_line_window(content, path_label, off, lim);
+                    if explicit_window.is_none() && total_lines > READ_FILE_DEFAULT_MAX_LINES {
+                        out.push_str(&format!(
+                            "\n{} — {} lines total. Use TOOL: read_file <same_path> --full for entire file, or TOOL: read_file <same_path> <offset> <limit> for a chunk.",
+                            READ_FILE_PARTIAL_DEFAULT_MARKER, total_lines
+                        ));
+                    }
+                    out
+                }
+            };
             if path_str.is_empty() {
-                (false, "[read_file] usage: read_file <path>".to_string(), None)
+                (
+                    false,
+                    "[read_file] usage: read_file <path> [--full] [<offset_line> <limit_lines>]".to_string(),
+                    None,
+                )
             } else if is_workspace_virtual_path(&path_str) {
                 let key = path_str
                     .trim_start_matches("workspace:/")
@@ -3588,19 +4392,9 @@ async fn execute_tool_call(
                             // Empty in-memory entry must not mask the real file on disk (orchestrator
                             // writes `.akasha/plan_*.md` with tokio::fs, not via this map).
                             if !content.is_empty() {
-                                let (preview, truncated, total) = crate::tool_output::read_file_preview(content);
-                                let body = format!(
-                                    "[read_file workspace:{}] {} bytes: {}",
-                                    key, total, preview
-                                );
                                 return (
                                     true,
-                                    crate::tool_output::with_truncation_footer(
-                                        body,
-                                        truncated,
-                                        total,
-                                        "use grep_content or search_files to narrow, then read_file again",
-                                    ),
+                                    format_read_content(content, &format!("workspace:{}", key)),
                                     None,
                                 );
                             }
@@ -3624,34 +4418,34 @@ async fn execute_tool_call(
                 match executor.read_file(&disk_path).await {
                     Ok((content, res)) => {
                         let msg = if res.success {
-                            let (preview, truncated, total) = crate::tool_output::read_file_preview(&content);
-                            let body = format!(
-                                "[read_file {}] {} bytes: {}",
-                                disk_path.display(),
-                                total,
-                                preview
-                            );
-                            crate::tool_output::with_truncation_footer(
-                                body,
-                                truncated,
-                                total,
-                                "use grep_content or search_files to narrow, then read_file again",
-                            )
+                            format_read_content(&content, &disk_path.display().to_string())
                         } else {
                             format!("[read_file workspace] failed: {}", res.summary)
                         };
                         return (res.success, msg, None);
                     }
-                    Err(e) => return (
-                        false,
-                        format!(
-                            "[read_file workspace] failed: read error for {} at {}: {}",
-                            key,
-                            disk_path.display(),
-                            e
-                        ),
-                        None,
-                    ),
+                    Err(e) => {
+                        let detail = format!("{:#}", e);
+                        let hint = if detail.to_ascii_lowercase().contains("not found")
+                            || detail.to_ascii_lowercase().contains("cannot find")
+                            || detail.to_ascii_lowercase().contains("no such file")
+                        {
+                            " (hint: verify path/casing and use search_files . <filename> first)"
+                        } else {
+                            ""
+                        };
+                        return (
+                            false,
+                            format!(
+                                "[read_file workspace] failed: read error for {} at {}: {}{}",
+                                key,
+                                disk_path.display(),
+                                detail,
+                                hint
+                            ),
+                            None,
+                        );
+                    }
                 };
             } else {
                 let p = Path::new(&path_str);
@@ -3661,25 +4455,28 @@ async fn execute_tool_call(
                     match executor.read_file(p).await {
                         Ok((content, res)) => {
                             let msg = if res.success {
-                                let (preview, truncated, total) = crate::tool_output::read_file_preview(&content);
-                                let body = format!(
-                                    "[read_file {}] {} bytes: {}",
-                                    p.display(),
-                                    total,
-                                    preview
-                                );
-                                crate::tool_output::with_truncation_footer(
-                                    body,
-                                    truncated,
-                                    total,
-                                    "use grep_content or search_files to narrow, then read_file again",
-                                )
+                                format_read_content(&content, &p.display().to_string())
                             } else {
                                 format!("[read_file] failed: {}", res.summary)
                             };
                             (res.success, msg, None)
                         }
-                        Err(e) => (false, format!("[read_file] failed: {}", e), None),
+                        Err(e) => {
+                            let detail = format!("{:#}", e);
+                            let hint = if detail.to_ascii_lowercase().contains("not found")
+                                || detail.to_ascii_lowercase().contains("cannot find")
+                                || detail.to_ascii_lowercase().contains("no such file")
+                            {
+                                " (hint: verify path/casing and use search_files . <filename> first)"
+                            } else {
+                                ""
+                            };
+                            (
+                                false,
+                                format!("[read_file] failed: {}{}", detail, hint),
+                                None,
+                            )
+                        }
                     }
                 }
             }
@@ -4488,8 +5285,9 @@ async fn execute_tool_call(
         }
         "write_file" => {
             let Some((path_str, content)) = parse_write_file_request(args) else {
-                return (false, "[write_file] usage: write_file <path> <content>".to_string(), None);
+                return (false, "[write_file] usage: write_file <path> then file content on following lines".to_string(), None);
             };
+            let content = strip_markdown_fences_from_write_content(&content);
             if is_workspace_virtual_path(&path_str) {
                 match workspace_store {
                     Some(ws) => {
@@ -4533,6 +5331,15 @@ async fn execute_tool_call(
                                 if let Some(parent) = disk_path.parent() {
                                     let _ = tokio::fs::create_dir_all(parent).await;
                                 }
+                                if let Some(r) = workspace_root {
+                                    if crate::studio::is_strictly_under_studio_root(&disk_path, r) {
+                                        if let Some(msg) =
+                                            crate::api_studio::studio_reject_polluted_code_content(&disk_path, &effective_content)
+                                        {
+                                            return (false, format!("[write_file] {}", msg), None);
+                                        }
+                                    }
+                                }
                                 if tokio::fs::write(&disk_path, &effective_content).await.is_ok() {
                                     return (true, format!("[write_file workspace:{}] saved (disk).", key), None);
                                 }
@@ -4543,11 +5350,18 @@ async fn execute_tool_call(
                     None => return (false, "[write_file] workspace paths require a workspace store.".to_string(), None),
                 }
             }
-            let path = Path::new(&path_str);
-            match executor.write_file(path, &content).await {
+            let disk_path = resolve_tool_disk_path(path_str.trim(), workspace_root);
+            if let Some(root) = workspace_root {
+                if crate::studio::is_strictly_under_studio_root(&disk_path, root) {
+                    if let Some(msg) = crate::api_studio::studio_reject_polluted_code_content(&disk_path, &content) {
+                        return (false, format!("[write_file] {}", msg), None);
+                    }
+                }
+            }
+            match executor.write_file(&disk_path, &content).await {
                 Ok(res) => {
                     let msg = if res.success {
-                        format!("[write_file {}] {}", path.display(), res.summary)
+                        format!("[write_file {}] {}", disk_path.display(), res.summary)
                     } else {
                         format!("[write_file] {}", res.summary)
                     };
@@ -4556,21 +5370,401 @@ async fn execute_tool_call(
                 Err(e) => (false, format!("[write_file] error: {}", e), None),
             }
         }
+        "delete_file" => {
+            let path_str = path_arg_joined(args);
+            if path_str.is_empty() {
+                return (
+                    false,
+                    "[delete_file] usage: delete_file <path>".to_string(),
+                    None,
+                );
+            }
+            let path_str = normalize_tool_path_hint(path_str.trim());
+            if path_str.contains("..") {
+                return (
+                    false,
+                    "[delete_file] invalid path (..)".to_string(),
+                    None,
+                );
+            }
+            if is_workspace_virtual_path(&path_str) {
+                match workspace_store {
+                    Some(ws) => {
+                        let key = path_str
+                            .trim_start_matches("workspace:/")
+                            .trim_start_matches("workspace:")
+                            .trim_start_matches('/')
+                            .to_string();
+                        let mut key = key.trim().trim_matches('`').trim_matches('"').to_string();
+                        if key.ends_with('#') {
+                            key.pop();
+                        }
+                        let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
+                        let (key, _) =
+                            rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
+                        {
+                            let mut guard = ws.write().await;
+                            if let Some(per_task) = guard.get_mut(&lineage_task_id) {
+                                per_task.remove(&key);
+                            }
+                        }
+                        let rel_path = Path::new(&key);
+                        if !executor.policy.can_write(rel_path) {
+                            return (
+                                false,
+                                "[delete_file] path not allowed by policy".to_string(),
+                                None,
+                            );
+                        }
+                        let disk_path_opt = workspace_root
+                            .map(|root| root.join(&key))
+                            .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(&key)))
+                            .map(strip_verbatim_prefix);
+                        if let Some(disk_path) = disk_path_opt {
+                            if disk_path.is_dir() {
+                                return (
+                                    false,
+                                    "[delete_file] path is a directory".to_string(),
+                                    None,
+                                );
+                            }
+                            if let Some(r) = workspace_root {
+                                if crate::studio::is_strictly_under_studio_root(&disk_path, r)
+                                    && !disk_path.exists()
+                                {
+                                    return (
+                                        true,
+                                        format!("[delete_file workspace:{}] absent (disk).", key),
+                                        None,
+                                    );
+                                }
+                            }
+                            match tokio::fs::remove_file(&disk_path).await {
+                                Ok(()) => {
+                                    return (
+                                        true,
+                                        format!("[delete_file workspace:{}] deleted (disk).", key),
+                                        None,
+                                    );
+                                }
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                    return (
+                                        true,
+                                        format!("[delete_file workspace:{}] absent (disk).", key),
+                                        None,
+                                    );
+                                }
+                                Err(e) => {
+                                    return (
+                                        false,
+                                        format!("[delete_file] {}", e),
+                                        None,
+                                    );
+                                }
+                            }
+                        }
+                        return (
+                            true,
+                            format!("[delete_file workspace:{}] removed from workspace store.", key),
+                            None,
+                        );
+                    }
+                    None => {
+                        return (
+                            false,
+                            "[delete_file] workspace paths require a workspace store.".to_string(),
+                            None,
+                        );
+                    }
+                }
+            }
+            let disk_path = resolve_tool_disk_path(path_str.trim(), workspace_root);
+            if disk_path.is_dir() {
+                return (
+                    false,
+                    "[delete_file] path is a directory".to_string(),
+                    None,
+                );
+            }
+            if !executor.policy.can_write(&disk_path) {
+                return (
+                    false,
+                    "[delete_file] path not allowed by policy".to_string(),
+                    None,
+                );
+            }
+            if let Some(root) = workspace_root {
+                if crate::studio::is_strictly_under_studio_root(&disk_path, root)
+                    && !disk_path.exists()
+                {
+                    return (
+                        true,
+                        format!("[delete_file {}] absent.", disk_path.display()),
+                        None,
+                    );
+                }
+            }
+            match tokio::fs::remove_file(&disk_path).await {
+                Ok(()) => (
+                    true,
+                    format!("[delete_file {}] deleted.", disk_path.display()),
+                    None,
+                ),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+                    true,
+                    format!("[delete_file {}] absent.", disk_path.display()),
+                    None,
+                ),
+                Err(e) => (false, format!("[delete_file] {}", e), None),
+            }
+        }
+        "rename_path" => {
+            if args.len() < 2 {
+                return (
+                    false,
+                    "[rename_path] usage: rename_path <from> <to> — disque ou workspace:/ ; la cible est tout le texte après le premier argument (espaces OK dans <to>)."
+                        .to_string(),
+                    None,
+                );
+            }
+            let from_s = normalize_tool_path_hint(args[0].trim());
+            let to_s = normalize_tool_path_hint(args[1..].join(" ").trim());
+            if from_s.is_empty() || to_s.is_empty() {
+                return (
+                    false,
+                    "[rename_path] usage: rename_path <from> <to>".to_string(),
+                    None,
+                );
+            }
+            if from_s.contains("..") || to_s.contains("..") {
+                return (
+                    false,
+                    "[rename_path] invalid path (..)".to_string(),
+                    None,
+                );
+            }
+            let from_is_workspace = is_workspace_virtual_path(&from_s);
+            let to_is_workspace = is_workspace_virtual_path(&to_s);
+
+            if from_is_workspace || to_is_workspace {
+                if !(from_is_workspace && to_is_workspace) {
+                    return (
+                        false,
+                        "[rename_path] both paths must use workspace:/ or neither".to_string(),
+                        None,
+                    );
+                }
+                match workspace_store {
+                    Some(ws) => {
+                        let normalize_ws_key = |s: &str| -> String {
+                            let k = s
+                                .trim_start_matches("workspace:/")
+                                .trim_start_matches("workspace:")
+                                .trim_start_matches('/');
+                            let mut k = k.trim().trim_matches('`').trim_matches('"').to_string();
+                            if k.ends_with('#') { k.pop(); }
+                            k
+                        };
+                        let lineage_id = workspace_lineage_root_task_id(task_id, store_path);
+                        let (from_key, _) = rewrite_workspace_plan_key_to_lineage_root(
+                            &normalize_ws_key(&from_s), lineage_id,
+                        );
+                        let (to_key, _) = rewrite_workspace_plan_key_to_lineage_root(
+                            &normalize_ws_key(&to_s), lineage_id,
+                        );
+                        // Phase 1: check preconditions and remove the key from the store under a
+                        // brief write lock (acts as a reservation). The lock is released before
+                        // the potentially-slow disk I/O so that unrelated read_file/write_file
+                        // operations are not blocked.
+                        let reserve_result = {
+                            let mut guard = ws.write().await;
+                            let per_task = guard.entry(lineage_id).or_default();
+                            if per_task.contains_key(&to_key) {
+                                Err(format!("[rename_path] destination workspace key already exists: {}", to_key))
+                            } else if let Some(content) = per_task.remove(&from_key) {
+                                Ok(Some(content))
+                            } else {
+                                Ok(None) // key absent from store
+                            }
+                            // write lock dropped here
+                        };
+
+                        match reserve_result {
+                            Err(msg) => (false, msg, None),
+                            Ok(Some(content)) => {
+                                // Phase 2: disk rename without holding the lock.
+                                let disk_result = if let Some(root) = workspace_root {
+                                    let from_disk = root.join(&from_key);
+                                    let to_disk = root.join(&to_key);
+                                    match executor.rename_path(&from_disk, &to_disk).await {
+                                        Ok(res) if !res.success => Err(res.summary),
+                                        Ok(_) => Ok(()),
+                                        Err(e) => Err(e.to_string()),
+                                    }
+                                } else {
+                                    Ok(()) // no disk backing — in-memory rename only
+                                };
+
+                                // Phase 3: commit to_key or rollback from_key.
+                                let mut guard = ws.write().await;
+                                let per_task = guard.entry(lineage_id).or_default();
+                                match disk_result {
+                                    Ok(()) => {
+                                        per_task.insert(to_key.clone(), content);
+                                        (true, format!("[rename_path] workspace key renamed: {} -> {}", from_key, to_key), None)
+                                    }
+                                    Err(msg) => {
+                                        per_task.insert(from_key.clone(), content);
+                                        (false, format!("[rename_path] {}", msg), None)
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                // Key absent from store — try disk rename directly.
+                                if let Some(root) = workspace_root {
+                                    let from_disk = root.join(&from_key);
+                                    let to_disk = root.join(&to_key);
+                                    match executor.rename_path(&from_disk, &to_disk).await {
+                                        Ok(res) => {
+                                            let msg = format!("[rename_path] {}", res.summary);
+                                            (res.success, msg, None)
+                                        }
+                                        Err(e) => (false, format!("[rename_path] {}", e), None),
+                                    }
+                                } else {
+                                    (false, format!("[rename_path] workspace key not found: {}", from_key), None)
+                                }
+                            }
+                        }
+                    }
+                    None => (false, "[rename_path] workspace paths require a workspace store.".to_string(), None),
+                }
+            } else {
+                let from_disk = resolve_tool_disk_path(&from_s, workspace_root);
+                let to_disk = resolve_tool_disk_path(&to_s, workspace_root);
+                match executor.rename_path(&from_disk, &to_disk).await {
+                    Ok(res) => {
+                        let msg = format!("[rename_path] {}", res.summary);
+                        (res.success, msg, None)
+                    }
+                    Err(e) => (false, format!("[rename_path] {}", e), None),
+                }
+            }
+        }
+        "move_tree" => {
+            if args.len() < 2 {
+                return (
+                    false,
+                    "[move_tree] usage: move_tree <from_dir> <to_dir> — répertoire source uniquement ; la cible est tout le texte après le premier argument."
+                        .to_string(),
+                    None,
+                );
+            }
+            let from_s = normalize_tool_path_hint(args[0].trim());
+            let to_s = normalize_tool_path_hint(args[1..].join(" ").trim());
+            if from_s.is_empty() || to_s.is_empty() {
+                return (
+                    false,
+                    "[move_tree] usage: move_tree <from_dir> <to_dir>".to_string(),
+                    None,
+                );
+            }
+            if from_s.contains("..") || to_s.contains("..") {
+                return (
+                    false,
+                    "[move_tree] invalid path (..)".to_string(),
+                    None,
+                );
+            }
+            let from_s = rewrite_workspace_plan_path_str(&from_s, task_id, store_path);
+            let to_s = rewrite_workspace_plan_path_str(&to_s, task_id, store_path);
+            let from_disk = resolve_tool_disk_path(&from_s, workspace_root);
+            let to_disk = resolve_tool_disk_path(&to_s, workspace_root);
+            match executor.move_tree(&from_disk, &to_disk).await {
+                Ok(res) => {
+                    // After a successful disk move, rename all workspace store keys whose paths
+                    // fall under the moved directory prefix (mirrors rename_path workspace sync).
+                    if res.success && is_workspace_virtual_path(&from_s) && is_workspace_virtual_path(&to_s) {
+                        if let Some(ws) = workspace_store {
+                            let lineage_id = workspace_lineage_root_task_id(task_id, store_path);
+                            let from_prefix = from_s
+                                .trim_start_matches("workspace:/")
+                                .trim_start_matches("workspace:")
+                                .trim_start_matches('/')
+                                .trim_end_matches('/')
+                                .to_string();
+                            let to_prefix = to_s
+                                .trim_start_matches("workspace:/")
+                                .trim_start_matches("workspace:")
+                                .trim_start_matches('/')
+                                .trim_end_matches('/')
+                                .to_string();
+                            let subtree_prefix = format!("{from_prefix}/");
+                            let mut guard = ws.write().await;
+                            let per_task = guard.entry(lineage_id).or_default();
+                            // Collect moves first to avoid holding a mutable + immutable borrow.
+                            let to_rename: Vec<(String, String, String)> = per_task
+                                .iter()
+                                .filter_map(|(key, val)| {
+                                    if *key == from_prefix {
+                                        // Exact directory entry.
+                                        Some((key.clone(), to_prefix.clone(), val.clone()))
+                                    } else if let Some(suffix) = key.strip_prefix(&subtree_prefix) {
+                                        // Entry inside the subtree: suffix is the part after the "/".
+                                        Some((key.clone(), format!("{to_prefix}/{suffix}"), val.clone()))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            for (old_key, new_key, content) in to_rename {
+                                per_task.remove(&old_key);
+                                per_task.insert(new_key, content);
+                            }
+                        }
+                    }
+                    let msg = format!("[move_tree] {}", res.summary);
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[move_tree] {}", e), None),
+            }
+        }
         "search_replace" => {
             let path_str = match args.get(0) {
                 Some(s) => s.as_str(),
-                None => return (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None),
+                None => return (
+                    false,
+                    "[search_replace] usage: search_replace <path> <old_snippet> | <new_snippet> — delimiter must be SPACE PIPE SPACE (` | `); one TOOL line".to_string(),
+                    None,
+                ),
             };
             let is_workspace = path_str.starts_with("workspace:/") || path_str.starts_with("workspace:");
             let path_str_rewritten = rewrite_workspace_plan_path_str(path_str, task_id, store_path);
             let path_str = path_str_rewritten.as_str();
             let disk_path = resolve_tool_disk_path(path_str, workspace_root);
-            let rest = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
-            let Some((search, replace)) = rest
-                .split_once('|')
-                .map(|(s, r)| (s.trim().to_string(), r.trim().to_string()))
-            else {
-                return (false, "[search_replace] usage: search_replace <path> <search> | <replace>".to_string(), None);
+            let (search, replace) = match parse_search_replace_payload(args) {
+                Ok(pair) => pair,
+                Err("usage") => {
+                    return (
+                        false,
+                        "[search_replace] usage: search_replace <path> <old_snippet> | <new_snippet> — use delimiter ` | ` (space-pipe-space) between the exact text to find and the replacement. Example: TOOL: search_replace workspace:/src/App.tsx const x = 1 | const x = 2".to_string(),
+                        None,
+                    );
+                }
+                Err("empty_search") => {
+                    return (
+                        false,
+                        "[search_replace] search string is empty — the tokenizer often emits `|` as its own token after the path, so the payload must start with the OLD text to find, then ` | `, then the NEW text (not `| …` right after the path). Example: TOOL: search_replace workspace:/f.tsx oldLine | newLine".to_string(),
+                        None,
+                    );
+                }
+                Err(_) => {
+                    return (
+                        false,
+                        "[search_replace] could not parse old/new segments".to_string(),
+                        None,
+                    );
+                }
             };
             match executor.search_replace(&disk_path, &search, &replace).await {
                 Ok(res) => {
@@ -5100,6 +6294,17 @@ async fn execute_tool_call(
                         let reg = Arc::clone(r);
                         let pid = plugin_id.clone();
                         let pl = plugin_payload.clone();
+                        // #region agent log
+                        debug_log(
+                            "H3",
+                            "crates/akasha-daemon/src/api.rs:5578",
+                            "Spawning blocking plugin call task",
+                            serde_json::json!({
+                                "plugin_id": pid,
+                                "payload_len": pl.len()
+                            }),
+                        );
+                        // #endregion
                         match tokio::task::spawn_blocking(move || reg.call_tool(&pid, &pl)).await {
                             Ok(Ok(out)) => {
                                 if out.trim().is_empty() {
@@ -5147,6 +6352,17 @@ async fn execute_tool_call(
                                     "[plugin:{}] execution failed: {}",
                                     plugin_id,
                                     if join_err.is_panic() {
+                                        // #region agent log
+                                        debug_log(
+                                            "H3",
+                                            "crates/akasha-daemon/src/api.rs:5629",
+                                            "Blocking plugin task panicked",
+                                            serde_json::json!({
+                                                "plugin_id": plugin_id,
+                                                "join_error": join_err.to_string()
+                                            }),
+                                        );
+                                        // #endregion
                                         "internal error (plugin task panicked)".to_string()
                                     } else {
                                         join_err.to_string()
@@ -5297,11 +6513,15 @@ pub async fn summarize_yesterday_and_promote(
         return;
     }
     let blob = ShortTermStore::turns_to_context(&turns);
+    let blob_capped = crate::llm_prompt_cap::truncate_utf8_bytes(
+        &blob,
+        crate::llm_prompt_cap::SYSTEM_PROMPT_FIELD_MAX_BYTES,
+    );
     let summary_prompt = format!(
         "Summarize in a short synthetic paragraph (5 to 10 lines) the day of {}: topics covered, decisions, projects or important information. \
 Factual response in English.\n\n{}",
         session_id.trim_start_matches("day-"),
-        blob
+        blob_capped
     );
     let summary_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
         .ok()
@@ -5693,6 +6913,83 @@ fn looks_like_placeholder_after_tools(text: &str) -> bool {
     placeholder_phrases.iter().any(|p| lower.contains(p))
 }
 
+/// Returns true when the model asks the user to manually apply file edits
+/// ("replace this file with...") instead of using write tools.
+fn looks_like_manual_file_patch_reply(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    let cues = [
+        "voici le contenu corrigé",
+        "à remplacer dans",
+        "copie ces blocs",
+        "replace directly in",
+        "here is the corrected content",
+        "paste this into",
+        "replace this file with",
+        "manually apply",
+        "je fournis le contenu corrigé",
+        "je fournis les corrections",
+    ];
+    cues.iter().any(|c| lower.contains(c))
+}
+
+/// Returns true when a Code Studio implementation task received a prose-only audit/plan
+/// even though write tools are available. This catches replies like "ce qui manque...",
+/// "recommandations pour avancer", or "je ne peux pas modifier les fichiers" instead of
+/// applying changes with `TOOL:` lines.
+fn looks_like_code_studio_prose_only_implementation_reply(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    let refusal_or_meta = [
+        "je ne peux pas modifier les fichiers",
+        "je ne peux pas modifier",
+        "i cannot modify files",
+        "i can't modify files",
+        "restriction « no tool lines »",
+        "restriction \"no tool lines\"",
+        "no tool lines",
+        "dans ce tour",
+        "in this turn",
+    ]
+    .iter()
+    .any(|p| lower.contains(p));
+    let plan_without_action = [
+        "ce qui manque",
+        "recommandations pour avancer",
+        "il faudrait",
+        "il faut ",
+        "prochaine étape",
+        "next steps",
+        "recommendations",
+        "should implement",
+        "should add",
+        "à mettre en place",
+        "mettre en place",
+    ]
+    .iter()
+    .any(|p| lower.contains(p));
+    let implementation_surface = [
+        "eslint",
+        "prettier",
+        "src/",
+        "package.json",
+        "composant",
+        "component",
+        "hook",
+        "tests",
+        "build",
+        "fichier",
+        "file",
+    ]
+    .iter()
+    .any(|p| lower.contains(p));
+    refusal_or_meta || (plan_without_action && implementation_surface)
+}
+
 fn looks_like_meta_agent_response(text: &str) -> bool {
     let lower = text.trim().to_lowercase();
     if lower.is_empty() {
@@ -5735,6 +7032,800 @@ fn looks_like_off_topic_greeting(text: &str) -> bool {
     .any(|p| lower.contains(p))
 }
 
+/// Outils autorisés pendant la correction automatique post-échec `npm run build` / `cargo check` (Code Studio).
+const STUDIO_VERIFY_AUTOFIX_TOOLS: &[&str] = &[
+    "read_file",
+    "grep_content",
+    "search_files",
+    "search_replace",
+    "edit_file",
+    "write_file",
+    "apply_patch",
+    "file_diff",
+    "delete_file",
+    "rename_path",
+    "move_tree",
+];
+
+/// Injecté quand deux tours consécutifs produisent le même résumé d’outils (risque de boucle).
+const STUDIO_VERIFY_AUTOFIX_STALL_WARNING: &str = "\n\n[STALL / ANTI-LOOP — READ CAREFULLY]\n\
+The previous round’s tool results fingerprint matches this round’s: you are likely repeating a failing strategy.\n\
+Rules for this sandbox:\n\
+- There is NO `run_command`, NO shell, NO `mv`/`mkdir`/`git mv` here.\n\
+- To rename/move a file or a single directory atomically: `rename_path <from> <to>` (destination must not exist).\n\
+- To move a directory tree across volumes or when rename fails: `move_tree <from_dir> <to_dir>`.\n\
+- If those are not applicable: `read_file` each source under the old path, then `write_file workspace:/new/path/...` with the same contents (write_file creates parent directories). Then `grep_content` + `search_replace` across the repo to fix imports. Optionally `delete_file` obsolete duplicates only if policy allows and you are sure.\n\
+- If TS2305 says a symbol is not exported: `read_file` the module that the import resolves to on disk (path shown in the error) before editing; add the export OR change the import to a file that actually exists (`search_files workspace:/. <basename> true`).\n\
+- If TS2554 wrong arity: fix the call site or the callee — read both sides.\n\
+- Do NOT repeat the same import-only edit without ensuring the target file exists at that path.\n";
+
+fn studio_verify_extract_ts_error_paths(verify_log: &str, cap: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in verify_log.lines() {
+        if !line.contains(": error TS") {
+            continue;
+        }
+        let Some((left, _)) = line.split_once('(') else {
+            continue;
+        };
+        let p = left.trim();
+        if p.is_empty() {
+            continue;
+        }
+        if !(p.ends_with(".ts") || p.ends_with(".tsx") || p.ends_with(".js") || p.ends_with(".jsx"))
+        {
+            continue;
+        }
+        if out.iter().any(|x| x == p) {
+            continue;
+        }
+        out.push(p.to_string());
+        if out.len() >= cap {
+            break;
+        }
+    }
+    out
+}
+
+fn studio_verify_short_hash(input: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    input.hash(&mut h);
+    format!("{:08x}", (h.finish() & 0xffff_ffff) as u32)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StudioVerifyUserLanguage {
+    French,
+    English,
+    /// Spanish, German, etc. — LLM must follow the user excerpt language.
+    MatchUserExcerpt,
+}
+
+fn studio_verify_detect_user_language(clean_user_message: &str) -> StudioVerifyUserLanguage {
+    let t: String = clean_user_message.chars().take(6_000).collect();
+    if t.trim().is_empty() {
+        return StudioVerifyUserLanguage::MatchUserExcerpt;
+    }
+    let mut fr = 0i32;
+    let mut en = 0i32;
+    for ch in t.chars() {
+        if matches!(
+            ch,
+            'à' | 'â' | 'é' | 'è' | 'ê' | 'ë' | 'î' | 'ï' | 'ô' | 'ù' | 'û' | 'ü' | 'ç' | 'œ' | 'æ'
+        ) {
+            fr += 3;
+        }
+    }
+    let lower = t.to_lowercase();
+    let pad = format!(" {lower} ");
+    const FR_MARKERS: &[&str] = &[
+        " tâche ",
+        " créer ",
+        " merci ",
+        " échec ",
+        " fichier ",
+        " utilisateur ",
+        " réinitialisation ",
+        " veuillez ",
+        " c'est ",
+        " être ",
+        " dans le ",
+        " pas de ",
+        " pour ",
+        " avec ",
+        " depuis ",
+        " régénérer ",
+        " mettre à jour ",
+        " code studio ",
+        " consigne ",
+    ];
+    const EN_MARKERS: &[&str] = &[
+        " the ",
+        " and ",
+        " create ",
+        " task ",
+        " failed ",
+        " please ",
+        " update ",
+        " build ",
+        " error ",
+        " file ",
+        " user ",
+        " request ",
+        " with ",
+        " from ",
+        " regenerate ",
+        " design ",
+        " studio ",
+        " workspace ",
+    ];
+    for m in FR_MARKERS {
+        if pad.contains(m) {
+            fr += 2;
+        }
+    }
+    for m in EN_MARKERS {
+        if pad.contains(m) {
+            en += 2;
+        }
+    }
+    if fr > en + 2 {
+        StudioVerifyUserLanguage::French
+    } else if en > fr + 2 {
+        StudioVerifyUserLanguage::English
+    } else {
+        StudioVerifyUserLanguage::MatchUserExcerpt
+    }
+}
+
+fn studio_verify_failure_banner(lang: StudioVerifyUserLanguage) -> &'static str {
+    match lang {
+        StudioVerifyUserLanguage::French => {
+            "Échec vérification automatique (build/check) — la tâche est marquée en échec."
+        }
+        StudioVerifyUserLanguage::English => {
+            "Automatic build/check verification failed — the task was marked as failed."
+        }
+        StudioVerifyUserLanguage::MatchUserExcerpt => {
+            "Build/check verification failed — the task was marked as failed."
+        }
+    }
+}
+
+fn studio_verify_analyzing_progress_line(lang: StudioVerifyUserLanguage) -> &'static str {
+    match lang {
+        StudioVerifyUserLanguage::French => {
+            "Échec de la vérification build — rédaction d'une synthèse lisible…"
+        }
+        StudioVerifyUserLanguage::English => {
+            "Build verification failed — drafting a readable summary…"
+        }
+        StudioVerifyUserLanguage::MatchUserExcerpt => {
+            "Verification failed — drafting a readable summary…"
+        }
+    }
+}
+
+fn studio_verify_build_excerpt_label(lang: StudioVerifyUserLanguage) -> &'static str {
+    match lang {
+        StudioVerifyUserLanguage::French => "--- Sortie build (extrait) ---",
+        StudioVerifyUserLanguage::English => "--- Build output (excerpt) ---",
+        StudioVerifyUserLanguage::MatchUserExcerpt => "--- Build output (excerpt) ---",
+    }
+}
+
+fn studio_verify_summary_heading_markdown(lang: StudioVerifyUserLanguage) -> &'static str {
+    match lang {
+        StudioVerifyUserLanguage::French => "## Synthèse\n\n",
+        StudioVerifyUserLanguage::English => "## Summary\n\n",
+        StudioVerifyUserLanguage::MatchUserExcerpt => "",
+    }
+}
+
+/// Synthèse courte (LLM, sans outils) après échec de `studio_verify_after_agent_task`, pour l’utilisateur final.
+async fn studio_verify_explain_failure_to_user(
+    llm_router: &std::sync::Arc<akasha_llm::LLMRouter>,
+    user_message: &str,
+    assistant_reply: &str,
+    verify_log: &str,
+    lang: StudioVerifyUserLanguage,
+) -> Option<String> {
+    const MAX_USER: usize = 900;
+    const MAX_ASSIST: usize = 1_400;
+    const MAX_LOG: usize = 14_000;
+    let um: String = user_message.chars().take(MAX_USER).collect();
+    let ar: String = assistant_reply.chars().take(MAX_ASSIST).collect();
+    let log: String = verify_log.chars().take(MAX_LOG).collect();
+    let system = match lang {
+        StudioVerifyUserLanguage::French => {
+            "Tu es un assistant Code Studio. Une tâche agent vient d'échouer à l'étape de vérification automatique (souvent `npm run build`, `tsc`, `vite build`, ou `cargo check`). \
+Rédige une synthèse entièrement en français, claire pour quelqu'un qui n'est pas familier avec les logs npm. \
+Ne pas inventer de chemins ou numéros de ligne absents du log. Si l'extrait est incomplet, le dire. \
+Structure (titres ## ou **gras** courts autorisés) :\n\
+1) **Contexte** — en 1–2 phrases : objectif apparent (consigne + extrait de la réponse agent).\n\
+2) **Cause principale** — ce qui bloque le build en langage simple.\n\
+3) **Fichiers / lignes** — ceux visibles dans le log, sinon \"non précisé dans l'extrait\".\n\
+4) **Prochaines étapes** — 2 à 5 actions concrètes.\n\
+Pas de copier-coller massif du log ; pas de blocs de code de plus de 6 lignes. Réponse max ~1600 caractères."
+                .to_string()
+        }
+        StudioVerifyUserLanguage::English => {
+            "You are a Code Studio assistant. An agent task just failed automatic verification (often `npm run build`, `tsc`, `vite build`, or `cargo check`). \
+Write the entire summary in clear English for someone who is not used to npm logs. \
+Do not invent file paths or line numbers that are not in the log. If the excerpt is incomplete, say so. \
+Structure (short ## or **bold** headings allowed):\n\
+1) **Context** — 1–2 sentences: apparent goal (user request + agent reply excerpt).\n\
+2) **Root cause** — what broke the build in plain language.\n\
+3) **Files / lines** — those visible in the log, otherwise \"not specified in the excerpt\".\n\
+4) **Next steps** — 2–5 concrete actions.\n\
+No huge copy-paste of the log; no code blocks longer than 6 lines. Max ~1600 characters."
+                .to_string()
+        }
+        StudioVerifyUserLanguage::MatchUserExcerpt => {
+            "You are a Code Studio assistant. An agent task just failed automatic verification (often `npm run build`, `tsc`, `vite build`, or `cargo check`). \
+**Language (mandatory):** Write your entire summary in the **same natural language** as the \"User message (excerpt)\" block below (French if French, English if English, Spanish if Spanish, etc.). Use headings and bullets in that same language. \
+If that excerpt is too short to infer the language, default to **French**. Do not mix two languages. \
+Do not invent file paths or line numbers absent from the log; if the excerpt is incomplete, say so in that language. \
+Use a short structure: context (1–2 sentences), root cause, files/lines from the log (or \"not in excerpt\"), next steps (2–5 bullets). No huge log paste; max ~1600 characters."
+                .to_string()
+        }
+    };
+    let user = match lang {
+        StudioVerifyUserLanguage::French => format!(
+            "Consigne utilisateur (extrait) :\n{um}\n\nTravail / réponse agent (extrait) :\n{ar}\n\nSortie vérification (build/check) :\n{log}\n\nRédige la synthèse demandée."
+        ),
+        StudioVerifyUserLanguage::English => format!(
+            "User message (excerpt):\n{um}\n\nAgent work / reply (excerpt):\n{ar}\n\nVerification output (build/check):\n{log}\n\nWrite the requested summary."
+        ),
+        StudioVerifyUserLanguage::MatchUserExcerpt => format!(
+            "User message (excerpt):\n{um}\n\nAgent work / reply (excerpt):\n{ar}\n\nVerification output (build/check):\n{log}\n\nWrite the summary in the same language as the user message excerpt."
+        ),
+    };
+    let req = CompletionRequest {
+        prompt: user,
+        max_tokens: Some(800),
+        temperature: Some(0.15),
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        repeat_penalty: None,
+        num_ctx: None,
+        num_gpu: None,
+        thinking_level: None,
+        preferred_task_type: Some("conversation".to_string()),
+        system_prompt: Some(system.to_string()),
+        image_data_urls: None,
+    };
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(55),
+        llm_router.complete(&req),
+    )
+    .await
+    {
+        Ok(Ok(r)) => {
+            let t = r.text.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.chars().take(2_400).collect())
+            }
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "studio verify explain: LLM complete failed");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("studio verify explain: LLM timeout");
+            None
+        }
+    }
+}
+
+/// Path argument for `read_file` (before optional line/offset window), normalized like `execute_tool_call`.
+fn parse_read_file_tool_path(args: &[String]) -> Option<String> {
+    let line_window = if args.len() >= 3 {
+        let maybe_limit = args.last().and_then(|s| s.parse::<usize>().ok());
+        let maybe_offset = args
+            .get(args.len().saturating_sub(2))
+            .and_then(|s| s.parse::<usize>().ok());
+        match (maybe_offset, maybe_limit) {
+            (Some(off), Some(lim)) if lim > 0 => Some((off, lim)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let path_parts_len = if line_window.is_some() && args.len() >= 3 {
+        args.len() - 2
+    } else {
+        args.len()
+    };
+    if path_parts_len == 0 {
+        return None;
+    }
+    let path_input = args[..path_parts_len].join(" ");
+    let path_str = normalize_tool_path_hint(path_input.trim());
+    if path_str.is_empty() || path_str.contains("..") {
+        return None;
+    }
+    Some(path_str)
+}
+
+/// Après un log d’échec de compilation, enchaîne quelques tours LLM + exécution d’outils pour corriger les sources.
+/// Retourne `true` si au moins un outil d’écriture a réussi au moins une fois.
+async fn studio_verify_run_llm_autofix_rounds(
+    bus: &EventBus,
+    llm_router: &std::sync::Arc<akasha_llm::LLMRouter>,
+    tools_executor: &std::sync::Arc<RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>,
+    skill_registry: Option<&std::sync::Arc<crate::skills::SkillRegistry>>,
+    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
+    process_registry: Option<&ProcessRegistry>,
+    conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
+    long_term_client: Option<&LongTermMemoryClient>,
+    workspace_store: Option<&TaskWorkspaceStore>,
+    browser_registry: Option<&crate::browser::BrowserSessionRegistry>,
+    device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
+    task_id: Uuid,
+    store_path: &Path,
+    data_dir: &Path,
+    tool_disk_root: &Path,
+    verify_log: &str,
+    max_llm_rounds: u32,
+) -> bool {
+    const VERIFY_SNIP: usize = 16_000;
+    const LLM_TIMEOUT_SECS: u64 = 180;
+    let timeline_correlation = resolve_root_task_id(store_path, task_id).unwrap_or(task_id);
+    let message_webhook_url = std::env::var("AKASHA_MESSAGE_WEBHOOK_URL").ok();
+    let system = "You repair a Code Studio project after `npm run build` or `cargo check` failed. \
+Workspace paths are relative to the project root shown in the user message. \
+Emit only lines starting with TOOL: using these tools: read_file, grep_content, search_files, search_replace, edit_file, write_file, apply_patch, file_diff, delete_file, rename_path, move_tree. \
+STRICT tool-call format: `TOOL: <tool_name> <arg1> <arg2> ...` (space-separated args only). \
+For ALL file/dir path arguments, ALWAYS use `workspace:/...` paths (including `workspace:/.` for project root scans). \
+Never use bare relative paths like `src/...` or `.`; use `workspace:/src/...` and `workspace:/.`. \
+Do NOT output JSON function-call style (invalid: `TOOL: read_file({\"path\":\"src/App.tsx\"})`). \
+Do NOT output pipe syntax (invalid: `TOOL: search_files|pattern|*|path|.`). \
+Valid examples: `TOOL: read_file workspace:/src/App.tsx 320 20`, `TOOL: search_files workspace:/. package.json true`. \
+Do NOT use ask_user, delegate_to_agent, run_command, browser_*, install_skill, or any tool not in that list. \
+IMPORTANT — this autofix sandbox has NO shell: you cannot `mv`, `git mv`, `mkdir` via run_command (it is disabled). \
+To rename/move a file or directory when the destination does not exist: `TOOL: rename_path workspace:/old/path workspace:/new/path` (second path may contain spaces). \
+To move a whole directory tree (e.g. cross-volume): `TOOL: move_tree workspace:/old_dir workspace:/new_dir`. \
+If that is not enough: read each file under the old path, then write_file to `workspace:/new/dir/...` (parent dirs are created automatically), then search_replace / grep_content to fix imports across the project. \
+If the build says a module has no exported member: read_file that module on disk at the path the error shows; either export the symbol or change imports to a module that actually exists (use search_files to locate the real file). \
+Do not paste markdown fences or assistant prose into source files — only valid source code. \
+Fix every compiler error; prefer minimal search_replace / edit_file over rewriting whole files. \
+If a [Code index — …] block appears in the user message, use it as orientation only — you must still apply edits with search_replace / edit_file / write_file / apply_patch. \
+When FILES_WITH_ERRORS or KNOWN_TS_ERRORS already pin down locations, prefer a concrete fix (search_replace / edit_file) over broad exploration; avoid read_file loops on the same path without editing. \
+Large projects may require many reads across different files — that is fine. \
+Do not deliver the fix only as prose or a full-file markdown block for the user to paste: emit write tools (`search_replace`, `edit_file`, `write_file`, `apply_patch`) unless a tool error or policy block forces you to explain why you cannot apply it yourself, then give a manual fallback. \
+If tool results repeat without progress, change strategy (see any [STALL / ANTI-LOOP] block in the user message).";
+    let root_disp = tool_disk_root.display().to_string();
+    let log_snip: String = verify_log.chars().take(VERIFY_SNIP).collect();
+    let focus_files = studio_verify_extract_ts_error_paths(verify_log, 10);
+    let error_lines = verify_log
+        .lines()
+        .filter(|l| l.contains(": error TS"))
+        .take(18)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let known_ts_errors_hash = studio_verify_short_hash(&error_lines);
+    let sticky_context = format!(
+        "CAVEMAN CONTEXT (reuse every round):\n\
+ROOT: {}\n\
+FILES_WITH_ERRORS: {}\n\
+KNOWN_TS_ERRORS:\n{}\n",
+        root_disp,
+        if focus_files.is_empty() {
+            "(none parsed)".to_string()
+        } else {
+            focus_files.join(", ")
+        },
+        if error_lines.trim().is_empty() {
+            "(none captured)"
+        } else {
+            error_lines.as_str()
+        }
+    );
+    let mut first_user = format!(
+        "{}\nProject root (all relative paths are under this directory):\n{}\n\nBuild output:\n{}\n\nFix the project.",
+        sticky_context, root_disp, log_snip
+    );
+    if studio_code_rag_enabled() {
+        if let Some(pid) = crate::studio::studio_project_id_from_disk_root(data_dir, tool_disk_root) {
+            let query = format!(
+                "{}\n{}\n{}",
+                error_lines,
+                focus_files.join(" "),
+                log_snip.chars().take(3_000).collect::<String>()
+            );
+            let data_dir_owned = data_dir.to_path_buf();
+            let root_owned = tool_disk_root.to_path_buf();
+            let code_rag_block = tokio::task::spawn_blocking(move || {
+                let store = crate::code_rag::CodeRagStore::new(&data_dir_owned);
+                let chunks = store.retrieve(
+                    &pid,
+                    &root_owned,
+                    &query,
+                    crate::code_rag::RetrieveOptions {
+                        top_k: 8,
+                        max_chars: 6_000,
+                    },
+                );
+                let chunks = chunks.ok()?;
+                if chunks.is_empty() {
+                    return None;
+                }
+                crate::code_rag::format_retrieved_chunks(&chunks, 6_000)
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Some(block) = code_rag_block {
+                first_user = format!(
+                    "[Code index — extraits locaux (RAG Code Studio) pour guider la correction. Ce n’est pas une lecture complète des fichiers : vous devez quand même appliquer search_replace / edit_file / write_file / apply_patch sur les chemins en erreur.]\n\n{block}\n\n{first_user}"
+                );
+            }
+        }
+    }
+    let exec = tools_executor.read().await.clone();
+    let mut any_write_success = false;
+    let mut follow_up = String::new();
+    let mut short_or_no_tool_retries = 0u32;
+    let mut writes_ok_count = 0u32;
+    /// Nudge only when the same file is read repeatedly without an intervening write (exploration stays allowed across many files).
+    const SAME_FILE_READ_THRESHOLD: u32 = 3;
+    let mut last_read_file_path: Option<String> = None;
+    let mut consecutive_same_file_reads: u32 = 0;
+    let mut last_tool = "(none)".to_string();
+    let mut last_failed_files = if focus_files.is_empty() {
+        "(none parsed)".to_string()
+    } else {
+        focus_files.join(", ")
+    };
+    let mut prev_round_tool_fp: Option<String> = None;
+    let mut pending_stall: Option<String> = None;
+    for round in 0..max_llm_rounds {
+        let state_snapshot = format!(
+            "STATE SNAPSHOT:\n\
+ROUND_INDEX: {}\n\
+LAST_TOOL: {}\n\
+WRITES_OK_COUNT: {}\n\
+NO_PARSEABLE_TOOL_RETRIES: {}\n\
+KNOWN_TS_ERRORS_HASH: {}\n\
+LAST_FAILED_FILES: {}\n",
+            round + 1,
+            last_tool,
+            writes_ok_count,
+            short_or_no_tool_retries,
+            known_ts_errors_hash,
+            last_failed_files
+        );
+        let user_block = if round == 0 {
+            format!("{}\n{}", first_user, state_snapshot)
+        } else {
+            format!(
+                "{}{}\n{}\nRound {} — previous tool results:\n{}\n\nEmit more TOOL: lines to fix remaining errors, or a single line AUTOFIX_DONE if the project should compile.",
+                pending_stall.take().unwrap_or_default(),
+                sticky_context,
+                state_snapshot,
+                round + 1,
+                follow_up
+            )
+        };
+        let req = CompletionRequest {
+            prompt: user_block,
+            max_tokens: Some(8192),
+            temperature: Some(0.15),
+            top_p: None,
+            top_k: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repeat_penalty: None,
+            num_ctx: None,
+            num_gpu: None,
+            thinking_level: None,
+            preferred_task_type: Some("code_generation".to_string()),
+            system_prompt: Some(system.to_string()),
+            image_data_urls: None,
+        };
+        let resp_text = match tokio::time::timeout(
+            std::time::Duration::from_secs(LLM_TIMEOUT_SECS),
+            llm_router.complete(&req),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r.text,
+            Ok(Err(e)) => {
+                tracing::warn!(task_id = %task_id, error = %e, "studio verify autofix: LLM complete failed");
+                break;
+            }
+            Err(_) => {
+                tracing::warn!(task_id = %task_id, "studio verify autofix: LLM timeout");
+                break;
+            }
+        };
+        let trimmed = resp_text.trim();
+        if trimmed.contains("AUTOFIX_DONE") && parse_tool_calls(trimmed).is_empty() {
+            tracing::info!(task_id = %task_id, round, "studio verify autofix: model signalled AUTOFIX_DONE");
+            break;
+        }
+        let calls = parse_tool_calls(trimmed);
+        if calls.is_empty() {
+            let text_len = trimmed.chars().count();
+            if short_or_no_tool_retries < 2 && round + 1 < max_llm_rounds {
+                short_or_no_tool_retries += 1;
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 56,
+                            "message": "Réponse modèle trop courte / sans TOOL, nouvelle tentative de correction auto…"
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
+                );
+                follow_up = format!(
+                    "Model returned no parseable TOOL lines (len={text_len}). \
+Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read_file on the primary error file then immediately search_replace or edit_file to fix it."
+                );
+                tracing::warn!(
+                    task_id = %task_id,
+                    round,
+                    text_len,
+                    retry = short_or_no_tool_retries,
+                    "studio verify autofix: no parseable TOOL lines, retrying"
+                );
+                continue;
+            }
+            tracing::debug!(task_id = %task_id, round, text_len, "studio verify autofix: no parseable TOOL lines");
+            break;
+        }
+        short_or_no_tool_retries = 0;
+        let mut round_results: Vec<String> = Vec::new();
+        let lanes = akasha_tools::schedule_tool_calls(&calls);
+        for (_lane, lane_calls) in lanes {
+            for (name, args) in &lane_calls {
+                let actual_tool = match skill_registry {
+                    Some(reg) => reg
+                        .get(name)
+                        .await
+                        .map(|s| s.tool_ref)
+                        .unwrap_or_else(|| name.clone()),
+                    None => name.clone(),
+                };
+                let actual_tool = canonicalize_tool_name(&actual_tool);
+                last_tool = actual_tool.clone();
+                if !STUDIO_VERIFY_AUTOFIX_TOOLS
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(&actual_tool))
+                {
+                    round_results.push(format!(
+                        "[{}] skipped in studio autofix (not an allowed repair tool)",
+                        actual_tool
+                    ));
+                    continue;
+                }
+                if exec.policy.requires_approval(&actual_tool) {
+                    round_results.push(format!(
+                        "[{}] skipped in studio autofix (requires human approval)",
+                        actual_tool
+                    ));
+                    continue;
+                }
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 58,
+                            "message": format!("Correction auto compilation : {} …", actual_tool)
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
+                );
+                let (success, res, _cap) = execute_tool_call(
+                    &exec,
+                    &actual_tool,
+                    args,
+                    process_registry,
+                    long_term_client,
+                    task_id,
+                    Some(store_path),
+                    conv_tx.clone(),
+                    message_webhook_url.as_deref(),
+                    plugin_registry,
+                    device_bridge,
+                    workspace_store,
+                    browser_registry,
+                    Some(tool_disk_root),
+                )
+                .await;
+                let write_like = matches!(
+                    actual_tool.as_str(),
+                    "write_file" | "search_replace" | "edit_file" | "apply_patch" | "delete_file"
+                        | "rename_path" | "move_tree"
+                );
+                if success && write_like {
+                    any_write_success = true;
+                    writes_ok_count = writes_ok_count.saturating_add(1);
+                    last_read_file_path = None;
+                    consecutive_same_file_reads = 0;
+                } else if success && actual_tool.as_str() == "read_file" {
+                    if let Some(path_key) = parse_read_file_tool_path(args) {
+                        if last_read_file_path.as_ref() == Some(&path_key) {
+                            consecutive_same_file_reads =
+                                consecutive_same_file_reads.saturating_add(1);
+                        } else {
+                            last_read_file_path = Some(path_key);
+                            consecutive_same_file_reads = 1;
+                        }
+                    }
+                }
+                round_results.push(format!("[{}] success={} {}", actual_tool, success, res));
+            }
+        }
+        follow_up = round_results.join("\n");
+        if consecutive_same_file_reads >= SAME_FILE_READ_THRESHOLD {
+            let path_disp = last_read_file_path
+                .as_deref()
+                .unwrap_or("(unknown path)");
+            follow_up.push_str(&format!(
+                "\n\n[LOOP GUARD — REPEATED read_file]\n\
+You successfully read_file `{path_disp}` {SAME_FILE_READ_THRESHOLD} times in a row without an intervening successful write tool.\n\
+The compiler output already signals what is wrong: apply a minimal fix with `TOOL: search_replace … | …` or `TOOL: edit_file …` on this file (or switch to another path from FILES_WITH_ERRORS / KNOWN_TS_ERRORS instead of re-opening the same file).\n"
+            ));
+            last_read_file_path = None;
+            consecutive_same_file_reads = 0;
+        }
+        let files_after_round = studio_verify_extract_ts_error_paths(&follow_up, 10);
+        if !files_after_round.is_empty() {
+            last_failed_files = files_after_round.join(", ");
+        }
+        if follow_up.trim().is_empty() {
+            break;
+        }
+        let fp = studio_verify_short_hash(&follow_up.chars().take(4_500).collect::<String>());
+        if let Some(prev) = prev_round_tool_fp.as_ref() {
+            if *prev == fp && round >= 1 {
+                pending_stall = Some(STUDIO_VERIFY_AUTOFIX_STALL_WARNING.to_string());
+                tracing::warn!(
+                    task_id = %task_id,
+                    round = round + 1,
+                    "studio verify autofix: repeated tool-output fingerprint (stall guard)"
+                );
+            }
+        }
+        prev_round_tool_fp = Some(fp);
+    }
+    if !any_write_success {
+        let focus_files = studio_verify_extract_ts_error_paths(verify_log, 8);
+        if !focus_files.is_empty() {
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::ProgressUpdate,
+                    Some(serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "progress_pct": 57,
+                        "message": "Fallback auto-correction : lecture ciblée des fichiers en erreur TS…"
+                    })),
+                )
+                .with_correlation(timeline_correlation),
+            );
+            let mut focused_reads: Vec<String> = Vec::new();
+            for p in &focus_files {
+                let read_args = vec![p.clone()];
+                let (ok, res, _cap) = execute_tool_call(
+                    &exec,
+                    "read_file",
+                    &read_args,
+                    process_registry,
+                    long_term_client,
+                    task_id,
+                    Some(store_path),
+                    conv_tx.clone(),
+                    message_webhook_url.as_deref(),
+                    plugin_registry,
+                    device_bridge,
+                    workspace_store,
+                    browser_registry,
+                    Some(tool_disk_root),
+                )
+                .await;
+                if ok {
+                    focused_reads.push(format!(
+                        "FILE: {}\n{}",
+                        p,
+                        res.chars().take(5000).collect::<String>()
+                    ));
+                }
+            }
+            if !focused_reads.is_empty() {
+                let fallback_req = CompletionRequest {
+                    prompt: format!(
+                        "Build output:\n{}\n\nFocused file reads:\n{}\n\nReturn ONLY TOOL lines to fix the TS syntax/build errors now. \
+Use only: search_replace, edit_file, write_file, apply_patch, file_diff, delete_file, rename_path, move_tree. \
+No prose, no ask_user, no run_command. Prefer rename_path / move_tree for renames; otherwise use write_file under new paths (parents auto-created) and fix imports.",
+                        verify_log.chars().take(12_000).collect::<String>(),
+                        focused_reads.join("\n\n---\n\n")
+                    ),
+                    max_tokens: Some(8192),
+                    temperature: Some(0.1),
+                    top_p: None,
+                    top_k: None,
+                    frequency_penalty: None,
+                    presence_penalty: None,
+                    repeat_penalty: None,
+                    num_ctx: None,
+                    num_gpu: None,
+                    thinking_level: None,
+                    preferred_task_type: Some("code_generation".to_string()),
+                    system_prompt: Some(
+                        "You are in final deterministic Code Studio autofix fallback. Emit only TOOL lines. \
+Use STRICT format: `TOOL: <tool_name> <arg1> <arg2> ...` with plain space-separated arguments. \
+For ALL file/dir paths, ALWAYS use `workspace:/...` arguments (for root scans, use `workspace:/.`). \
+Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-call style or `|key|value|` syntax."
+                            .to_string(),
+                    ),
+                    image_data_urls: None,
+                };
+                if let Ok(Ok(resp)) = tokio::time::timeout(
+                    std::time::Duration::from_secs(LLM_TIMEOUT_SECS),
+                    llm_router.complete(&fallback_req),
+                )
+                .await
+                {
+                    let calls = parse_tool_calls(resp.text.trim());
+                    if !calls.is_empty() {
+                        let lanes = akasha_tools::schedule_tool_calls(&calls);
+                        for (_lane, lane_calls) in lanes {
+                            for (name, args) in &lane_calls {
+                                let actual_tool = canonicalize_tool_name(name);
+                                if !matches!(
+                                    actual_tool.as_str(),
+                                    "search_replace" | "edit_file" | "write_file" | "apply_patch" | "file_diff" | "delete_file"
+                                        | "rename_path" | "move_tree"
+                                ) {
+                                    continue;
+                                }
+                                let (success, _res, _cap) = execute_tool_call(
+                                    &exec,
+                                    &actual_tool,
+                                    args,
+                                    process_registry,
+                                    long_term_client,
+                                    task_id,
+                                    Some(store_path),
+                                    conv_tx.clone(),
+                                    message_webhook_url.as_deref(),
+                                    plugin_registry,
+                                    device_bridge,
+                                    workspace_store,
+                                    browser_registry,
+                                    Some(tool_disk_root),
+                                )
+                                .await;
+                                if success
+                                    && matches!(
+                                        actual_tool.as_str(),
+                                        "search_replace" | "edit_file" | "write_file" | "apply_patch" | "delete_file"
+                                            | "rename_path" | "move_tree"
+                                    )
+                                {
+                                    any_write_success = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    any_write_success
+}
+
 /// Run LLM completion for a user message, with short-term + long-term memory (and compaction), optional tool-use loop. Push reply as progress, mark task completed.
 /// image_data_urls: optional list of data URLs (data:image/...;base64,...) for vision-capable models.
 /// preferred_task_type_override: when set (e.g. system selector task_type), overrides routing/reminders vs. assigned_agent alone.
@@ -5768,6 +7859,7 @@ pub(crate) async fn run_message_via_llm(
     workspace_store: Option<TaskWorkspaceStore>,
     browser_registry: Option<crate::browser::BrowserSessionRegistry>,
     autonomous_mission: Option<Arc<RwLock<AutonomousMissionConfig>>>,
+    studio_disk_registry: crate::studio::StudioDiskRootRegistry,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -5781,6 +7873,30 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
+    let lineage_for_studio = workspace_lineage_root_task_id(task_id, Some(store_path.as_path()));
+    let tool_disk_workspace_root: std::path::PathBuf = {
+        let reg = studio_disk_registry.read().await;
+        if let Some(p) = reg.get(&lineage_for_studio) {
+            p.clone()
+        } else {
+            drop(reg);
+            store_path
+                .parent()
+                .map(|x| x.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+        }
+    };
+    let data_dir_for_studio_flags = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+    let code_studio_disk_task = tool_disk_workspace_root
+        .starts_with(crate::studio::studio_projects_base(data_dir_for_studio_flags));
+    let studio_disk_system_append = {
+        let proj_base = crate::studio::studio_projects_base(data_dir_for_studio_flags);
+        if tool_disk_workspace_root.starts_with(proj_base) {
+            format!("{}{}", STUDIO_DISK_REMINDER, STUDIO_AGENT_QUALITY_REMINDER)
+        } else {
+            String::new()
+        }
+    };
     // NOTE: interpret_message is called below, after guardrail extraction, so it uses clean_message.
     let task_snapshot = store.get(task_id).ok().flatten();
     let assigned_agent = task_snapshot
@@ -5797,6 +7913,26 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .and_then(|t| t.parent_task_id)
         .is_some();
+    if code_studio_disk_task && !is_subagent {
+        let dd = data_dir_for_studio_flags.to_path_buf();
+        let root = tool_disk_workspace_root.clone();
+        let tid = task_id;
+        match tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            let snap_path = dd.join("studio-task-snapshots").join(format!("{tid}.json"));
+            if snap_path.exists() {
+                return Ok(false);
+            }
+            crate::studio_task_snapshot::capture_task_snapshot(&dd, tid, &root)?;
+            Ok(true)
+        })
+        .await
+        {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => tracing::debug!(task_id = %tid, "studio task snapshot already captured; skipping"),
+            Ok(Err(e)) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot capture failed"),
+            Err(e) => tracing::warn!(task_id = %tid, error = %e, "studio task snapshot join failed"),
+        }
+    }
     // When main_agent prepends a guardrail block on selector timeout, extract the real user message.
     // Format: "[Guardrail: …]\n\n<actual message>"
     const GUARDRAIL_MARKER: &str = "[Guardrail:";
@@ -5837,13 +7973,23 @@ pub(crate) async fn run_message_via_llm(
     // breaks fast-lane matching or memory profile selection.
     let structured = interpret_message(clean_message);
     let orch_disk_deliverables = clean_message.contains(ORCH_DISK_DELIVERABLES_MARKER);
-    let small_talk_intent = classify_small_talk_message(clean_message);
+    // Code Studio tasks run on studio-projects/* disk roots: do not treat user prompts as
+    // "small talk" or suppress tool-heavy LLM replies — that blocked write_file / TOOL lines.
+    let small_talk_intent = if code_studio_disk_task {
+        None
+    } else {
+        classify_small_talk_message(clean_message)
+    };
     let session_recall_intent = detect_session_recall_intent(clean_message);
     tracing::debug!(
         ?session_recall_intent,
         "[RECALL_DEBUG] session_recall_intent"
     );
-    let is_small_talk_fast_lane = small_talk_fast_lane(clean_message).is_some();
+    let is_small_talk_fast_lane = if code_studio_disk_task {
+        false
+    } else {
+        small_talk_fast_lane(clean_message).is_some()
+    };
     let is_session_recall = session_recall_intent.is_some();
     let mut memory_profile = if is_small_talk_fast_lane || is_session_recall {
         MemoryProfile {
@@ -5890,6 +8036,18 @@ pub(crate) async fn run_message_via_llm(
         memory_profile.semantic_top_k = memory_profile.semantic_top_k.min(1);
         memory_profile.compact_before_prompt = false;
     }
+    // Code Studio: avoid global long-term memory, user document RAG, multi-workspace graph indexes,
+    // and cross-session episodic bleed — the prompt already carries plan/stack and disk context.
+    if code_studio_disk_task {
+        memory_profile.semantic_top_k = 0;
+        memory_profile.episodic_limit = 0;
+        memory_profile.facts_limit = 0;
+        memory_profile.user_rag_top_k = 0;
+        memory_profile.workspace_graph_top_k = 0;
+        memory_profile.expand_by_graph = false;
+        memory_profile.allow_project_recall = false;
+        memory_profile.recent_context_max_chars = memory_profile.recent_context_max_chars.min(12_000);
+    }
 
     let tools_executor_snapshot = match &tools_executor {
         Some(r) => Some((*r.read().await).clone()),
@@ -5933,6 +8091,7 @@ pub(crate) async fn run_message_via_llm(
         max_tokens
     };
 
+    let mut code_studio_system_tools_block = String::new();
     let tool_instruction = if is_small_talk_fast_lane {
         String::new()
     } else if tools_executor_snapshot.is_some() {
@@ -5967,7 +8126,74 @@ pub(crate) async fn run_message_via_llm(
                 }
             }
         }
-        let base = available_tools_instruction(allowed_tools.as_deref());
+        let studio_tool_list = if code_studio_disk_task {
+            Some(code_studio_tools_for_prompt(
+                allowed_tools.as_deref(),
+                assigned_agent.as_str(),
+            ))
+        } else {
+            None
+        };
+        let base = if let Some(ref v) = studio_tool_list {
+            available_tools_instruction_exact(v)
+        } else {
+            available_tools_instruction(allowed_tools.as_deref())
+        };
+        let run_command_os_rule = match std::env::consts::OS {
+            "windows" => "RUN_COMMAND OS: You are on Windows. Prefer cmd, PowerShell, curl.exe; avoid grep, cat, sed (not in default PATH). Use full path or .exe when needed. To test that the vault token works (e.g. GitHub API), use Invoke-WebRequest: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN powershell -NoProfile -Command \"Invoke-WebRequest -Uri 'https://api.github.com/repos/owner/repo' -Headers @{ Authorization = 'Bearer ' + $env:GITHUB_TOKEN } | Select-Object -Expand Content\" (replace owner/repo). Ensure 'powershell' is in allowed_commands in tools_policy.yaml. The system injects the vault value into the environment for the command.\n\
+             ",
+            _ => "RUN_COMMAND OS: You are on Linux/macos. Standard Unix commands (curl, grep, etc.) are available.\n\
+             ",
+        };
+        if code_studio_disk_task {
+            let skills_part_studio = match &skill_registry {
+                Some(reg) => {
+                    let list = reg.list().await;
+                    if list.is_empty() {
+                        String::new()
+                    } else {
+                        let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
+                        format!(
+                            " ; Skills (n’utiliser que si pertinent pour ce dépôt ; sinon ignorer) : {}",
+                            names.join(", ")
+                        )
+                    }
+                }
+                None => String::new(),
+            };
+            code_studio_system_tools_block = format!(
+                "[Code Studio — outils]\n\
+                 Une ligne par invocation : `TOOL: nom_outil arg1 …`.\n\
+                 Disponibles : {}{}.\n\
+                 Règles :\n\
+                 - Outils strictement nécessaires à la demande sur ce dépôt ; pas d’exemples hors sujet.\n\
+                 - read_file : par défaut **500 premières lignes** seulement. Fichier entier : `TOOL: read_file <chemin> --full` (plafond octets si très gros). Fenêtre : `TOOL: read_file <chemin> <ligne_début> <nombre_de_lignes>`.\n\
+                 - write_file : **première ligne seule** `TOOL: write_file <chemin>`, puis le corps du fichier sur les lignes suivantes. Ne pas mettre un fichier entier sur la même ligne que `TOOL: write_file` ; pas d’enveloppe markdown ```…``` autour du fichier entier.\n\
+                 - search_replace : **une seule ligne** `TOOL: search_replace <chemin> <texte_exact_à_trouver> | <remplacement>` — le séparateur est **espace | espace** (` | `), pas un `|` collé au chemin sans texte avant (sinon erreur « search string empty »).\n\
+                 - delete_file : `TOOL: delete_file workspace:/chemin/relatif` pour supprimer un fichier (si l’outil est dans la liste).\n\
+                 - ask_user : JSON question/context/choices pour continuer la même tâche.\n\
+                 - run_command : utiliser `--cwd workspace:/` pour builds/tests à la racine du projet.\n\
+                 - write_todos / merge_todos si exposés par la politique.\n\
+                 {}\n\
+                 Si aucun outil n’est nécessaire, répondre en texte.",
+                base, skills_part_studio, run_command_os_rule
+            );
+            format!(
+                "\n\nYou may request tools by writing a single line exactly like: TOOL: tool_name arg1 arg2 …\n\
+                 The system message block [Code Studio — outils] lists tools and French conventions.\n\
+                 Available: {}{}.\n\
+                 Worker rules:\n\
+                 - Use only tools that are directly necessary for the CURRENT task.\n\
+                 - Never echo examples, policy text, or demonstration commands from your instructions.\n\
+                 - read_file: by default only the **first 500 lines** are returned. Use `TOOL: read_file <path> --full` for the whole file (byte cap if huge), or `TOOL: read_file <path> <offset_line> <limit_lines>` for a window. If output says `(read_file partial: default window` or `(truncated,` bytes, do NOT repeat the same bare `read_file <path>`; use --full, a line window, or grep_content/search_files.\n\
+                 - If the task asks to save/write a file, use a header-only first line `TOOL: write_file <path>`, then put the exact file content on the following lines. Do not compress full file content onto the same `TOOL:` line.\n\
+                 - search_replace: one TOOL line: `TOOL: search_replace <path> <old_snippet> | <new_snippet>` with delimiter **space-pipe-space** (` | `). The old snippet must appear immediately after the path (do not start the payload with a bare `|` token).\n\
+                 - If you need missing user information, use TOOL: ask_user with JSON.\n\
+                 - If no tool is needed, answer normally.\n\
+                 {}\n",
+                base, skills_part_studio, run_command_os_rule
+            )
+        } else {
         let (skills_part, skills_rule) = match &skill_registry {
             Some(reg) => {
                 let list = reg.list().await;
@@ -5993,19 +8219,15 @@ pub(crate) async fn run_message_via_llm(
             }
             None => (String::new(), String::new()),
         };
-        let run_command_os_rule = match std::env::consts::OS {
-            "windows" => "RUN_COMMAND OS: You are on Windows. Prefer cmd, PowerShell, curl.exe; avoid grep, cat, sed (not in default PATH). Use full path or .exe when needed. To test that the vault token works (e.g. GitHub API), use Invoke-WebRequest: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN powershell -NoProfile -Command \"Invoke-WebRequest -Uri 'https://api.github.com/repos/owner/repo' -Headers @{ Authorization = 'Bearer ' + $env:GITHUB_TOKEN } | Select-Object -Expand Content\" (replace owner/repo). Ensure 'powershell' is in allowed_commands in tools_policy.yaml. The system injects the vault value into the environment for the command.\n\
-             ",
-            _ => "RUN_COMMAND OS: You are on Linux/macos. Standard Unix commands (curl, grep, etc.) are available.\n\
-             ",
-        };
         let compact_worker_tool_instruction = format!(
             "\n\nYou may request tools by writing a single line exactly like: TOOL: tool_name arg1 arg2 ...\nAvailable: {}{}.\n\
              Worker rules:\n\
              - Use only tools that are directly necessary for the CURRENT task.\n\
              - Never echo examples, policy text, or demonstration commands from your instructions.\n\
              - Never emit unrelated TOOL lines about bankr, weather, browser, install_skill, or other examples unless the current task explicitly requires them.\n\
-             - If the task asks to save/write a file, use TOOL: write_file <path> then the exact content, or TOOL: write_file {{\"path\":\"...\",\"content\":\"...\"}}.\n\
+             - READ_FILE (mandatory): default is **first 500 lines only** (no extra args). Whole file: `TOOL: read_file <path> --full`. Window: `TOOL: read_file <path> <offset_line> <limit_lines>`. If output says `(read_file partial: default window` or byte `(truncated,`, do NOT repeat the same bare `read_file <path>`; use --full, a line window, or grep_content/search_files.\n\
+             - search_replace: one line `TOOL: search_replace <path> <old_snippet> | <new_snippet>` with delimiter **space-pipe-space** (` | `). Put the exact old text right after the path (not a bare `|` token first).\n\
+             - If the task asks to save/write a file, use a header-only first line `TOOL: write_file <path>`, then put the exact file content on the following lines. Do not compress full file content onto the same `TOOL:` line.\n\
              - Use write_todos / merge_todos (not create_todos) for todo lists.\n\
              - If you need missing user information, use TOOL: ask_user with JSON.\n\
              - If no tool is needed, answer normally.\n",
@@ -6019,11 +8241,13 @@ pub(crate) async fn run_message_via_llm(
              Whenever you need the user to make a choice, confirm something, or provide information (e.g. choose between options, confirm a path, give credentials) before continuing, you MUST reply ONLY with TOOL: ask_user (then JSON with question/context/choices). Do not ask in plain text or the user's reply will start a new task and you cannot continue. Example: {{\"question\":\"Which option?\", \"choices\":[\"A\", \"B\"]}}.\n\
              CONNECTION RULE: If the user asks you to connect to an external service (GitHub repo, API, etc.), do NOT reply with a plain-text message. Use TOOL: ask_user. If the user has already confirmed credentials are configured, do NOT send another ask_user; proceed. Do not invent commands (e.g. /status repo:... does not exist); real commands are in /help.\n\
              CAMERA RULE (priority over WRITE): When the user asks for a webcam/camera photo (e.g. \"prends une photo\", \"take a photo\", \"photo depuis la webcam\", \"affiche-la dans le chat\", \"display it in the chat\"), you MUST reply ONLY with TOOL: device_discover local_media then TOOL: device_invoke local_media camera capture. Do NOT mention tools_policy.yaml, allowed_write_paths, or file writing. After the tool returns, if the user asked to \"display in the chat\" / \"affiche-la dans le chat\" / \"show it in the chat\", reply with ONLY a short confirmation in the user's language (e.g. in French: \"Photo prise. Elle s'affiche ci-dessous.\"; in English: \"Photo captured. It is shown below.\"). Do NOT offer \"save to file\", \"get a description\", \"take another photo\", or \"What would you like to do next?\" — the image is appended automatically below your message. Use the same language as the user (French if they wrote in French).\n\
-             WRITE RULE (mandatory): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
+             WRITE RULE (mandatory): When the user asks to save, record, or write a file (e.g. \"enregistre\", \"sauvegarde\", \"save to\", \"write to file\", or gives a folder path), you MUST reply ONLY with: a first header line \"TOOL: write_file <full_path>\" then on the following lines the exact file content. Do NOT put full file content on the same TOOL line. Do NOT answer with \"I cannot write to disk\" or \"copy-paste the code yourself\". Use write_file; if the path is denied, the tool returns an error and you then explain tools_policy.yaml (allowed_write_paths). Paths can be Windows (C:\\Users\\...\\file.py) or Unix. Do NOT apply this rule when the user only asked for a webcam photo.\n\
              WEATHER RULE (PRIORITY): When the user asks for weather, météo, or forecasts (e.g. \"quel temps\", \"météo demain\", \"weather in X\"), you MUST use TOOL: web_search <query> first, then if snippets lack numeric detail use TOOL: web_fetch <url> on a trusted result URL and/or TOOL: browser navigate <url> then TOOL: browser snapshot (many weather sites are JS-heavy). Do NOT use bankr, portfolio, or any other skill for weather — use web_search plus web_fetch/browser as needed.\n\
              BROWSER RULE (PRIORITY): When the user explicitly asks to open the browser, go to a website, or show something on X/Twitter (e.g. \"ouvre le navigateur\", \"open the browser\", \"va sur X\", \"go to twitter\", \"cherche sur X\", \"ouvre le navigateur et cherche\"), you MUST use TOOL: browser navigate <url> first with the appropriate URL (e.g. https://x.com/akashabot for a profile, https://x.com for the home page). You may then add a short message. Do NOT use only web_search when the user asked to open the browser or go to X/Twitter.\n\
              SOCIAL / LOGGED-IN SITES RULE: If tools_policy allows the domain, use TOOL: browser navigate <https URL> and TOOL: browser snapshot when the user asks to open or inspect X/Twitter or similar. Do NOT refuse with vague \"security\", \"confidentiality\", or \"structural policy\" claims — the user runs Akasha locally and controls tools_policy. Real limitation: you cannot type the user's password or complete interactive MFA inside the managed browser on their behalf; if a login wall blocks content, say that clearly and offer practical options (user logs in manually in that same browser session if their environment keeps the session, or official API access via TOOL: run_command with VAULT:... when applicable). Do NOT state that vault-backed API access is forbidden when the user has configured secrets — follow VAULT ENV RULE.\n\
              WEB SEARCH RULE: When the user asks for external information (weather, news, forecasts, schedules, etc.) that you do not have, you MUST use TOOL: web_search <query> first, then answer from fetched content — not only from snippets. If snippets are insufficient, use TOOL: web_fetch <url> on a relevant result URL, or TOOL: browser navigate <url> then TOOL: browser snapshot so YOU retrieve the page text inside Akasha (managed browser), then summarize for the user. Do NOT reply with \"I did not find it\" or suggest sites without having called web_search. Do NOT tell the user to open links in their own browser when web_fetch or browser snapshot is available and allowed — retrieve and answer yourself.\n\
+             READ_FILE (mandatory): default is **first 500 lines only** (no extra args). Whole file: `TOOL: read_file <path> --full`. Window: `TOOL: read_file <path> <offset_line> <limit_lines>`. If output says `(read_file partial: default window` or byte `(truncated,`, do NOT repeat the same bare `read_file <path>`; use --full, a line window, or grep_content/search_files.\n\
+             SEARCH_REPLACE: one line `TOOL: search_replace <path> <old_snippet> | <new_snippet>` — delimiter **space-pipe-space** (` | `). The old snippet must follow the path immediately (tokenizer may emit `|` as its own token; do not start the payload with `|` alone).\n\
              INSTALL CLI RULE: When the user asks to install a CLI or package globally (e.g. \"install bankr CLI\", \"npm install -g @bankr/cli\", \"install the bankr cli in global\"), you MUST reply ONLY with TOOL: run_command <cmd> <args> (e.g. TOOL: run_command npm install -g @bankr/cli). Do NOT generate a script or ask the user to run commands themselves; run the installation command via the tool.\n\
              VAULT ENV RULE: To use a vault secret in a command you MUST call TOOL: run_command with VAULT:<vault_key>=<ENV_VAR> as the FIRST argument(s), then the command. The system injects the secret value into ENV_VAR for that command only. Example: TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo. FORBIDDEN: never tell the user to run GITHUB_TOKEN=VAULT:GITHUB_TOKEN or export GITHUB_TOKEN=... or VAULT:GITHUB_TOKEN=ghp_... — you must output the TOOL: line yourself so the system runs the command and injects the token. For GitHub with token in vault: use TOOL: run_command VAULT:GITHUB_TOKEN=GITHUB_TOKEN curl -sS -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/repos/owner/repo (or gh repo view owner/repo). The vault key may be GITHUB_TOKEN or github_token; the part after = is the env var name the command uses (e.g. $GITHUB_TOKEN). Do NOT say you cannot access the repo without having called run_command with VAULT:... first.\n\
              {}\
@@ -6038,6 +8262,7 @@ pub(crate) async fn run_message_via_llm(
             base, skills_part, run_command_os_rule, skills_rule
         )
         }
+        }
     } else {
         String::new()
     };
@@ -6048,48 +8273,96 @@ pub(crate) async fn run_message_via_llm(
         Some(cache) => get_or_load_agent_profile(data_dir, cache).await,
         None => AgentProfile::load(data_dir),
     };
-    let profile_block = crate::personality::build_personality_prompt(
-        spec_dir.as_path(),
-        &agent_profile,
-        Some(&assigned_agent),
-    );
+    let profile_block = if code_studio_disk_task {
+        String::new()
+    } else {
+        crate::personality::build_personality_prompt(
+            spec_dir.as_path(),
+            &agent_profile,
+            Some(&assigned_agent),
+        )
+    };
     let os_env_block = match std::env::consts::OS {
         "windows" => "[Environment] The daemon runs on Windows. For run_command, prefer cmd, PowerShell, curl.exe; avoid Unix-only commands (grep, cat, sed) that are not in the default PATH (except WSL).\n\n",
         _ => "[Environment] The daemon runs on Linux/macOS. You can use usual Unix commands (curl, grep, etc.).\n\n",
     };
     let mut system_prompt = String::with_capacity(8192);
-    system_prompt.push_str(APP_CONTEXT);
+    if code_studio_disk_task {
+        system_prompt.push_str(CODE_STUDIO_APP_CONTEXT);
+    } else {
+        system_prompt.push_str(APP_CONTEXT);
+    }
     system_prompt.push_str(os_env_block);
     if let Some(role_prompt) = agent_role_system_prompt(role_agent_for_system_prompt) {
         system_prompt.push_str("[Role]\n");
         system_prompt.push_str(role_prompt);
+        let studio_impl_writes_expected = code_studio_disk_task
+            && matches!(
+                role_agent_for_system_prompt,
+                "studio_scaffold" | "studio_frontend" | "studio_backend" | "studio_fullstack"
+            );
+        if studio_impl_writes_expected {
+            system_prompt.push_str(
+                "\n\n[Code Studio — application des corrections]\n\
+                - Tu dois appliquer les modifications toi-même via des lignes `TOOL:` (`search_replace`, `edit_file`, `write_file`, `apply_patch`) sur `workspace:/…` lorsque ces outils sont autorisés.\n\
+                - Ne remplace pas une exécution d’outil par un long « contenu corrigé à mettre dans le fichier » dans le chat : le livrable attendu est l’écriture sur disque.\n\
+                - Si un outil d’écriture échoue ou est refusé par la politique : explique **pourquoi** tu ne peux pas l’appliquer toi-même (message d’erreur ou règle), puis seulement propose une alternative manuelle.\n",
+            );
+        }
         system_prompt.push_str("\n\n");
     }
-    if !profile_block.is_empty() {
+    if code_studio_disk_task {
+        system_prompt.push_str(
+            "[Code Studio — ton]\n\
+             Assistant technique pour ce dépôt : concision, pas de digressions sur l’UI Akasha ; tutoyer en français si l’utilisateur écrit en français.\n\n",
+        );
+    } else if !profile_block.is_empty() {
         system_prompt.push_str(&profile_block);
     }
     // Enforce language and personality so the model does not switch language (e.g. when tool output is in English).
-    system_prompt.push_str(
-        "\n\n[Response]\n\
-        - Language: reply ONLY in the same language as the user's message. If the user writes in French, reply entirely in French; in English, in English. Do not adopt the language of tool results or context.\n\
-        - Personality: always apply your identity (name), tone, and form of address as defined in [Agent profile and instructions] (including formality when set).\n\n",
-    );
+    if code_studio_disk_task {
+        system_prompt.push_str(
+            "\n\n[Response]\n\
+            - Langue : répondre uniquement dans la même langue que le message utilisateur.\n\
+            - Fichiers : respecter les règles Code Studio du préfixe message (pas de prose dans le source ; pas de barres markdown ``` autour du contenu write_file).\n\
+            - Corrections : quand tu corriges du code, le résultat doit passer par les outils sur le dépôt ; ne pas renvoyer l’utilisateur vers un copier-coller manuel comme action principale sans avoir tenté (et documenté) les outils.\n\n",
+        );
+    } else {
+        system_prompt.push_str(
+            "\n\n[Response]\n\
+            - Language: reply ONLY in the same language as the user's message. If the user writes in French, reply entirely in French; in English, in English. Do not adopt the language of tool results or context.\n\
+            - Personality: always apply your identity (name), tone, and form of address as defined in [Agent profile and instructions] (including formality when set).\n\n",
+        );
+    }
+    if !studio_disk_system_append.is_empty() {
+        system_prompt.push_str(&studio_disk_system_append);
+    }
+    if !code_studio_system_tools_block.is_empty() {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&code_studio_system_tools_block);
+    }
     let system_prompt: Option<String> = if system_prompt.trim().is_empty() {
         None
     } else {
         Some(system_prompt.trim_end().to_string())
     };
 
-    let personality_reminder = crate::personality::build_personality_reminder_line(
-        spec_dir.as_path(),
-        &agent_profile,
-        Some(&assigned_agent),
-    );
+    let personality_reminder = if code_studio_disk_task {
+        String::new()
+    } else {
+        crate::personality::build_personality_reminder_line(
+            spec_dir.as_path(),
+            &agent_profile,
+            Some(&assigned_agent),
+        )
+    };
     let mut user_prefix = String::with_capacity(8192);
     user_prefix.push_str(&personality_reminder);
-    user_prefix.push_str(
-        "Reply in the same language as the user message below (French, English, etc.).\n\n",
-    );
+    user_prefix.push_str(if code_studio_disk_task {
+        "Réponds dans la même langue que le message utilisateur ci-dessous.\n\n"
+    } else {
+        "Reply in the same language as the user message below (French, English, etc.).\n\n"
+    });
     if let Some(ref am) = autonomous_mission {
         let g = am.read().await;
         if g.enabled && g.status == MissionStatusYaml::Active && session_id == g.session_id {
@@ -6124,7 +8397,10 @@ pub(crate) async fn run_message_via_llm(
         filter_by_session: !turns_empty,
         suggest_project: memory_profile.allow_project_recall
             && message_suggests_project(clean_message),
-        is_first_message: turns_empty && memory_profile.allow_identity_lookup,
+        // Code Studio: do not run global LT search for "user name" on first turn — it pulls unrelated memories.
+        is_first_message: turns_empty
+            && memory_profile.allow_identity_lookup
+            && !code_studio_disk_task,
         expand_by_graph: memory_profile.expand_by_graph,
         user_identity_prefix: if user_identity_prefix.is_empty()
             || !memory_profile.allow_identity_lookup
@@ -6133,12 +8409,16 @@ pub(crate) async fn run_message_via_llm(
         } else {
             Some(user_identity_prefix)
         },
+        task_outcomes_limit: if code_studio_disk_task { 6 } else { 8 },
+        task_outcomes_scope_session: code_studio_disk_task,
+        include_preference_and_personality_episodic: !code_studio_disk_task,
         ..Default::default()
     };
     if memory_profile.semantic_top_k > 0
         || memory_profile.episodic_limit > 0
         || memory_profile.facts_limit > 0
         || recall_params.user_identity_prefix.is_some()
+        || recall_params.task_outcomes_limit > 0
     {
         let fused =
             crate::memory_orchestrator::recall_context(long_term_client.as_ref(), recall_params)
@@ -6276,13 +8556,25 @@ pub(crate) async fn run_message_via_llm(
              Follow your identity, personality, and traits from the system instructions.]\n",
         );
     }
-    let intent_flags = compute_message_intent_flags(&message);
-    let runtime_tool_routing_enforcer = build_runtime_tool_routing_enforcer(
-        plugin_registry.as_ref(),
-        clean_message,
-        &intent_flags,
-        tools_executor_snapshot.as_ref(),
-    );
+    // IMPORTANT: intent classification must use the clean user message (without guardrail/prefix
+    // injections). Using the raw `message` can falsely trigger intents (e.g. transport/maps)
+    // from injected context blocks and activate unrelated plugin routing.
+    let mut intent_flags = compute_message_intent_flags(clean_message);
+    if code_studio_disk_task {
+        code_studio_disable_plugin_intents(&mut intent_flags);
+    }
+    let runtime_tool_routing_enforcer = if code_studio_disk_task {
+        // Hard guard: Code Studio tasks must stay project/code oriented and must not be
+        // hijacked by dynamic plugin routing (maps/graph/external intents).
+        None
+    } else {
+        build_runtime_tool_routing_enforcer(
+            plugin_registry.as_ref(),
+            clean_message,
+            &intent_flags,
+            tools_executor_snapshot.as_ref(),
+        )
+    };
     let write_reminder = if intent_flags.save_file {
         WRITE_FILE_REMINDER
     } else {
@@ -6334,12 +8626,16 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let (plugin_routing_reminder, plugin_handles_geo_distance) = build_plugin_routing_reminders(
-        plugin_registry.as_ref(),
-        clean_message,
-        &intent_flags,
-        tools_executor_snapshot.as_ref(),
-    );
+    let (plugin_routing_reminder, plugin_handles_geo_distance) = if code_studio_disk_task {
+        (String::new(), false)
+    } else {
+        build_plugin_routing_reminders(
+            plugin_registry.as_ref(),
+            clean_message,
+            &intent_flags,
+            tools_executor_snapshot.as_ref(),
+        )
+    };
     let geolocation_distance_reminder: &str = if intent_flags.geolocation_distance
         && !plugin_handles_geo_distance
     {
@@ -6411,7 +8707,7 @@ pub(crate) async fn run_message_via_llm(
     };
     let mut current_prompt = if user_prefix.trim().is_empty() {
         format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
+            "{0}{1}{2}{3}{4}{5}{6}{7}{8}{9}{10}{11}User:\n{12}",
             guardrail_reminder_block,
             write_reminder,
             web_search_reminder,
@@ -6428,7 +8724,7 @@ pub(crate) async fn run_message_via_llm(
         )
     } else {
         format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}{}User:\n{}",
+            "{0}{1}{2}{3}{4}{5}{6}{7}{8}{9}{10}{11}{12}User:\n{13}",
             user_prefix.trim_end(),
             guardrail_reminder_block,
             write_reminder,
@@ -6522,11 +8818,23 @@ pub(crate) async fn run_message_via_llm(
         }
         let mut round = 0u32;
         let mut social_snapshot_seen = false;
-        let mut tool_loop_history: Vec<(String, String)> = Vec::new();
+        // Loop detection history is tracked per "agent key".
+        // For now, agent key = current task_id (sub-agent tasks each have their own task_id).
+        let mut tool_loop_history_by_agent: std::collections::HashMap<
+            String,
+            Vec<(String, String)>,
+        > = std::collections::HashMap::new();
+        let loop_agent_key = task_id.to_string();
         let mut last_tool_results_blob: Option<String> = None;
         let mut force_synthesis_attempted = false;
         let mut meta_response_retry_count = 0u32;
         let mut small_talk_off_topic_retries = 0u32;
+        // Per-agent (agent key = task_id) set of paths where a full read_file was truncated.
+        // Used to hard-block repeated full-file reads and force chunked/windowed reads.
+        let mut truncated_read_file_paths_by_agent: std::collections::HashMap<
+            String,
+            std::collections::HashSet<String>,
+        > = std::collections::HashMap::new();
         let strict_tools_first = runtime_tool_routing_enforcer
             .as_ref()
             .map(|e| !e.preferred_tools.is_empty())
@@ -6557,6 +8865,10 @@ pub(crate) async fn run_message_via_llm(
         let mut deterministic_preferred_attempted = false;
         // Orchestrated deliverables: re-prompts when the model returns no parseable TOOL lines.
         let mut orch_disk_write_nags = 0u32;
+        // Code Studio implementation agents: prevent "copy/paste this file" fallback
+        // when write tools are available but unused.
+        let mut studio_manual_patch_nags = 0u32;
+        let mut studio_prose_only_write_nags = 0u32;
         let mut last_captured_image_base64: Option<String> = None;
 
         let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
@@ -6641,7 +8953,7 @@ pub(crate) async fn run_message_via_llm(
                             device_bridge.as_ref(),
                             workspace_store.as_ref(),
                             browser_registry.as_ref(),
-                            store_path.parent(),
+                            Some(tool_disk_workspace_root.as_path()),
                         )
                         .await;
                         let result_preview = if res.chars().count() > 320 {
@@ -6668,10 +8980,13 @@ pub(crate) async fn run_message_via_llm(
                             EventEnvelope::new(EventType::TimelineMilestone, Some(milestone))
                                 .with_correlation(timeline_correlation),
                         );
-                        tool_loop_history.push((
-                            preferred_tool.clone(),
-                            if success { "success" } else { "failure" }.to_string(),
-                        ));
+                        tool_loop_history_by_agent
+                            .entry(loop_agent_key.clone())
+                            .or_default()
+                            .push((
+                                preferred_tool.clone(),
+                                if success { "success" } else { "failure" }.to_string(),
+                            ));
                         if let Some(img) = captured_image {
                             last_captured_image_base64 = Some(img);
                         }
@@ -6759,7 +9074,11 @@ pub(crate) async fn run_message_via_llm(
                 temperature: Some(0.7),
                 preferred_task_type,
                 system_prompt: system_prompt.clone(),
-                image_data_urls: if tool_loop_history.is_empty() {
+                image_data_urls: if tool_loop_history_by_agent
+                    .get(&loop_agent_key)
+                    .map(|v| v.is_empty())
+                    .unwrap_or(true)
+                {
                     image_data_urls.clone()
                 } else {
                     None
@@ -6831,10 +9150,28 @@ pub(crate) async fn run_message_via_llm(
                             }
                         }
                         const MAX_ACCUMULATED: usize = 2 * 1024 * 1024; // 2 MiB cap to prevent unbounded allocation on long streams
-                        if accumulated.len() + chunk.len() > MAX_ACCUMULATED {
-                            accumulated.truncate(MAX_ACCUMULATED.saturating_sub(chunk.len()));
+                        let chunk_ref: &str = if chunk.len() > MAX_ACCUMULATED {
+                            tracing::warn!(
+                                chunk_len = chunk.len(),
+                                max = MAX_ACCUMULATED,
+                                "Stream chunk larger than progress cap; truncating for accumulated progress buffer"
+                            );
+                            let mut end = MAX_ACCUMULATED;
+                            while end > 0 && !chunk.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            &chunk[..end]
+                        } else {
+                            chunk.as_str()
+                        };
+                        if accumulated.len() + chunk_ref.len() > MAX_ACCUMULATED {
+                            let mut keep_len = MAX_ACCUMULATED.saturating_sub(chunk_ref.len());
+                            while keep_len > 0 && !accumulated.is_char_boundary(keep_len) {
+                                keep_len -= 1;
+                            }
+                            accumulated.truncate(keep_len);
                         }
-                        accumulated.push_str(&chunk);
+                        accumulated.push_str(chunk_ref);
                         let _ = bus.send(
                             EventEnvelope::new(
                                 EventType::ProgressUpdate,
@@ -7017,6 +9354,33 @@ pub(crate) async fn run_message_via_llm(
                 continue;
             }
 
+            const MAX_STUDIO_PROSE_ONLY_WRITE_NAGS: u32 = 4;
+            if code_studio_disk_task
+                && no_parseable_tools_this_round
+                && strict_successful_tool_calls == 0
+                && studio_prose_only_write_nags < MAX_STUDIO_PROSE_ONLY_WRITE_NAGS
+                && looks_like_code_studio_prose_only_implementation_reply(&response_plain)
+            {
+                let policy_allows_write = tools_executor_snapshot
+                    .as_ref()
+                    .map(|e| {
+                        e.policy.can_use_tool("write_file")
+                            || e.policy.can_use_tool("edit_file")
+                            || e.policy.can_use_tool("search_replace")
+                            || e.policy.can_use_tool("apply_patch")
+                    })
+                    .unwrap_or(false);
+                if policy_allows_write {
+                    studio_prose_only_write_nags += 1;
+                    current_prompt = format!(
+                        "User request: {}\n\nYour previous reply:\n{}\n\n[Code Studio — mandatory execution guard]\nThe user asked you to implement changes in the repository. Your previous reply was an audit/plan/refusal instead of executing available write tools. You DO have write tools in this task. Emit only executable TOOL lines now.\n\nRequired format examples:\nTOOL: write_file workspace:/path/to/file.ts\n<complete file content on following lines>\n\nTOOL: search_replace workspace:/path/to/file.ts old snippet | new snippet\n\nDo not say \"I cannot modify files\", \"No TOOL lines\", or ask where to start. Apply the requested changes on disk with `write_file`, `edit_file`, `search_replace`, or `apply_patch`.",
+                        user_message,
+                        response_plain
+                    );
+                    continue;
+                }
+            }
+
             if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls)
             {
                 round += 1;
@@ -7101,12 +9465,53 @@ pub(crate) async fn run_message_via_llm(
                                 continue;
                             }
                         }
+                        // Hard guardrail: if read_file on this path was already truncated for this
+                        // agent key, block repeated full-file reads and require chunked/windowed read.
+                        if actual_tool.eq_ignore_ascii_case("read_file") {
+                            let (path_tokens, explicit_window, want_full) =
+                                parse_read_file_args(&tool_args);
+                            let allows_escape_truncation_guard =
+                                want_full || explicit_window.is_some();
+                            if !allows_escape_truncation_guard {
+                                let path_input = path_tokens.join(" ");
+                                let path_str = normalize_tool_path_hint(&path_input);
+                                let previously_truncated = truncated_read_file_paths_by_agent
+                                    .get(&loop_agent_key)
+                                    .map(|s| s.contains(&path_str))
+                                    .unwrap_or(false);
+                                if previously_truncated {
+                                    let blocked = format!(
+                                        "[read_file] blocked repeated default read after partial output for path={}. Use TOOL: read_file {} --full, or a line window (e.g. TOOL: read_file {} 1 200 then 201 200), or narrow with grep_content/search_files.",
+                                        path_str,
+                                        if path_str.is_empty() { "<path>" } else { &path_str },
+                                        if path_str.is_empty() { "<path>" } else { &path_str }
+                                    );
+                                    let payload = serde_json::json!({
+                                        "tool": "read_file",
+                                        "args": tool_args,
+                                        "result_preview": blocked,
+                                        "success": false,
+                                        "reason": "read_file_truncated_requires_chunking"
+                                    });
+                                    let _ = bus.send(
+                                        EventEnvelope::new(EventType::ToolInvoked, Some(payload))
+                                            .with_correlation(timeline_correlation),
+                                    );
+                                    tool_results.push(blocked);
+                                    continue;
+                                }
+                            }
+                        }
                         let args_str = tool_args.join(" ");
-                        tool_loop_history.push((actual_tool.clone(), args_str.clone()));
+                        let history = tool_loop_history_by_agent
+                            .entry(loop_agent_key.clone())
+                            .or_default();
+                        history.push((actual_tool.clone(), args_str.clone()));
                         // Phase 4: loop detection — same tool+args repeated 3 times
-                        if tool_loop_history.len() >= 3 {
-                            let last = tool_loop_history.last().unwrap();
-                            if tool_loop_history
+                        // for the same agent key (agent = sub-agent task_id).
+                        if history.len() >= 3 {
+                            let last = history.last().unwrap();
+                            if history
                                 .iter()
                                 .rev()
                                 .take(3)
@@ -7161,7 +9566,7 @@ pub(crate) async fn run_message_via_llm(
                                     const MAX_APPROVAL_ARG_LEN: usize = 80;
                                     let args_preview: String = if matches!(
                                         actual_tool.as_str(),
-                                        "apply_patch" | "edit_file" | "write_file"
+                                        "apply_patch" | "edit_file" | "write_file" | "delete_file"
                                     ) {
                                         "[redacted]".to_string()
                                     } else {
@@ -7411,63 +9816,74 @@ pub(crate) async fn run_message_via_llm(
                                     ),
                                 }
                             } else if actual_tool == "delegate_to_agent" {
-                                match &delegation_tx {
-                                    Some(tx) => {
-                                        let (reply_tx, reply_rx) = oneshot::channel();
-                                        let agent_type = args
-                                            .get(0)
-                                            .cloned()
-                                            .unwrap_or_else(|| "conversation".to_string());
-                                        let message =
-                                            args.get(1..).map(|a| a.join(" ")).unwrap_or_else(
-                                                || args.get(0).cloned().unwrap_or_default(),
-                                            );
-                                        if tx
-                                            .send(DelegationRequest {
-                                                requesting_task_id: task_id,
-                                                agent_type,
-                                                message,
-                                                reply_tx,
-                                            })
-                                            .await
-                                            .is_ok()
-                                        {
-                                            match tokio::time::timeout(
-                                                std::time::Duration::from_secs(310),
-                                                reply_rx,
-                                            )
-                                            .await
-                                            {
-                                                Ok(Ok(Ok(msg))) => (
-                                                    true,
-                                                    format!("[delegate_to_agent] {}", msg),
-                                                    None,
-                                                ),
-                                                Ok(Ok(Err(e))) => (
-                                                    false,
-                                                    format!("[delegate_to_agent] {}", e),
-                                                    None,
-                                                ),
-                                                _ => (
-                                                    false,
-                                                    "[delegate_to_agent] timeout or channel closed"
-                                                        .to_string(),
-                                                    None,
-                                                ),
-                                            }
-                                        } else {
-                                            (
-                                                false,
-                                                "[delegate_to_agent] channel closed".to_string(),
-                                                None,
-                                            )
-                                        }
-                                    }
-                                    None => (
+                                if code_studio_disk_task
+                                    && !assigned_agent.eq_ignore_ascii_case("studio_project_manager")
+                                {
+                                    (
                                         false,
-                                        "[delegate_to_agent] not available".to_string(),
+                                        "[delegate_to_agent] réservé à l’agent `studio_project_manager` (chef de projet Code Studio). Les sous-agents implémentent directement avec read_file / write_file / …"
+                                            .to_string(),
                                         None,
-                                    ),
+                                    )
+                                } else {
+                                    match &delegation_tx {
+                                        Some(tx) => {
+                                            let (reply_tx, reply_rx) = oneshot::channel();
+                                            let agent_type = args
+                                                .get(0)
+                                                .cloned()
+                                                .unwrap_or_else(|| "conversation".to_string());
+                                            let message = args
+                                                .get(1..)
+                                                .map(|a| a.join(" "))
+                                                .unwrap_or_else(|| args.get(0).cloned().unwrap_or_default());
+                                            if tx
+                                                .send(DelegationRequest {
+                                                    requesting_task_id: task_id,
+                                                    agent_type,
+                                                    message,
+                                                    reply_tx,
+                                                })
+                                                .await
+                                                .is_ok()
+                                            {
+                                                match tokio::time::timeout(
+                                                    std::time::Duration::from_secs(310),
+                                                    reply_rx,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(Ok(Ok(msg))) => (
+                                                        true,
+                                                        format!("[delegate_to_agent] {}", msg),
+                                                        None,
+                                                    ),
+                                                    Ok(Ok(Err(e))) => (
+                                                        false,
+                                                        format!("[delegate_to_agent] {}", e),
+                                                        None,
+                                                    ),
+                                                    _ => (
+                                                        false,
+                                                        "[delegate_to_agent] timeout or channel closed"
+                                                            .to_string(),
+                                                        None,
+                                                    ),
+                                                }
+                                            } else {
+                                                (
+                                                    false,
+                                                    "[delegate_to_agent] channel closed".to_string(),
+                                                    None,
+                                                )
+                                            }
+                                        }
+                                        None => (
+                                            false,
+                                            "[delegate_to_agent] not available".to_string(),
+                                            None,
+                                        ),
+                                    }
                                 }
                             } else if actual_tool == "install_skill" {
                                 let url = args.get(0).map(String::as_str).unwrap_or("").trim();
@@ -7758,7 +10174,7 @@ pub(crate) async fn run_message_via_llm(
                                         device_bridge.as_ref(),
                                         workspace_store.as_ref(),
                                         browser_registry.as_ref(),
-                                        store_path.parent(),
+                                        Some(tool_disk_workspace_root.as_path()),
                                     )
                                     .await;
                                     (s, r, None)
@@ -7808,7 +10224,7 @@ pub(crate) async fn run_message_via_llm(
                                     device_bridge.as_ref(),
                                     workspace_store.as_ref(),
                                     browser_registry.as_ref(),
-                                    store_path.parent(),
+                                    Some(tool_disk_workspace_root.as_path()),
                                 )
                                 .await
                             };
@@ -7833,7 +10249,7 @@ pub(crate) async fn run_message_via_llm(
                         // Redact or truncate args in the event to avoid leaking large blobs or secrets.
                         let redacted_args: Vec<String> = if matches!(
                             actual_tool.as_str(),
-                            "apply_patch" | "edit_file" | "write_file"
+                            "apply_patch" | "edit_file" | "write_file" | "delete_file"
                         ) {
                             vec!["[redacted for write-like tool]".to_string()]
                         } else {
@@ -7914,6 +10330,41 @@ pub(crate) async fn run_message_via_llm(
                                 strict_successful_tool_calls =
                                     strict_successful_tool_calls.saturating_add(1);
                             }
+                            if code_studio_disk_task
+                                && matches!(
+                                    actual_tool.as_str(),
+                                    "write_file"
+                                        | "delete_file"
+                                        | "rename_path"
+                                        | "move_tree"
+                                        | "search_replace"
+                                        | "edit_file"
+                                        | "apply_patch"
+                                )
+                            {
+                                schedule_code_studio_index_for_root(
+                                    store_path.as_path(),
+                                    tool_disk_workspace_root.as_path(),
+                                );
+                            }
+                            if actual_tool.eq_ignore_ascii_case("read_file") {
+                                let (path_tokens, explicit_window, want_full) =
+                                    parse_read_file_args(&tool_args);
+                                if !want_full && explicit_window.is_none() {
+                                    let path_input = path_tokens.join(" ");
+                                    let path_str = normalize_tool_path_hint(&path_input);
+                                    let was_truncated = res.contains("[read_file")
+                                        && !path_str.is_empty()
+                                        && (res.contains("(truncated,")
+                                            || res.contains(READ_FILE_PARTIAL_DEFAULT_MARKER));
+                                    if was_truncated {
+                                        truncated_read_file_paths_by_agent
+                                            .entry(loop_agent_key.clone())
+                                            .or_default()
+                                            .insert(path_str);
+                                    }
+                                }
+                            }
                             log_tool_journal_if_write(&actual_tool, tool_args, &res).await;
                         }
                         tool_results.push(res);
@@ -7926,6 +10377,10 @@ pub(crate) async fn run_message_via_llm(
                 }
                 let round_had_ask_user = calls.iter().any(|(name, _)| name == "ask_user");
                 let msg_social = compute_message_intent_flags(&message).social_feed_fetch;
+                let tool_loop_history = tool_loop_history_by_agent
+                    .get(&loop_agent_key)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
                 let had_web_search = tool_loop_history.iter().any(|(t, _)| t == "web_search");
                 let browser_ok = tools_executor_snapshot
                     .as_ref()
@@ -8148,6 +10603,10 @@ pub(crate) async fn run_message_via_llm(
                     .map(|e| e.policy.can_use_tool("write_file"))
                     .unwrap_or(false);
                 if policy_allows_write {
+                    let tool_loop_history = tool_loop_history_by_agent
+                        .get(&loop_agent_key)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]);
                     let disk_write_attempted = tool_loop_history.iter().any(|(t, _)| {
                         matches!(
                             t.as_str(),
@@ -8172,6 +10631,43 @@ pub(crate) async fn run_message_via_llm(
                 .join("\n")
                 .trim()
                 .to_string();
+            const MAX_STUDIO_MANUAL_PATCH_NAGS: u32 = 3;
+            if code_studio_disk_task
+                && looks_like_manual_file_patch_reply(&response_for_user)
+                && tools_executor_snapshot.is_some()
+            {
+                let (policy_allows_write, write_tool_seen) = tools_executor_snapshot
+                    .as_ref()
+                    .map(|e| {
+                        let tool_loop_history = tool_loop_history_by_agent
+                            .get(&loop_agent_key)
+                            .map(|v| v.as_slice())
+                            .unwrap_or(&[]);
+                        let allows = e.policy.can_use_tool("write_file")
+                            || e.policy.can_use_tool("edit_file")
+                            || e.policy.can_use_tool("search_replace")
+                            || e.policy.can_use_tool("apply_patch");
+                        let seen = tool_loop_history.iter().any(|(t, _)| {
+                            matches!(
+                                t.as_str(),
+                                "write_file" | "edit_file" | "search_replace" | "apply_patch"
+                            )
+                        });
+                        (allows, seen)
+                    })
+                    .unwrap_or((false, false));
+                if policy_allows_write
+                    && !write_tool_seen
+                    && studio_manual_patch_nags < MAX_STUDIO_MANUAL_PATCH_NAGS
+                {
+                    studio_manual_patch_nags += 1;
+                    current_prompt = format!(
+                        "{}\n\n[Code Studio — mandatory runtime guard]\nYour previous reply asked the user to manually paste file changes. This is not acceptable here while write tools are available.\nEmit TOOL lines now and apply the fix directly on disk using `search_replace`, `edit_file`, `write_file`, or `apply_patch` (workspace:/ paths). Do NOT output manual replacement blocks.\nIf a write tool fails, include the tool error and explain the blocker briefly.",
+                        current_prompt
+                    );
+                    continue;
+                }
+            }
             if strict_tools_first && strict_successful_tool_calls == 0 {
                 let preferred_tools_hint = runtime_tool_routing_enforcer
                     .as_ref()
@@ -8188,6 +10684,10 @@ pub(crate) async fn run_message_via_llm(
                 break;
             }
             // If we already ran tools but the model returned a placeholder ("Je vais… Une seconde."), force one more round to get the actual answer.
+            let tool_loop_history = tool_loop_history_by_agent
+                .get(&loop_agent_key)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             if !tool_loop_history.is_empty()
                 && last_tool_results_blob
                     .as_ref()
@@ -8250,7 +10750,7 @@ pub(crate) async fn run_message_via_llm(
         }
     }
 
-    let reply_text = if reply_text.is_empty() {
+    let mut reply_text = if reply_text.is_empty() {
         tracing::warn!("LLM returned empty text");
         "No response from the model. Check Ollama or your LLM provider.".to_string()
     } else {
@@ -8261,6 +10761,96 @@ pub(crate) async fn run_message_via_llm(
         }
         reply_text
     };
+    let is_paused = matches!(
+        store.get(task_id),
+        Ok(Some(Task {
+            status: TaskStatus::Paused,
+            ..
+        }))
+    );
+    let mut studio_verify_error: Option<String> = None;
+    let mut studio_autofix_applied = false;
+    if !is_paused && code_studio_disk_task {
+        let max_passes: u32 = if is_session_recall {
+            1
+        } else {
+            std::env::var("AKASHA_STUDIO_VERIFY_MAX_PASSES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3)
+                .max(1)
+                .min(8)
+        };
+        for pass in 0..max_passes {
+            match crate::api_studio::studio_verify_after_agent_task(&tool_disk_workspace_root).await {
+                Ok(()) => {
+                    studio_verify_error = None;
+                    break;
+                }
+                Err(e) => {
+                    studio_verify_error = Some(e.clone());
+                    if pass + 1 >= max_passes {
+                        break;
+                    }
+                    if let Some(ref exec_arc) = tools_executor {
+                        let denom = max_passes.saturating_sub(1).max(1);
+                        let _ = bus.send(
+                            EventEnvelope::new(
+                                EventType::ProgressUpdate,
+                                Some(serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "progress_pct": 55,
+                                    "message": format!(
+                                        "Compilation du projet en échec — correction automatique (tentative {}/{}).",
+                                        pass + 1,
+                                        denom
+                                    )
+                                })),
+                            )
+                            .with_correlation(timeline_correlation),
+                        );
+                        let llm_rounds = std::env::var("AKASHA_STUDIO_VERIFY_AUTOFIX_LLM_ROUNDS")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(6)
+                            .max(1)
+                            .min(16);
+                        let data_dir = store_path
+                            .parent()
+                            .unwrap_or_else(|| store_path.as_path());
+                        let did_write = studio_verify_run_llm_autofix_rounds(
+                            &bus,
+                            &llm_router,
+                            exec_arc,
+                            skill_registry.as_ref(),
+                            plugin_registry.as_ref(),
+                            process_registry.as_ref(),
+                            conv_tx.clone(),
+                            long_term_client.as_ref(),
+                            workspace_store.as_ref(),
+                            browser_registry.as_ref(),
+                            device_bridge.as_ref(),
+                            task_id,
+                            store_path.as_path(),
+                            data_dir,
+                            tool_disk_workspace_root.as_path(),
+                            &e,
+                            llm_rounds,
+                        )
+                        .await;
+                        if did_write {
+                            studio_autofix_applied = true;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        if studio_verify_error.is_none() && studio_autofix_applied {
+            reply_text.push_str("\n\n_(Compilation du projet Code Studio corrigée automatiquement après échec du build.)_");
+        }
+    }
     if !first_meaningful_progress_sent && !reply_text.trim().is_empty() {
         cancel_progress_watchdog(&mut watchdog_cancel);
         if emit_timeline_once_for_task(
@@ -8399,8 +10989,14 @@ AGENT_CAN: what the agent can do (allowed)\n\
 AGENT_CANNOT: what the agent must not do (forbidden)\n\
 Write only lines with these prefixes, or NOTHING if none. No other text.\n\
 Extract only facts explicitly mentioned (by the user or the assistant). Do not invent anything.\n\nUser: {}\n\nAssistant: {}",
-                msg.trim(),
-                reply.trim()
+                crate::llm_prompt_cap::truncate_utf8_bytes(
+                    msg.trim(),
+                    crate::llm_prompt_cap::SYSTEM_PROMPT_FIELD_MAX_BYTES,
+                ),
+                crate::llm_prompt_cap::truncate_utf8_bytes(
+                    reply.trim(),
+                    crate::llm_prompt_cap::SYSTEM_PROMPT_FIELD_MAX_BYTES,
+                )
             );
                 let extract_max_tokens = std::env::var("AKASHA_SYSTEM_TASK_MAX_TOKENS")
                     .ok()
@@ -8549,18 +11145,6 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             .with_correlation(task_id),
         );
     }
-    // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
-    // Determine if the task was paused during execution. If so, we must not emit
-    // TaskCompleted nor mark it as completed; instead, emit TaskPaused to keep
-    // the event stream consistent with the stored status.
-    let is_paused = matches!(
-        store.get(task_id),
-        Ok(Some(Task {
-            status: TaskStatus::Paused,
-            ..
-        }))
-    );
-
     if let Some(reg) = &browser_registry {
         crate::browser::close_task(reg, task_id).await;
     }
@@ -8569,23 +11153,116 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         ws.write().await.remove(&task_id);
     }
 
+    let verify_user_lang = studio_verify_detect_user_language(clean_message);
+    let studio_verify_display_message: Option<String> = if let Some(ref err) = studio_verify_error {
+        let explain_enabled = code_studio_disk_task
+            && std::env::var("AKASHA_STUDIO_VERIFY_EXPLAIN_FAILURE")
+                .ok()
+                .map(|v| v != "0")
+                .unwrap_or(true);
+        let explain = if explain_enabled {
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::ProgressUpdate,
+                    Some(serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "progress_pct": 99,
+                        "message": studio_verify_analyzing_progress_line(verify_user_lang)
+                    })),
+                )
+                .with_correlation(task_id),
+            );
+            studio_verify_explain_failure_to_user(
+                &llm_router,
+                clean_message,
+                &reply_text,
+                err,
+                verify_user_lang,
+            )
+            .await
+        } else {
+            None
+        };
+        let summary = explain.filter(|s| !s.trim().is_empty());
+        let banner = studio_verify_failure_banner(verify_user_lang);
+        let excerpt_lbl = studio_verify_build_excerpt_label(verify_user_lang);
+        Some(if let Some(ref s) = summary {
+            let head = studio_verify_summary_heading_markdown(verify_user_lang);
+            if head.is_empty() {
+                format!(
+                    "{banner}\n\n{}\n\n{excerpt_lbl}\n{}",
+                    s.trim(),
+                    err.chars().take(1_400).collect::<String>()
+                )
+            } else {
+                format!(
+                    "{banner}\n\n{head}{}\n\n{excerpt_lbl}\n{}",
+                    s.trim(),
+                    err.chars().take(1_400).collect::<String>()
+                )
+            }
+        } else {
+            format!(
+                "{banner}\n{}",
+                err.chars().take(1_800).collect::<String>()
+            )
+        })
+    } else {
+        None
+    };
+
+    if let Some(ref pm) = studio_verify_display_message {
+        let _ = bus.send(
+            EventEnvelope::new(
+                EventType::ProgressUpdate,
+                Some(serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "progress_pct": 100,
+                    "message": pm.chars().take(6_000).collect::<String>()
+                })),
+            )
+            .with_correlation(task_id),
+        );
+    }
+
     let final_event_type = if is_paused {
         EventType::TaskPaused
+    } else if studio_verify_error.is_some() {
+        EventType::TaskFailed
     } else {
         EventType::TaskCompleted
     };
-    let final_status_str = if is_paused { "paused" } else { "completed" };
+    let final_status_str = if is_paused {
+        "paused"
+    } else if studio_verify_error.is_some() {
+        "failed"
+    } else {
+        "completed"
+    };
 
+    let mut final_payload = serde_json::json!({
+        "task_id": task_id.to_string(),
+        "status": final_status_str,
+        "model_used": last_llm_model_used
+    });
+    if studio_verify_error.is_some() {
+        if let Some(obj) = final_payload.as_object_mut() {
+            let reason_text: String = studio_verify_display_message
+                .as_ref()
+                .map(|m| m.chars().take(2_000).collect::<String>())
+                .unwrap_or_else(|| {
+                    studio_verify_error
+                        .as_deref()
+                        .unwrap_or("")
+                        .chars()
+                        .take(2_000)
+                        .collect::<String>()
+                });
+            obj.insert("reason".to_string(), serde_json::Value::String(reason_text));
+        }
+    }
     let _ = bus.send(
-        EventEnvelope::new(
-            final_event_type,
-            Some(serde_json::json!({
-                "task_id": task_id.to_string(),
-                "status": final_status_str,
-                "model_used": last_llm_model_used
-            })),
-        )
-        .with_correlation(task_id),
+        EventEnvelope::new(final_event_type, Some(final_payload)).with_correlation(task_id),
     );
     emit_timeline_once_for_task(
         &bus,
@@ -8598,7 +11275,11 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
 
     // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
     if !is_paused {
-        let _ = store.update_status(task_id, TaskStatus::Completed);
+        if studio_verify_error.is_some() {
+            let _ = store.update_status(task_id, TaskStatus::Failed);
+        } else {
+            let _ = store.update_status(task_id, TaskStatus::Completed);
+        }
         notify_task_completion(&task_completion_registry, task_id).await;
         let data_dir_sess = store_path.parent().unwrap_or_else(|| store_path.as_ref());
         let is_root_task = store
@@ -8607,7 +11288,11 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             .flatten()
             .map(|t| t.parent_task_id.is_none())
             .unwrap_or(true);
-        if is_root_task && !is_small_talk_fast_lane && !is_orchestrated_task_msg {
+        if is_root_task
+            && !is_small_talk_fast_lane
+            && !is_orchestrated_task_msg
+            && studio_verify_error.is_none()
+        {
             if let Ok(st) = crate::session_state::merge(data_dir_sess, &session_id, |s| {
                 let fact = reply_text.chars().take(240).collect::<String>();
                 // Skip storing agent confusion/redirects as facts — they poison future context.
@@ -8665,12 +11350,23 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             }
         }
         if !is_small_talk_fast_lane {
-            let summary_preview: String = reply_text.chars().take(300).collect();
+            let outcome_label = if studio_verify_error.is_some() {
+                "failed"
+            } else {
+                "completed"
+            };
+            let summary_preview: String = if let Some(ref m) = studio_verify_display_message {
+                m.chars().take(300).collect()
+            } else if let Some(ref e) = studio_verify_error {
+                e.chars().take(300).collect()
+            } else {
+                reply_text.chars().take(300).collect()
+            };
             learn_from_task_outcome_async(
                 long_term_client.clone(),
                 task_id,
                 message.clone(),
-                "completed".to_string(),
+                outcome_label.to_string(),
                 summary_preview,
                 Some(session_id.clone()),
                 structured.intent_slug.clone(),
@@ -9008,6 +11704,18 @@ pub async fn handle_api(
     }
 
     let (path_only, query_str) = split_path_query(path);
+
+    if let Some(resp) = crate::api_studio::handle_studio_route(
+        method,
+        path_only,
+        query_str,
+        body.as_deref(),
+        data_dir,
+    )
+    .await
+    {
+        return resp;
+    }
 
     if let Some(resp) = crate::api_workspace_graph::handle_workspace_graph(
         method,
@@ -10605,14 +13313,184 @@ pub async fn handle_api(
                 }
             })
             .unwrap_or(TaskPriority::UserNormal);
+        let studio_code_mode = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_code_mode").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
+        let studio_policy_hint = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_policy_hint").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let studio_design_hint = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_design_hint").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let studio_design_doc = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_design_doc").and_then(|x| x.as_str()))
+            .map(|s| s.to_string())
+            .filter(|s| !s.trim().is_empty());
+        let studio_delegate_single_level = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_delegate_single_level").and_then(|x| x.as_bool()))
+            .unwrap_or(false);
+        let studio_project_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_project_id").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let studio_disk_root = if let Some(pid) = studio_project_id.as_deref()
+        {
+            match crate::studio::resolve_studio_project_dir(data_dir, pid.trim()) {
+                Ok(p) => {
+                    let _ = std::fs::create_dir_all(&p);
+                    Some(p)
+                }
+                Err(e) => {
+                    let body = serde_json::json!({ "error": "invalid_studio_project", "detail": e });
+                    return json_response("400 Bad Request", &body.to_string());
+                }
+            }
+        } else {
+            None
+        };
+        let studio_ui_agent_preference = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_assigned_agent").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
+        // Code Studio : toujours router vers le chef de projet ; la valeur UI devient une préférence pour les sous-agents.
+        let studio_forced_agent = if studio_disk_root.is_some() {
+            Some("studio_project_manager".to_string())
+        } else {
+            studio_ui_agent_preference.clone()
+        };
+        let mut studio_evolution_branch = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_evolution_branch").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if studio_evolution_branch.is_none() {
+            if let (Some(pid), Some(eid)) = (
+                studio_project_id.as_deref(),
+                body_json
+                    .as_ref()
+                    .and_then(|v| v.get("studio_evolution_id").and_then(|x| x.as_str())),
+            ) {
+                studio_evolution_branch =
+                    crate::api_studio::evolution_branch_for_id(data_dir, pid.trim(), eid.trim());
+            }
+        }
         // Build acknowledgment message before moving `message` into the envelope.
         let ack_message = build_ack_message(&message);
-        let envelope = crate::gateway::MessageEnvelope::api(
+        // Capture the raw user message for code-RAG retrieval before any prefixes are injected.
+        let raw_user_message = message.clone();
+        let mut message_for_llm = message;
+        if let Some(ref root) = studio_disk_root {
+            if let Some(plan) = crate::api_studio::studio_code_plan_message_prefix(root) {
+                message_for_llm = format!("{plan}{message_for_llm}");
+            }
+            let (evol_prefix, policy_prefix, tech_prefix) =
+                crate::api_studio::studio_meta_prefixes(root);
+            if let Some(p) = evol_prefix {
+                message_for_llm = format!("{p}{message_for_llm}");
+            }
+            if let Some(p) = policy_prefix {
+                message_for_llm = format!("{p}{message_for_llm}");
+            }
+            if studio_evolution_branch.is_some() {
+                message_for_llm = format!(
+                    "[Évolution Code Studio — conserver le même périmètre produit et le même type d’application que le dépôt (cf. CODE_STUDIO_PLAN.md ci-dessus et code existant) ; ne pas remplacer par un autre jeu, une autre app ou un autre domaine fonctionnel sauf instruction explicite de l’utilisateur.]\n\n{}",
+                    message_for_llm
+                );
+            }
+            if let Some(prefix) = tech_prefix {
+                message_for_llm = format!("{prefix}{message_for_llm}");
+            }
+            if let Some(ref m) = studio_code_mode {
+                if let Some(p) = crate::api_studio::studio_code_mode_message_prefix(m) {
+                    message_for_llm = format!("{p}{message_for_llm}");
+                }
+            }
+            if let Some(ref h) = studio_policy_hint {
+                if let Some(p) = crate::api_studio::studio_one_shot_policy_hint_prefix(h) {
+                    message_for_llm = format!("{p}{message_for_llm}");
+                }
+            }
+            if let Some(ref h) = studio_design_hint {
+                if let Some(p) = crate::api_studio::studio_design_hint_prefix(h) {
+                    message_for_llm = format!("{p}{message_for_llm}");
+                }
+            }
+            if let Some(ref d) = studio_design_doc {
+                if let Some(p) = crate::api_studio::studio_design_doc_prefix(d) {
+                    message_for_llm = format!("{p}{message_for_llm}");
+                }
+            }
+            if studio_code_rag_enabled() {
+                if let Some(pid) = studio_project_id.as_deref() {
+                    let query = raw_user_message.clone();
+                    let data_dir = data_dir.to_path_buf();
+                    let root = root.clone();
+                    let pid = pid.to_string();
+                    let top_k = std::env::var("AKASHA_STUDIO_CODE_RAG_TOP_K")
+                        .ok()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .filter(|&n| n > 0 && n <= 30)
+                        .unwrap_or(8);
+                    let max_chars = std::env::var("AKASHA_STUDIO_CODE_RAG_MAX_CHARS")
+                        .ok()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .filter(|&n| n >= 800 && n <= 30_000)
+                        .unwrap_or(6_000);
+                    let code_ctx = tokio::task::spawn_blocking(move || {
+                        let store = crate::code_rag::CodeRagStore::new(&data_dir);
+                        let chunks = store.retrieve(
+                            &pid,
+                            &root,
+                            &query,
+                            crate::code_rag::RetrieveOptions { top_k, max_chars },
+                        )?;
+                        Ok::<_, anyhow::Error>(crate::code_rag::format_retrieved_chunks(
+                            &chunks, max_chars,
+                        ))
+                    })
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .flatten();
+                    if let Some(prefix) = code_ctx {
+                        message_for_llm = format!("{prefix}{message_for_llm}");
+                    }
+                }
+            }
+            if studio_delegate_single_level {
+                message_for_llm = format!(
+                    "[Délégation : privilégier une seule passe agent — éviter les sous-agents ou tâches parallèles implicites sans accord utilisateur.]\n\n{}",
+                    message_for_llm
+                );
+            }
+            if let Some(pref) = studio_ui_agent_preference.as_ref() {
+                if !pref.is_empty() && pref != "studio_project_manager" {
+                    message_for_llm = format!(
+                        "[Préférence d’implémentation (sélection UI Code Studio) : `{pref}` — en déléguant via `delegate_to_agent`, oriente les sous-tâches vers le spécialiste le plus adapté (ex. studio_frontend, studio_backend, studio_fullstack, studio_scaffold, qa).]\n\n{}",
+                        message_for_llm
+                    );
+                }
+            }
+        }
+        let mut envelope = crate::gateway::MessageEnvelope::api(
             session_id.clone(),
-            message,
+            message_for_llm,
             image_data_urls,
             priority,
         );
+        envelope.studio_disk_root = studio_disk_root;
+        envelope.studio_forced_agent = studio_forced_agent;
+        envelope.studio_evolution_branch = studio_evolution_branch;
         match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
             Ok(task_id) => {
                 let body = serde_json::json!({
@@ -10680,6 +13558,9 @@ pub async fn handle_api(
                 }
                 if method == "GET" && parts.get(1) == Some(&"events") {
                     return get_task_events(store_path, events, id).await;
+                }
+                if method == "GET" && parts.get(1) == Some(&"studio-diff") {
+                    return get_task_studio_diff(store_path, id).await;
                 }
                 // Human in the loop: GET pending question/context/choices for the task
                 if method == "GET" && parts.get(1) == Some(&"human-input") {
@@ -11868,6 +14749,81 @@ async fn resume_task(store_path: &Path, id: Uuid, main_agent: &crate::agents::Ma
     }
 }
 
+/// Short follow-up actions for Code Studio UI (`GET /api/tasks/:id` → `suggested_actions`).
+fn code_studio_suggested_actions(
+    status: &TaskStatus,
+    failure_detail: Option<&str>,
+    last_progress: Option<&ProgressEntry>,
+) -> Vec<serde_json::Value> {
+    use TaskStatus::*;
+    let mut v = Vec::new();
+    match status {
+        Completed => {
+            v.push(serde_json::json!({
+                "id": "refresh_files",
+                "label": "Rafraîchir la liste des fichiers",
+                "kind": "ui",
+                "ui_action": "refresh_files"
+            }));
+            v.push(serde_json::json!({
+                "id": "open_editor",
+                "label": "Onglet Éditeur",
+                "kind": "ui",
+                "ui_action": "open_editor"
+            }));
+            v.push(serde_json::json!({
+                "id": "open_preview",
+                "label": "Ouvrir l’aperçu",
+                "kind": "ui",
+                "ui_action": "open_preview"
+            }));
+            v.push(serde_json::json!({
+                "id": "open_design",
+                "label": "Voir DESIGN.md",
+                "kind": "ui",
+                "ui_action": "open_design"
+            }));
+        }
+        Failed | Cancelled => {
+            let hint = failure_detail
+                .map(str::to_string)
+                .or_else(|| last_progress.map(|e| e.message.clone()))
+                .unwrap_or_default();
+            let truncated = if hint.chars().count() > 500 {
+                hint.chars().take(500).collect::<String>() + "…"
+            } else {
+                hint
+            };
+            v.push(serde_json::json!({
+                "id": "analyze_failure",
+                "label": "Demander une analyse de l’échec",
+                "kind": "message",
+                "message": format!(
+                    "La dernière tâche a échoué ou été annulée. Contexte:\n{}\n\nPropose un plan de correction ciblé (fichiers et étapes) sans refaire toute l’implémentation.",
+                    truncated
+                )
+            }));
+        }
+        WaitingUserInput => {
+            v.push(serde_json::json!({
+                "id": "reply_wait",
+                "label": "Rappel : répondre à l’agent",
+                "kind": "message",
+                "message": "Je complète ma réponse pour l’agent (voir la zone « Réponse requise » dans le suivi de tâche)."
+            }));
+        }
+        Running | Queued | Pending | Paused | Interrupted => {
+            v.push(serde_json::json!({
+                "id": "wait_continue",
+                "label": "Poursuivre après la tâche",
+                "kind": "message",
+                "message": "Continue sur la base du plan actuel ; je reviens vérifier le résultat une fois la tâche terminée."
+            }));
+        }
+    }
+    v
+}
+
 async fn get_task_status(
     store_path: &Path,
     progress: &ProgressCache,
@@ -11890,6 +14846,7 @@ async fn get_task_status(
                 .map(|(pct, msg)| ProgressEntry {
                     progress_pct: pct,
                     message: msg,
+                    task_id: Some(id.to_string()),
                 })
                 .collect()
         })
@@ -11936,6 +14893,7 @@ async fn get_task_status(
                 progress_list.push(ProgressEntry {
                     progress_pct: display_pct,
                     message: "Sous-tâches en cours.".to_string(),
+                    task_id: Some(id.to_string()),
                 });
             } else if let Some(last) = progress_list.last_mut() {
                 last.progress_pct = display_pct;
@@ -11974,6 +14932,45 @@ async fn get_task_status(
             })
         })
         .collect();
+    let failure_detail: Option<String> = if matches!(
+        task.status,
+        TaskStatus::Failed | TaskStatus::Cancelled
+    ) {
+        progress_list
+            .iter()
+            .rev()
+            .find(|e| !task_progress_is_chat_stub(&e.message))
+            .map(|e| e.message.chars().take(4000).collect::<String>())
+    } else {
+        None
+    };
+    let last_for_suggest = progress_list.last().cloned();
+    let suggested = code_studio_suggested_actions(&task.status, failure_detail.as_deref(), last_for_suggest.as_ref());
+    // Dernière ligne de progression par sous-tâche pour le détail Studio (dédoublonnage côté client par task_id).
+    if let Ok(children) = store.get_children(id) {
+        if !children.is_empty() {
+            let mem_snapshot: std::collections::HashMap<Uuid, VecDeque<ProgressEntry>> = {
+                let g = progress.read().await;
+                g.iter().map(|(k, v)| (*k, v.clone())).collect()
+            };
+            for c in &children {
+                let from_mem = mem_snapshot.get(&c.id).and_then(|q| q.back().cloned());
+                let from_disk = store.get_progress(c.id).ok().and_then(|v| {
+                    v.last().map(|(pct, msg)| ProgressEntry {
+                        progress_pct: *pct,
+                        message: msg.clone(),
+                        task_id: Some(c.id.to_string()),
+                    })
+                });
+                if let Some(mut e) = from_mem.or(from_disk) {
+                    if e.task_id.is_none() {
+                        e.task_id = Some(c.id.to_string());
+                    }
+                    progress_list.push(e);
+                }
+            }
+        }
+    }
     let mut body = serde_json::json!({
         "task_id": task.id.to_string(),
         "status": task.status.as_str(),
@@ -11983,10 +14980,14 @@ async fn get_task_status(
         "progress": progress_list,
         "tokens_used": tokens_used,
         "cost_usd": cost_usd,
-        "todos": todos_json
+        "todos": todos_json,
+        "suggested_actions": suggested
     });
     if let Some(u) = todos_updated_at {
         body["todos_updated_at"] = serde_json::Value::String(u);
+    }
+    if let Some(fd) = failure_detail {
+        body["failure_detail"] = serde_json::Value::String(fd);
     }
     json_response("200 OK", &body.to_string())
 }
@@ -12526,7 +15527,7 @@ mod tests {
         parse_device_invoke_params, parse_generate_image_tool_args,
         parse_memory_store_explicit_links, parse_plugin_reputation_reset_body, parse_run_command_args,
         parse_skill_install_url, parse_tool_calls, parse_write_file_request,
-        resolve_run_command_working_dir,
+        resolve_run_command_working_dir, strip_markdown_fences_from_write_content,
         response_looks_off_topic_for_small_talk, rewrite_workspace_plan_key_to_lineage_root,
         rewrite_workspace_plan_path_str, small_talk_fast_lane, PluginReputationResetBody,
         SessionRecallIntent, SessionRecallRange, SmallTalkLanguage,
@@ -12750,6 +15751,25 @@ mod tests {
     }
 
     #[test]
+    fn detect_session_recall_ignores_task_recap_in_design_spec() {
+        assert!(
+            detect_session_recall_intent(
+                "Nothing else (no task recap, no npm commands, no non-English text)."
+            )
+            .is_none(),
+            "DESIGN.md/Code Studio boilerplate must not trigger session-recall fast path"
+        );
+    }
+
+    #[test]
+    fn detect_session_recall_still_detects_recap_verb() {
+        let intent = detect_session_recall_intent("Can you recap what we shipped today?")
+            .expect("recap request");
+        assert_eq!(intent.range, SessionRecallRange::CurrentDay);
+        assert_eq!(intent.language, SmallTalkLanguage::English);
+    }
+
+    #[test]
     fn build_session_recap_reply_filters_noise() {
         let turns = vec![
             crate::memory::ConversationTurn {
@@ -12789,6 +15809,52 @@ mod tests {
         assert_eq!(c[0].0, "write_file");
         assert_eq!(c[0].1[0], "workspace:/x.md");
         assert_eq!(c[0].1[1], "hello block");
+    }
+
+    #[test]
+    fn parse_tool_calls_xml_tool_call_tags() {
+        let s = "<tool_call>read_file workspace:/src/App.tsx 1 10</tool_call>\n<tool_call>read_file workspace:/src/b.tsx 1 5</tool_call>";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 2, "{:?}", c);
+        assert_eq!(c[0].0, "read_file");
+        assert_eq!(c[1].0, "read_file");
+    }
+
+    #[test]
+    fn parse_tool_calls_xml_tool_call_chained_without_close() {
+        let s = "<tool_call>read_file workspace:/a.tsx 1 2<tool_call>read_file workspace:/b.tsx 3 4";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 2, "{:?}", c);
+        assert_eq!(c[0].0, "read_file");
+        assert_eq!(c[1].0, "read_file");
+    }
+
+    /// DeepSeek-style `<｜DSML｜…>` (U+FF5C fullwidth vertical line).
+    #[test]
+    fn parse_tool_calls_dsml_search_files_fullwidth_delimiters() {
+        let d = "\u{ff5c}";
+        let s = format!(
+            "<{d}DSML{d}tool_calls>\n\
+             <{d}DSML{d}invoke name=\"search_files\">\n\
+             <{d}DSML{d}parameter name=\"dir\" string=\"true\">workspace:/</{d}DSML{d}parameter>\n\
+             <{d}DSML{d}parameter name=\"pattern\" string=\"true\">**/*</{d}DSML{d}parameter>\n\
+             <{d}DSML{d}parameter name=\"--no-ignore\" string=\"false\">true</{d}DSML{d}parameter>\n\
+             <{d}DSML{d}parameter name=\"limit\" string=\"false\">200</{d}DSML{d}parameter>\n\
+             </{d}DSML{d}invoke>\n\
+             </{d}DSML{d}tool_calls>",
+            d = d
+        );
+        let c = parse_tool_calls(&s);
+        assert_eq!(c.len(), 1, "{:?}", c);
+        assert_eq!(c[0].0, "search_files");
+        assert_eq!(c[0].1[0], "workspace:/");
+        assert_eq!(c[0].1[1], "**/*");
+        assert!(c[0].1.contains(&"--no-ignore".to_string()));
+        assert!(
+            !c[0].1.iter().any(|a| a == "200"),
+            "limit must be ignored: {:?}",
+            c[0].1
+        );
     }
 
     #[test]
@@ -12846,6 +15912,63 @@ mod tests {
         let (path, content) = parse_write_file_request(&args).expect("json payload should parse");
         assert_eq!(path, "workspace:/project_plan.md");
         assert!(content.contains("# Plan"));
+    }
+
+    #[test]
+    fn parse_write_file_request_preserves_same_line_content_spacing() {
+        // All tokens come from the TOOL header (no collected body). The last token is joined
+        // with a newline to be consistent with the single-line-body case — the resulting JSON
+        // (with a newline before the final `}`) is still valid and parseable.
+        let args = vec![
+            "workspace:/tsconfig.json".to_string(),
+            "{".to_string(),
+            "\"compilerOptions\":".to_string(),
+            "{".to_string(),
+            "\"strict\":".to_string(),
+            "true".to_string(),
+            "}".to_string(),
+            "}".to_string(),
+        ];
+        let (path, content) = parse_write_file_request(&args).expect("write_file should parse");
+        assert_eq!(path, "workspace:/tsconfig.json");
+        assert_eq!(content, "{ \"compilerOptions\": { \"strict\": true }\n}");
+    }
+
+    #[test]
+    fn parse_write_file_request_combines_inline_prefix_and_single_line_body() {
+        // Inline token on the TOOL header line + exactly one body line collected by the parser.
+        let args = vec![
+            "workspace:/src/index.js".to_string(),
+            "const".to_string(),
+            "x = 1;".to_string(),
+            "return x;".to_string(),
+        ];
+        let (_, content) = parse_write_file_request(&args).expect("write_file should parse");
+        assert_eq!(content, "const x = 1;\nreturn x;");
+    }
+
+    #[test]
+    fn parse_write_file_request_combines_inline_prefix_and_multiline_body() {
+        let args = vec![
+            "workspace:/index.html".to_string(),
+            "<!doctype".to_string(),
+            "html>".to_string(),
+            "<html>\n<body></body>\n</html>".to_string(),
+        ];
+        let (_, content) = parse_write_file_request(&args).expect("write_file should parse");
+        assert_eq!(content, "<!doctype html>\n<html>\n<body></body>\n</html>");
+    }
+
+    #[test]
+    fn strip_markdown_fences_removes_wrapping_fence() {
+        let raw = "```tsx\nconst x = 1;\n```";
+        assert_eq!(strip_markdown_fences_from_write_content(raw), "const x = 1;");
+        let raw2 = "```\nhello\n```\n";
+        assert_eq!(strip_markdown_fences_from_write_content(raw2), "hello");
+        assert_eq!(
+            strip_markdown_fences_from_write_content("no fence here"),
+            "no fence here"
+        );
     }
 
     #[test]

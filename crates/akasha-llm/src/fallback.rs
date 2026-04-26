@@ -2,11 +2,26 @@
 
 use crate::config::{RouteEntry, TaskTypeConfig};
 use crate::metrics::MetricsCollector;
-use crate::provider::{CompletionRequest, CompletionResponse, LLMProvider};
+use crate::provider::{
+    provider_error_is_context_window_exceeded, CompletionRequest, CompletionResponse, LLMProvider,
+};
 use crate::retry::{RetryClass, RetryPolicy};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::warn;
+
+fn looks_like_tool_only_reply(text: &str) -> bool {
+    let t = text.trim();
+    let normalized = t
+        .strip_prefix("- ")
+        .unwrap_or(t)
+        .trim_start_matches('*')
+        .trim_start()
+        .to_ascii_lowercase();
+    normalized.starts_with("tool:")
+        || normalized.starts_with("tool :")
+        || normalized.starts_with("tool\t:")
+}
 
 pub struct FallbackEngine {
     pub max_retries: u32,
@@ -157,6 +172,18 @@ impl FallbackEngine {
                                         eval_count = eval_count,
                                         "Brief LLM output for task_type=system (memory/fact extraction etc.); this is not the user-facing streamed reply"
                                     );
+                                } else if looks_like_tool_only_reply(&resp.text) {
+                                    tracing::debug!(
+                                        provider = %entry.provider,
+                                        model = %entry.model,
+                                        task_type = task_type_label,
+                                        max_tokens = ?max_tokens_used,
+                                        done_reason = %resp.done_reason.as_deref().unwrap_or("stop"),
+                                        text_length = text_len,
+                                        thinking_length = thinking_len,
+                                        eval_count = eval_count,
+                                        "Brief LLM output is tool-only; short-response warning suppressed"
+                                    );
                                 } else {
                                     tracing::warn!(
                                         provider = %entry.provider,
@@ -232,6 +259,15 @@ impl FallbackEngine {
                             error = %e,
                             "Attempt failed, try next in chain"
                         );
+                        if provider_error_is_context_window_exceeded(&e) {
+                            warn!(
+                                provider = %entry.provider,
+                                model = %entry.model,
+                                error = %e,
+                                "Prompt exceeds this provider's context window; trying next provider in chain (may have larger context)"
+                            );
+                            break; // exit retry loop for this provider; let the chain continue
+                        }
                     }
                 }
             }

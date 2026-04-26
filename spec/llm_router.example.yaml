@@ -26,9 +26,9 @@ providers:
     # base_url optionnel (défaut: https://openrouter.ai/api/v1)
     # site_url: "https://Akasha.local"         # en-tête HTTP-Referer (défaut ; ou OPENROUTER_SITE_URL)
     # app_title: "Akasha"                     # en-tête X-Title (défaut ; ou OPENROUTER_APP_TITLE)
-  # BitNet (serveur local type llama-server / BitNet, API OpenAI-compatible) — voir spec 36
-  # bitnet:
-  #   base_url: "http://127.0.0.1:8080"   # défaut si absent
+  # BitNet / Rbitnet (serveur local API OpenAI-compatible, ex. rbitnet-server)
+  bitnet:
+    base_url: "http://127.0.0.1:8080"
 
 # Métadonnées par modèle (remplies par akasha init ou akasha config models fetch/add)
 # — context_length_max, num_ctx, family, etc. depuis Ollama /api/show

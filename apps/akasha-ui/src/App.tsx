@@ -65,7 +65,6 @@ const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "ligh
 function shouldChatStreamProgress(message: string): boolean {
   const m = message?.trim() ?? "";
   if (!m) return false;
-  if (m.includes("Analyzing your request") || m.includes("Analyse de votre demande")) return false;
   if (/^\s*TOOL\s*:/im.test(m)) return false;
   if (/\n\s*TOOL\s*:/i.test(m)) return false;
   return true;
@@ -1323,6 +1322,17 @@ function App() {
     },
     [t]
   );
+  /** Libellé court pour les pastilles (évite « timeline_milestone » brut dans l'UI). */
+  const eventTypeBadgeLabel = useCallback(
+    (typ: string) => {
+      if (typ === "timeline_milestone") {
+        const short = t("events.timeline_milestone_badge");
+        return short === "events.timeline_milestone_badge" ? typ : short;
+      }
+      return eventLabel(typ);
+    },
+    [t, eventLabel]
+  );
   const summarizeTaskEvent = useCallback(
     (event: { event_type: string; payload?: unknown }) => {
       const payload = event.payload;
@@ -1371,6 +1381,30 @@ function App() {
           ? `${t("tasks.deterministic_tool_no_success_summary")} ${tools.join(", ")}`
           : t("tasks.deterministic_tool_no_success_summary");
       }
+      if (event.event_type === "timeline_milestone" && payload && typeof payload === "object") {
+        const p = payload as Record<string, unknown>;
+        const name = typeof p.name === "string" ? p.name.trim() : "";
+        if (name) {
+          const key = `events.milestone.${name}`;
+          let line = t(key);
+          if (line === key) {
+            line = name.replace(/_/g, " ");
+          }
+          if (typeof p.tool === "string" && p.tool.trim()) {
+            line = `${line} — ${p.tool.trim()}`;
+          }
+          if (typeof p.step_id === "string" && p.step_id.trim()) {
+            line = `${line} · ${p.step_id.trim()}`;
+          }
+          if (typeof p.child_task_id === "string" && p.child_task_id.length >= 8) {
+            line = `${line} · #${p.child_task_id.slice(-8)}`;
+          }
+          if (typeof p.round === "number") {
+            line = `${line} · ${t("tasks.attempt_label")} #${p.round}`;
+          }
+          return trimPreview(line, 220);
+        }
+      }
       return "";
     },
     [t]
@@ -1406,6 +1440,15 @@ function App() {
         }
       }
       if (event.event_type === "timeline_milestone") {
+        const mn = typeof p.name === "string" ? p.name.trim() : "";
+        if (mn) {
+          const key = `events.milestone.${mn}`;
+          let line = t(key);
+          if (line === key) {
+            line = mn.replace(/_/g, " ");
+          }
+          out.push(line);
+        }
         pushLabeled(t("tasks.phase_label"), p.milestone);
       }
 
@@ -1659,7 +1702,8 @@ function App() {
   const [humanInputFreeText, setHumanInputFreeText] = useState("");
   /** Reply text for the inline ask_user form in the chat (when modal is not used). */
   const [inlineHumanReplyText, setInlineHumanReplyText] = useState("");
-  const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(true);
+  /** Fil d'activité des agents : ouvert par défaut pour suivre les étapes (style ChatGPT / Cursor). */
+  const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(false);
   /** Per-root task: whether the discussion block is collapsed in the sub-agent panel (true = collapsed). */
   const [collapsedRootTasks, setCollapsedRootTasks] = useState<Record<string, boolean>>({});
   const [schedules, setSchedules] = useState<Array<{ id: string; name: string; enabled: boolean; interval_seconds?: number }>>([]);
@@ -5491,7 +5535,7 @@ function App() {
                   {chatToolBatchSummary}
                 </div>
               )}
-              {!isSimpleMode && Object.keys(runningTaskChips).length > 0 && (
+              {Object.keys(runningTaskChips).length > 0 && (
                 <div className="chat-subagents-panel">
                   <button
                     type="button"
@@ -5501,19 +5545,19 @@ function App() {
                     aria-controls="subagents-detail"
                   >
                     <span className="chat-subagents-toggle-icon" aria-hidden>{subAgentPanelCollapsed ? "▶" : "▼"}</span>
-                    <span>
+                    <span className="chat-subagents-toggle-text">
                       {subAgentPanelCollapsed
                         ? (() => {
                             const total = Object.values(runningTaskEvents).flat().length;
                             return total > 0
-                              ? `Détail des sous-agents (${total} étape(s))`
-                              : "Détail des sous-agents (cliquez pour afficher)";
+                              ? t("chat.agent_activity_expand").replace("{{count}}", String(total))
+                              : t("chat.agent_activity_expand_hint");
                           })()
-                        : "Masquer le détail des sous-agents"}
+                        : t("chat.agent_activity_collapse")}
                     </span>
                   </button>
                   {!subAgentPanelCollapsed && (
-                    <div id="subagents-detail" className="chat-subagents-detail" role="region" aria-label="Actions des sous-agents">
+                    <div id="subagents-detail" className="chat-subagents-detail" role="region" aria-label={t("chat.agent_activity_region")}>
                       {Object.entries(runningTaskEvents).filter(([, ev]) => ev.length > 0).length === 0 ? (
                         <p className="chat-subagents-empty">
                           {t("chat.no_events_yet")}
@@ -5535,7 +5579,7 @@ function App() {
                               >
                                 <span className="chat-subagents-discussion-icon" aria-hidden>{isCollapsed ? "▶" : "▼"}</span>
                                 <span className="chat-subagents-discussion-label">
-                                  Discussion — Task #{rootTaskId.slice(-8)}
+                                  {t("chat.agent_discussion_heading").replace("{{id}}", rootTaskId.slice(-8))}
                                   {pct != null && pct < 100 ? ` (${pct}%)` : ""}
                                 </span>
                               </button>
@@ -5597,8 +5641,14 @@ function App() {
                                             <li key={`${tid}-${idx}`} className="chat-subagents-event" data-type={ev.event_type} data-event-kind={classifyEventKind(ev.event_type)}>
                                               <span className="chat-subagents-event-dot" aria-hidden />
                                               <div className="chat-subagents-event-body">
+                                                {(() => {
+                                                  const summary = summarizeTaskEvent(ev);
+                                                  return summary ? (
+                                                    <p className="chat-subagents-event-summary">{summary}</p>
+                                                  ) : null;
+                                                })()}
                                                 <div className="chat-subagents-event-topline">
-                                                  <span className="chat-subagents-event-type event-kind-pill" data-event-kind={classifyEventKind(ev.event_type)}>{eventLabel(ev.event_type)}</span>
+                                                  <span className="chat-subagents-event-type event-kind-pill" data-event-kind={classifyEventKind(ev.event_type)}>{eventTypeBadgeLabel(ev.event_type)}</span>
                                                   {isDeterministicAutoToolEvent(ev.event_type) && (
                                                     <span className="event-auto-tool-badge">{t("tasks.auto_tool_badge")}</span>
                                                   )}
@@ -6480,8 +6530,9 @@ function App() {
                             <li key={`discussion-${event.event_type}-${event.at}-${i}`} className="activity-event-card" data-event-kind={classifyEventKind(event.event_type)}>
                               <span className="activity-event-dot" aria-hidden />
                               <div className="activity-event-body">
+                                {summarizeTaskEvent(event) && <p className="activity-event-summary activity-event-summary--lead">{summarizeTaskEvent(event)}</p>}
                                 <div className="activity-event-topline">
-                                  <strong className="event-kind-pill" data-event-kind={classifyEventKind(event.event_type)}>{eventLabel(event.event_type)}</strong>
+                                  <strong className="event-kind-pill" data-event-kind={classifyEventKind(event.event_type)}>{eventTypeBadgeLabel(event.event_type)}</strong>
                                   {isDeterministicAutoToolEvent(event.event_type) && (
                                     <span className="event-auto-tool-badge">{t("tasks.auto_tool_badge")}</span>
                                   )}
@@ -6490,7 +6541,6 @@ function App() {
                                     <span className="activity-event-subtask">{t("chat.sub_task")}{event.task_id.slice(-8)}</span>
                                   )}
                                 </div>
-                                {summarizeTaskEvent(event) && <p className="activity-event-summary">{summarizeTaskEvent(event)}</p>}
                                 {highlights.length > 0 && (
                                   <ul className="task-steps-list" role="list" aria-label={t("tasks.agent_discussions_title")}>
                                     {highlights.map((line, j) => (
@@ -6557,8 +6607,9 @@ function App() {
                           <li key={`${e.event_type}-${e.at}-${i}`} className="activity-event-card" data-event-kind={classifyEventKind(e.event_type)}>
                             <span className="activity-event-dot" aria-hidden />
                             <div className="activity-event-body">
+                              {summarizeTaskEvent(e) && <p className="activity-event-summary activity-event-summary--lead">{summarizeTaskEvent(e)}</p>}
                               <div className="activity-event-topline">
-                                <strong className="event-kind-pill" data-event-kind={classifyEventKind(e.event_type)}>{eventLabel(e.event_type)}</strong>
+                                <strong className="event-kind-pill" data-event-kind={classifyEventKind(e.event_type)}>{eventTypeBadgeLabel(e.event_type)}</strong>
                                 {isDeterministicAutoToolEvent(e.event_type) && (
                                   <span className="event-auto-tool-badge">{t("tasks.auto_tool_badge")}</span>
                                 )}
@@ -6567,7 +6618,6 @@ function App() {
                                   <span className="activity-event-subtask">{t("chat.sub_task")}{e.task_id.slice(-8)}</span>
                                 )}
                               </div>
-                              {summarizeTaskEvent(e) && <p className="activity-event-summary">{summarizeTaskEvent(e)}</p>}
                               {(() => {
                                 const metadata = extractModelMetadata(e);
                                 if (metadata) {

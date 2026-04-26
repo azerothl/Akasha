@@ -14,7 +14,8 @@ pub use tool_contract::{
 };
 pub use tools::{
     apply_patch, compare_dirs, edit_file, file_diff, file_diff_unified, git_diff, git_log, git_rev_parse_head,
-    git_status, grep_content, read_file, run_command, search_files, search_replace, write_file, ToolResult,
+    git_status, grep_content, move_tree, read_file, rename_path, run_command, search_files, search_replace,
+    write_file, ToolResult,
 };
 #[cfg(feature = "web")]
 pub use tools::{web_fetch, web_search};
@@ -46,6 +47,14 @@ impl ToolExecutor {
 
     pub async fn write_file(&self, path: &Path, content: &str) -> anyhow::Result<ToolResult> {
         write_file(path, content, &self.policy).await
+    }
+
+    pub async fn rename_path(&self, from: &Path, to: &Path) -> anyhow::Result<ToolResult> {
+        rename_path(from, to, &self.policy).await
+    }
+
+    pub async fn move_tree(&self, from: &Path, to: &Path) -> anyhow::Result<ToolResult> {
+        move_tree(from, to, &self.policy).await
     }
 
     pub async fn search_replace(

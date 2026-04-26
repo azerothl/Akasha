@@ -11,6 +11,12 @@
     },
     {
         "path": "../Akasha_plugins"
+    },
+    {
+        "path": "../akasha-code-studio"
+    },
+    {
+        "path": "../Rbitnet"
     }
 ]
 }
