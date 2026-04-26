@@ -1,5 +1,8 @@
 //! MCP stdio transport — probe handshake (`initialize` + optional `tools/list`) for Hermes parity / compatibility tests.
 //!
+//! Uses the standard `Content-Length`-framed transport as specified by the MCP stdio protocol
+//! (identical to Language Server Protocol framing), which is required by Cursor / VS Code-style servers.
+//!
 //! See `docs/mcp-runtime.md` and `docs/mcp-mvp.md`.
 
 use serde_json::{json, Value};
@@ -16,7 +19,53 @@ pub struct McpProbeResult {
     pub stderr_tail: String,
 }
 
-/// Spawn `program` with `args`, send JSON-RPC `initialize`, read one line, optionally send `tools/list`.
+/// Write one MCP stdio framed message: `Content-Length: <n>\r\n\r\n<json_body>`.
+async fn mcp_write_framed<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    msg: &Value,
+) -> std::io::Result<()> {
+    let body = msg.to_string();
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    writer.write_all(header.as_bytes()).await?;
+    writer.write_all(body.as_bytes()).await?;
+    writer.flush().await
+}
+
+/// Read one MCP stdio framed message by consuming `Content-Length` headers then the body.
+async fn mcp_read_framed<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+) -> Result<Value, String> {
+    let mut content_length: Option<usize> = None;
+    loop {
+        let mut line = String::new();
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("read header: {}", e))?;
+        if n == 0 {
+            return Err("connection closed before response headers".to_string());
+        }
+        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some(val) = trimmed.strip_prefix("Content-Length:") {
+            content_length = val.trim().parse().ok();
+        }
+    }
+    let len = content_length
+        .ok_or_else(|| "no Content-Length header in response".to_string())?;
+    let mut body = vec![0u8; len];
+    reader
+        .read_exact(&mut body)
+        .await
+        .map_err(|e| format!("read body ({} bytes): {}", len, e))?;
+    let s = std::str::from_utf8(&body).map_err(|e| format!("non-UTF-8 body: {}", e))?;
+    serde_json::from_str(s).map_err(|e| format!("invalid JSON in body: {}", e))
+}
+
+/// Spawn `program` with `args`, send JSON-RPC `initialize` using MCP stdio framing,
+/// read one framed response, optionally send `tools/list` and read its response.
 /// The child is killed when the probe finishes or on timeout.
 pub async fn probe_stdio_mcp(
     program: &str,
@@ -53,26 +102,17 @@ pub async fn probe_stdio_mcp(
             "clientInfo": { "name": "akasha-mcp-probe", "version": env!("CARGO_PKG_VERSION") }
         }
     });
-    let init_line = init.to_string() + "\n";
-    timeout(deadline, stdin.write_all(init_line.as_bytes()))
+    timeout(deadline, mcp_write_framed(&mut stdin, &init))
         .await
         .map_err(|_| "timeout writing initialize".to_string())?
         .map_err(|e| format!("write initialize: {}", e))?;
-    timeout(deadline, stdin.flush())
-        .await
-        .map_err(|_| "timeout flush initialize".to_string())?
-        .map_err(|e| format!("flush: {}", e))?;
 
     let mut reader = BufReader::new(stdout);
-    let mut line1 = String::new();
-    timeout(deadline, reader.read_line(&mut line1))
-        .await
-        .map_err(|_| "timeout reading initialize response".to_string())?
-        .map_err(|e| format!("read initialize: {}", e))?;
-    let init_resp: Option<Value> = if line1.trim().is_empty() {
-        None
-    } else {
-        Some(serde_json::from_str(line1.trim()).map_err(|e| format!("initialize JSON: {}", e))?)
+    let init_resp = match timeout(deadline, mcp_read_framed(&mut reader)).await {
+        Err(_) => return Err("timeout reading initialize response".to_string()),
+        Ok(Ok(v)) => Some(v),
+        Ok(Err(e)) if e.starts_with("connection closed") => None,
+        Ok(Err(e)) => return Err(format!("initialize response: {}", e)),
     };
 
     let mut tools_resp = None;
@@ -83,19 +123,9 @@ pub async fn probe_stdio_mcp(
             "method": "tools/list",
             "params": {}
         });
-        let list_line = list.to_string() + "\n";
-        let _ = timeout(deadline, stdin.write_all(list_line.as_bytes())).await;
-        let _ = timeout(deadline, stdin.flush()).await;
-        let mut line2 = String::new();
-        if timeout(deadline, reader.read_line(&mut line2))
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .map(|n| n > 0)
-            == Some(true)
-            && !line2.trim().is_empty()
-        {
-            tools_resp = serde_json::from_str(line2.trim()).ok();
+        let _ = timeout(deadline, mcp_write_framed(&mut stdin, &list)).await;
+        if let Ok(Ok(v)) = timeout(deadline, mcp_read_framed(&mut reader)).await {
+            tools_resp = Some(v);
         }
     }
 

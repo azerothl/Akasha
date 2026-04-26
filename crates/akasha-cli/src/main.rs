@@ -517,13 +517,60 @@ fn validate_mcp_config_json_local(root: &serde_json::Value) -> Result<(), String
     Ok(())
 }
 
+/// Write one MCP stdio framed message: `Content-Length: <n>\r\n\r\n<json_body>`.
+async fn mcp_write_framed_local<W: tokio::io::AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    msg: &serde_json::Value,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let body = msg.to_string();
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    writer.write_all(header.as_bytes()).await?;
+    writer.write_all(body.as_bytes()).await?;
+    writer.flush().await
+}
+
+/// Read one MCP stdio framed message by consuming `Content-Length` headers then the body.
+async fn mcp_read_framed_local<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut tokio::io::BufReader<R>,
+) -> Result<serde_json::Value, String> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    let mut content_length: Option<usize> = None;
+    loop {
+        let mut line = String::new();
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("read header: {}", e))?;
+        if n == 0 {
+            return Err("connection closed before response headers".to_string());
+        }
+        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some(val) = trimmed.strip_prefix("Content-Length:") {
+            content_length = val.trim().parse().ok();
+        }
+    }
+    let len = content_length
+        .ok_or_else(|| "no Content-Length header in response".to_string())?;
+    let mut body = vec![0u8; len];
+    reader
+        .read_exact(&mut body)
+        .await
+        .map_err(|e| format!("read body ({} bytes): {}", len, e))?;
+    let s = std::str::from_utf8(&body).map_err(|e| format!("non-UTF-8 body: {}", e))?;
+    serde_json::from_str(s).map_err(|e| format!("invalid JSON in body: {}", e))
+}
+
 async fn probe_stdio_mcp_local(
     program: &str,
     args: &[String],
     include_tools_list: bool,
     deadline: Duration,
 ) -> Result<serde_json::Value, String> {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::BufReader;
     use tokio::process::Command;
     use tokio::time::timeout;
 
@@ -556,28 +603,16 @@ async fn probe_stdio_mcp_local(
             "clientInfo": { "name": "akasha-cli-mcp-probe", "version": env!("CARGO_PKG_VERSION") }
         }
     });
-    let init_line = init.to_string() + "\n";
-    timeout(deadline, stdin.write_all(init_line.as_bytes()))
+    timeout(deadline, mcp_write_framed_local(&mut stdin, &init))
         .await
         .map_err(|_| "timeout writing initialize".to_string())?
         .map_err(|e| format!("write initialize: {}", e))?;
-    timeout(deadline, stdin.flush())
-        .await
-        .map_err(|_| "timeout flush initialize".to_string())?
-        .map_err(|e| format!("flush: {}", e))?;
 
     let mut reader = BufReader::new(stdout);
-    let mut line1 = String::new();
-    timeout(deadline, reader.read_line(&mut line1))
-        .await
-        .map_err(|_| "timeout reading initialize response".to_string())?
-        .map_err(|e| format!("read initialize: {}", e))?;
-    let init_resp: serde_json::Value = if line1.trim().is_empty() {
-        serde_json::json!({ "error": "empty_line" })
-    } else {
-        serde_json::from_str(line1.trim()).unwrap_or_else(|e| {
-            serde_json::json!({ "error": "invalid_json", "detail": e.to_string(), "line": line1.trim() })
-        })
+    let init_resp: serde_json::Value = match timeout(deadline, mcp_read_framed_local(&mut reader)).await {
+        Err(_) => serde_json::json!({ "error": "timeout_reading_response" }),
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => serde_json::json!({ "error": "framing_error", "detail": e }),
     };
 
     let mut tools_resp = serde_json::Value::Null;
@@ -588,24 +623,15 @@ async fn probe_stdio_mcp_local(
             "method": "tools/list",
             "params": {}
         });
-        let list_line = list.to_string() + "\n";
-        let _ = timeout(deadline, stdin.write_all(list_line.as_bytes())).await;
-        let _ = timeout(deadline, stdin.flush()).await;
-        let mut line2 = String::new();
-        if timeout(deadline, reader.read_line(&mut line2))
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .map(|n| n > 0)
-            == Some(true)
-            && !line2.trim().is_empty()
-        {
-            tools_resp = serde_json::from_str(line2.trim()).unwrap_or_else(|_| serde_json::json!({ "raw": line2.trim() }));
+        let _ = timeout(deadline, mcp_write_framed_local(&mut stdin, &list)).await;
+        if let Ok(Ok(v)) = timeout(deadline, mcp_read_framed_local(&mut reader)).await {
+            tools_resp = v;
         }
     }
 
     let mut err_tail = String::new();
     if let Some(mut err) = stderr.take() {
+        use tokio::io::AsyncReadExt;
         let mut buf = Vec::new();
         let _ = timeout(Duration::from_millis(400), err.read_to_end(&mut buf)).await;
         err_tail = String::from_utf8_lossy(&buf).chars().take(2000).collect();
