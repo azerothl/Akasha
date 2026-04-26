@@ -458,6 +458,7 @@ impl ToolsPolicy {
             return ToolEffectiveRow {
                 name: name.to_string(),
                 allowed: true,
+                runnable: true,
                 requires_user_approval: requires,
                 rule_sources,
                 notes,
@@ -495,6 +496,7 @@ impl ToolsPolicy {
             return ToolEffectiveRow {
                 name: name.to_string(),
                 allowed,
+                runnable: allowed && self.is_operationally_runnable(name),
                 requires_user_approval: requires,
                 rule_sources,
                 notes,
@@ -526,6 +528,7 @@ impl ToolsPolicy {
         ToolEffectiveRow {
             name: name.to_string(),
             allowed,
+            runnable: allowed && self.is_operationally_runnable(name),
             requires_user_approval: requires,
             rule_sources,
             notes,
@@ -589,13 +592,34 @@ impl ToolsPolicy {
             _ => {}
         }
     }
+
+    /// Returns `true` when every operational prerequisite for `name` is satisfied at runtime
+    /// (policy enable flags, required credentials, etc.).  Tools that are `allowed` but not
+    /// `is_operationally_runnable` will be refused at execution time.
+    fn is_operationally_runnable(&self, name: &str) -> bool {
+        match name {
+            "web_search" => self.web_search_enabled,
+            "browser" | "install_playwright" => self.browser_enabled,
+            "web_crawl" | "web_crawl_status" => {
+                self.web_crawl_enabled
+                    && self.resolved_cloudflare_account_id().is_some()
+                    && self.resolved_cloudflare_api_token().is_some()
+            }
+            _ => true,
+        }
+    }
 }
 
 /// One row for `GET /api/tools/effective` and operator dashboards.
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolEffectiveRow {
     pub name: String,
+    /// `true` when the tool passes all policy gates (profile, command allow-list, etc.).
     pub allowed: bool,
+    /// `true` when `allowed` is `true` **and** every operational prerequisite is satisfied
+    /// (e.g. `web_search_enabled`, `browser_enabled`, required credentials present).
+    /// A tool can be `allowed` but not `runnable` when a flag is disabled or a key is missing.
+    pub runnable: bool,
     pub requires_user_approval: bool,
     pub rule_sources: Vec<String>,
     pub notes: Vec<String>,

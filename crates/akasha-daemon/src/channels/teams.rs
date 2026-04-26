@@ -29,8 +29,12 @@ const ALLOWED_SERVICE_URL_DOMAINS: &[&str] = &[
     ".teams.microsoft.com",
 ];
 
-const BOTFRAMEWORK_JWKS_URL: &str = "https://login.botframework.com/v1/.well-known/keys";
+/// Maximum number of per-`kid` entries retained in the JWKS cache.
+/// When this limit is reached during an insert, stale entries are evicted first;
+/// if all entries are still fresh, the oldest half are dropped to bound memory.
+const JWKS_CACHE_MAX_ENTRIES: usize = 50;
 
+const BOTFRAMEWORK_JWKS_URL: &str = "https://login.botframework.com/v1/.well-known/keys";
 /// TTL for the JWKS/cert cache (1 hour).
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(3600);
 
@@ -91,11 +95,14 @@ fn fetch_pem_from_jwks(kid: &str) -> Result<String, &'static str> {
 
 /// Fetch JWKS from Bot Framework and return PEM (first `x5c` cert) for `kid`.
 ///
-/// Results are cached per `kid` with a [`JWKS_CACHE_TTL`] TTL to avoid a network round-trip
-/// on every webhook. The blocking HTTP call is wrapped in `block_in_place` so it does not
-/// stall other tasks on the Tokio async runtime.
-fn botframework_signing_pem_for_kid(kid: &str) -> Result<String, &'static str> {
-    // Check the in-memory cache first.
+/// Results are cached per `kid` with a [`JWKS_CACHE_TTL`] TTL.  At most
+/// [`JWKS_CACHE_MAX_ENTRIES`] entries are kept; stale entries are evicted on
+/// every insert and, if still full, the oldest half are removed.
+///
+/// The blocking HTTP call is off-loaded to the Tokio blocking thread pool via
+/// `spawn_blocking` so the async runtime thread is never stalled.
+async fn botframework_signing_pem_for_kid(kid: &str) -> Result<String, &'static str> {
+    // Fast path: check the in-memory cache.
     {
         let cache = jwks_cert_cache().lock().unwrap_or_else(|e| e.into_inner());
         if let Some((pem, inserted)) = cache.get(kid) {
@@ -104,12 +111,25 @@ fn botframework_signing_pem_for_kid(kid: &str) -> Result<String, &'static str> {
             }
         }
     }
-    // Cache miss or TTL expired: fetch from network, shielding the async runtime.
+    // Cache miss or TTL expired: fetch from network on the blocking thread pool.
     let kid_owned = kid.to_string();
-    let pem = tokio::task::block_in_place(|| fetch_pem_from_jwks(&kid_owned))?;
-    // Populate the cache with the freshly fetched PEM.
+    let pem = tokio::task::spawn_blocking(move || fetch_pem_from_jwks(&kid_owned))
+        .await
+        .map_err(|_| "jwks_spawn_failed")??;
+    // Populate the cache, evicting stale / excess entries.
     {
         let mut cache = jwks_cert_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= JWKS_CACHE_MAX_ENTRIES {
+            // First evict all expired entries.
+            cache.retain(|_, (_, t)| t.elapsed() < JWKS_CACHE_TTL);
+            // If still full, drop the oldest half.
+            if cache.len() >= JWKS_CACHE_MAX_ENTRIES {
+                let mut entries: Vec<_> = cache.drain().collect();
+                entries.sort_by_key(|(_, (_, t))| *t);
+                let keep = entries.split_off(entries.len() / 2);
+                cache.extend(keep);
+            }
+        }
         cache.insert(kid.to_string(), (pem.clone(), Instant::now()));
     }
     Ok(pem)
@@ -117,14 +137,14 @@ fn botframework_signing_pem_for_kid(kid: &str) -> Result<String, &'static str> {
 
 /// Validate the Bot Framework Authorization header: Bearer JWT with **RS256 signature**
 /// against Microsoft JWKS (`x5c`), plus audience (`app_id`) and issuer prefix checks.
-fn validate_teams_jwt(authorization: Option<&str>, app_id: &str) -> Result<(), &'static str> {
+async fn validate_teams_jwt(authorization: Option<&str>, app_id: &str) -> Result<(), &'static str> {
     let token = extract_bearer_token(authorization).ok_or("missing_authorization")?;
     let header = decode_header(token).map_err(|_| "invalid_jwt_header")?;
     if header.alg != Algorithm::RS256 {
         return Err("unsupported_jwt_alg");
     }
     let kid = header.kid.as_deref().ok_or("missing_kid")?;
-    let pem = botframework_signing_pem_for_kid(kid)?;
+    let pem = botframework_signing_pem_for_kid(kid).await?;
     let key = DecodingKey::from_rsa_pem(pem.as_bytes()).map_err(|_| "invalid_signing_pem")?;
     let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_exp = true;
@@ -189,7 +209,7 @@ struct TeamsConversation {
 }
 
 /// Handle Teams Bot Framework message: validate JWT auth, parse activity, create task, poll, reply.
-pub fn handle_teams_message(
+pub async fn handle_teams_message(
     body: Option<Vec<u8>>,
     authorization: Option<&str>,
     app_id: &str,
@@ -199,7 +219,7 @@ pub fn handle_teams_message(
     store_path: &Path,
 ) -> String {
     // Validate Bot Framework JWT before processing the request.
-    if let Err(e) = validate_teams_jwt(authorization, app_id) {
+    if let Err(e) = validate_teams_jwt(authorization, app_id).await {
         warn!(reason = e, "Teams: authentication failed");
         let body = serde_json::json!({ "error": "unauthorized", "detail": e });
         return crate::api::json_response("401 Unauthorized", &body.to_string());

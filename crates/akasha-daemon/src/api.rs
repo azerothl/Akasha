@@ -2589,12 +2589,27 @@ fn is_github_host(host: &str) -> bool {
 /// Append one JSON line to `data_dir/skills.lock.jsonl` (supply-chain / pin trail).
 fn append_skills_lock_entry(data_dir: &Path, entry: &serde_json::Value) {
     let Ok(mut line) = serde_json::to_string(entry) else {
+        eprintln!("failed to serialize skills.lock.jsonl entry");
         return;
     };
     line.push('\n');
     let path = data_dir.join("skills.lock.jsonl");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+    let write = move || {
+        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(mut f) => {
+                if let Err(e) = std::io::Write::write_all(&mut f, line.as_bytes()) {
+                    eprintln!("failed to append to {}: {}", path.display(), e);
+                }
+            }
+            Err(e) => {
+                eprintln!("failed to open {}: {}", path.display(), e);
+            }
+        }
+    };
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let _ = handle.spawn_blocking(write);
+    } else {
+        std::thread::spawn(write);
     }
 }
 
@@ -5057,9 +5072,11 @@ async fn execute_tool_call(
                     return (false, format!("[browser] Domain not allowed: {}", host), None);
                 }
                 let mut g = registry.write().await;
-                let session = if let Some(s) = g.get_mut(&task_id) {
-                    let res = s.send_command(&serde_json::json!({ "cmd": "navigate", "params": { "url": url, "timeout_secs": action_timeout } })).await;
+                let session = if let Some(mut s) = g.remove(&task_id) {
                     drop(g);
+                    let res = s.send_command(&serde_json::json!({ "cmd": "navigate", "params": { "url": url, "timeout_secs": action_timeout } })).await;
+                    // Always reinsert the session — a navigate failure doesn't mean the browser is dead.
+                    registry.write().await.insert(task_id, s);
                     res
                 } else {
                     drop(g);
@@ -5103,11 +5120,12 @@ async fn execute_tool_call(
                 }
             } else if sub == "snapshot" {
                 let mut g = registry.write().await;
-                let Some(session) = g.get_mut(&task_id) else {
+                let Some(mut session) = g.remove(&task_id) else {
                     return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
                 };
-                let resp = session.send_command(&serde_json::json!({ "cmd": "snapshot" })).await;
                 drop(g);
+                let resp = session.send_command(&serde_json::json!({ "cmd": "snapshot" })).await;
+                registry.write().await.insert(task_id, session);
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -5136,13 +5154,14 @@ async fn execute_tool_call(
                 }
             } else if sub == "screenshot" {
                 let mut g = registry.write().await;
-                let Some(session) = g.get_mut(&task_id) else {
+                let Some(mut session) = g.remove(&task_id) else {
                     return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
                 };
+                drop(g);
                 let resp = session
                     .send_command(&serde_json::json!({ "cmd": "screenshot", "params": { "full_page": false } }))
                     .await;
-                drop(g);
+                registry.write().await.insert(task_id, session);
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -5179,16 +5198,17 @@ async fn execute_tool_call(
                     return (false, "[browser] usage: browser click <css_selector>".to_string(), None);
                 }
                 let mut g = registry.write().await;
-                let Some(session) = g.get_mut(&task_id) else {
+                let Some(mut session) = g.remove(&task_id) else {
                     return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
                 };
+                drop(g);
                 let resp = session
                     .send_command(&serde_json::json!({
                         "cmd": "click",
                         "params": { "selector": selector, "timeout_secs": action_timeout }
                     }))
                     .await;
-                drop(g);
+                registry.write().await.insert(task_id, session);
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -5219,16 +5239,17 @@ async fn execute_tool_call(
                 }
                 let value: String = args[2..].join(" ");
                 let mut g = registry.write().await;
-                let Some(session) = g.get_mut(&task_id) else {
+                let Some(mut session) = g.remove(&task_id) else {
                     return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
                 };
+                drop(g);
                 let resp = session
                     .send_command(&serde_json::json!({
                         "cmd": "fill",
                         "params": { "selector": sel, "value": value, "timeout_secs": action_timeout }
                     }))
                     .await;
-                drop(g);
+                registry.write().await.insert(task_id, session);
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -5251,9 +5272,10 @@ async fn execute_tool_call(
                     );
                 }
                 let mut g = registry.write().await;
-                let Some(session) = g.get_mut(&task_id) else {
+                let Some(mut session) = g.remove(&task_id) else {
                     return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
                 };
+                drop(g);
                 let cmd = if arg.chars().all(|c| c.is_ascii_digit()) {
                     let ms: u64 = arg.parse().unwrap_or(0);
                     serde_json::json!({ "cmd": "wait", "params": { "milliseconds": ms } })
@@ -5264,7 +5286,7 @@ async fn execute_tool_call(
                     })
                 };
                 let resp = session.send_command(&cmd).await;
-                drop(g);
+                registry.write().await.insert(task_id, session);
                 match resp {
                     Ok(resp) => {
                         let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -13610,7 +13632,7 @@ pub async fn handle_api(
                 channel_config.port,
                 main_agent,
                 store_path,
-            );
+            ).await;
         }
         return json_response("404 Not Found", r#"{"error":"teams_not_configured"}"#);
     }
