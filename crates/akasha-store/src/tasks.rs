@@ -93,7 +93,9 @@ impl TaskStore {
         // instead of failing immediately with SQLITE_BUSY.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // WAL: readers (API) can proceed while the writer persists; reduces "database is locked" vs rollback journal.
-        let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
+        if let Err(err) = conn.execute_batch("PRAGMA journal_mode=WAL;") {
+            eprintln!("warning: failed to enable SQLite WAL mode; continuing without WAL: {err}");
+        }
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS tasks (

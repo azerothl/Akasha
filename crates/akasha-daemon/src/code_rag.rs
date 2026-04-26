@@ -141,7 +141,9 @@ impl CodeRagStore {
         let dir = self.project_index_dir(project_id);
         fs::create_dir_all(&dir)?;
         let dest = dir.join(INDEX_FILENAME);
-        let tmp = dir.join(format!("{INDEX_FILENAME}.tmp"));
+        // Use a random suffix so concurrent builds (background + manual reindex) don't clobber
+        // each other's temp file before the atomic rename.
+        let tmp = dir.join(format!("{INDEX_FILENAME}.{}.tmp", uuid::Uuid::new_v4().simple()));
         let s = serde_json::to_string_pretty(manifest)?;
         fs::write(&tmp, s)?;
         #[cfg(windows)]

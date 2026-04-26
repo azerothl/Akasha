@@ -481,8 +481,9 @@ User message:\n{}",
             None
         };
         let preliminary_agent: &str = if let Some(ref a) = studio_forced_agent {
-            if SPECIALIST_AGENTS.contains(&a.as_str()) {
-                a.as_str()
+            let normalized = a.trim();
+            if let Some(canonical) = SPECIALIST_AGENTS.iter().find(|s| s.eq_ignore_ascii_case(normalized)) {
+                canonical
             } else if !forward_to_orchestrator {
                 "llm"
             } else {
@@ -561,7 +562,7 @@ User message:\n{}",
             let skip_selector_for_recall = forward_to_orchestrator && is_session_recall_message(original_message);
             let selector_result = if let Some(agent) = studio_forced_spawn
                 .as_ref()
-                .filter(|a| SPECIALIST_AGENTS.contains(&a.as_str()))
+                .filter(|a| is_specialist_agent(a.as_str()))
                 .cloned()
             {
                 if forward_to_orchestrator && !skip_selector_for_recall {
