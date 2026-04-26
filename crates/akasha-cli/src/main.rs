@@ -95,6 +95,11 @@ enum Commands {
         #[command(subcommand)]
         sub: WorktreeSub,
     },
+    /// MCP: validate config JSON, optional stdio probe (Hermes parity)
+    Mcp {
+        #[command(subcommand)]
+        sub: McpSub,
+    },
 }
 
 #[derive(Subcommand)]
@@ -127,6 +132,26 @@ enum ServicesSub {
         #[arg(long)]
         compose_dir: Option<PathBuf>,
     },
+    /// Tail logs for a compose service (docker compose logs --tail)
+    Logs {
+        /// Service name as in docker-compose.yml (e.g. ollama, voice-tts)
+        service: String,
+        #[arg(long, default_value_t = 200)]
+        tail: u32,
+        #[arg(long)]
+        compose_dir: Option<PathBuf>,
+    },
+    /// Restart one compose service
+    Restart {
+        service: String,
+        #[arg(long)]
+        compose_dir: Option<PathBuf>,
+    },
+    /// Show compose ps and quick health hints (Ollama / BitNet URLs)
+    Doctor {
+        #[arg(long)]
+        compose_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -135,6 +160,28 @@ enum ToolsetSub {
     Profiles,
     /// Show effective allow/deny per tool (requires daemon GET /api/tools/effective)
     Effective,
+}
+
+#[derive(Subcommand)]
+enum McpSub {
+    /// Validate a JSON file with top-level `mcpServers` (Cursor / VS Code style)
+    Validate {
+        /// Path to mcp.json or similar
+        config: PathBuf,
+    },
+    /// Run a short stdio handshake (initialize [+ tools/list]) against one server from the config
+    Probe {
+        config: PathBuf,
+        /// Server name under mcpServers (defaults to first key)
+        #[arg(long)]
+        name: Option<String>,
+        /// Also send tools/list after initialize
+        #[arg(long)]
+        tools: bool,
+        /// Timeout per I/O phase (seconds)
+        #[arg(long, default_value_t = 8)]
+        timeout_secs: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -440,6 +487,193 @@ fn main() -> anyhow::Result<()> {
         Commands::Services { sub } => cmd_services(sub),
         Commands::Toolset { sub } => cmd_toolset(sub),
         Commands::Worktree { sub } => cmd_worktree(sub),
+        Commands::Mcp { sub } => cmd_mcp(sub),
+    }
+}
+
+fn validate_mcp_config_json_local(root: &serde_json::Value) -> Result<(), String> {
+    let servers = root
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| "missing object \"mcpServers\"".to_string())?;
+    if servers.is_empty() {
+        return Err("mcpServers is empty".to_string());
+    }
+    for (name, entry) in servers {
+        let cmd = entry
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if cmd.is_none() {
+            return Err(format!("server {:?}: missing non-empty \"command\"", name));
+        }
+        if let Some(args) = entry.get("args") {
+            if !args.is_null() && !args.is_array() {
+                return Err(format!("server {:?}: \"args\" must be array or omitted", name));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn probe_stdio_mcp_local(
+    program: &str,
+    args: &[String],
+    include_tools_list: bool,
+    deadline: Duration,
+) -> Result<serde_json::Value, String> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::process::Command;
+    use tokio::time::timeout;
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("spawn {:?}: {}", program, e))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "stdin not available".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "stdout not available".to_string())?;
+    let mut stderr = child.stderr.take();
+
+    let init = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "akasha-cli-mcp-probe", "version": env!("CARGO_PKG_VERSION") }
+        }
+    });
+    let init_line = init.to_string() + "\n";
+    timeout(deadline, stdin.write_all(init_line.as_bytes()))
+        .await
+        .map_err(|_| "timeout writing initialize".to_string())?
+        .map_err(|e| format!("write initialize: {}", e))?;
+    timeout(deadline, stdin.flush())
+        .await
+        .map_err(|_| "timeout flush initialize".to_string())?
+        .map_err(|e| format!("flush: {}", e))?;
+
+    let mut reader = BufReader::new(stdout);
+    let mut line1 = String::new();
+    timeout(deadline, reader.read_line(&mut line1))
+        .await
+        .map_err(|_| "timeout reading initialize response".to_string())?
+        .map_err(|e| format!("read initialize: {}", e))?;
+    let init_resp: serde_json::Value = if line1.trim().is_empty() {
+        serde_json::json!({ "error": "empty_line" })
+    } else {
+        serde_json::from_str(line1.trim()).unwrap_or_else(|e| {
+            serde_json::json!({ "error": "invalid_json", "detail": e.to_string(), "line": line1.trim() })
+        })
+    };
+
+    let mut tools_resp = serde_json::Value::Null;
+    if include_tools_list {
+        let list = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        });
+        let list_line = list.to_string() + "\n";
+        let _ = timeout(deadline, stdin.write_all(list_line.as_bytes())).await;
+        let _ = timeout(deadline, stdin.flush()).await;
+        let mut line2 = String::new();
+        if timeout(deadline, reader.read_line(&mut line2))
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .map(|n| n > 0)
+            == Some(true)
+            && !line2.trim().is_empty()
+        {
+            tools_resp = serde_json::from_str(line2.trim()).unwrap_or_else(|_| serde_json::json!({ "raw": line2.trim() }));
+        }
+    }
+
+    let mut err_tail = String::new();
+    if let Some(mut err) = stderr.take() {
+        let mut buf = Vec::new();
+        let _ = timeout(Duration::from_millis(400), err.read_to_end(&mut buf)).await;
+        err_tail = String::from_utf8_lossy(&buf).chars().take(2000).collect();
+    }
+
+    let _ = child.kill().await;
+
+    Ok(serde_json::json!({
+        "initialize": init_resp,
+        "tools_list": tools_resp,
+        "stderr_tail": err_tail,
+    }))
+}
+
+fn cmd_mcp(sub: McpSub) -> anyhow::Result<()> {
+    match sub {
+        McpSub::Validate { config } => {
+            let raw = std::fs::read_to_string(&config)?;
+            let v: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
+            validate_mcp_config_json_local(&v).map_err(|e| anyhow::anyhow!("{}", e))?;
+            println!("OK: {}", config.display());
+            Ok(())
+        }
+        McpSub::Probe {
+            config,
+            name,
+            tools,
+            timeout_secs,
+        } => {
+            let raw = std::fs::read_to_string(&config)?;
+            let v: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
+            validate_mcp_config_json_local(&v).map_err(|e| anyhow::anyhow!("{}", e))?;
+            let servers = v["mcpServers"].as_object().unwrap();
+            let (srv_name, entry) = if let Some(n) = name.as_deref() {
+                let e = servers
+                    .get(n)
+                    .ok_or_else(|| anyhow::anyhow!("unknown server {:?}", n))?;
+                (n.to_string(), e)
+            } else {
+                servers
+                    .iter()
+                    .next()
+                    .map(|(k, v)| (k.clone(), v))
+                    .ok_or_else(|| anyhow::anyhow!("no servers"))?
+            };
+            let program = entry["command"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("command missing"))?;
+            let args: Vec<String> = entry
+                .get("args")
+                .and_then(|a| a.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            println!("Probing MCP server {:?} (command={} args={:?})…", srv_name, program, args);
+            let rt = tokio::runtime::Runtime::new()?;
+            let deadline = Duration::from_secs(timeout_secs.max(1));
+            let out = rt
+                .block_on(probe_stdio_mcp_local(program, &args, tools, deadline))
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            Ok(())
+        }
     }
 }
 
@@ -1215,6 +1449,78 @@ fn cmd_services(sub: ServicesSub) -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("Répertoire docker-compose introuvable. Définissez AKASHA_MODELS_DIR ou --compose-dir."))?;
             run_docker_compose(&compose_dir, "down", &["ollama", "voice", "bitnet"], false)?;
             println!("Services arrêtés.");
+            Ok(())
+        }
+        ServicesSub::Logs {
+            service,
+            tail,
+            compose_dir,
+        } => {
+            let compose_dir = find_models_compose_dir(compose_dir.as_ref()).ok_or_else(|| {
+                anyhow::anyhow!("Répertoire docker-compose introuvable. Définissez AKASHA_MODELS_DIR ou --compose-dir.")
+            })?;
+            let compose_file = compose_dir.join("docker-compose.yml");
+            let cf = compose_file.to_str().ok_or_else(|| anyhow::anyhow!("invalid compose path"))?;
+            let out = Command::new("docker")
+                .args([
+                    "compose",
+                    "-f",
+                    cf,
+                    "logs",
+                    "--tail",
+                    &tail.to_string(),
+                    &service,
+                ])
+                .current_dir(&compose_dir)
+                .output()?;
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+            if !out.stderr.is_empty() {
+                eprint!("{}", String::from_utf8_lossy(&out.stderr));
+            }
+            if !out.status.success() {
+                anyhow::bail!("docker compose logs failed: {}", out.status);
+            }
+            Ok(())
+        }
+        ServicesSub::Restart { service, compose_dir } => {
+            let compose_dir = find_models_compose_dir(compose_dir.as_ref()).ok_or_else(|| {
+                anyhow::anyhow!("Répertoire docker-compose introuvable. Définissez AKASHA_MODELS_DIR ou --compose-dir.")
+            })?;
+            let compose_file = compose_dir.join("docker-compose.yml");
+            let cf = compose_file.to_str().ok_or_else(|| anyhow::anyhow!("invalid compose path"))?;
+            let out = Command::new("docker")
+                .args(["compose", "-f", cf, "restart", &service])
+                .current_dir(&compose_dir)
+                .output()?;
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+            if !out.stderr.is_empty() {
+                eprint!("{}", String::from_utf8_lossy(&out.stderr));
+            }
+            if !out.status.success() {
+                anyhow::bail!("docker compose restart failed: {}", out.status);
+            }
+            println!("Service {} redémarré.", service);
+            Ok(())
+        }
+        ServicesSub::Doctor { compose_dir } => {
+            let compose_dir = find_models_compose_dir(compose_dir.as_ref()).ok_or_else(|| {
+                anyhow::anyhow!("Répertoire docker-compose introuvable. Définissez AKASHA_MODELS_DIR ou --compose-dir.")
+            })?;
+            let compose_file = compose_dir.join("docker-compose.yml");
+            let cf = compose_file.to_str().ok_or_else(|| anyhow::anyhow!("invalid compose path"))?;
+            println!("Compose: {}", compose_dir.display());
+            let out = Command::new("docker")
+                .args(["compose", "-f", cf, "ps", "-a"])
+                .current_dir(&compose_dir)
+                .output()?;
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+            if !out.stderr.is_empty() {
+                eprint!("{}", String::from_utf8_lossy(&out.stderr));
+            }
+            println!("\nIndices santé (si ports par défaut) :");
+            println!("  • Ollama: GET http://127.0.0.1:11434/api/tags");
+            println!("  • BitNet (Rbitnet): GET http://127.0.0.1:8080/v1/models (selon compose)");
+            println!("  • Voice TTS/STT: ports 8765 / 8766 selon akasha-models");
             Ok(())
         }
     }

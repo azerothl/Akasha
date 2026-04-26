@@ -1,6 +1,8 @@
 //! MCP (Model Context Protocol) — MVP helpers: validate local server definitions before wiring a transport.
 //!
-//! Full stdio/HTTP client + OAuth hardening is tracked in the Hermes parity plan. See **`docs/mcp-mvp.md`**.
+//! Stdio probe: [`crate::mcp_stdio`]. OAuth hardening: **`docs/mcp-oauth.md`**. See also **`docs/mcp-mvp.md`**, **`docs/mcp-runtime.md`**.
+
+pub use crate::mcp_stdio::{probe_stdio_mcp, McpProbeResult};
 
 use serde_json::Value;
 

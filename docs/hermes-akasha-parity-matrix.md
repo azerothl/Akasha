@@ -1,6 +1,6 @@
 # Matrice de parité Hermes Agent ↔ Akasha
 
-**Version:** 1.0.1  
+**Version:** 1.0.3  
 **Date:** 2026-04-26  
 **Références externes:** [Hermes Quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart), [Hermes Tools](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools/), [Hermes Features Overview](https://hermes-agent.nousresearch.com/docs/user-guide/features/overview), [README Hermes (GitHub)](https://github.com/NousResearch/hermes-agent/blob/main/README.md)
 
@@ -15,13 +15,13 @@ Légende: **Existe** = équivalent opérationnel dans Akasha · **Partiel** = in
 | Sessions / reprise | `--continue`, sessions | `session_id`, mémoire, `/api/session-state`, `/api/session/resume-brief` | Partiel | Moyenne | + `memory_recall_metrics`, `tools_policy_brief` |
 | Toolsets UX | `hermes tools`, presets par plateforme | `tool_profiles`, `akasha toolset profiles|effective`, `/api/tools/effective` | Partiel | Moyenne | CLI opérateur + API |
 | Outils machine | 40+ outils, registry | `AVAILABLE_TOOLS`, exécution `akasha-tools` | Existe | Élevée | `crates/akasha-daemon/src/api.rs` |
-| Terminal backends | local, docker, ssh, modal, … | local, `run_in_container`, docker services | Partiel | Moyenne | Spec backends dans `docs/` |
+| Terminal backends | local, docker, ssh, modal, … | local, `run_in_container`, docker services, `GET /api/terminal/capabilities` | Partiel | Moyenne | Roadmap `docs/terminal-backends-roadmap.md` |
 | Sandbox | Docker, approbation | Policy deny-by-default, container `--network=none` | Existe | Élevée | `crates/akasha-tools/src/policy.rs` |
 | Gateway messagerie | Telegram, Discord, … | Slack, Discord, Telegram, Teams | Existe | Moyenne | Hardening auth canaux |
-| Webhooks externes | Adapter HMAC, routes, direct delivery | Plateforme + mode direct (impl progressive) | Partiel | Faible → moyenne | Voir `spec/` + daemon |
+| Webhooks externes | Adapter HMAC, routes, direct delivery | `POST /api/automation/webhook`, `/direct`, doc `docs/automation-webhooks.md` | Partiel | Moyenne | Idempotence + rate limit in-process |
 | Cron / automation | `cronjob`, livraison plateforme | Scheduler persistant, `task_run` | Existe | Élevée | Ops pause/resume/run-now |
-| Hooks | gateway / plugin / shell | Hooks lifecycle (impl progressive) | Partiel | Faible → moyenne | Aligné README Hermes |
-| MCP | Serveurs MCP, OAuth | `PluginKind::Mcp`, `validate_mcp_config_json`, `docs/mcp-mvp.md` | Partiel | Faible → moyenne | Transport runtime à finaliser |
+| Hooks | gateway / plugin / shell | `lifecycle_hooks.json` (`on_schedule_fire`), doc multi-niveaux | Partiel | Moyenne | `docs/gateway-shell-hooks.md`, `spec/56_lifecycle_hooks.example.json` |
+| MCP | Serveurs MCP, OAuth | `validate_mcp_config_json`, `probe_stdio_mcp`, CLI `akasha mcp`, `docs/mcp-runtime.md` | Partiel | Moyenne | OAuth: `docs/mcp-oauth.md` |
 | Skills | Hub, auto-amélioration | Install URL, `skills.lock.jsonl` (SHA256 + ref), `Akasha_skills` | Existe | Moyenne | Lockfile append côté daemon |
 | Plugins WASM | Extensions | Host WASM, réputation, trust store | Existe | Élevée | `GET /api/plugins/metrics`, `akasha plugin metrics` |
 | Mémoire | FTS5, profils, compaction | LT + épisodique + compaction | Existe | Élevée | `GET /api/memory/recall-metrics`, tokenizer calibré, spec `54_memory_hierarchical_compaction.md` |
@@ -36,15 +36,40 @@ Légende: **Existe** = équivalent opérationnel dans Akasha · **Partiel** = in
 
 ## Applications connexes
 
-| Repo | Rôle parité Hermes |
-|------|---------------------|
-| `Akasha_app` | Hub doc public, comparaison, guides webhooks/migration |
-| `Akasha_skills` | Versioning, evals CI, bundles |
-| `Akasha_plugins` | Trust catalogue (hash, permissions) |
-| `akasha-code-studio` | Cockpit jobs, logs, RAG, worktree UI |
-| `Rbitnet` | Inférence locale OpenAI-compatible, métriques, doc router |
+| Application | Rôle parité Hermes |
+|-------------|---------------------|
+| Monorepo **Akasha** (daemon, CLI, tools) | Exécution, politiques, APIs, matrice source |
+| **`apps/akasha-ui`** (Tauri) | UX desktop : reprise session, état outils, liens doc opérateur |
+| **`Akasha_app`** (site statique) | Hub public : comparaison, guides MCP/webhooks/toolsets/migration |
+| **`Akasha_skills`** | Catalogue vivant : semver, changelog, compat daemon, evals CI |
+| **`Akasha_plugins`** | Trust : WASM hash dans l’index, permissions visibles |
+| **`akasha-code-studio`** | Cockpit dev : jobs, `task_runs`, process watch, terminal, tools effective |
+| **`Rbitnet`** | Backend local : OpenAI-compatible, `/metrics`, doc `llm_router.yaml` |
+
+Légende pour le tableau ci-dessous : **C** = implémentation dans le core · **Doc** = documentation / site · **Cat** = catalogue skills/plugins · **Studio** = Code Studio · **Rbit** = Rbitnet · **UI** = app Tauri.
+
+## Propriétaire par domaine (Hermes → écosystème)
+
+Synthèse : où la parité Hermes devient **visible** ou **opérable** hors du seul daemon.
+
+| Thème Hermes | C | Doc | Cat | Studio | Rbit | UI |
+|--------------|---|-----|-----|--------|------|-----|
+| Setup / doctor / services | ● | ● | — | — | ● | — |
+| Providers / routing / fallback | ● | ● | — | — | ● | — |
+| Sessions / reprise / mémoire | ● | ● | — | ○ | — | ● |
+| Toolsets / tools policy | ● | ● | — | ● | — | ● |
+| Terminal / PTY / background | ● | ● | — | ● | — | ○ |
+| Webhooks / automation externe | ● | ● | — | ● | — | — |
+| MCP (validation, probe, OAuth doc) | ● | ● | ○ | ● | — | ○ |
+| Skills / lockfile | ● | ● | ● | — | — | — |
+| Plugins WASM / métriques | ● | ● | ● | ○ | — | ● |
+| Perf / SLO / bench | ● | ● | — | ○ | ○ | — |
+
+**○** = surface partielle ou roadmap UI ; mettre à jour ce tableau quand une PR satellite ferme une case.
 
 ## Changelog matrice
 
+- **1.0.3** (2026-04-26): colonne écosystème (applications + tableau propriétaire Hermes → satellites) ; inclusion explicite de `apps/akasha-ui`.
+- **1.0.2** (2026-04-26): webhooks signés + direct delivery, watch processus (`GET /api/process/watch/recent`), hooks schedule, MCP stdio probe (daemon + CLI), `akasha services logs|restart|doctor`, docs MCP OAuth / terminal backends / hooks.
 - **1.0.1** (2026-04-26): browser phase 2, crawl Cloudflare MVP, métriques recall/plugins, CLI toolset/worktree/config validate, MCP validation + docs cache/SLO/compaction.
 - **1.0.0** (2026-04-26): publication initiale alignée sur le plan d’intégration Hermes vs Akasha.

@@ -1369,7 +1369,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("run_command", "run_command [--cwd <path>] <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique). Optionnel : --cwd workspace:/ ou chemin disque (allowed_read_paths). Si tools_policy run_command_default_cwd_workspace: true, cwd par défaut = workspace de la tâche. Pour GitHub depuis le shell, préférer gh-axi (npm install -g gh-axi ; principes AXI https://axi.md/) s'il est installé — sorties compactes pour l'agent. Pour l'automation navigateur en CLI, chrome-devtools-axi (même dépôt https://github.com/kunchenguid/axi) en complément d'Akasha browser."),
     ("run_terminal", "run_terminal [--cwd <path>] <cmd> [args...] — exécuter une commande (même que run_command)"),
     ("run_command_background", "run_command_background [--cwd <path>] <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
-    ("terminal_session", "terminal_session — session PTY interactive (prévue ultérieurement, spec 43). Pour l’instant utiliser run_command / run_terminal pour une commande, run_command_background + process pour suivi."),
+    ("terminal_session", "terminal_session — PTY interactif planifié (spec 43). Capacités: GET /api/terminal/capabilities. En attendant: run_command / run_terminal, run_command_background + process list|poll|kill, GET /api/process/watch/recent."),
     ("process", "process list | process poll <session_id> | process kill <session_id> — lister, consulter ou arrêter des commandes en arrière-plan"),
     ("file_diff", "file_diff <path_a> <path_b> — diff texte entre deux fichiers (ligne à ligne)"),
     ("diff_unified", "diff_unified <path_a> <path_b> [context_lines] — diff unifié style patch (défaut context_lines=3) ; chemins réels ou workspace:/"),
@@ -4660,7 +4660,19 @@ async fn execute_tool_call(
                     let task = tokio::spawn(async move {
                         let cwd_ref = cwd_resolved.as_deref();
                         let result = exec.run_command(&cmd, &cmd_args, cwd_ref, None).await;
+                        let (success, exit_code) = match &result {
+                            Ok((out, res)) => (res.success, out.status.code()),
+                            Err(_) => (false, None),
+                        };
                         *cell_clone.write().await = Some(result);
+                        crate::process_watch::push_event(crate::process_watch::ProcessWatchEvent {
+                            ts_rfc3339: chrono::Utc::now().to_rfc3339(),
+                            session_id: session_id.to_string(),
+                            cmd_line: format!("{} {}", cmd, cmd_args.join(" ")),
+                            success,
+                            exit_code,
+                        })
+                        .await;
                         // Auto-cleanup after a TTL to prevent leaking sessions the client never polls.
                         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                         reg_clone.write().await.remove(&session_id);
@@ -11974,6 +11986,120 @@ pub async fn handle_api(
     .await
     {
         return resp;
+    }
+
+    // Signed inbound automation webhooks (Hermes-style external automation; no LLM in this path).
+    if method == "POST" && path_only == "/api/automation/webhook" {
+        let secret = std::env::var("AKASHA_AUTOMATION_WEBHOOK_SECRET").unwrap_or_default();
+        if secret.is_empty() {
+            return json_response(
+                "503 Service Unavailable",
+                r#"{"error":"automation_webhook_secret_not_configured","hint":"Set AKASHA_AUTOMATION_WEBHOOK_SECRET and send HMAC-SHA256(body) in X-Signature (hex or sha256=<hex>)."}"#,
+            );
+        }
+        let body_bytes = body.as_deref().unwrap_or(&[]);
+        let sig = headers
+            .get("x-signature")
+            .or_else(|| headers.get("x-hub-signature-256"))
+            .map(String::as_str);
+        if !crate::webhook_inbound::verify_hmac_sha256(secret.as_bytes(), body_bytes, sig) {
+            return json_response("401 Unauthorized", r#"{"error":"invalid_signature"}"#);
+        }
+        let gate = crate::webhook_inbound::automation_gate();
+        let idem = headers
+            .get("idempotency-key")
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        if !idem.is_empty()
+            && !gate.check_idempotency(idem, std::time::Duration::from_secs(86_400))
+        {
+            return json_response("409 Conflict", r#"{"error":"duplicate_idempotency_key"}"#);
+        }
+        if !gate.check_rate("automation_webhook", 120) {
+            return json_response("429 Too Many Requests", r#"{"error":"rate_limited"}"#);
+        }
+        let parsed: serde_json::Value = serde_json::from_slice(body_bytes)
+            .unwrap_or_else(|_| serde_json::json!({ "raw": serde_json::Value::Null }));
+        let keys: Vec<_> = parsed
+            .as_object()
+            .map(|o| o.keys().map(|k| k.as_str()).collect())
+            .unwrap_or_default();
+        let body_out = serde_json::json!({
+            "ok": true,
+            "accepted": true,
+            "payload_key_count": keys.len(),
+            "payload_keys_preview": keys.into_iter().take(24).collect::<Vec<_>>(),
+        });
+        return json_response(
+            "202 Accepted",
+            &serde_json::to_string(&body_out).unwrap_or_else(|_| "{}".to_string()),
+        );
+    }
+
+    // Direct webhook delivery: returns fixed JSON from env (same HMAC gate; zero LLM tokens).
+    if method == "POST" && path_only == "/api/automation/webhook/direct" {
+        let secret = std::env::var("AKASHA_AUTOMATION_WEBHOOK_SECRET").unwrap_or_default();
+        let direct = std::env::var("AKASHA_WEBHOOK_DIRECT_BODY_JSON").unwrap_or_default();
+        if secret.is_empty() || direct.trim().is_empty() {
+            return json_response(
+                "503 Service Unavailable",
+                r#"{"error":"direct_webhook_not_configured","hint":"Set AKASHA_AUTOMATION_WEBHOOK_SECRET and AKASHA_WEBHOOK_DIRECT_BODY_JSON (JSON text)."}"#,
+            );
+        }
+        let body_bytes = body.as_deref().unwrap_or(&[]);
+        let sig = headers
+            .get("x-signature")
+            .or_else(|| headers.get("x-hub-signature-256"))
+            .map(String::as_str);
+        if !crate::webhook_inbound::verify_hmac_sha256(secret.as_bytes(), body_bytes, sig) {
+            return json_response("401 Unauthorized", r#"{"error":"invalid_signature"}"#);
+        }
+        let gate = crate::webhook_inbound::automation_gate();
+        let idem = headers.get("idempotency-key").map(|s| s.as_str()).unwrap_or("");
+        if !idem.is_empty()
+            && !gate.check_idempotency(
+                &format!("direct:{idem}"),
+                std::time::Duration::from_secs(86_400),
+            )
+        {
+            return json_response("409 Conflict", r#"{"error":"duplicate_idempotency_key"}"#);
+        }
+        if !gate.check_rate("automation_webhook_direct", 120) {
+            return json_response("429 Too Many Requests", r#"{"error":"rate_limited"}"#);
+        }
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(direct.trim()) {
+            return json_response(
+                "500 Internal Server Error",
+                &serde_json::json!({"error":"invalid_AKASHA_WEBHOOK_DIRECT_BODY_JSON","detail": e.to_string()}).to_string(),
+            );
+        }
+        let body_trim = direct.trim();
+        let bytes = body_trim.as_bytes();
+        return format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            bytes.len(),
+            body_trim
+        );
+    }
+
+    if method == "GET" && path_only == "/api/process/watch/recent" {
+        let limit = parse_query_param(query_str, "limit")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(50);
+        let ev = crate::process_watch::recent(limit).await;
+        return json_response(
+            "200 OK",
+            &serde_json::to_string(&ev).unwrap_or_else(|_| "[]".to_string()),
+        );
+    }
+
+    if method == "GET" && path_only == "/api/terminal/capabilities" {
+        let j = serde_json::json!({
+            "interactive_pty": "planned",
+            "current": ["run_command", "run_terminal", "run_command_background", "process list|poll|kill"],
+            "spec": "spec/43_terminal_session.md"
+        });
+        return json_response("200 OK", &j.to_string());
     }
 
     if path_only == "/api/autonomous-mission" {

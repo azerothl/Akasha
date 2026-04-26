@@ -2971,6 +2971,26 @@ a.settings-link-btn.refresh-btn {
   margin: 1.5rem 0 0.5rem;
   font-size: 1rem;
 }
+
+.operator-hermes-insights {
+  margin-top: 0.5rem;
+  max-width: 52rem;
+}
+
+.operator-hermes-pre {
+  margin: 0.35rem 0 0;
+  padding: 0.65rem 0.75rem;
+  max-height: 14rem;
+  overflow: auto;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  border-radius: 8px;
+  border: 1px solid var(--akasha-border);
+  background: var(--akasha-bg-surface);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .settings-row-actions {
   display: flex;
   flex-wrap: wrap;

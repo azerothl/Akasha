@@ -8,6 +8,7 @@ import { preprocessMessagePaths } from "./preprocessMessagePaths";
 import { getCached, setCached } from "./useTabCache";
 import { useI18n } from "./useI18n";
 import { GeoMapView } from "./GeoMapView";
+import { OperatorHermesInsights } from "./OperatorHermesInsights";
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -8538,6 +8539,22 @@ function App() {
                     <span className="settings-doc muted"> — {t("settings.doc_from_daemon")}</span>
                   </dd>
                 </dl>
+
+                <OperatorHermesInsights
+                  sessionId={sessionId}
+                  daemonUrl={e2eDaemonHttpUrl}
+                  expert={uiMode === "expert"}
+                  labels={{
+                    title: t("settings.operator_hermes_title"),
+                    resumeHeading: t("settings.operator_hermes_resume"),
+                    toolsHeading: t("settings.operator_hermes_tools"),
+                    noSession: t("settings.operator_hermes_no_session"),
+                    docsMatrix: t("settings.operator_hermes_doc_matrix"),
+                    docsWebhooks: t("settings.operator_hermes_doc_webhooks"),
+                    docsMcp: t("settings.operator_hermes_doc_mcp"),
+                    loadError: t("settings.operator_hermes_load_error"),
+                  }}
+                />
 
                 <h3 className="settings-subtitle">{t("settings.plugin_reputation_title")}</h3>
                 <p className="settings-doc muted">{t("settings.plugin_reputation_desc")}</p>

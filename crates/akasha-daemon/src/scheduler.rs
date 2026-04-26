@@ -138,6 +138,11 @@ async fn tick(
                     dedup_key: dedup_key.clone(),
                 };
                 schedule_store.insert_task_run(&task_run)?;
+                let data_dir = store_path
+                    .parent()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("."));
+                crate::lifecycle_hooks::fire_on_schedule_fire_async(&data_dir, schedule.id, task_id);
                 let _ = bus.send(
                     EventEnvelope::new(
                         EventType::TaskRunCreated,
