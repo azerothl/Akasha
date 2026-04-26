@@ -59,6 +59,7 @@ hex = "0.4"
 urlencoding = "2.1"
 base64 = "0.22"
 pdf-extract = "0.10"
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [dev-dependencies]
 criterion = "0.5"

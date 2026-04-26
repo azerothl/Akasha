@@ -26,6 +26,7 @@ Execution is **fire-and-forget** with a **30s** timeout per argv list; failures 
 
 ## 2) Gateway / plugin hooks
 
+- **Operator summary:** `GET /api/lifecycle/hooks` returns whether `lifecycle_hooks.json` exists and counts configured hook arrays (`on_schedule_fire`, reserved `on_http_request_pre` / `on_http_request_post` for forward compatibility). Only `on_schedule_fire` is executed today.
 - **Gateway:** HTTP middleware hooks (pre/post route) — roadmap; use signed **`/api/automation/webhook`** for external triggers today.
 - **Plugin:** WASM plugin host events — extend `Akasha_plugins` + daemon registry (see plugins trust doc).
 - **Shell (general):** unify with `lifecycle_hooks.json` schema extensions (`on_task_start`, …) in a future release.

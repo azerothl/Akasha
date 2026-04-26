@@ -1369,7 +1369,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("run_command", "run_command [--cwd <path>] <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique). Optionnel : --cwd workspace:/ ou chemin disque (allowed_read_paths). Si tools_policy run_command_default_cwd_workspace: true, cwd par défaut = workspace de la tâche. Pour GitHub depuis le shell, préférer gh-axi (npm install -g gh-axi ; principes AXI https://axi.md/) s'il est installé — sorties compactes pour l'agent. Pour l'automation navigateur en CLI, chrome-devtools-axi (même dépôt https://github.com/kunchenguid/axi) en complément d'Akasha browser."),
     ("run_terminal", "run_terminal [--cwd <path>] <cmd> [args...] — exécuter une commande (même que run_command)"),
     ("run_command_background", "run_command_background [--cwd <path>] <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
-    ("terminal_session", "terminal_session — PTY interactif planifié (spec 43). Capacités: GET /api/terminal/capabilities. En attendant: run_command / run_terminal, run_command_background + process list|poll|kill, GET /api/process/watch/recent."),
+    ("terminal_session", "terminal_session — PTY interactif planifié (spec/43_session_terminal.md). Capacités: GET /api/terminal/capabilities. En attendant: run_command / run_terminal, run_command_background + process list|poll|kill, GET /api/process/watch/recent."),
     ("process", "process list | process poll <session_id> | process kill <session_id> — lister, consulter ou arrêter des commandes en arrière-plan"),
     ("file_diff", "file_diff <path_a> <path_b> — diff texte entre deux fichiers (ligne à ligne)"),
     ("diff_unified", "diff_unified <path_a> <path_b> [context_lines] — diff unifié style patch (défaut context_lines=3) ; chemins réels ou workspace:/"),
@@ -12033,7 +12033,13 @@ pub async fn handle_api(
             .map(|s| s.as_str())
             .unwrap_or("");
         if !idem.is_empty()
-            && !gate.check_idempotency(idem, std::time::Duration::from_secs(86_400))
+            && !crate::webhook_inbound::check_automation_idempotency(
+                data_dir,
+                idem,
+                std::time::Duration::from_secs(86_400),
+                &gate,
+            )
+            .await
         {
             return json_response("409 Conflict", r#"{"error":"duplicate_idempotency_key"}"#);
         }
@@ -12093,11 +12099,19 @@ pub async fn handle_api(
         }
         let gate = crate::webhook_inbound::automation_gate();
         let idem = headers.get("idempotency-key").map(|s| s.as_str()).unwrap_or("");
-        if !idem.is_empty()
-            && !gate.check_idempotency(
-                &format!("direct:{idem}"),
+        let idem_key = if idem.is_empty() {
+            String::new()
+        } else {
+            format!("direct:{idem}")
+        };
+        if !idem_key.is_empty()
+            && !crate::webhook_inbound::check_automation_idempotency(
+                data_dir,
+                &idem_key,
                 std::time::Duration::from_secs(86_400),
+                &gate,
             )
+            .await
         {
             return json_response("409 Conflict", r#"{"error":"duplicate_idempotency_key"}"#);
         }
@@ -12129,8 +12143,20 @@ pub async fn handle_api(
         let j = serde_json::json!({
             "interactive_pty": "planned",
             "current": ["run_command", "run_terminal", "run_command_background", "process list|poll|kill"],
-            "spec": "spec/43_terminal_session.md"
+            "spec": "spec/43_session_terminal.md"
         });
+        return json_response("200 OK", &j.to_string());
+    }
+
+    // Operator: MCP config on disk (validate only; runtime spawn is roadmap — see docs/mcp-mvp.md).
+    if method == "GET" && path_only == "/api/mcp/status" {
+        let j = crate::mcp::mcp_operator_status(data_dir);
+        return json_response("200 OK", &j.to_string());
+    }
+
+    // Operator: lifecycle_hooks.json summary (schedule hooks run today; HTTP gateway hooks reserved).
+    if method == "GET" && path_only == "/api/lifecycle/hooks" {
+        let j = crate::lifecycle_hooks::lifecycle_hooks_summary(data_dir);
         return json_response("200 OK", &j.to_string());
     }
 

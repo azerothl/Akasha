@@ -3,10 +3,16 @@
 //! Used by `POST /api/automation/webhook` when `AKASHA_AUTOMATION_WEBHOOK_SECRET` is set.
 //! **Direct delivery** (no LLM): `POST /api/automation/webhook/direct` returns the JSON in
 //! `AKASHA_WEBHOOK_DIRECT_BODY_JSON` after the same HMAC + idempotency checks.
+//!
+//! **Idempotency:** by default, non-empty `Idempotency-Key` values are recorded in
+//! `{data_dir}/webhook_idempotency.sqlite3` so replays survive process restarts (multi-instance still
+//! needs shared storage — one SQLite file per data dir). Set `AKASHA_WEBHOOK_IDEMPOTENCY_MEMORY_ONLY=1`
+//! to use only the in-process map (legacy behaviour).
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -85,4 +91,67 @@ pub fn automation_gate() -> Arc<IdempotencyAndRateLimit> {
     AUTOMATION_GATE
         .get_or_init(|| Arc::new(IdempotencyAndRateLimit::new()))
         .clone()
+}
+
+fn webhook_idem_disk_try_insert(data_dir: &Path, key: &str, ttl: Duration) -> Result<bool, String> {
+    let path = data_dir.join("webhook_idempotency.sqlite3");
+    let conn = rusqlite::Connection::open(&path).map_err(|e| e.to_string())?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         CREATE TABLE IF NOT EXISTS webhook_idempotency (
+             idk TEXT PRIMARY KEY,
+             seen_at INTEGER NOT NULL
+         );",
+    )
+    .map_err(|e| e.to_string())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let cutoff = now.saturating_sub(ttl.as_secs() as i64);
+    conn.execute(
+        "DELETE FROM webhook_idempotency WHERE seen_at < ?1",
+        rusqlite::params![cutoff],
+    )
+    .map_err(|e| e.to_string())?;
+    let n = conn
+        .execute(
+            "INSERT OR IGNORE INTO webhook_idempotency (idk, seen_at) VALUES (?1, ?2)",
+            rusqlite::params![key, now],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(n == 1)
+}
+
+/// Returns `true` if the request should proceed (first time for this key), `false` if duplicate.
+pub async fn check_automation_idempotency(
+    data_dir: &Path,
+    key: &str,
+    ttl: Duration,
+    gate: &Arc<IdempotencyAndRateLimit>,
+) -> bool {
+    if key.is_empty() {
+        return true;
+    }
+    let memory_only = std::env::var("AKASHA_WEBHOOK_IDEMPOTENCY_MEMORY_ONLY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if memory_only {
+        return gate.check_idempotency(key, ttl);
+    }
+    let dd = data_dir.to_path_buf();
+    let k = key.to_string();
+    let ttl_secs = ttl.as_secs();
+    match tokio::task::spawn_blocking(move || webhook_idem_disk_try_insert(&dd, &k, Duration::from_secs(ttl_secs))).await
+    {
+        Ok(Ok(is_new)) => is_new,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "webhook idempotency: disk failed, falling back to in-memory");
+            gate.check_idempotency(key, ttl)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "webhook idempotency: spawn_blocking failed, falling back to in-memory");
+            gate.check_idempotency(key, ttl)
+        }
+    }
 }

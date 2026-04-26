@@ -4,7 +4,8 @@
 
 pub use crate::mcp_stdio::{probe_stdio_mcp, McpProbeResult};
 
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::path::Path;
 
 /// Validate one server entry from a JSON config (e.g. `{ "command": "npx", "args": ["-y", "@pkg/mcp"] }`).
 pub fn validate_mcp_server_entry(entry: &Value) -> Result<(), String> {
@@ -40,6 +41,47 @@ pub fn validate_mcp_config_json(root: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// JSON for `GET /api/mcp/status` — validates `mcp.json` under the daemon data dir if present.
+pub fn mcp_operator_status(data_dir: &Path) -> Value {
+    let path = data_dir.join("mcp.json");
+    let present = path.is_file();
+    let mut out = json!({
+        "config_path": path.display().to_string(),
+        "config_present": present,
+        "valid": Value::Null,
+        "server_count": 0_i32,
+        "runtime": "stdio_probe_and_validate_only",
+        "oauth": "documented_only_see_docs_mcp_oauth_md",
+    });
+    if !present {
+        return out;
+    }
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            out["read_error"] = Value::String(e.to_string());
+            return out;
+        }
+    };
+    let root: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            out["valid"] = json!(false);
+            out["parse_error"] = Value::String(e.to_string());
+            return out;
+        }
+    };
+    let valid = validate_mcp_config_json(&root).is_ok();
+    out["valid"] = json!(valid);
+    let count = root
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
+        .map(|o| o.len() as i32)
+        .unwrap_or(0);
+    out["server_count"] = json!(count);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,5 +104,12 @@ mod tests {
             }
         });
         assert!(validate_mcp_config_json(&v).is_err());
+    }
+
+    #[test]
+    fn mcp_operator_status_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = super::mcp_operator_status(dir.path());
+        assert_eq!(s["config_present"], false);
     }
 }

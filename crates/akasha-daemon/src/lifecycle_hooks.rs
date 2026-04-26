@@ -6,9 +6,60 @@
 //! ```
 //! Each entry is a full argv array. Environment: `AKASHA_DATA_DIR`, `AKASHA_SCHEDULE_ID`, `AKASHA_TASK_ID`.
 
+use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
+
+fn hook_array_len(v: &Value, key: &str) -> usize {
+    v.get(key)
+        .and_then(|x| x.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0)
+}
+
+/// Summary of `lifecycle_hooks.json` for `GET /api/lifecycle/hooks` (operator visibility).
+pub fn lifecycle_hooks_summary(data_dir: &Path) -> Value {
+    let path = data_dir.join("lifecycle_hooks.json");
+    if !path.is_file() {
+        return json!({
+            "present": false,
+            "path": path.display().to_string(),
+            "executed_phases": ["on_schedule_fire"],
+            "note": "Gateway HTTP pre/post hooks are reserved; only on_schedule_fire is executed today."
+        });
+    }
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            return json!({
+                "present": false,
+                "path": path.display().to_string(),
+                "read_error": e.to_string()
+            });
+        }
+    };
+    let v: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({
+                "present": true,
+                "path": path.display().to_string(),
+                "invalid_json": true,
+                "detail": e.to_string()
+            });
+        }
+    };
+    json!({
+        "present": true,
+        "path": path.display().to_string(),
+        "on_schedule_fire": hook_array_len(&v, "on_schedule_fire"),
+        "on_http_request_pre": hook_array_len(&v, "on_http_request_pre"),
+        "on_http_request_post": hook_array_len(&v, "on_http_request_post"),
+        "executed_phases": ["on_schedule_fire"],
+        "note": "on_http_request_* arrays are parsed for forward compatibility; they are not invoked on HTTP traffic yet."
+    })
+}
 
 pub fn fire_on_schedule_fire_async(data_dir: &Path, schedule_id: Uuid, task_id: Uuid) {
     let path = data_dir.join("lifecycle_hooks.json");

@@ -91,6 +91,7 @@
   "tui.router_latency": "Latency ms",
   "tui.router_tokens": "Tokens",
   "tui.router_fallbacks": "Fallbacks",
+  "tui.router_hermes_title": " Hermes operator snapshot (PgUp/PgDn, R: refresh) ",
   "tui.tasks_list_header": " Date       │ Status    │ Agent  │ Parent  │ ID (excerpt) ",
   "tui.tasks_discussions": " Discussions (roots) [d=all] ",
   "tui.tasks_list_all": " Task list [d=roots] ",

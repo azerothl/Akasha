@@ -8552,6 +8552,9 @@ function App() {
                     docsMatrix: t("settings.operator_hermes_doc_matrix"),
                     docsWebhooks: t("settings.operator_hermes_doc_webhooks"),
                     docsMcp: t("settings.operator_hermes_doc_mcp"),
+                    recallHeading: t("settings.operator_hermes_recall"),
+                    mcpHeading: t("settings.operator_hermes_mcp_status"),
+                    lifecycleHeading: t("settings.operator_hermes_lifecycle"),
                     loadError: t("settings.operator_hermes_load_error"),
                   }}
                 />

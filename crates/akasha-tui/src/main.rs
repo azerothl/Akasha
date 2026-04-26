@@ -251,6 +251,10 @@ struct App {
     pending_human_input: Option<(String, String, String, Option<Vec<String>>)>,
     /// All tasks currently waiting for user input (from GET /api/pending-human-input), so we can show them after relaunch or when user was away.
     pending_human_input_list: Vec<(String, String, String, Option<Vec<String>>)>,
+    /// Hermes-style operator snapshot (schedules, task_runs, process watch, terminal, tools, recall, MCP, lifecycle hooks).
+    hermes_ops_text: String,
+    /// Vertical scroll for the Hermes snapshot block on the Router tab.
+    hermes_ops_scroll: usize,
 }
 
 fn trim_tui(s: &str, max: usize) -> String {
@@ -409,6 +413,8 @@ impl App {
             chat_history_loaded: false,
             pending_human_input: None,
             pending_human_input_list: Vec::new(),
+            hermes_ops_text: String::new(),
+            hermes_ops_scroll: 0,
         }
     }
 
@@ -525,6 +531,8 @@ impl App {
     fn trigger_mode_entered(&mut self) {
         if self.mode == Mode::Router {
             self.fetch_metrics();
+            self.fetch_hermes_ops_snapshot();
+            self.hermes_ops_scroll = 0;
         }
         if self.mode == Mode::Doc && self.doc_content.is_empty() {
             self.fetch_doc();
@@ -1132,6 +1140,45 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Fetch operator HTTP endpoints (Hermes parity cockpit) for display under router metrics.
+    fn fetch_hermes_ops_snapshot(&mut self) {
+        let base = daemon_base_url(self.port);
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => {
+                self.hermes_ops_text = "(client HTTP)".to_string();
+                return;
+            }
+        };
+        let paths: [(&str, &str); 8] = [
+            ("schedules", "/api/schedules"),
+            ("task_runs", "/api/task_runs"),
+            ("process_watch", "/api/process/watch/recent?limit=12"),
+            ("terminal", "/api/terminal/capabilities"),
+            ("tools", "/api/tools/effective"),
+            ("recall", "/api/memory/recall-metrics"),
+            ("mcp", "/api/mcp/status"),
+            ("lifecycle", "/api/lifecycle/hooks"),
+        ];
+        let mut parts: Vec<String> = Vec::new();
+        for (label, path) in paths {
+            let url = format!("{base}{path}");
+            let line = match client.get(&url).send() {
+                Ok(r) => {
+                    let status = r.status();
+                    let body = r.text().unwrap_or_default();
+                    format!("{label} {path} → {status}\n{}", trim_tui(&body, 1400))
+                }
+                Err(e) => format!("{label} {path} → (error: {e})"),
+            };
+            parts.push(line);
+        }
+        self.hermes_ops_text = parts.join("\n---\n");
     }
 
     /// Non-blocking: POST /api/message, send ack via tx, then poll and send final reply (FR-025).
@@ -2260,6 +2307,10 @@ fn ui(f: &mut Frame, app: &mut App) {
             f.render_widget(block, content_area);
         }
         Mode::Router => {
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(45), Constraint::Min(4)])
+                .split(content_area);
             let rows: Vec<Row> = app
                 .metrics
                 .iter()
@@ -2302,7 +2353,24 @@ fn ui(f: &mut Frame, app: &mut App) {
                     .title(app.i18n.t("tui.router_block"))
                     .border_style(theme.block_border()),
             );
-            f.render_widget(table, content_area);
+            f.render_widget(table, split[0]);
+            let hermes_h = split[1].height.saturating_sub(2).max(1) as usize;
+            let hermes_lines = app.hermes_ops_text.lines().count().max(1);
+            let hermes_max = hermes_lines.saturating_sub(hermes_h);
+            if app.hermes_ops_scroll > hermes_max {
+                app.hermes_ops_scroll = hermes_max;
+            }
+            let hermes_para = Paragraph::new(app.hermes_ops_text.clone())
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(app.i18n.t("tui.router_hermes_title"))
+                        .border_style(theme.block_border()),
+                )
+                .style(Style::default().fg(theme.palette().muted))
+                .wrap(Wrap { trim: false })
+                .scroll((app.hermes_ops_scroll as u16, 0));
+            f.render_widget(hermes_para, split[1]);
         }
         Mode::Doc => {
             let content_width = content_area.width as usize;
@@ -2835,8 +2903,13 @@ fn run_app(
             }
             last_health = std::time::Instant::now();
         }
-        if app.mode == Mode::Router && app.metrics.is_empty() {
-            app.fetch_metrics();
+        if app.mode == Mode::Router {
+            if app.metrics.is_empty() {
+                app.fetch_metrics();
+            }
+            if app.hermes_ops_text.is_empty() {
+                app.fetch_hermes_ops_snapshot();
+            }
         }
         while let Ok((task_id, pct)) = progress_rx.try_recv() {
             if app.pending_reply_task_id.as_deref() == Some(&task_id) {
@@ -3181,6 +3254,13 @@ fn run_app(
                     }
                     (Mode::Router, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_metrics();
+                        app.fetch_hermes_ops_snapshot();
+                    }
+                    (Mode::Router, KeyCode::PageUp, _) => {
+                        app.hermes_ops_scroll = app.hermes_ops_scroll.saturating_sub(8);
+                    }
+                    (Mode::Router, KeyCode::PageDown, _) => {
+                        app.hermes_ops_scroll = app.hermes_ops_scroll.saturating_add(8);
                     }
                     (Mode::ScheduleReports, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_schedule_reports();

@@ -15,6 +15,9 @@ type Props = {
     docsMatrix: string;
     docsWebhooks: string;
     docsMcp: string;
+    recallHeading: string;
+    mcpHeading: string;
+    lifecycleHeading: string;
     loadError: string;
   };
 };
@@ -26,6 +29,9 @@ type Props = {
 export function OperatorHermesInsights({ sessionId, daemonUrl, expert, labels }: Props) {
   const [resumeJson, setResumeJson] = useState<string>("");
   const [toolsJson, setToolsJson] = useState<string>("");
+  const [recallJson, setRecallJson] = useState<string>("");
+  const [mcpJson, setMcpJson] = useState<string>("");
+  const [lifecycleJson, setLifecycleJson] = useState<string>("");
   const [err, setErr] = useState<string>("");
 
   useEffect(() => {
@@ -38,6 +44,21 @@ export function OperatorHermesInsights({ sessionId, daemonUrl, expert, labels }:
         const tt = await tr.text();
         if (!cancelled) {
           setToolsJson(tr.ok ? tt : `${labels.loadError}: tools/effective HTTP ${tr.status}`);
+        }
+        const rm = await fetch(daemonUrl("/api/memory/recall-metrics"));
+        const rmt = await rm.text();
+        if (!cancelled) {
+          setRecallJson(rm.ok ? rmt : `${labels.loadError}: recall-metrics HTTP ${rm.status}`);
+        }
+        const ms = await fetch(daemonUrl("/api/mcp/status"));
+        const mst = await ms.text();
+        if (!cancelled) {
+          setMcpJson(ms.ok ? mst : `${labels.loadError}: mcp/status HTTP ${ms.status}`);
+        }
+        const lh = await fetch(daemonUrl("/api/lifecycle/hooks"));
+        const lht = await lh.text();
+        if (!cancelled) {
+          setLifecycleJson(lh.ok ? lht : `${labels.loadError}: lifecycle/hooks HTTP ${lh.status}`);
         }
         if (sessionId?.trim()) {
           const q = new URLSearchParams({ session_id: sessionId.trim() });
@@ -86,6 +107,24 @@ export function OperatorHermesInsights({ sessionId, daemonUrl, expert, labels }:
       </h4>
       <pre className="operator-hermes-pre" tabIndex={0}>
         {toolsJson || "…"}
+      </pre>
+      <h4 className="settings-plugin-status-title" style={{ marginTop: "1rem" }}>
+        {labels.recallHeading}
+      </h4>
+      <pre className="operator-hermes-pre" tabIndex={0}>
+        {recallJson || "…"}
+      </pre>
+      <h4 className="settings-plugin-status-title" style={{ marginTop: "1rem" }}>
+        {labels.mcpHeading}
+      </h4>
+      <pre className="operator-hermes-pre" tabIndex={0}>
+        {mcpJson || "…"}
+      </pre>
+      <h4 className="settings-plugin-status-title" style={{ marginTop: "1rem" }}>
+        {labels.lifecycleHeading}
+      </h4>
+      <pre className="operator-hermes-pre" tabIndex={0}>
+        {lifecycleJson || "…"}
       </pre>
     </div>
   );
