@@ -85,6 +85,16 @@ enum Commands {
         #[command(subcommand)]
         sub: ServicesSub,
     },
+    /// Tool profiles + effective tool gates (operator / Hermes-style toolsets)
+    Toolset {
+        #[command(subcommand)]
+        sub: ToolsetSub,
+    },
+    /// Git worktree helpers (list / add / remove)
+    Worktree {
+        #[command(subcommand)]
+        sub: WorktreeSub,
+    },
 }
 
 #[derive(Subcommand)]
@@ -120,6 +130,38 @@ enum ServicesSub {
 }
 
 #[derive(Subcommand)]
+enum ToolsetSub {
+    /// Show tool_profiles keys and default_profile from tools_policy.yaml (offline)
+    Profiles,
+    /// Show effective allow/deny per tool (requires daemon GET /api/tools/effective)
+    Effective,
+}
+
+#[derive(Subcommand)]
+enum WorktreeSub {
+    /// List worktrees for a repo (`git worktree list`)
+    List {
+        /// Path to git repository (directory containing .git)
+        repo: PathBuf,
+    },
+    /// Add a worktree (`git worktree add <path> <branch>`)
+    Add {
+        repo: PathBuf,
+        /// Branch to checkout in the new worktree
+        branch: String,
+        /// Path for the new worktree directory
+        path: PathBuf,
+    },
+    /// Remove a worktree (`git worktree remove <path>`)
+    Remove {
+        /// Main repo path (used as `-C` for git)
+        repo: PathBuf,
+        /// Worktree path to remove
+        path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum UpdateSub {
     /// Check if a newer version is available; print download URL if so
     Check {
@@ -137,6 +179,8 @@ enum UpdateSub {
 
 #[derive(Subcommand)]
 enum ConfigSub {
+    /// Validate that llm_router.yaml and tools_policy.yaml parse (offline)
+    Validate,
     /// Show paths used for config and data (same as `akasha paths`)
     Paths,
     /// Fetch Ollama model info (context_length_max, num_ctx, etc.) for models in llm_router.yaml and write to config
@@ -252,6 +296,8 @@ enum RouterSub {
 
 #[derive(Subcommand)]
 enum PluginSub {
+    /// Load-cycle metrics (last duration, errors) from daemon
+    Metrics,
     /// List installed plugins (from daemon)
     List,
     /// Reload plugins (no daemon restart)
@@ -392,6 +438,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Paths => cmd_paths(),
         Commands::Update { sub } => cmd_update(sub),
         Commands::Services { sub } => cmd_services(sub),
+        Commands::Toolset { sub } => cmd_toolset(sub),
+        Commands::Worktree { sub } => cmd_worktree(sub),
     }
 }
 
@@ -509,6 +557,97 @@ fn daemon_base_url() -> String {
     format!("http://127.0.0.1:{}", port)
 }
 
+fn cmd_toolset(sub: ToolsetSub) -> anyhow::Result<()> {
+    let data_dir = akasha_data_dir();
+    let tp = data_dir.join("tools_policy.yaml");
+    match sub {
+        ToolsetSub::Profiles => {
+            if !tp.exists() {
+                println!("(no {})", tp.display());
+                return Ok(());
+            }
+            let raw = std::fs::read_to_string(&tp)?;
+            let v: serde_yaml::Value = serde_yaml::from_str(&raw)?;
+            let def = v
+                .get("default_profile")
+                .and_then(|x| x.as_str())
+                .unwrap_or("(none)");
+            println!("default_profile: {}", def);
+            if let Some(m) = v.get("tool_profiles").and_then(|x| x.as_mapping()) {
+                println!("tool_profiles ({}):", m.len());
+                for k in m.keys() {
+                    if let Some(name) = k.as_str() {
+                        println!("  - {}", name);
+                    }
+                }
+            } else {
+                println!("tool_profiles: (none)");
+            }
+        }
+        ToolsetSub::Effective => {
+            let client = reqwest::blocking::Client::new();
+            let base = daemon_base_url();
+            let resp = client
+                .get(format!("{}/api/tools/effective", base))
+                .timeout(std::time::Duration::from_secs(8))
+                .send()?;
+            if !resp.status().is_success() {
+                anyhow::bail!("Daemon error: {}", resp.status());
+            }
+            let j: serde_json::Value = resp.json()?;
+            println!("{}", serde_json::to_string_pretty(&j)?);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_worktree(sub: WorktreeSub) -> anyhow::Result<()> {
+    match sub {
+        WorktreeSub::List { repo } => {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["worktree", "list"])
+                .output()?;
+            if !out.status.success() {
+                anyhow::bail!(
+                    "git worktree list failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+        }
+        WorktreeSub::Add { repo, branch, path } => {
+            let st = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .arg("worktree")
+                .arg("add")
+                .arg(&path)
+                .arg(&branch)
+                .status()?;
+            if !st.success() {
+                anyhow::bail!("git worktree add failed (status {:?})", st.code());
+            }
+            println!("Worktree added at {}", path.display());
+        }
+        WorktreeSub::Remove { repo, path } => {
+            let st = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .arg("worktree")
+                .arg("remove")
+                .arg(&path)
+                .status()?;
+            if !st.success() {
+                anyhow::bail!("git worktree remove failed (status {:?})", st.code());
+            }
+            println!("Worktree removed: {}", path.display());
+        }
+    }
+    Ok(())
+}
+
 fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
     let data_dir = akasha_data_dir();
     let plugins_dir = data_dir.join("plugins");
@@ -517,6 +656,17 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
     let base = daemon_base_url();
 
     match sub {
+        PluginSub::Metrics => {
+            let resp = client
+                .get(format!("{}/api/plugins/metrics", base))
+                .timeout(std::time::Duration::from_secs(5))
+                .send()?;
+            if !resp.status().is_success() {
+                anyhow::bail!("Daemon error: {}", resp.status());
+            }
+            let j: serde_json::Value = resp.json()?;
+            println!("{}", serde_json::to_string_pretty(&j)?);
+        }
         PluginSub::List => {
             let resp = client
                 .get(format!("{}/api/plugins", base))
@@ -1486,6 +1636,26 @@ fn cmd_config(sub: ConfigSub) -> anyhow::Result<()> {
     std::fs::create_dir_all(&data_dir)?;
     match sub {
         ConfigSub::Paths => unreachable!(),
+        ConfigSub::Validate => {
+            let path = llm_router_path();
+            if path.exists() {
+                akasha_llm::RoutingConfig::load_from_path(&path)
+                    .map_err(|e| anyhow::anyhow!("llm_router.yaml: {}", e))?;
+                println!("OK: {}", path.display());
+            } else {
+                println!("Skip (missing): {}", path.display());
+            }
+            let tp = data_dir.join("tools_policy.yaml");
+            if tp.exists() {
+                akasha_tools::ToolsPolicy::load_from_path(&tp)
+                    .map_err(|e| anyhow::anyhow!("tools_policy.yaml: {}", e))?;
+                println!("OK: {}", tp.display());
+            } else {
+                println!("Skip (missing): {}", tp.display());
+            }
+            println!("akasha config validate: done.");
+            return Ok(());
+        }
         ConfigSub::Models { sub: models_sub } => {
             let path = llm_router_path();
             if !path.exists() {
@@ -3133,6 +3303,99 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
 
     // Config file checks (existence + valid format)
     checks.extend(run_config_checks(&data_dir));
+
+    // Auto-triage (Hermes-like): when daemon is up, sample LLM router summary + task queue depth.
+    if daemon_healthy {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build();
+        if let Ok(client) = client {
+            if let Ok(resp) = client
+                .get(format!("http://127.0.0.1:{}/api/metrics/summary", port))
+                .send()
+            {
+                if resp.status().is_success() {
+                    if let Ok(summary) = resp.json::<serde_json::Value>() {
+                        let mut total_fb: u64 = 0;
+                        let mut total_req: u64 = 0;
+                        let mut total_fail: u64 = 0;
+                        if let Some(obj) = summary.as_object() {
+                            for (_k, v) in obj {
+                                if let Some(m) = v.as_object() {
+                                    total_fb += m
+                                        .get("fallback_triggered")
+                                        .and_then(|x| x.as_u64())
+                                        .unwrap_or(0);
+                                    total_req += m
+                                        .get("total_requests")
+                                        .and_then(|x| x.as_u64())
+                                        .unwrap_or(0);
+                                    total_fail += m
+                                        .get("failed_requests")
+                                        .and_then(|x| x.as_u64())
+                                        .unwrap_or(0);
+                                }
+                            }
+                        }
+                        let fb_rate = if total_req > 0 {
+                            total_fb as f64 / total_req as f64
+                        } else {
+                            0.0
+                        };
+                        let fail_rate = if total_req > 0 {
+                            total_fail as f64 / total_req as f64
+                        } else {
+                            0.0
+                        };
+                        let fb_ok = !(total_req >= 10 && fb_rate > 0.25);
+                        checks.push((
+                            "triage_router_fallback".to_string(),
+                            fb_ok,
+                            format!(
+                                "Router fallback ratio ≈ {:.2} ({} triggers / {} reqs; warn if >0.25 with ≥10 reqs)",
+                                fb_rate, total_fb, total_req
+                            ),
+                        ));
+                        let fail_ok = !(total_req >= 10 && fail_rate > 0.20);
+                        checks.push((
+                            "triage_llm_failures".to_string(),
+                            fail_ok,
+                            format!(
+                                "LLM failure ratio ≈ {:.2} ({} failed / {} reqs; warn if >0.20 with ≥10 reqs)",
+                                fail_rate, total_fail, total_req
+                            ),
+                        ));
+                    }
+                }
+            }
+            if let Ok(resp) = client
+                .get(format!("http://127.0.0.1:{}/api/metrics", port))
+                .send()
+            {
+                if resp.status().is_success() {
+                    if let Ok(j) = resp.json::<serde_json::Value>() {
+                        let pending = j
+                            .pointer("/tasks/pending")
+                            .and_then(|x| x.as_u64())
+                            .unwrap_or(0);
+                        let running = j
+                            .pointer("/tasks/running")
+                            .and_then(|x| x.as_u64())
+                            .unwrap_or(0);
+                        let queue_ok = pending < 80 && running < 40;
+                        checks.push((
+                            "triage_task_queue".to_string(),
+                            queue_ok,
+                            format!(
+                                "Task queue depth pending={} running={} (warn if pending≥80 or running≥40)",
+                                pending, running
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
 
     let all_ok = checks.iter().all(|(_, ok, _)| *ok);
 

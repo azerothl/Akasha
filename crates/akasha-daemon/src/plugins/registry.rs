@@ -6,7 +6,7 @@ use akasha_plugin_host::WasmPlugin;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
 use super::reputation::ReputationStore;
@@ -91,18 +91,23 @@ impl PluginRegistry {
 
     /// Load all plugins from plugins_dir (scan for manifest.toml / manifest.json per subdir or root).
     pub fn load_all(&self) {
+        let t0 = Instant::now();
         let mut plugins = self.plugins.write().unwrap();
         plugins.clear();
+        let mut loaded_ok: u64 = 0;
+        let mut load_errors: u64 = 0;
         if !self.plugins_dir.exists() {
             if let Err(e) = std::fs::create_dir_all(&self.plugins_dir) {
                 warn!(error = %e, "Could not create plugins dir");
             }
+            super::metrics::record_plugin_load(t0.elapsed().as_millis() as u64, 0, 1);
             return;
         }
         let read_dir = match std::fs::read_dir(&self.plugins_dir) {
             Ok(d) => d,
             Err(e) => {
                 warn!(error = %e, "Could not read plugins dir");
+                super::metrics::record_plugin_load(t0.elapsed().as_millis() as u64, 0, 1);
                 return;
             }
         };
@@ -152,8 +157,10 @@ impl PluginRegistry {
                                     wasm: wasm.with_manifest(manifest.clone()),
                                 };
                                 plugins.insert(manifest.id.clone(), loaded);
+                                loaded_ok += 1;
                                 info!(id = %manifest.id, kind = ?manifest.kind, "Plugin loaded");
                             } else {
+                                load_errors += 1;
                                 warn!(id = %manifest.id, path = ?wasm_path, "Failed to load WASM");
                             }
                         }
@@ -162,6 +169,7 @@ impl PluginRegistry {
                 }
             }
         }
+        super::metrics::record_plugin_load(t0.elapsed().as_millis() as u64, loaded_ok, load_errors);
     }
 
     pub fn list(&self) -> Vec<PluginEntry> {

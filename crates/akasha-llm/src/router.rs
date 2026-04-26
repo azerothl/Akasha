@@ -170,6 +170,15 @@ impl LLMRouter {
         resolve_task_type_for_agent_impl(assigned_agent, &config)
     }
 
+    /// Primary route `(provider, model)` for a task type from routing config (for token estimates, metrics labels).
+    pub fn primary_route_for_task_type(&self, task_type: &str) -> Option<(String, String)> {
+        let config = self.config.read().unwrap_or_else(|e| e.into_inner());
+        config
+            .get_route(task_type)
+            .and_then(|c| c.primary.as_ref())
+            .map(|p| (p.provider.clone(), p.model.clone()))
+    }
+
     /// Base URL of the Ollama provider from config (if set).
     pub fn ollama_base_url(&self) -> Option<String> {
         self.config

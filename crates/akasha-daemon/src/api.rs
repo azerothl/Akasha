@@ -23,6 +23,7 @@ use akasha_store::{
     TaskStore, TodoStatus, WorkspaceGraphStore,
 };
 use akasha_vault::Vault;
+use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1382,6 +1383,8 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("search_replace", "search_replace <path> <ancien_texte> | <nouveau_texte> — une seule ligne TOOL:. Séparateur : **espace | espace** (` | `). Après le chemin, mettre tout de suite le texte exact à remplacer (pas un `|` seul : le découpage sur espaces le transforme en token et vide la recherche). Si le motif contient ` | `, utiliser edit_file ou apply_patch. Exemple : TOOL: search_replace workspace:/src/App.tsx const x = 1 | const x = 2"),
     ("web_fetch", "web_fetch <url> — récupérer le contenu d'une URL (domaine autorisé dans tools_policy allowed_web_domains)"),
     ("web_search", "web_search <query> [max_results] — rechercher sur le web (Brave API; BRAVE_API_KEY, web_search_enabled)"),
+    ("web_crawl", "web_crawl <url> [limit] — lancer un crawl Cloudflare Browser Rendering (web_crawl_enabled, cloudflare_account_id, token vault cloudflare_api_token ou CLOUDFLARE_API_TOKEN ; domaines = allowed_web_domains). Retourne un job_id ; poller avec web_crawl_status."),
+    ("web_crawl_status", "web_crawl_status <job_id> — statut / résultat d’un job crawl Cloudflare (même config que web_crawl)."),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
     ("memory_search", "memory_search <query> [top_k] — rechercher dans la mémoire long terme (si activée)"),
     ("workspace_graph_search", "workspace_graph_search <query> [--workspace <uuid>] — rechercher dans les graphes projet indexés (nœuds label/chemin) ; limite ~20 lignes ; --workspace pour un espace enregistré uniquement"),
@@ -1394,7 +1397,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("sessions_spawn", "sessions_spawn <message> [session_id] — créer une sous-tâche et la lancer"),
     ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
     ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
-    ("browser", "browser navigate <url> — open URL in managed browser (http/https; domain allowed by tools_policy). browser snapshot — text + links of current page. Phase 2: click, fill, screenshot, wait (see spec 39)."),
+    ("browser", "browser navigate <url> — navigate (http/https; domain allowed). browser snapshot — texte + liens. browser screenshot | browser click <css> | browser fill <css> <texte> | browser wait <css_selector|ms> — automation Playwright (spec 39)."),
     ("install_playwright", "install_playwright — run npm install and npx playwright install chromium in the Playwright runner directory (scripts/playwright-runner or AKASHA_PLAYWRIGHT_RUNNER). Requires browser_enabled. Use after ask_user consent if you need explicit approval before download; optional require_approval in tools_policy."),
     ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
     ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
@@ -2583,6 +2586,18 @@ fn is_github_host(host: &str) -> bool {
         .any(|h| host == *h || host.ends_with(&format!(".{}", *h)))
 }
 
+/// Append one JSON line to `data_dir/skills.lock.jsonl` (supply-chain / pin trail).
+fn append_skills_lock_entry(data_dir: &Path, entry: &serde_json::Value) {
+    let Ok(mut line) = serde_json::to_string(entry) else {
+        return;
+    };
+    line.push('\n');
+    let path = data_dir.join("skills.lock.jsonl");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+    }
+}
+
 /// Result of parsing a skill install URL: raw SKILL.md URL, skill name, and optional GitHub API path for listing contents.
 struct ParsedSkillUrl {
     raw_skill_url: String,
@@ -2941,6 +2956,24 @@ async fn do_install_skill(
     };
     match skill_registry.reload(data_dir, spec_dir).await {
         Ok(count) => {
+            let pin_ref = parsed
+                .api_path
+                .as_ref()
+                .map(|(_, _, branch, _)| branch.clone())
+                .unwrap_or_default();
+            let digest = hex::encode(Sha256::digest(body.as_bytes()));
+            append_skills_lock_entry(
+                data_dir,
+                &serde_json::json!({
+                    "v": 1,
+                    "skill_name": parsed.skill_name,
+                    "source_url": url,
+                    "raw_skill_url": parsed.raw_skill_url,
+                    "ref": pin_ref,
+                    "skill_md_sha256": digest,
+                    "installed_at": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
             let body_instructions = skill_md_body(&body);
             let total_chars = body_instructions.chars().count();
             let body_preview = if total_chars > 8000 {
@@ -2984,6 +3017,7 @@ async fn do_install_skill(
                     if let Ok(mut reloaded) = akasha_tools::ToolsPolicy::load_from_path(path) {
                         if let Ok(v) = akasha_vault::open_vault(data_dir) {
                             reloaded.brave_api_key = v.get("brave_api_key").ok();
+                            reloaded.cloudflare_api_token = v.get("cloudflare_api_token").ok();
                         }
                         *r.write().await =
                             std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
@@ -3090,6 +3124,7 @@ async fn do_uninstall_skill(
             if let Ok(mut reloaded) = akasha_tools::ToolsPolicy::load_from_path(path) {
                 if let Ok(v) = akasha_vault::open_vault(data_dir) {
                     reloaded.brave_api_key = v.get("brave_api_key").ok();
+                    reloaded.cloudflare_api_token = v.get("cloudflare_api_token").ok();
                 }
                 *r.write().await = std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
             }
@@ -3454,6 +3489,8 @@ const ORCH_INLINE_TOOL_FIRST_WORDS: &[&str] = &[
     "grep_content",
     "web_search",
     "web_fetch",
+    "web_crawl",
+    "web_crawl_status",
     "run_command",
     "browser",
     "install_playwright",
@@ -5086,11 +5123,150 @@ async fn execute_tool_call(
                     Err(e) => (false, format!("[browser] error: {}", e), None),
                 }
             } else if sub == "screenshot" {
-                (true, "[browser] Screenshot is planned for Phase 2. For now use device_invoke synthetic_input keyboard shortcut (e.g. Win+Shift+S).".to_string(), None)
-            } else if sub == "click" || sub == "fill" || sub == "wait" {
-                (true, "[browser] click, fill, wait are planned for Phase 2.".to_string(), None)
+                let mut g = registry.write().await;
+                let Some(session) = g.get_mut(&task_id) else {
+                    return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
+                };
+                let resp = session
+                    .send_command(&serde_json::json!({ "cmd": "screenshot", "params": { "full_page": false } }))
+                    .await;
+                drop(g);
+                match resp {
+                    Ok(resp) => {
+                        let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                        if ok {
+                            let b64 = resp
+                                .pointer("/result/data_base64")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let (preview, total, trunc) = crate::tool_output::truncate_utf8_by_bytes(
+                                b64,
+                                crate::tool_output::BROWSER_SCREENSHOT_B64_MAX,
+                            );
+                            let base = format!(
+                                "[browser] Screenshot PNG (base64, {} bytes of payload):\n{}",
+                                total, preview
+                            );
+                            let msg = crate::tool_output::with_truncation_footer(
+                                base,
+                                trunc,
+                                total,
+                                "truncated base64; decode externally or use a narrower viewport",
+                            );
+                            (true, msg, None)
+                        } else {
+                            let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("screenshot failed");
+                            (false, format!("[browser] {}", err), None)
+                        }
+                    }
+                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                }
+            } else if sub == "click" {
+                let selector = args[1..].join(" ").trim().to_string();
+                if selector.is_empty() {
+                    return (false, "[browser] usage: browser click <css_selector>".to_string(), None);
+                }
+                let mut g = registry.write().await;
+                let Some(session) = g.get_mut(&task_id) else {
+                    return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
+                };
+                let resp = session
+                    .send_command(&serde_json::json!({
+                        "cmd": "click",
+                        "params": { "selector": selector, "timeout_secs": action_timeout }
+                    }))
+                    .await;
+                drop(g);
+                match resp {
+                    Ok(resp) => {
+                        let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                        if ok {
+                            (true, "[browser] Click OK.".to_string(), None)
+                        } else {
+                            let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("click failed");
+                            (false, format!("[browser] {}", err), None)
+                        }
+                    }
+                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                }
+            } else if sub == "fill" {
+                let Some(sel) = args.get(1).map(|s| s.as_str()) else {
+                    return (
+                        false,
+                        "[browser] usage: browser fill <css_selector> <text>".to_string(),
+                        None,
+                    );
+                };
+                let sel = sel.trim();
+                if sel.is_empty() || args.len() < 3 {
+                    return (
+                        false,
+                        "[browser] usage: browser fill <css_selector> <text>".to_string(),
+                        None,
+                    );
+                }
+                let value: String = args[2..].join(" ");
+                let mut g = registry.write().await;
+                let Some(session) = g.get_mut(&task_id) else {
+                    return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
+                };
+                let resp = session
+                    .send_command(&serde_json::json!({
+                        "cmd": "fill",
+                        "params": { "selector": sel, "value": value, "timeout_secs": action_timeout }
+                    }))
+                    .await;
+                drop(g);
+                match resp {
+                    Ok(resp) => {
+                        let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                        if ok {
+                            (true, "[browser] Fill OK.".to_string(), None)
+                        } else {
+                            let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("fill failed");
+                            (false, format!("[browser] {}", err), None)
+                        }
+                    }
+                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                }
+            } else if sub == "wait" {
+                let arg = args[1..].join(" ").trim().to_string();
+                if arg.is_empty() {
+                    return (
+                        false,
+                        "[browser] usage: browser wait <css_selector> | browser wait <milliseconds>".to_string(),
+                        None,
+                    );
+                }
+                let mut g = registry.write().await;
+                let Some(session) = g.get_mut(&task_id) else {
+                    return (false, "[browser] Navigate to a page first (browser navigate <url>).".to_string(), None);
+                };
+                let cmd = if arg.chars().all(|c| c.is_ascii_digit()) {
+                    let ms: u64 = arg.parse().unwrap_or(0);
+                    serde_json::json!({ "cmd": "wait", "params": { "milliseconds": ms } })
+                } else {
+                    serde_json::json!({
+                        "cmd": "wait",
+                        "params": { "selector": arg, "timeout_secs": action_timeout }
+                    })
+                };
+                let resp = session.send_command(&cmd).await;
+                drop(g);
+                match resp {
+                    Ok(resp) => {
+                        let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                        if ok {
+                            (true, "[browser] Wait completed.".to_string(), None)
+                        } else {
+                            let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("wait failed");
+                            (false, format!("[browser] {}", err), None)
+                        }
+                    }
+                    Err(e) => (false, format!("[browser] error: {}", e), None),
+                }
             } else {
-                (false, "[browser] usage: browser navigate <url> | browser snapshot | browser screenshot (Phase 2).".to_string(), None)
+                (false, "[browser] usage: browser navigate <url> | browser snapshot | browser screenshot | browser click <selector> | browser fill <selector> <text> | browser wait <selector|ms>".to_string(), None)
             }
         }
         "install_playwright" => {
@@ -6077,6 +6253,55 @@ async fn execute_tool_call(
                 Err(e) => (false, format!("[web_search] failed: {}", e), None),
             }
         }
+        "web_crawl" => {
+            let url = args.get(0).map(String::as_str).unwrap_or("").trim();
+            if url.is_empty() {
+                return (false, "[web_crawl] usage: web_crawl <url> [limit]".to_string(), None);
+            }
+            let limit = args
+                .get(1)
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(50);
+            match executor.web_crawl(url, limit).await {
+                Ok((body, res)) => {
+                    let msg = if res.success {
+                        format!("[web_crawl] {}\n{}", res.summary, body)
+                    } else {
+                        format!("[web_crawl] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[web_crawl] {}", e), None),
+            }
+        }
+        "web_crawl_status" => {
+            let job_id = args.get(0).map(String::as_str).unwrap_or("").trim();
+            if job_id.is_empty() {
+                return (
+                    false,
+                    "[web_crawl_status] usage: web_crawl_status <job_id>".to_string(),
+                    None,
+                );
+            }
+            match executor.web_crawl_job_status(job_id).await {
+                Ok((body, res)) => {
+                    let (preview, total, trunc) =
+                        crate::tool_output::truncate_utf8_by_bytes(&body, 24_000);
+                    let msg = if res.success {
+                        crate::tool_output::with_truncation_footer(
+                            format!("[web_crawl_status] {} — {}", res.summary, preview),
+                            trunc,
+                            total,
+                            "response truncated; poll again if job still running",
+                        )
+                    } else {
+                        format!("[web_crawl_status] {}", res.summary)
+                    };
+                    (res.success, msg, None)
+                }
+                Err(e) => (false, format!("[web_crawl_status] {}", e), None),
+            }
+        }
         "run_in_container" => {
             let work_dir = path_arg(0);
             let image = args.get(1).map(String::as_str).unwrap_or("");
@@ -6399,6 +6624,8 @@ async fn compact_short_term_if_needed(
     llm_router: &akasha_llm::LLMRouter,
     new_message_tokens: usize,
     long_term_client: Option<&LongTermMemoryClient>,
+    tokenizer_provider: &str,
+    tokenizer_model: &str,
 ) {
     if short_term.get_compaction_count(session_id).await
         >= crate::memory::MAX_COMPACTIONS_PER_SESSION
@@ -6414,7 +6641,8 @@ async fn compact_short_term_if_needed(
     let trigger = (max_context_tokens as f64 * short_term.compaction_trigger_ratio) as usize;
 
     let turns = short_term.get_turns(session_id).await;
-    let history_tokens = ShortTermStore::turns_tokens(&turns);
+    let history_tokens =
+        ShortTermStore::turns_tokens_calibrated(tokenizer_provider, tokenizer_model, &turns);
     if history_tokens + new_message_tokens <= trigger || turns.len() <= 2 {
         return;
     }
@@ -8502,15 +8730,34 @@ pub(crate) async fn run_message_via_llm(
             user_prefix.push_str("\n");
         }
     }
+    let router_task_type_for_compact = if preferred_task_type_override.as_deref()
+        == Some("image_generation")
+        || assigned_agent == "image_generation"
+    {
+        llm_router.resolve_task_type_for_agent("conversation")
+    } else {
+        preferred_task_type_override
+            .clone()
+            .unwrap_or_else(|| llm_router.resolve_task_type_for_agent(&assigned_agent))
+    };
+    let (tok_prov, tok_model) = llm_router
+        .primary_route_for_task_type(&router_task_type_for_compact)
+        .unwrap_or_else(|| ("default".to_string(), "default".to_string()));
     if let Some(ref st) = short_term {
         if memory_profile.compact_before_prompt {
-            let new_msg_tokens = ShortTermStore::estimate_tokens(&message);
+            let new_msg_tokens = ShortTermStore::estimate_tokens_calibrated(
+                tok_prov.as_str(),
+                tok_model.as_str(),
+                &message,
+            );
             compact_short_term_if_needed(
                 st,
                 &session_id,
                 &llm_router,
                 new_msg_tokens,
                 long_term_client.as_ref(),
+                tok_prov.as_str(),
+                tok_model.as_str(),
             )
             .await;
         }
@@ -11665,7 +11912,7 @@ pub async fn handle_api(
     ollama_base_url: Option<&str>,
     spec_dir: &Path,
     restart_tx: RestartTx,
-    _tools_executor: Option<
+    tools_executor: Option<
         &std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<akasha_tools::ToolExecutor>>>,
     >,
     skill_registry: &std::sync::Arc<crate::skills::SkillRegistry>,
@@ -11810,6 +12057,69 @@ pub async fn handle_api(
             &serde_json::to_string(&serde_json::json!({
                 "session_id": session_id,
                 "state": st,
+            }))
+            .unwrap_or_else(|_| "{}".into()),
+        );
+    }
+
+    // GET /api/session/resume-brief?session_id=… — Hermes-like resume UX: structured state + short-term size.
+    if method == "GET" && path.starts_with("/api/session/resume-brief") {
+        let session_id = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| {
+                q.split('&').find_map(|p| {
+                    if let Some(v) = p.strip_prefix("session_id=") {
+                        Some(
+                            urlencoding::decode(v)
+                                .map(|c| c.into_owned())
+                                .unwrap_or_else(|_| v.to_string()),
+                        )
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or_default();
+        if session_id.is_empty() {
+            return json_response(
+                "400 Bad Request",
+                r#"{"error":"session_id query_parameter_required"}"#,
+            );
+        }
+        let st = crate::session_state::load(data_dir, &session_id);
+        let (short_term_turns, compaction_count) = match &short_term {
+            Some(st_mem) => {
+                let n = st_mem.get_turns(&session_id).await.len();
+                let c = st_mem.get_compaction_count(&session_id).await;
+                (n, c)
+            }
+            None => (0usize, 0u32),
+        };
+        let tools_policy_brief = if let Some(exec_lock) = tools_executor {
+            let g = exec_lock.read().await;
+            let p = &g.policy;
+            serde_json::json!({
+                "default_profile": p.default_profile,
+                "web_search_enabled": p.web_search_enabled,
+                "browser_enabled": p.browser_enabled,
+                "web_crawl_enabled": p.web_crawl_enabled,
+                "cloudflare_account_configured": p.resolved_cloudflare_account_id().is_some(),
+                "cloudflare_token_configured": p.resolved_cloudflare_api_token().is_some(),
+            })
+        } else {
+            serde_json::Value::Null
+        };
+        return json_response(
+            "200 OK",
+            &serde_json::to_string(&serde_json::json!({
+                "session_id": session_id,
+                "session_state": st,
+                "short_term_turn_count": short_term_turns,
+                "compaction_count": compaction_count,
+                "memory_recall_metrics": crate::memory_orchestrator::memory_recall_metrics_snapshot(),
+                "tools_policy_brief": tools_policy_brief,
+                "hint": "Use this payload to restore UI tabs (goals, constraints) and to explain context to the user after reconnect."
             }))
             .unwrap_or_else(|_| "{}".into()),
         );
@@ -12276,6 +12586,15 @@ pub async fn handle_api(
                 )
             }
         }
+    }
+
+    // GET /api/memory/recall-metrics — counters from memory orchestrator (semantic recall hits/empty).
+    if method == "GET" && path == "/api/memory/recall-metrics" {
+        let body = crate::memory_orchestrator::memory_recall_metrics_snapshot();
+        return json_response(
+            "200 OK",
+            &serde_json::to_string(&body).unwrap_or_else(|_| "{}".into()),
+        );
     }
 
     // GET /api/memory/short-term?session_id=... — turns for session (default: day-YYYY-MM-DD)
@@ -13126,9 +13445,11 @@ pub async fn handle_api(
     if method == "POST" && path == "/channels/slack/command" {
         if let Some(ref secret) = channel_config.slack_signing_secret {
             let sig = headers.get("x-slack-signature").map(String::as_str);
+            let ts = headers.get("x-slack-request-timestamp").map(String::as_str);
             return crate::channels::slack::handle_slack_command(
                 body,
                 sig,
+                ts,
                 secret,
                 channel_config.port,
                 main_agent,
@@ -13620,6 +13941,24 @@ pub async fn handle_api(
             }
         }
     }
+    // POST /api/schedules/{id}/pause|resume|run_now — Hermes-like job ops (enabled flag + manual fire).
+    if method == "POST" && path.starts_with("/api/schedules/") {
+        let rest = path.trim_start_matches("/api/schedules/");
+        let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.len() == 2 {
+            if let Ok(id) = Uuid::parse_str(parts[0]) {
+                let resp = match parts[1] {
+                    "pause" => Some(schedule_set_enabled(store_path, id, false).await),
+                    "resume" => Some(schedule_set_enabled(store_path, id, true).await),
+                    "run_now" | "run-now" => Some(schedule_run_now(store_path, main_agent, id).await),
+                    _ => None,
+                };
+                if let Some(r) = resp {
+                    return r;
+                }
+            }
+        }
+    }
     if method == "POST" && path.contains("/exceptions") {
         let rest = path.trim_start_matches("/api/schedules/");
         let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
@@ -13689,6 +14028,13 @@ pub async fn handle_api(
         let body = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
         return json_response("200 OK", &body);
     }
+    if method == "GET" && path == "/api/plugins/metrics" {
+        let m = crate::plugins::metrics::snapshot();
+        return json_response(
+            "200 OK",
+            &serde_json::to_string(&m).unwrap_or_else(|_| "{}".to_string()),
+        );
+    }
     // GET /api/plugins/routing_rules[?message=...] — debug dynamic plugin routing rules
     // - Without message: returns all declared routing rules from loaded plugin manifests.
     // - With message: also returns active intents and matched rules for this message.
@@ -13723,7 +14069,7 @@ pub async fn handle_api(
         let (active_intents, matched_rules) = if let Some(ref msg) = message {
             let flags = compute_message_intent_flags(msg);
             let intents = active_intents_from_flags(&flags);
-            let tools_executor_snapshot = if let Some(exec_lock) = _tools_executor {
+            let tools_executor_snapshot = if let Some(exec_lock) = tools_executor {
                 Some(exec_lock.read().await.clone())
             } else {
                 None
@@ -13801,7 +14147,7 @@ pub async fn handle_api(
 
         let flags = compute_message_intent_flags(message);
         let intents = active_intents_from_flags(&flags);
-        let tools_executor_snapshot = if let Some(exec_lock) = _tools_executor {
+        let tools_executor_snapshot = if let Some(exec_lock) = tools_executor {
             Some(exec_lock.read().await.clone())
         } else {
             None
@@ -13913,7 +14259,7 @@ pub async fn handle_api(
         match name {
             Some(skill_name) => {
                 let policy_path = data_dir.join("tools_policy.yaml");
-                let tools_reload = _tools_executor.map(|r| (r, policy_path.as_path()));
+                let tools_reload = tools_executor.map(|r| (r, policy_path.as_path()));
                 let (ok, msg) = do_uninstall_skill(
                     &skill_name,
                     data_dir,
@@ -13952,7 +14298,7 @@ pub async fn handle_api(
             .map(String::from);
         match url {
             Some(skill_url) => {
-                let allowed_hosts = if let Some(exec_lock) = _tools_executor {
+                let allowed_hosts = if let Some(exec_lock) = tools_executor {
                     exec_lock.read().await.policy.skill_install_allowed_hosts()
                 } else {
                     vec![
@@ -13964,7 +14310,7 @@ pub async fn handle_api(
                 let policy_path = data_dir.join("tools_policy.yaml");
                 // tools_reload: passed to do_install_skill so it can hot-reload tools_policy
                 // after the new skill command entry is registered.
-                let tools_reload = _tools_executor.map(|r| (r, policy_path.as_path()));
+                let tools_reload = tools_executor.map(|r| (r, policy_path.as_path()));
                 let (ok, msg) = do_install_skill(
                     &skill_url,
                     data_dir,
@@ -13990,7 +14336,7 @@ pub async fn handle_api(
     }
 
     // Liste des outils machine disponibles (Phase A)
-    if method == "GET" && path == "/api/tools" {
+    if method == "GET" && (path == "/api/tools" || path_only == "/api/tools") {
         let list: Vec<serde_json::Value> = AVAILABLE_TOOLS
             .iter()
             .map(|(name, desc)| serde_json::json!({ "name": name, "description": desc }))
@@ -13998,6 +14344,30 @@ pub async fn handle_api(
         let body = serde_json::to_string(&serde_json::json!({ "tools": list }))
             .unwrap_or_else(|_| "{}".to_string());
         return json_response("200 OK", &body);
+    }
+
+    // Effective tool policy (Hermes-like toolsets visibility): allowed / approval / rule sources.
+    if method == "GET" && path_only == "/api/tools/effective" {
+        match tools_executor {
+            Some(ex_arc) => {
+                let ex_inner = ex_arc.read().await;
+                let executor = ex_inner.as_ref();
+                let names: Vec<&str> = AVAILABLE_TOOLS.iter().map(|(n, _)| *n).collect();
+                let rows = executor.policy.effective_tool_rows(&names);
+                let body = serde_json::to_string(&serde_json::json!({
+                    "tools": rows,
+                    "default_profile": executor.policy.default_profile,
+                }))
+                .unwrap_or_else(|_| "{}".to_string());
+                return json_response("200 OK", &body);
+            }
+            None => {
+                return json_response(
+                    "503 Service Unavailable",
+                    r#"{"error":"tools_executor_unavailable"}"#,
+                );
+            }
+        }
     }
 
     // User RAG: list documents
@@ -15289,6 +15659,89 @@ async fn delete_schedule(store_path: &Path, id: Uuid) -> String {
         "200 OK",
         &serde_json::json!({ "deleted": id.to_string() }).to_string(),
     )
+}
+
+async fn schedule_set_enabled(store_path: &Path, id: Uuid, enabled: bool) -> String {
+    let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let mut s = match store.get_schedule(id) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return json_response("404 Not Found", r#"{"error":"schedule_not_found"}"#);
+        }
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    s.enabled = enabled;
+    s.updated_at = chrono::Utc::now();
+    if store.update_schedule(&s).is_err() {
+        return json_response("500 Internal Server Error", r#"{"error":"store"}"#);
+    }
+    json_response(
+        "200 OK",
+        &serde_json::json!({ "id": id.to_string(), "enabled": enabled }).to_string(),
+    )
+}
+
+async fn schedule_run_now(
+    store_path: &Path,
+    main_agent: &crate::agents::MainAgent,
+    schedule_id: Uuid,
+) -> String {
+    let store = match ScheduleStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let s = match store.get_schedule(schedule_id) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return json_response("404 Not Found", r#"{"error":"schedule_not_found"}"#);
+        }
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    if !s.enabled {
+        return json_response(
+            "400 Bad Request",
+            r#"{"error":"schedule_paused","detail":"Resume the schedule before run-now."}"#,
+        );
+    }
+    let msg = s
+        .channel_context
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or(s.name.as_str());
+    let session_id = format!("schedule:{}", schedule_id);
+    let correlation = Uuid::new_v4();
+    match main_agent
+        .handle_message(
+            store_path,
+            msg,
+            correlation,
+            true,
+            &session_id,
+            None,
+            TaskPriority::Scheduled,
+            None,
+            None,
+            None,
+        )
+        .await
+    {
+        Ok(task_id) => json_response(
+            "200 OK",
+            &serde_json::json!({
+                "task_id": task_id.to_string(),
+                "schedule_id": schedule_id.to_string(),
+            })
+            .to_string(),
+        ),
+        Err(e) => json_response(
+            "500 Internal Server Error",
+            &serde_json::json!({ "error": "run_now_failed", "detail": e.to_string() }).to_string(),
+        ),
+    }
 }
 
 fn task_label(initial_message: Option<&String>, task_id: &Uuid) -> String {

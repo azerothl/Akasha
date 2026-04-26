@@ -510,6 +510,7 @@ impl Daemon {
                     Ok(mut policy) => {
                         if let Ok(v) = &vault {
                             policy.brave_api_key = v.get("brave_api_key").ok();
+                            policy.cloudflare_api_token = v.get("cloudflare_api_token").ok();
                         }
                         policy.workspace_root = Some(self.data_dir.clone());
                         Some(Arc::new(tokio::sync::RwLock::new(Arc::new(

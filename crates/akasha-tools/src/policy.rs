@@ -31,9 +31,18 @@ pub struct ToolsPolicy {
     /// Optional: enable web_search (requires brave_api_key from vault or BRAVE_API_KEY env).
     #[serde(default)]
     pub web_search_enabled: bool,
+    /// Optional: enable Cloudflare Browser Rendering crawl (`web_crawl` / `web_crawl_status`). See spec/53.
+    #[serde(default)]
+    pub web_crawl_enabled: bool,
+    /// Cloudflare account id for `/browser-rendering/crawl` (or set `CLOUDFLARE_ACCOUNT_ID` env).
+    #[serde(default)]
+    pub cloudflare_account_id: Option<String>,
     /// Brave Search API key (set by daemon from vault "brave_api_key"; not in YAML). Takes precedence over BRAVE_API_KEY env.
     #[serde(skip)]
     pub brave_api_key: Option<String>,
+    /// Cloudflare API token (vault `cloudflare_api_token` or env `CLOUDFLARE_API_TOKEN`). Not serialized in YAML.
+    #[serde(skip)]
+    pub cloudflare_api_token: Option<String>,
     /// Project root for resolving workspace:/ paths and "." in allowed_read_paths/allowed_write_paths.
     /// Set by the daemon from its data_dir (see daemon.rs).
     #[serde(skip)]
@@ -401,6 +410,195 @@ impl ToolsPolicy {
             host == d || host.ends_with(&format!(".{}", d))
         })
     }
+
+    /// Cloudflare account id from YAML or `CLOUDFLARE_ACCOUNT_ID` env.
+    pub fn resolved_cloudflare_account_id(&self) -> Option<String> {
+        self.cloudflare_account_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .or_else(|| {
+                std::env::var("CLOUDFLARE_ACCOUNT_ID")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
+    }
+
+    /// API token from policy (vault) or `CLOUDFLARE_API_TOKEN` env.
+    pub fn resolved_cloudflare_api_token(&self) -> Option<String> {
+        self.cloudflare_api_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .or_else(|| {
+                std::env::var("CLOUDFLARE_API_TOKEN")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
+    }
+
+    /// Whether Cloudflare crawl can be attempted for `url` (policy + credentials + same host rules as web_fetch).
+    pub fn can_use_web_crawl_url(&self, url: &str) -> bool {
+        self.web_crawl_enabled
+            && self.resolved_cloudflare_account_id().is_some()
+            && self.resolved_cloudflare_api_token().is_some()
+            && self.can_fetch_url(url)
+    }
+
+    /// Operator-facing row: policy gate (`can_use_tool`), approval flag, rule sources, optional operational notes.
+    pub fn effective_tool_row(&self, name: &str) -> ToolEffectiveRow {
+        let requires = self.requires_approval(name);
+        let mut rule_sources: Vec<String> = Vec::new();
+        let mut notes: Vec<String> = Vec::new();
+
+        if matches!(name, "ask_user" | "install_skill" | "uninstall_skill") {
+            rule_sources.push("built_in:always_allowed".to_string());
+            return ToolEffectiveRow {
+                name: name.to_string(),
+                allowed: true,
+                requires_user_approval: requires,
+                rule_sources,
+                notes,
+            };
+        }
+
+        if matches!(name, "device_discover" | "device_invoke") {
+            let has_ifaces = self
+                .allowed_device_interfaces
+                .iter()
+                .any(|a| a.trim().eq_ignore_ascii_case("*"))
+                || !self.allowed_device_interfaces.is_empty();
+            if !has_ifaces {
+                rule_sources.push("policy:allowed_device_interfaces_empty".to_string());
+            } else {
+                rule_sources.push("policy:device_interfaces_configured".to_string());
+            }
+            match &self.default_profile {
+                Some(p) => {
+                    let in_prof = self
+                        .tool_profiles
+                        .get(p)
+                        .map(|l| l.iter().any(|t| t == name))
+                        .unwrap_or(false);
+                    if in_prof {
+                        rule_sources.push(format!("tool_profile:{p}"));
+                    } else {
+                        rule_sources.push(format!("tool_profile:{p}:deny_not_listed"));
+                    }
+                }
+                None => rule_sources.push("tool_profile:none".to_string()),
+            }
+            let allowed = self.can_use_tool(name);
+            self.append_operational_notes(name, allowed, &mut notes);
+            return ToolEffectiveRow {
+                name: name.to_string(),
+                allowed,
+                requires_user_approval: requires,
+                rule_sources,
+                notes,
+            };
+        }
+
+        let via_cmd = self.can_run_command(name);
+        if via_cmd {
+            rule_sources.push("policy:allowed_commands".to_string());
+        }
+        match &self.default_profile {
+            Some(p) => {
+                let in_prof = self
+                    .tool_profiles
+                    .get(p)
+                    .map(|l| l.iter().any(|t| t == name))
+                    .unwrap_or(false);
+                if in_prof {
+                    rule_sources.push(format!("tool_profile:{p}"));
+                } else if !via_cmd {
+                    rule_sources.push(format!("tool_profile:{p}:deny_not_listed"));
+                }
+            }
+            None => rule_sources.push("tool_profile:none".to_string()),
+        }
+
+        let allowed = self.can_use_tool(name);
+        self.append_operational_notes(name, allowed, &mut notes);
+        ToolEffectiveRow {
+            name: name.to_string(),
+            allowed,
+            requires_user_approval: requires,
+            rule_sources,
+            notes,
+        }
+    }
+
+    /// Build [`ToolEffectiveRow`] for every tool name in `names` (e.g. daemon `AVAILABLE_TOOLS`).
+    pub fn effective_tool_rows(&self, names: &[&str]) -> Vec<ToolEffectiveRow> {
+        names.iter().map(|n| self.effective_tool_row(n)).collect()
+    }
+
+    fn append_operational_notes(&self, name: &str, allowed: bool, notes: &mut Vec<String>) {
+        if !allowed {
+            return;
+        }
+        match name {
+            "web_search" => {
+                if !self.web_search_enabled {
+                    notes.push("operational:web_search_disabled_in_policy".to_string());
+                }
+                if self.brave_api_key.as_deref().unwrap_or("").trim().is_empty() {
+                    notes.push("operational:missing_brave_api_key".to_string());
+                }
+            }
+            "web_fetch" => {
+                if self.allowed_web_domains.is_empty()
+                    && !self
+                        .allowed_web_domains
+                        .iter()
+                        .any(|a| a.trim().eq_ignore_ascii_case("*"))
+                {
+                    notes.push("operational:allowed_web_domains_empty".to_string());
+                }
+            }
+            "browser" | "install_playwright" => {
+                if !self.browser_enabled {
+                    notes.push("operational:browser_disabled_in_policy".to_string());
+                }
+                if name == "browser"
+                    && self.browser_enabled
+                    && self.browser_allowed_domains.is_empty()
+                    && !self
+                        .browser_allowed_domains
+                        .iter()
+                        .any(|a| a.trim().eq_ignore_ascii_case("*"))
+                {
+                    notes.push("operational:browser_allowed_domains_empty".to_string());
+                }
+            }
+            "web_crawl" | "web_crawl_status" => {
+                if !self.web_crawl_enabled {
+                    notes.push("operational:web_crawl_disabled_in_policy".to_string());
+                }
+                if self.resolved_cloudflare_account_id().is_none() {
+                    notes.push("operational:missing_cloudflare_account_id".to_string());
+                }
+                if self.resolved_cloudflare_api_token().is_none() {
+                    notes.push("operational:missing_cloudflare_api_token".to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One row for `GET /api/tools/effective` and operator dashboards.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolEffectiveRow {
+    pub name: String,
+    pub allowed: bool,
+    pub requires_user_approval: bool,
+    pub rule_sources: Vec<String>,
+    pub notes: Vec<String>,
 }
 
 #[cfg(test)]

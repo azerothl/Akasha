@@ -2,6 +2,20 @@
 
 use crate::memory_actor::LongTermMemoryClient;
 use akasha_store::{EpisodicFilter, MemorySearchFilter};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static MEMORY_RECALL_TOTAL: AtomicU64 = AtomicU64::new(0);
+static MEMORY_RECALL_SEMANTIC_HITS: AtomicU64 = AtomicU64::new(0);
+static MEMORY_RECALL_SEMANTIC_EMPTY: AtomicU64 = AtomicU64::new(0);
+
+/// Counters for [`recall_context`] (operator / SLO). Best-effort; relaxed atomics.
+pub fn memory_recall_metrics_snapshot() -> serde_json::Value {
+    serde_json::json!({
+        "recall_total": MEMORY_RECALL_TOTAL.load(Ordering::Relaxed),
+        "semantic_recall_nonempty": MEMORY_RECALL_SEMANTIC_HITS.load(Ordering::Relaxed),
+        "semantic_recall_empty": MEMORY_RECALL_SEMANTIC_EMPTY.load(Ordering::Relaxed),
+    })
+}
 
 /// Parameters for memory recall.
 #[derive(Clone)]
@@ -162,6 +176,7 @@ pub async fn recall_context(
     let params = params.clone();
 
     let result = tokio::task::spawn_blocking(move || {
+        MEMORY_RECALL_TOTAL.fetch_add(1, Ordering::Relaxed);
         let mut ctx = FusedMemoryContext::default();
 
         // Semantic retriever: main message with optional session filter
@@ -183,6 +198,13 @@ pub async fn recall_context(
                 recall_filter,
             )
         };
+        if params.semantic_top_k > 0 {
+            if results.is_empty() {
+                MEMORY_RECALL_SEMANTIC_EMPTY.fetch_add(1, Ordering::Relaxed);
+            } else {
+                MEMORY_RECALL_SEMANTIC_HITS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         let result_ids: std::collections::HashSet<String> = results.iter().map(|(id, _)| id.clone()).collect();
         for (_, content) in &results {
             ctx.long_term_block.push_str("- ");

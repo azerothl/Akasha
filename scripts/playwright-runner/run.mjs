@@ -2,7 +2,7 @@
 /**
  * Akasha browser automation runner (spec 39).
  * Reads JSON commands from stdin (one per line), executes via Playwright, writes JSON result to stdout.
- * Commands: init, navigate, snapshot, close.
+ * Commands: init, navigate, snapshot, click, fill, wait, screenshot, close.
  * Usage: node run.mjs [--headless]  (default headless=true)
  */
 
@@ -103,6 +103,85 @@ async function handleSnapshot() {
   }
 }
 
+async function handleClick(params) {
+  if (!page) {
+    send({ ok: false, error: 'Browser not initialized; send init first.' });
+    return;
+  }
+  try {
+    const sel = (params && params.selector) || '';
+    if (!sel) {
+      send({ ok: false, error: 'click requires params.selector (CSS selector)' });
+      return;
+    }
+    const timeout = (params.timeout_secs || 30) * 1000;
+    await page.click(sel, { timeout });
+    send({ ok: true, result: { clicked: true, selector: sel } });
+  } catch (e) {
+    send({ ok: false, error: e.message || String(e) });
+  }
+}
+
+async function handleFill(params) {
+  if (!page) {
+    send({ ok: false, error: 'Browser not initialized; send init first.' });
+    return;
+  }
+  try {
+    const sel = (params && params.selector) || '';
+    const value = (params && params.value) != null ? String(params.value) : '';
+    if (!sel) {
+      send({ ok: false, error: 'fill requires params.selector and params.value' });
+      return;
+    }
+    const timeout = (params.timeout_secs || 30) * 1000;
+    await page.fill(sel, value, { timeout });
+    send({ ok: true, result: { filled: true, selector: sel } });
+  } catch (e) {
+    send({ ok: false, error: e.message || String(e) });
+  }
+}
+
+async function handleWait(params) {
+  if (!page) {
+    send({ ok: false, error: 'Browser not initialized; send init first.' });
+    return;
+  }
+  try {
+    const ms = params && params.milliseconds;
+    const sel = params && params.selector;
+    if (typeof ms === 'number' && ms >= 0 && !sel) {
+      const capped = Math.min(ms, 120000);
+      await new Promise((r) => setTimeout(r, capped));
+      send({ ok: true, result: { waited_ms: capped } });
+      return;
+    }
+    if (!sel || typeof sel !== 'string') {
+      send({ ok: false, error: 'wait requires params.selector (string) or params.milliseconds (number)' });
+      return;
+    }
+    const timeout = (params.timeout_secs || 30) * 1000;
+    await page.waitForSelector(sel, { timeout });
+    send({ ok: true, result: { waited: true, selector: sel } });
+  } catch (e) {
+    send({ ok: false, error: e.message || String(e) });
+  }
+}
+
+async function handleScreenshot(params) {
+  if (!page) {
+    send({ ok: false, error: 'Browser not initialized; send init first.' });
+    return;
+  }
+  try {
+    const fullPage = !!(params && params.full_page);
+    const buf = await page.screenshot({ type: 'png', fullPage });
+    send({ ok: true, result: { format: 'png', data_base64: buf.toString('base64') } });
+  } catch (e) {
+    send({ ok: false, error: e.message || String(e) });
+  }
+}
+
 async function handleClose() {
   try {
     if (browser) {
@@ -136,6 +215,18 @@ async function dispatch(line) {
       break;
     case 'snapshot':
       await handleSnapshot();
+      break;
+    case 'click':
+      await handleClick(params);
+      break;
+    case 'fill':
+      await handleFill(params);
+      break;
+    case 'wait':
+      await handleWait(params);
+      break;
+    case 'screenshot':
+      await handleScreenshot(params);
       break;
     case 'close':
       await handleClose();

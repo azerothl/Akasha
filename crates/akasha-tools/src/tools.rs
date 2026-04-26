@@ -1740,3 +1740,214 @@ pub async fn web_search(
         },
     ))
 }
+
+/// Start a Cloudflare Browser Rendering crawl job. Feature "web". See spec/53.
+#[cfg(feature = "web")]
+pub async fn web_crawl_start(
+    url: &str,
+    limit: u32,
+    policy: &crate::policy::ToolsPolicy,
+) -> Result<(String, ToolResult)> {
+    if !policy.web_crawl_enabled {
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: "web_crawl".to_string(),
+                success: false,
+                summary: "web_crawl not enabled (tools_policy web_crawl_enabled: true)".to_string(),
+                detail: Some(url.to_string()),
+            },
+        ));
+    }
+    let Some(account) = policy.resolved_cloudflare_account_id() else {
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: "web_crawl".to_string(),
+                success: false,
+                summary: "missing cloudflare account id (tools_policy cloudflare_account_id or CLOUDFLARE_ACCOUNT_ID)".to_string(),
+                detail: Some(url.to_string()),
+            },
+        ));
+    };
+    let Some(token) = policy.resolved_cloudflare_api_token() else {
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: "web_crawl".to_string(),
+                success: false,
+                summary: "missing Cloudflare API token (vault cloudflare_api_token or CLOUDFLARE_API_TOKEN)".to_string(),
+                detail: Some(url.to_string()),
+            },
+        ));
+    };
+    if !policy.can_fetch_url(url) {
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: "web_crawl".to_string(),
+                success: false,
+                summary: "url host not allowed by policy (allowed_web_domains / blocked_web_domains)".to_string(),
+                detail: Some(url.to_string()),
+            },
+        ));
+    }
+    let endpoint = format!(
+        "https://api.cloudflare.com/client/v4/accounts/{}/browser-rendering/crawl",
+        account
+    );
+    let lim = limit.max(1).min(200);
+    let body = serde_json::json!({
+        "url": url,
+        "limit": lim,
+        "formats": ["markdown"],
+        "render": true
+    });
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("web_crawl build client")?;
+    let res = client
+        .post(&endpoint)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&body)
+        .send()
+        .await
+        .context("web_crawl send")?;
+    let status = res.status();
+    let text = res.text().await.unwrap_or_default();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({ "raw": text }));
+    let ok_api = v.get("success").and_then(|x| x.as_bool()).unwrap_or(false);
+    if !status.is_success() || !ok_api {
+        let errs = v
+            .get("errors")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: "web_crawl".to_string(),
+                success: false,
+                summary: format!("Cloudflare crawl start failed: HTTP {}", status),
+                detail: Some(serde_json::to_string(&errs).unwrap_or_else(|_| text.chars().take(2000).collect())),
+            },
+        ));
+    }
+    let job_id = v
+        .pointer("/result/id")
+        .and_then(|x| x.as_str())
+        .or_else(|| v.get("result").and_then(|r| r.as_str()))
+        .or_else(|| v.pointer("/result/job_id").and_then(|x| x.as_str()))
+        .unwrap_or("")
+        .to_string();
+    if job_id.is_empty() {
+        return Ok((
+            text,
+            ToolResult {
+                tool: "web_crawl".to_string(),
+                success: false,
+                summary: "unexpected Cloudflare response (no job id in result)".to_string(),
+                detail: Some(serde_json::to_string(&v).unwrap_or_default()),
+            },
+        ));
+    }
+    let msg = format!(
+        "job_id={}\nPoll with: TOOL: web_crawl_status {}",
+        job_id, job_id
+    );
+    Ok((
+        msg,
+        ToolResult {
+            tool: "web_crawl".to_string(),
+            success: true,
+            summary: "crawl job started".to_string(),
+            detail: Some(url.to_string()),
+        },
+    ))
+}
+
+/// Poll a Cloudflare crawl job. Feature "web".
+#[cfg(feature = "web")]
+pub async fn web_crawl_status(job_id: &str, policy: &crate::policy::ToolsPolicy) -> Result<(String, ToolResult)> {
+    let job_id = job_id.trim();
+    if job_id.is_empty() {
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: "web_crawl_status".to_string(),
+                success: false,
+                summary: "usage: web_crawl_status <job_id>".to_string(),
+                detail: None,
+            },
+        ));
+    }
+    if !policy.web_crawl_enabled {
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: "web_crawl_status".to_string(),
+                success: false,
+                summary: "web_crawl not enabled in tools_policy".to_string(),
+                detail: None,
+            },
+        ));
+    }
+    let Some(account) = policy.resolved_cloudflare_account_id() else {
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: "web_crawl_status".to_string(),
+                success: false,
+                summary: "missing cloudflare account id".to_string(),
+                detail: None,
+            },
+        ));
+    };
+    let Some(token) = policy.resolved_cloudflare_api_token() else {
+        return Ok((
+            String::new(),
+            ToolResult {
+                tool: "web_crawl_status".to_string(),
+                success: false,
+                summary: "missing Cloudflare API token".to_string(),
+                detail: None,
+            },
+        ));
+    };
+    let endpoint = format!(
+        "https://api.cloudflare.com/client/v4/accounts/{}/browser-rendering/crawl/{}",
+        account, job_id
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("web_crawl_status build client")?;
+    let res = client
+        .get(&endpoint)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .context("web_crawl_status send")?;
+    let status = res.status();
+    let text = res.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Ok((
+            text.chars().take(4000).collect(),
+            ToolResult {
+                tool: "web_crawl_status".to_string(),
+                success: false,
+                summary: format!("HTTP {}", status),
+                detail: Some(job_id.to_string()),
+            },
+        ));
+    }
+    Ok((
+        text.chars().take(120_000).collect(),
+        ToolResult {
+            tool: "web_crawl_status".to_string(),
+            success: true,
+            summary: "crawl status".to_string(),
+            detail: Some(job_id.to_string()),
+        },
+    ))
+}

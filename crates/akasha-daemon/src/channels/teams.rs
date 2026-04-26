@@ -3,6 +3,7 @@
 
 use crate::agents::MainAgent;
 use crate::gateway;
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -25,63 +26,76 @@ const ALLOWED_SERVICE_URL_DOMAINS: &[&str] = &[
     ".teams.microsoft.com",
 ];
 
-/// Validate the Bot Framework Authorization header: require a Bearer JWT, validate
-/// structure, issuer, and audience (app_id). Returns an error string on failure.
-/// Note: signature verification requires fetching JWKS from Microsoft endpoints;
-/// here we validate the token structure, issuer prefix, and audience to prevent
-/// unauthenticated access while keeping the implementation self-contained.
-fn validate_teams_jwt(authorization: Option<&str>, app_id: &str) -> Result<(), &'static str> {
-    let auth = match authorization {
-        Some(a) if a.to_ascii_lowercase().starts_with("bearer ") => &a[7..],
-        _ => return Err("missing_authorization"),
+const BOTFRAMEWORK_JWKS_URL: &str = "https://login.botframework.com/v1/.well-known/keys";
+
+fn extract_bearer_token<'a>(authorization: Option<&'a str>) -> Option<&'a str> {
+    let auth = authorization?;
+    let lower = auth.to_ascii_lowercase();
+    let rest = if lower.starts_with("bearer ") {
+        auth.get(7..)?
+    } else {
+        return None;
     };
-    // Decode JWT payload (middle segment, base64url encoded JSON).
-    // JWT uses base64url without padding; try URL_SAFE_NO_PAD first, then with padding added.
-    let parts: Vec<&str> = auth.splitn(3, '.').collect();
-    if parts.len() != 3 {
-        return Err("invalid_jwt_format");
+    let t = rest.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t)
     }
-    let payload_b64 = parts[1];
-    let decoded = base64::Engine::decode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        payload_b64,
-    )
-    .or_else(|_| {
-        let padded = match payload_b64.len() % 4 {
-            2 => format!("{}==", payload_b64),
-            3 => format!("{}=", payload_b64),
-            _ => payload_b64.to_string(),
-        };
-        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &padded)
-    })
-    .map_err(|_| "jwt_payload_decode_error")?;
-    let payload: serde_json::Value =
-        serde_json::from_slice(&decoded).map_err(|_| "jwt_payload_parse_error")?;
-    // Validate issuer.
-    let iss = payload.get("iss").and_then(|v| v.as_str()).unwrap_or("");
+}
+
+/// Fetch JWKS from Bot Framework and return PEM (first `x5c` cert) for `kid`.
+fn botframework_signing_pem_for_kid(kid: &str) -> Result<String, &'static str> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|_| "jwks_client_build_failed")?;
+    let resp = client
+        .get(BOTFRAMEWORK_JWKS_URL)
+        .send()
+        .map_err(|_| "jwks_fetch_failed")?;
+    if !resp.status().is_success() {
+        return Err("jwks_http_error");
+    }
+    let v: serde_json::Value = resp.json().map_err(|_| "jwks_json_failed")?;
+    let keys = v["keys"].as_array().ok_or("jwks_missing_keys")?;
+    for k in keys {
+        if k["kid"].as_str() != Some(kid) {
+            continue;
+        }
+        let x5c0 = k["x5c"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|x| x.as_str())
+            .ok_or("jwks_missing_x5c")?;
+        return Ok(format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            x5c0
+        ));
+    }
+    Err("jwks_kid_not_found")
+}
+
+/// Validate the Bot Framework Authorization header: Bearer JWT with **RS256 signature**
+/// against Microsoft JWKS (`x5c`), plus audience (`app_id`) and issuer prefix checks.
+fn validate_teams_jwt(authorization: Option<&str>, app_id: &str) -> Result<(), &'static str> {
+    let token = extract_bearer_token(authorization).ok_or("missing_authorization")?;
+    let header = decode_header(token).map_err(|_| "invalid_jwt_header")?;
+    if header.alg != Algorithm::RS256 {
+        return Err("unsupported_jwt_alg");
+    }
+    let kid = header.kid.as_deref().ok_or("missing_kid")?;
+    let pem = botframework_signing_pem_for_kid(kid)?;
+    let key = DecodingKey::from_rsa_pem(pem.as_bytes()).map_err(|_| "invalid_signing_pem")?;
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.validate_exp = true;
+    validation.leeway = 60;
+    validation.set_audience(&[app_id]);
+    let data = decode::<serde_json::Value>(token, &key, &validation).map_err(|_| "jwt_verify_failed")?;
+    let iss = data.claims.get("iss").and_then(|v| v.as_str()).unwrap_or("");
     if !BOT_FRAMEWORK_ISSUERS.iter().any(|prefix| iss.starts_with(prefix)) {
         warn!(iss = %iss, "Teams: JWT issuer not from Bot Framework");
         return Err("invalid_jwt_issuer");
-    }
-    // Validate audience matches our app_id.
-    let aud_matches = match payload.get("aud") {
-        Some(serde_json::Value::String(s)) => s == app_id,
-        Some(serde_json::Value::Array(arr)) => arr.iter().any(|v| v.as_str() == Some(app_id)),
-        _ => false,
-    };
-    if !aud_matches {
-        warn!("Teams: JWT audience does not match app_id");
-        return Err("invalid_jwt_audience");
-    }
-    // Validate token is not expired.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    if let Some(exp) = payload.get("exp").and_then(|v| v.as_u64()) {
-        if exp < now {
-            return Err("jwt_expired");
-        }
     }
     Ok(())
 }

@@ -10,6 +10,8 @@ pub const RUN_COMMAND_STDERR_MAX: usize = 4_000;
 pub const GIT_TEXT_MAX: usize = 8_000;
 /// Max bytes included from a browser snapshot text result.
 pub const BROWSER_SNAPSHOT_TEXT_MAX: usize = 8_000;
+/// Max base64 characters returned for `browser screenshot` (PNG) in tool output.
+pub const BROWSER_SCREENSHOT_B64_MAX: usize = 32_000;
 
 const READ_FILE_PREVIEW_BYTES: usize = 500;
 
