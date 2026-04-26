@@ -522,7 +522,6 @@ async fn mcp_write_framed_local<W: tokio::io::AsyncWriteExt + Unpin>(
     writer: &mut W,
     msg: &serde_json::Value,
 ) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
     let body = msg.to_string();
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
     writer.write_all(header.as_bytes()).await?;
