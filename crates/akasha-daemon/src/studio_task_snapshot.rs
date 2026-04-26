@@ -214,11 +214,12 @@ pub fn compute_studio_task_diff_from_snapshot(snap: StudioTaskSnapshot) -> anyho
         match current.get(path) {
             None => {
                 let diff = build_unified_diff(&unified_diff_label(path), "/dev/null", &old_f.content, "");
+                let long = diff.chars().count() > MAX_DIFF_OUTPUT_CHARS_PER_FILE;
                 out.push(StudioFileDiffEntry {
                     path: path.clone(),
                     status: "deleted".to_string(),
                     diff: truncate_diff(diff),
-                    truncated: old_f.content.chars().count() > MAX_DIFF_OUTPUT_CHARS_PER_FILE,
+                    truncated: long,
                 });
             }
             Some(new_c) if new_c != &old_f.content => {
@@ -244,7 +245,7 @@ pub fn compute_studio_task_diff_from_snapshot(snap: StudioTaskSnapshot) -> anyho
             continue;
         }
         let diff = build_unified_diff("/dev/null", &unified_diff_label(path), "", new_c);
-        let long = new_c.chars().count() > MAX_DIFF_OUTPUT_CHARS_PER_FILE;
+        let long = diff.chars().count() > MAX_DIFF_OUTPUT_CHARS_PER_FILE;
         out.push(StudioFileDiffEntry {
             path: path.clone(),
             status: "added".to_string(),
