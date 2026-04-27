@@ -90,6 +90,91 @@ fn parse_read_file_args(args: &[String]) -> (Vec<String>, Option<(usize, usize)>
 /// Séparateur recommandé entre l’ancien et le nouveau texte (`TOOL:` est découpé sur les espaces, d’où un token `|` seul).
 const SEARCH_REPLACE_DELIM: &str = " | ";
 
+const BUDGET_SETTINGS_FILE: &str = "budget_settings.json";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct BudgetSettings {
+    daily_token_limit: u64,
+    warn_ratio: f64,
+    auto_concise: bool,
+}
+
+impl Default for BudgetSettings {
+    fn default() -> Self {
+        Self {
+            daily_token_limit: 1_000_000,
+            warn_ratio: 0.7,
+            auto_concise: true,
+        }
+    }
+}
+
+const SECOND_BRAIN_SETTINGS_FILE: &str = "memory_second_brain.json";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct SecondBrainSettings {
+    enabled: bool,
+    paused: bool,
+}
+
+impl Default for SecondBrainSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            paused: false,
+        }
+    }
+}
+
+fn load_second_brain_settings(data_dir: &Path) -> SecondBrainSettings {
+    let path = data_dir.join(SECOND_BRAIN_SETTINGS_FILE);
+    let raw = match std::fs::read_to_string(path) {
+        Ok(v) => v,
+        Err(_) => return SecondBrainSettings::default(),
+    };
+    serde_json::from_str::<SecondBrainSettings>(&raw).unwrap_or_default()
+}
+
+fn save_second_brain_settings(data_dir: &Path, settings: &SecondBrainSettings) -> anyhow::Result<()> {
+    let path = data_dir.join(SECOND_BRAIN_SETTINGS_FILE);
+    std::fs::write(path, serde_json::to_string_pretty(settings)?)?;
+    Ok(())
+}
+
+fn load_budget_settings(data_dir: &Path) -> BudgetSettings {
+    let path = data_dir.join(BUDGET_SETTINGS_FILE);
+    let raw = match std::fs::read_to_string(path) {
+        Ok(v) => v,
+        Err(_) => return BudgetSettings::default(),
+    };
+    serde_json::from_str::<BudgetSettings>(&raw).unwrap_or_default()
+}
+
+fn save_budget_settings(data_dir: &Path, settings: &BudgetSettings) -> anyhow::Result<()> {
+    let path = data_dir.join(BUDGET_SETTINGS_FILE);
+    std::fs::write(path, serde_json::to_string_pretty(settings)?)?;
+    Ok(())
+}
+
+fn tool_scope_key(tool: &str, tool_args: &[String]) -> String {
+    match tool {
+        "run_command" | "run_terminal" | "run_command_background" => tool_args
+            .iter()
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string(),
+        "write_file" | "edit_file" | "apply_patch" | "delete_file" | "rename_path" | "move_tree" => {
+            tool_args.get(0).cloned().unwrap_or_else(|| "global".to_string())
+        }
+        _ => "global".to_string(),
+    }
+}
+
 /// `args[0]` = chemin ; le reste = « ancien » puis ` | ` (recommandé) ou `|`, puis « nouveau ».
 /// Retire les `|` initiaux issus du découpage (`path | old | new` → `old | new`).
 fn parse_search_replace_payload(args: &[String]) -> Result<(String, String), &'static str> {
@@ -956,6 +1041,13 @@ impl TaskUsageStore {
     pub async fn get_session(&self, session_id: &str) -> Option<(u64, f64)> {
         self.by_session.read().await.get(session_id).copied()
     }
+    pub async fn reset_session(&self, session_id: &str) {
+        self.by_session.write().await.remove(session_id);
+    }
+    pub async fn totals(&self) -> (u64, f64) {
+        let g = self.by_session.read().await;
+        g.values().fold((0u64, 0.0f64), |acc, v| (acc.0 + v.0, acc.1 + v.1))
+    }
 }
 
 pub fn new_task_completion_registry() -> TaskCompletionRegistry {
@@ -1396,6 +1488,10 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("sessions_list", "sessions_list [limit] — lister les tâches/sessions récentes"),
     ("sessions_spawn", "sessions_spawn <message> [session_id] — créer une sous-tâche et la lancer"),
     ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
+    ("schedule_task", "schedule_task <cron> <prompt> [title] — créer une tâche planifiée active."),
+    ("list_scheduled_tasks", "list_scheduled_tasks [limit] — lister les schedules actifs."),
+    ("cancel_scheduled_task", "cancel_scheduled_task <schedule_id> — supprimer un schedule par UUID."),
+    ("budget_status", "budget_status [session_id] — état budget (usage tokens/coût, seuil, auto-concise)."),
     ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
     ("browser", "browser navigate <url> — navigate (http/https; domain allowed). browser snapshot — texte + liens. browser screenshot | browser click <css> | browser fill <css> <texte> | browser wait <css_selector|ms> — automation Playwright (spec 39)."),
     ("install_playwright", "install_playwright — run npm install and npx playwright install chromium in the Playwright runner directory (scripts/playwright-runner or AKASHA_PLAYWRIGHT_RUNNER). Requires browser_enabled. Use after ask_user consent if you need explicit approval before download; optional require_approval in tools_policy."),
@@ -3511,6 +3607,10 @@ const ORCH_INLINE_TOOL_FIRST_WORDS: &[&str] = &[
     "install_playwright",
     "read_skill",
     "memory_store",
+    "schedule_task",
+    "list_scheduled_tasks",
+    "cancel_scheduled_task",
+    "budget_status",
     "workspace_graph_search",
     "device_invoke",
     "ask_user",
@@ -5079,6 +5179,164 @@ async fn execute_tool_call(
                 }
                 (_, _) => (false, "[sessions_spawn] store or conversation channel not available".to_string(), None),
             }
+        }
+        "schedule_task" => {
+            let cron = args.get(0).map(String::as_str).unwrap_or("").trim();
+            let prompt = args.get(1).map(String::as_str).unwrap_or("").trim();
+            let title = args
+                .get(2)
+                .cloned()
+                .unwrap_or_else(|| "Agent scheduled task".to_string());
+            if cron.is_empty() || prompt.is_empty() {
+                return (
+                    false,
+                    "[schedule_task] usage: schedule_task <cron> <prompt> [title]".to_string(),
+                    None,
+                );
+            }
+            match store_path {
+                Some(path) => match ScheduleStore::open(path) {
+                    Ok(store) => {
+                        let now = chrono::Utc::now();
+                        let s = Schedule {
+                            id: Uuid::new_v4(),
+                            name: title,
+                            description: prompt.to_string(),
+                            timezone: "UTC".to_string(),
+                            rrule: cron.to_string(),
+                            interval_seconds: None,
+                            start_at: now,
+                            end_at: None,
+                            channel_context: Some(
+                                serde_json::json!({
+                                    "prompt": prompt,
+                                    "source": "tool:schedule_task",
+                                    "created_by_task_id": task_id.to_string()
+                                })
+                                .to_string(),
+                            ),
+                            enabled: true,
+                            created_at: now,
+                            updated_at: now,
+                        };
+                        match store.insert_schedule(&s) {
+                            Ok(()) => (
+                                true,
+                                format!(
+                                    "[schedule_task] created schedule {} ({})",
+                                    s.id, cron
+                                ),
+                                None,
+                            ),
+                            Err(e) => (false, format!("[schedule_task] {}", e), None),
+                        }
+                    }
+                    Err(e) => (false, format!("[schedule_task] store error: {}", e), None),
+                },
+                None => (false, "[schedule_task] store not available".to_string(), None),
+            }
+        }
+        "list_scheduled_tasks" => {
+            let limit = args
+                .get(0)
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(20)
+                .min(100);
+            match store_path {
+                Some(path) => match ScheduleStore::open(path) {
+                    Ok(store) => match store.list_schedules() {
+                        Ok(list) => {
+                            let lines: Vec<String> = list
+                                .into_iter()
+                                .rev()
+                                .take(limit)
+                                .map(|s| {
+                                    format!(
+                                        "{} {} {} {}",
+                                        s.id,
+                                        if s.enabled { "enabled" } else { "disabled" },
+                                        "cron",
+                                        s.rrule
+                                    )
+                                })
+                                .collect();
+                            (
+                                true,
+                                format!(
+                                    "[list_scheduled_tasks] {} schedule(s): {}",
+                                    lines.len(),
+                                    lines.join(" ; ")
+                                ),
+                                None,
+                            )
+                        }
+                        Err(e) => (false, format!("[list_scheduled_tasks] {}", e), None),
+                    },
+                    Err(e) => (false, format!("[list_scheduled_tasks] store error: {}", e), None),
+                },
+                None => (false, "[list_scheduled_tasks] store not available".to_string(), None),
+            }
+        }
+        "cancel_scheduled_task" => {
+            let id = args
+                .get(0)
+                .and_then(|s| Uuid::parse_str(s).ok());
+            match (store_path, id) {
+                (Some(path), Some(schedule_id)) => match ScheduleStore::open(path) {
+                    Ok(store) => match store.get_schedule(schedule_id) {
+                        Ok(Some(_)) => match store.delete_schedule(schedule_id) {
+                            Ok(()) => (
+                                true,
+                                format!("[cancel_scheduled_task] deleted {}", schedule_id),
+                                None,
+                            ),
+                            Err(e) => (false, format!("[cancel_scheduled_task] {}", e), None),
+                        },
+                        Ok(None) => (
+                            false,
+                            format!("[cancel_scheduled_task] {} not found", schedule_id),
+                            None,
+                        ),
+                        Err(e) => (false, format!("[cancel_scheduled_task] {}", e), None),
+                    },
+                    Err(e) => (false, format!("[cancel_scheduled_task] store error: {}", e), None),
+                },
+                (_, _) => (
+                    false,
+                    "[cancel_scheduled_task] usage: cancel_scheduled_task <schedule_id>".to_string(),
+                    None,
+                ),
+            }
+        }
+        "budget_status" => {
+            let session_id = args.get(0).cloned().unwrap_or_default();
+            let settings = match store_path {
+                Some(path) => path.parent().map(load_budget_settings).unwrap_or_default(),
+                None => BudgetSettings::default(),
+            };
+            let usage = if session_id.trim().is_empty() {
+                (0u64, 0.0f64)
+            } else {
+                (0u64, 0.0f64)
+            };
+            let ratio = if settings.daily_token_limit == 0 {
+                0.0
+            } else {
+                usage.0 as f64 / settings.daily_token_limit as f64
+            };
+            (
+                true,
+                format!(
+                    "[budget_status] limit={} used_tokens={} cost_usd={:.4} warn_ratio={:.2} auto_concise={} over_warn={}",
+                    settings.daily_token_limit,
+                    usage.0,
+                    usage.1,
+                    settings.warn_ratio,
+                    settings.auto_concise,
+                    ratio >= settings.warn_ratio
+                ),
+                None,
+            )
         }
         "message" => {
             let sub = args.get(0).map(String::as_str).unwrap_or("");
@@ -9924,6 +10182,50 @@ pub(crate) async fn run_message_via_llm(
                         );
                         // Phase 3.1: tools in require_approval need user confirmation before execution.
                         if exec.policy.requires_approval(&actual_tool) {
+                            let scope_key = tool_scope_key(&actual_tool, &tool_args);
+                            let state = crate::permissions_center::load(data_dir);
+                            let mut already_granted = false;
+                            if let Some(decision) =
+                                crate::permissions_center::lookup(&actual_tool, &scope_key, &state)
+                            {
+                                match decision.mode {
+                                    crate::permissions_center::DecisionMode::AllowPersistent => {
+                                        already_granted = true;
+                                        let payload = serde_json::json!({
+                                            "tool": actual_tool,
+                                            "scope": scope_key,
+                                            "approved": true,
+                                            "mode": "allow_persistent",
+                                            "decision_id": decision.id
+                                        });
+                                        let _ = bus.send(
+                                            EventEnvelope::new(EventType::ToolInvoked, Some(payload))
+                                                .with_correlation(timeline_correlation),
+                                        );
+                                    }
+                                    crate::permissions_center::DecisionMode::DenyPersistent => {
+                                        tool_results.push(
+                                            "Action refusée par la politique d'approbation persistante."
+                                                .to_string(),
+                                        );
+                                        let payload = serde_json::json!({
+                                            "tool": actual_tool,
+                                            "scope": scope_key,
+                                            "approved": false,
+                                            "mode": "deny_persistent",
+                                            "decision_id": decision.id
+                                        });
+                                        let _ = bus.send(
+                                            EventEnvelope::new(EventType::ToolInvoked, Some(payload))
+                                                .with_correlation(timeline_correlation),
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+                            if already_granted {
+                                // Persistent approval matched: skip interactive prompt.
+                            } else {
                             match &human_input_store {
                                 Some(store) => {
                                     const APPROVAL_TIMEOUT_SECS: u64 = 300;
@@ -9962,8 +10264,11 @@ pub(crate) async fn run_message_via_llm(
                                         "Approuver l'action : {} — {} ?",
                                         actual_tool, args_preview
                                     );
-                                    let choices =
-                                        vec!["Approuver".to_string(), "Refuser".to_string()];
+                                    let choices = vec![
+                                        "Approuver".to_string(),
+                                        "Toujours autoriser".to_string(),
+                                        "Refuser".to_string(),
+                                    ];
                                     let (tx, rx) = tokio::sync::oneshot::channel();
                                     let pending = PendingHumanInput {
                                         question: question.clone(),
@@ -10004,15 +10309,13 @@ pub(crate) async fn run_message_via_llm(
                                         )
                                         .with_correlation(task_id),
                                     );
-                                    let granted = match tokio::time::timeout(
+                                    let answer = match tokio::time::timeout(
                                         std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS),
                                         rx,
                                     )
                                     .await
                                     {
-                                        Ok(Ok(reply)) => {
-                                            reply.trim().eq_ignore_ascii_case("Approuver")
-                                        }
+                                        Ok(Ok(reply)) => reply.trim().to_string(),
                                         _ => {
                                             // Timeout or channel error: remove stale pending entry to avoid it staying forever.
                                             {
@@ -10030,9 +10333,26 @@ pub(crate) async fn run_message_via_llm(
                                                 )
                                                 .with_correlation(task_id),
                                             );
-                                            false
+                                            "Refuser".to_string()
                                         }
                                     };
+                                    let granted = answer.eq_ignore_ascii_case("Approuver")
+                                        || answer.eq_ignore_ascii_case("Toujours autoriser");
+                                    if answer.eq_ignore_ascii_case("Toujours autoriser") {
+                                        let mut state = crate::permissions_center::load(data_dir);
+                                        state.decisions.retain(|d| {
+                                            !(d.tool == actual_tool && d.scope == scope_key)
+                                        });
+                                        state.decisions.push(crate::permissions_center::PermissionDecision {
+                                            id: Uuid::new_v4().to_string(),
+                                            tool: actual_tool.clone(),
+                                            scope: scope_key.clone(),
+                                            mode: crate::permissions_center::DecisionMode::AllowPersistent,
+                                            created_at: chrono::Utc::now().to_rfc3339(),
+                                            expires_at: None,
+                                        });
+                                        let _ = crate::permissions_center::save(data_dir, &state);
+                                    }
                                     if !granted {
                                         tool_results.push("Action refusée par l'utilisateur (approbation requise).".to_string());
                                         let payload = serde_json::json!({
@@ -10053,6 +10373,7 @@ pub(crate) async fn run_message_via_llm(
                                     tool_results.push("Action nécessitant approbation impossible (human_input_store indisponible).".to_string());
                                     continue;
                                 }
+                            }
                             }
                         }
                         let tool_t0 = std::time::Instant::now();
@@ -13140,6 +13461,106 @@ data: {}\n\n",
         }
     }
 
+    // Second brain controls: settings, overview and clear.
+    if method == "GET" && path == "/api/memory/second-brain/settings" {
+        let settings = load_second_brain_settings(data_dir);
+        let body = serde_json::json!({ "settings": settings });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path == "/api/memory/second-brain/settings" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let mut settings = load_second_brain_settings(data_dir);
+        if let Some(enabled) = body_json
+            .as_ref()
+            .and_then(|v| v.get("enabled").and_then(|b| b.as_bool()))
+        {
+            settings.enabled = enabled;
+        }
+        if let Some(paused) = body_json
+            .as_ref()
+            .and_then(|v| v.get("paused").and_then(|b| b.as_bool()))
+        {
+            settings.paused = paused;
+        }
+        match save_second_brain_settings(data_dir, &settings) {
+            Ok(()) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "settings": settings }).to_string(),
+                )
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+    if method == "GET" && path.starts_with("/api/memory/second-brain/overview") {
+        let settings = load_second_brain_settings(data_dir);
+        let (entries, total) = if let Some(ref client) = long_term_client {
+            let client = client.clone();
+            tokio::task::spawn_blocking(move || client.list(500, 0))
+                .await
+                .unwrap_or((vec![], 0))
+        } else {
+            (vec![], 0)
+        };
+        let mut by_type: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        for (_, _, source, _) in entries {
+            let t = if source.contains("preference") {
+                "preference"
+            } else if source.contains("goal") {
+                "goal"
+            } else if source.contains("project") {
+                "project"
+            } else if source.contains("decision") {
+                "decision"
+            } else if source.contains("constraint") {
+                "constraint"
+            } else if source.contains("identity") || source.contains("user_fact") {
+                "identity"
+            } else {
+                "other"
+            };
+            *by_type.entry(t.to_string()).or_insert(0) += 1;
+        }
+        let body = serde_json::json!({
+            "settings": settings,
+            "total_entries": total,
+            "typed_counts": by_type
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path == "/api/memory/second-brain/clear" {
+        let mut deleted = 0u64;
+        if let Some(ref client) = long_term_client {
+            let client = client.clone();
+            deleted = tokio::task::spawn_blocking(move || {
+                let mut removed = 0u64;
+                loop {
+                    let (rows, _total) = client.list(200, 0);
+                    if rows.is_empty() {
+                        break;
+                    }
+                    for (id, _content, _source, _created) in rows {
+                        if client.delete(id).is_ok() {
+                            removed += 1;
+                        }
+                    }
+                }
+                removed
+            })
+            .await
+            .unwrap_or(0);
+        }
+        let body = serde_json::json!({ "ok": true, "deleted_entries": deleted });
+        return json_response("200 OK", &body.to_string());
+    }
+
     // GET /api/memory/recall-metrics — counters from memory orchestrator (semantic recall hits/empty).
     if method == "GET" && path == "/api/memory/recall-metrics" {
         let body = crate::memory_orchestrator::memory_recall_metrics_snapshot();
@@ -14920,6 +15341,187 @@ data: {}\n\n",
                 );
             }
         }
+    }
+
+    // Permission center: persisted approval decisions.
+    if method == "GET" && path_only == "/api/permissions/decisions" {
+        let state = crate::permissions_center::load(data_dir);
+        let body = serde_json::json!({ "decisions": state.decisions });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path_only == "/api/permissions/decisions" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let tool = body_json
+            .as_ref()
+            .and_then(|v| v.get("tool").and_then(|s| s.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let scope = body_json
+            .as_ref()
+            .and_then(|v| v.get("scope").and_then(|s| s.as_str()))
+            .unwrap_or("global")
+            .trim()
+            .to_string();
+        let mode_str = body_json
+            .as_ref()
+            .and_then(|v| v.get("mode").and_then(|s| s.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        let mode = match mode_str.as_str() {
+            "allow_persistent" => crate::permissions_center::DecisionMode::AllowPersistent,
+            "deny_persistent" => crate::permissions_center::DecisionMode::DenyPersistent,
+            _ => {
+                return json_response(
+                    "400 Bad Request",
+                    r#"{"error":"invalid_mode","expected":"allow_persistent|deny_persistent"}"#,
+                )
+            }
+        };
+        if tool.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_tool"}"#);
+        }
+        let mut state = crate::permissions_center::load(data_dir);
+        state
+            .decisions
+            .retain(|d| !(d.tool == tool && d.scope == scope));
+        let decision = crate::permissions_center::PermissionDecision {
+            id: Uuid::new_v4().to_string(),
+            tool,
+            scope,
+            mode,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            expires_at: None,
+        };
+        state.decisions.push(decision.clone());
+        match crate::permissions_center::save(data_dir, &state) {
+            Ok(()) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "decision": decision }).to_string(),
+                )
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+    if method == "DELETE" && path_only.starts_with("/api/permissions/decisions/") {
+        let id = path_only
+            .trim_start_matches("/api/permissions/decisions/")
+            .trim();
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
+        }
+        let mut state = crate::permissions_center::load(data_dir);
+        let before = state.decisions.len();
+        state.decisions.retain(|d| d.id != id);
+        let removed = before != state.decisions.len();
+        if removed {
+            let _ = crate::permissions_center::save(data_dir, &state);
+        }
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "ok": true, "removed": removed, "id": id }).to_string(),
+        );
+    }
+
+    // Budget controls (daily limit + warning ratio + auto-concise mode).
+    if method == "GET" && path_only == "/api/budget" {
+        let settings = load_budget_settings(data_dir);
+        let session_id = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| q.split('&').find(|p| p.starts_with("session_id=")))
+            .map(|p| p.trim_start_matches("session_id=").to_string())
+            .unwrap_or_default();
+        let session_usage = if session_id.is_empty() {
+            None
+        } else {
+            task_usage_store.get_session(&session_id).await
+        };
+        let totals = task_usage_store.totals().await;
+        let used_tokens = session_usage.map(|u| u.0).unwrap_or(totals.0);
+        let used_cost_usd = session_usage.map(|u| u.1).unwrap_or(totals.1);
+        let usage_ratio = if settings.daily_token_limit == 0 {
+            0.0
+        } else {
+            used_tokens as f64 / settings.daily_token_limit as f64
+        };
+        let body = serde_json::json!({
+            "settings": settings,
+            "session_id": if session_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(session_id) },
+            "usage": {
+                "tokens": used_tokens,
+                "cost_usd": used_cost_usd,
+                "ratio": usage_ratio,
+                "warn_reached": usage_ratio >= settings.warn_ratio
+            }
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path_only == "/api/budget" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let mut settings = load_budget_settings(data_dir);
+        if let Some(limit) = body_json
+            .as_ref()
+            .and_then(|v| v.get("daily_token_limit").and_then(|n| n.as_u64()))
+        {
+            settings.daily_token_limit = limit;
+        }
+        if let Some(warn_ratio) = body_json
+            .as_ref()
+            .and_then(|v| v.get("warn_ratio").and_then(|n| n.as_f64()))
+        {
+            settings.warn_ratio = warn_ratio.clamp(0.0, 1.0);
+        }
+        if let Some(auto_concise) = body_json
+            .as_ref()
+            .and_then(|v| v.get("auto_concise").and_then(|b| b.as_bool()))
+        {
+            settings.auto_concise = auto_concise;
+        }
+        match save_budget_settings(data_dir, &settings) {
+            Ok(()) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "settings": settings }).to_string(),
+                )
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+    if method == "POST" && path_only == "/api/budget/reset-session" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let session_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("session_id").and_then(|s| s.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if session_id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_session_id"}"#);
+        }
+        task_usage_store.reset_session(&session_id).await;
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "ok": true, "session_id": session_id }).to_string(),
+        );
     }
 
     // User RAG: list documents
