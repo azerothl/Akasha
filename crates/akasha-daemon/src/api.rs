@@ -1,6 +1,9 @@
 //! Simple HTTP API: POST /api/message, GET /api/tasks/:id, GET / (health)
 
-use crate::agent_profile::AgentProfile;
+pub use crate::agent_profile::{
+    get_or_load_agent_profile, new_agent_profile_cache, set_agent_profile_cache, AgentProfile,
+    AgentProfileCache,
+};
 use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority};
 use crate::latency::{
     clear_task_milestones, emit_timeline_once_for_task, env_duration_ms, log_latency_metric,
@@ -9,16 +12,13 @@ use crate::latency::{
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use crate::protocol_adapter::unknown_external_message_count;
-use crate::autonomous_mission_config::{
-    merge_from_json_partial, persist_config_and_snapshot, AutonomousMissionConfig, Horizon,
-    MissionStatusYaml,
-};
+use crate::autonomous_mission_config::{AutonomousMissionConfig, MissionStatusYaml};
 use crate::user_profile::UserProfile;
 use akasha_core::{EventEnvelope, EventType};
 use akasha_llm::CompletionRequest;
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use akasha_store::{
-    format_todos_plan_block, parse_todos_from_payload, AutonomousMissionStore, Schedule,
+    format_todos_plan_block, parse_todos_from_payload, Schedule,
     ScheduleException, ScheduleExceptionType, ScheduleStore, Task, TaskRunStatus, TaskStatus,
     TaskStore, TodoStatus, WorkspaceGraphStore,
 };
@@ -598,41 +598,12 @@ use tokio::sync::RwLock;
 use tracing::Instrument;
 use uuid::Uuid;
 
-/// In-memory cache for AgentProfile to avoid repeated disk reads (invalidated on POST /api/agent-profile and after profile save in run_message_via_llm).
-pub type AgentProfileCache = Arc<RwLock<Option<AgentProfile>>>;
-
 /// Virtual workspace per task (Deep Agents-style). Paths prefixed with "workspace:/" or "workspace:" are read/written here instead of disk.
 pub type TaskWorkspaceStore =
     Arc<RwLock<std::collections::HashMap<Uuid, std::collections::HashMap<String, String>>>>;
 
 pub fn new_task_workspace_store() -> TaskWorkspaceStore {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
-}
-
-pub fn new_agent_profile_cache() -> AgentProfileCache {
-    Arc::new(RwLock::new(None))
-}
-
-/// Load profile from cache or disk and update cache.
-pub async fn get_or_load_agent_profile(data_dir: &Path, cache: &AgentProfileCache) -> AgentProfile {
-    {
-        let g = cache.read().await;
-        if let Some(ref p) = *g {
-            return p.clone();
-        }
-    }
-    let profile = AgentProfile::load(data_dir);
-    {
-        let mut g = cache.write().await;
-        *g = Some(profile.clone());
-    }
-    profile
-}
-
-/// Update cache after profile save (call after writing to disk).
-pub async fn set_agent_profile_cache(cache: &AgentProfileCache, profile: AgentProfile) {
-    let mut g = cache.write().await;
-    *g = Some(profile);
 }
 
 /// Cached result of fetching api/latest.json from the Akasha_app site (version, download_url, etc.).
@@ -12094,171 +12065,6 @@ where
     Ok(())
 }
 
-fn split_path_query(path: &str) -> (&str, &str) {
-    path.split_once('?').map(|(p, q)| (p, q)).unwrap_or((path, ""))
-}
-
-fn parse_query_param(query: &str, key: &str) -> Option<String> {
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == key {
-                return Some(
-                    urlencoding::decode(v)
-                        .map(|c| c.into_owned())
-                        .unwrap_or_else(|_| v.to_string()),
-                );
-            }
-        }
-    }
-    None
-}
-
-async fn get_autonomous_mission_state(
-    data_dir: &Path,
-    store_path: &Path,
-    am: &Arc<RwLock<AutonomousMissionConfig>>,
-) -> String {
-    let cfg = am.read().await;
-    let am_store = match AutonomousMissionStore::open(store_path) {
-        Ok(s) => s,
-        Err(e) => {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    };
-    let (last_hb, last_tid) = am_store.get_meta().unwrap_or((None, None));
-    let report_abs = data_dir.join(&cfg.report_dir);
-    let horizon_s = match cfg.horizon {
-        Horizon::Short => "short",
-        Horizon::Medium => "medium",
-        Horizon::Long => "long",
-    };
-    let status_s = match cfg.status {
-        MissionStatusYaml::Active => "active",
-        MissionStatusYaml::Paused => "paused",
-        MissionStatusYaml::Completed => "completed",
-    };
-    let next_hb = last_hb.map(|t| t + chrono::Duration::minutes(cfg.heartbeat_interval_minutes as i64));
-    let role_definitions: Vec<serde_json::Value> = cfg
-        .role_definitions
-        .iter()
-        .map(|r| {
-            serde_json::json!({
-                "name": r.name,
-                "responsibility": r.responsibility,
-                "preferred_agent_type": r.preferred_agent_type,
-            })
-        })
-        .collect();
-    let body = serde_json::json!({
-        "enabled": cfg.enabled,
-        "global_context": cfg.global_context.as_str(),
-        "horizon": horizon_s,
-        "objective": cfg.objective.as_str(),
-        "heartbeat_interval_minutes": cfg.heartbeat_interval_minutes,
-        "report_dir": cfg.report_dir.as_str(),
-        "report_path_absolute": report_abs.display().to_string(),
-        "session_id": cfg.session_id.as_str(),
-        "status": status_s,
-        "operating_rules": cfg.operating_rules.as_str(),
-        "role_definitions": role_definitions,
-        "heartbeat_preferred_task_type": cfg.heartbeat_preferred_task_type.as_str(),
-        "last_heartbeat_at": last_hb.map(|t| t.to_rfc3339()),
-        "last_task_id": last_tid.map(|u| u.to_string()),
-        "next_heartbeat_approx_at": next_hb.map(|t| t.to_rfc3339()),
-    });
-    json_response("200 OK", &body.to_string())
-}
-
-async fn put_autonomous_mission_state(
-    data_dir: &Path,
-    store_path: &Path,
-    am: &Arc<RwLock<AutonomousMissionConfig>>,
-    body: &[u8],
-) -> String {
-    let v: serde_json::Value = match serde_json::from_slice(body) {
-        Ok(x) => x,
-        Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
-    };
-    {
-        let mut w = am.write().await;
-        let _ = merge_from_json_partial(&mut *w, &v);
-        if let Err(e) = persist_config_and_snapshot(data_dir, store_path, &*w) {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    }
-    get_autonomous_mission_state(data_dir, store_path, am).await
-}
-
-async fn get_autonomous_mission_events_list(store_path: &Path, query: &str) -> String {
-    let limit = parse_query_param(query, "limit")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(100)
-        .min(1000);
-    let since = parse_query_param(query, "since").and_then(|s| {
-        chrono::DateTime::parse_from_rfc3339(s.trim())
-            .ok()
-            .map(|d| d.with_timezone(&chrono::Utc))
-    });
-    let am_store = match AutonomousMissionStore::open(store_path) {
-        Ok(s) => s,
-        Err(e) => {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    };
-    let events = match am_store.list_events_since(since, limit) {
-        Ok(e) => e,
-        Err(e) => {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    };
-    let arr: Vec<_> = events
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "id": e.id,
-                "at": e.at.to_rfc3339(),
-                "event_type": e.event_type,
-                "payload": e.payload,
-            })
-        })
-        .collect();
-    json_response("200 OK", &serde_json::json!({ "events": arr }).to_string())
-}
-
-async fn post_autonomous_mission_status(
-    data_dir: &Path,
-    store_path: &Path,
-    am: &Arc<RwLock<AutonomousMissionConfig>>,
-    status: MissionStatusYaml,
-) -> String {
-    {
-        let mut w = am.write().await;
-        w.status = status;
-        if let Err(e) = persist_config_and_snapshot(data_dir, store_path, &*w) {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    }
-    get_autonomous_mission_state(data_dir, store_path, am).await
-}
-
 pub async fn handle_api(
     method: &str,
     path: &str,
@@ -12291,29 +12097,11 @@ pub async fn handle_api(
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
-    // CSRF protection: reject state-changing requests that originate from a non-local web page.
-    // Browsers include an Origin header on cross-origin requests; same-origin or non-browser clients
-    // (curl, CLI) typically do not. Allowing only localhost/tauri origins for mutating methods blocks
-    // attacks from malicious web pages opened in the same browser as the Tauri app.
-    if matches!(method, "POST" | "PUT" | "DELETE" | "PATCH") {
-        if let Some(origin) = headers.get("origin") {
-            let origin = origin.trim();
-            let is_local = origin == "null"
-                || origin.starts_with("http://localhost")
-                || origin.starts_with("http://127.0.0.1")
-                || origin.starts_with("https://localhost")
-                || origin.starts_with("https://127.0.0.1")
-                || origin.starts_with("http://tauri.localhost")
-                || origin.starts_with("https://tauri.localhost")
-                || origin.starts_with("tauri://");
-            if !is_local {
-                tracing::warn!(origin = %origin, method = %method, path = %path, "CSRF: rejected request from non-local origin");
-                return json_response("403 Forbidden", r#"{"error":"origin_not_allowed"}"#);
-            }
-        }
+    if let Some(resp) = crate::api_security::csrf_reject_response(method, path, headers) {
+        return resp;
     }
 
-    let (path_only, query_str) = split_path_query(path);
+    let (path_only, query_str) = crate::api_security::split_path_query(path);
     let _http_post_lifecycle = crate::lifecycle_hooks::HttpPostLifecycleHooks {
         data_dir: data_dir.to_path_buf(),
         method: method.to_string(),
@@ -12345,140 +12133,20 @@ pub async fn handle_api(
         return resp;
     }
 
-    // Signed inbound automation webhooks (Hermes-style external automation; no LLM in this path).
-    if method == "POST" && path_only == "/api/automation/webhook" {
-        let secret = std::env::var("AKASHA_AUTOMATION_WEBHOOK_SECRET").unwrap_or_default();
-        if secret.is_empty() {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"automation_webhook_secret_not_configured","hint":"Set AKASHA_AUTOMATION_WEBHOOK_SECRET and send HMAC-SHA256(body) in X-Signature (hex or sha256=<hex>)."}"#,
-            );
-        }
-        let body_bytes = body.as_deref().unwrap_or(&[]);
-        let sig = headers
-            .get("x-signature")
-            .or_else(|| headers.get("x-hub-signature-256"))
-            .map(String::as_str);
-        if !crate::webhook_inbound::verify_hmac_sha256(secret.as_bytes(), body_bytes, sig) {
-            return json_response("401 Unauthorized", r#"{"error":"invalid_signature"}"#);
-        }
-        let gate = crate::webhook_inbound::automation_gate();
-        let idem = headers
-            .get("idempotency-key")
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        if !idem.is_empty()
-            && !crate::webhook_inbound::check_automation_idempotency(
-                data_dir,
-                idem,
-                std::time::Duration::from_secs(86_400),
-                &gate,
-            )
-            .await
-        {
-            return json_response("409 Conflict", r#"{"error":"duplicate_idempotency_key"}"#);
-        }
-        if !crate::webhook_inbound::check_rate_distributed(
-            data_dir,
-            &gate,
-            "automation_webhook",
-            120,
-        )
-        .await
-        {
-            return json_response("429 Too Many Requests", r#"{"error":"rate_limited"}"#);
-        }
-        let parsed: serde_json::Value = match serde_json::from_slice(body_bytes) {
-            Ok(v) => v,
-            Err(_) => {
-                let keys_preview: Vec<&str> = vec![];
-                let body_out = serde_json::json!({
-                    "ok": true,
-                    "accepted": true,
-                    "invalid_json": true,
-                    "payload_key_count": 0,
-                    "payload_keys_preview": keys_preview,
-                });
-                return json_response(
-                    "202 Accepted",
-                    &serde_json::to_string(&body_out).unwrap_or_else(|_| "{}".to_string()),
-                );
-            }
-        };
-        let keys: Vec<_> = parsed
-            .as_object()
-            .map(|o| o.keys().map(|k| k.as_str()).collect())
-            .unwrap_or_default();
-        let body_out = serde_json::json!({
-            "ok": true,
-            "accepted": true,
-            "payload_key_count": keys.len(),
-            "payload_keys_preview": keys.into_iter().take(24).collect::<Vec<_>>(),
-        });
-        return json_response(
-            "202 Accepted",
-            &serde_json::to_string(&body_out).unwrap_or_else(|_| "{}".to_string()),
-        );
-    }
-
-    // Direct webhook delivery: returns fixed JSON from env (same HMAC gate; zero LLM tokens).
-    if method == "POST" && path_only == "/api/automation/webhook/direct" {
-        let secret = std::env::var("AKASHA_AUTOMATION_WEBHOOK_SECRET").unwrap_or_default();
-        let direct = std::env::var("AKASHA_WEBHOOK_DIRECT_BODY_JSON").unwrap_or_default();
-        if secret.is_empty() || direct.trim().is_empty() {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"direct_webhook_not_configured","hint":"Set AKASHA_AUTOMATION_WEBHOOK_SECRET and AKASHA_WEBHOOK_DIRECT_BODY_JSON (JSON text)."}"#,
-            );
-        }
-        let body_bytes = body.as_deref().unwrap_or(&[]);
-        let sig = headers
-            .get("x-signature")
-            .or_else(|| headers.get("x-hub-signature-256"))
-            .map(String::as_str);
-        if !crate::webhook_inbound::verify_hmac_sha256(secret.as_bytes(), body_bytes, sig) {
-            return json_response("401 Unauthorized", r#"{"error":"invalid_signature"}"#);
-        }
-        let gate = crate::webhook_inbound::automation_gate();
-        let idem = headers.get("idempotency-key").map(|s| s.as_str()).unwrap_or("");
-        let idem_key = if idem.is_empty() {
-            String::new()
-        } else {
-            format!("direct:{idem}")
-        };
-        if !idem_key.is_empty()
-            && !crate::webhook_inbound::check_automation_idempotency(
-                data_dir,
-                &idem_key,
-                std::time::Duration::from_secs(86_400),
-                &gate,
-            )
-            .await
-        {
-            return json_response("409 Conflict", r#"{"error":"duplicate_idempotency_key"}"#);
-        }
-        if !crate::webhook_inbound::check_rate_distributed(
-            data_dir,
-            &gate,
-            "automation_webhook_direct",
-            120,
-        )
-        .await
-        {
-            return json_response("429 Too Many Requests", r#"{"error":"rate_limited"}"#);
-        }
-        if let Err(e) = serde_json::from_str::<serde_json::Value>(direct.trim()) {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({"error":"invalid_AKASHA_WEBHOOK_DIRECT_BODY_JSON","detail": e.to_string()}).to_string(),
-            );
-        }
-        let body_trim = direct.trim();
-        return json_response("200 OK", body_trim);
+    if let Some(resp) = crate::api_routes_automation::handle_automation_routes(
+        method,
+        path_only,
+        body.as_deref(),
+        headers,
+        data_dir,
+    )
+    .await
+    {
+        return resp;
     }
 
     if method == "GET" && path_only == "/api/process/watch/recent" {
-        let limit = parse_query_param(query_str, "limit")
+        let limit = crate::api_security::parse_query_param(query_str, "limit")
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(50);
         let ev = crate::process_watch::recent(limit).await;
@@ -12488,335 +12156,40 @@ pub async fn handle_api(
         );
     }
 
-    if method == "GET" && path_only == "/api/terminal/capabilities" {
-        let j = serde_json::json!({
-            "interactive_pty": "available",
-            "current": ["run_command", "run_terminal", "run_command_background", "process list|poll|kill"],
-            "pty_api": {
-                "create": "POST /api/terminal/pty/sessions",
-                "list": "GET /api/terminal/pty/sessions",
-                "input": "POST /api/terminal/pty/sessions/{id}/input",
-                "output": "GET /api/terminal/pty/sessions/{id}/output?max=8192",
-                "resize": "POST /api/terminal/pty/sessions/{id}/resize",
-                "close": "DELETE /api/terminal/pty/sessions/{id}"
-            },
-            "spec": "spec/43_session_terminal.md"
-        });
-        return json_response("200 OK", &j.to_string());
+    if let Some(resp) = crate::api_routes_terminal::handle_terminal_routes(
+        method,
+        path_only,
+        query_str,
+        body.as_deref(),
+    )
+    .await
+    {
+        return resp;
     }
 
-    if method == "GET" && path_only == "/api/terminal/pty/sessions" {
-        let res =
-            tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().list_sessions())
-                .await;
-        return match res {
-            Ok(Ok(v)) => json_response(
-                "200 OK",
-                &serde_json::to_string(&v).unwrap_or_else(|_| "[]".to_string()),
-            ),
-            Ok(Err(e)) => json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({"error":"pty_list_failed","detail": e.to_string()}).to_string(),
-            ),
-            Err(e) => json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({"error":"pty_list_join","detail": e.to_string()}).to_string(),
-            ),
-        };
+    if let Some(resp) = crate::api_routes_mcp::handle_mcp_lifecycle_routes(
+        method,
+        path_only,
+        body.as_deref(),
+        data_dir,
+    )
+    .await
+    {
+        return resp;
     }
 
-    // PTY sessions (Hermes tranche 1 — portable-pty).
-    if method == "POST" && path_only == "/api/terminal/pty/sessions" {
-        let Some(b) = body.as_deref() else {
-            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-        };
-        let parsed: Result<crate::terminal_pty::PtyCreateBody, _> = serde_json::from_slice(b);
-        let Ok(create_body) = parsed else {
-            return json_response(
-                "400 Bad Request",
-                &serde_json::json!({"error":"invalid_json"}).to_string(),
-            );
-        };
-        let res = tokio::task::spawn_blocking(move || {
-            crate::terminal_pty::PtyManager::global().create(create_body)
-        })
-        .await;
-        match res {
-            Ok(Ok(r)) => {
-                return json_response(
-                    "200 OK",
-                    &serde_json::to_string(&r).unwrap_or_else(|_| "{}".to_string()),
-                );
-            }
-            Ok(Err(e)) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({"error":"pty_create_failed","detail": e.to_string()}).to_string(),
-                );
-            }
-            Err(e) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({"error":"pty_create_join","detail": e.to_string()}).to_string(),
-                );
-            }
-        }
-    }
-
-    if let Some(rest) = path_only.strip_prefix("/api/terminal/pty/sessions/") {
-        let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
-        if parts.len() == 1 {
-            let sid = parts[0];
-            if method == "DELETE" {
-                let sid = sid.to_string();
-                let res = tokio::task::spawn_blocking(move || {
-                    crate::terminal_pty::PtyManager::global().close(&sid)
-                })
-                .await;
-                return match res {
-                    Ok(Ok(())) => json_response("200 OK", r#"{"ok":true}"#),
-                    Ok(Err(e)) => json_response(
-                        "404 Not Found",
-                        &serde_json::json!({"error":"pty_close_failed","detail": e.to_string()}).to_string(),
-                    ),
-                    Err(e) => json_response(
-                        "500 Internal Server Error",
-                        &serde_json::json!({"error":"pty_close_join","detail": e.to_string()}).to_string(),
-                    ),
-                };
-            }
-        }
-        if parts.len() == 2 {
-            let sid = parts[0].to_string();
-            let action = parts[1];
-            if action == "output" && method == "GET" {
-                let max = parse_query_param(query_str, "max")
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(8192);
-                let sid2 = sid.clone();
-                let res = tokio::task::spawn_blocking(move || {
-                    crate::terminal_pty::PtyManager::global().read_output(&sid2, max)
-                })
-                .await;
-                return match res {
-                    Ok(Ok(o)) => json_response(
-                        "200 OK",
-                        &serde_json::to_string(&o).unwrap_or_else(|_| "{}".to_string()),
-                    ),
-                    Ok(Err(e)) => json_response(
-                        "404 Not Found",
-                        &serde_json::json!({"error":"pty_read_failed","detail": e.to_string()}).to_string(),
-                    ),
-                    Err(e) => json_response(
-                        "500 Internal Server Error",
-                        &serde_json::json!({"error":"pty_read_join","detail": e.to_string()}).to_string(),
-                    ),
-                };
-            }
-            if action == "input" && method == "POST" {
-                let Some(b) = body.as_deref() else {
-                    return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-                };
-                let parsed: Result<crate::terminal_pty::PtyInputBody, _> = serde_json::from_slice(b);
-                if parsed.is_err() {
-                    return json_response(
-                        "400 Bad Request",
-                        r#"{"error":"invalid_json"}"#,
-                    );
-                }
-                let input_body = parsed.unwrap();
-                let sid2 = sid.clone();
-                let res = tokio::task::spawn_blocking(move || {
-                    crate::terminal_pty::PtyManager::global().write_input(&sid2, input_body)
-                })
-                .await;
-                return match res {
-                    Ok(Ok(())) => json_response("200 OK", r#"{"ok":true}"#),
-                    Ok(Err(e)) => json_response(
-                        "400 Bad Request",
-                        &serde_json::json!({"error":"pty_write_failed","detail": e.to_string()}).to_string(),
-                    ),
-                    Err(e) => json_response(
-                        "500 Internal Server Error",
-                        &serde_json::json!({"error":"pty_write_join","detail": e.to_string()}).to_string(),
-                    ),
-                };
-            }
-            if action == "resize" && method == "POST" {
-                let Some(b) = body.as_deref() else {
-                    return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-                };
-                let parsed: Result<crate::terminal_pty::PtyResizeBody, _> = serde_json::from_slice(b);
-                if parsed.is_err() {
-                    return json_response(
-                        "400 Bad Request",
-                        r#"{"error":"invalid_json"}"#,
-                    );
-                }
-                let resize_body = parsed.unwrap();
-                let sid2 = sid.clone();
-                let res = tokio::task::spawn_blocking(move || {
-                    crate::terminal_pty::PtyManager::global().resize(&sid2, resize_body)
-                })
-                .await;
-                return match res {
-                    Ok(Ok(())) => json_response("200 OK", r#"{"ok":true}"#),
-                    Ok(Err(e)) => json_response(
-                        "400 Bad Request",
-                        &serde_json::json!({"error":"pty_resize_failed","detail": e.to_string()}).to_string(),
-                    ),
-                    Err(e) => json_response(
-                        "500 Internal Server Error",
-                        &serde_json::json!({"error":"pty_resize_join","detail": e.to_string()}).to_string(),
-                    ),
-                };
-            }
-        }
-    }
-
-    // Operator: MCP config on disk (validate only; runtime spawn is roadmap — see docs/mcp-mvp.md).
-    if method == "GET" && path_only == "/api/mcp/status" {
-        if let Some(cached) = crate::http_get_cache::cache_get_mcp_status() {
-            return json_response("200 OK", &cached);
-        }
-        let j = crate::mcp::mcp_operator_status(data_dir);
-        let body = j.to_string();
-        crate::http_get_cache::cache_put_mcp_status(&body);
-        return json_response("200 OK", &body);
-    }
-
-    if method == "GET" && path_only == "/api/mcp/runtime" {
-        let j = crate::mcp_runtime::summary().await;
-        return json_response("200 OK", &j.to_string());
-    }
-    if method == "GET" && path_only == "/api/mcp/runtime/sse" {
-        let summary = crate::mcp_runtime::summary().await.to_string();
-        return format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\nevent: runtime\n\
-data: {}\n\n",
-            summary.replace('\n', "").replace('\r', "")
-        );
-    }
-    if method == "POST" && path_only == "/api/mcp/runtime/stdio/start" {
-        let Some(b) = body.as_deref() else {
-            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-        };
-        let v: serde_json::Value = match serde_json::from_slice(b) {
-            Ok(v) => v,
-            Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
-        };
-        let server = v
-            .get("server")
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .unwrap_or("");
-        if server.is_empty() {
-            return json_response(
-                "400 Bad Request",
-                r#"{"error":"missing_server","hint":"{\"server\":\"myMcpKey\"}"}"#,
-            );
-        }
-        match crate::mcp_runtime::start_stdio_server(data_dir, server).await {
-            Ok(j) => return json_response("200 OK", &j.to_string()),
-            Err(e) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({"error":"mcp_stdio_start_failed","detail": e}).to_string(),
-                );
-            }
-        }
-    }
-    if method == "POST" && path_only == "/api/mcp/runtime/stdio/stop" {
-        let j = crate::mcp_runtime::stop_stdio_server().await;
-        return json_response("200 OK", &j.to_string());
-    }
-    if method == "GET" && path_only == "/api/mcp/runtime/oauth" {
-        let j = crate::mcp_runtime::oauth_get(data_dir).await;
-        return json_response("200 OK", &j.to_string());
-    }
-    if method == "POST" && path_only == "/api/mcp/runtime/oauth" {
-        let Some(b) = body.as_deref() else {
-            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-        };
-        let v: serde_json::Value = match serde_json::from_slice(b) {
-            Ok(v) => v,
-            Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
-        };
-        let provider = v
-            .get("provider")
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("unknown")
-            .to_string();
-        let status = v
-            .get("status")
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("configured")
-            .to_string();
-        match crate::mcp_runtime::oauth_put(data_dir, provider, status).await {
-            Ok(j) => return json_response("200 OK", &j.to_string()),
-            Err(e) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({"error":"mcp_oauth_state_write_failed","detail":e}).to_string(),
-                );
-            }
-        }
-    }
-
-    // Operator: lifecycle_hooks.json summary (schedule hooks run today; HTTP gateway hooks reserved).
-    if method == "GET" && path_only == "/api/lifecycle/hooks" {
-        let j = crate::lifecycle_hooks::lifecycle_hooks_summary(data_dir);
-        return json_response("200 OK", &j.to_string());
-    }
-
-    if path_only == "/api/autonomous-mission" {
-        let Some(ref am) = autonomous_mission else {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
-        };
-        if method == "GET" {
-            return get_autonomous_mission_state(data_dir, store_path, am).await;
-        }
-        if method == "PUT" {
-            let Some(ref b) = body else {
-                return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-            };
-            return put_autonomous_mission_state(data_dir, store_path, am, b).await;
-        }
-        return json_response("405 Method Not Allowed", r#"{"error":"method_not_allowed"}"#);
-    }
-    if path_only == "/api/autonomous-mission/events" && method == "GET" {
-        if autonomous_mission.is_none() {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
-        }
-        return get_autonomous_mission_events_list(store_path, query_str).await;
-    }
-    if path_only == "/api/autonomous-mission/pause" && method == "POST" {
-        let Some(ref am) = autonomous_mission else {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
-        };
-        return post_autonomous_mission_status(data_dir, store_path, am, MissionStatusYaml::Paused).await;
-    }
-    if path_only == "/api/autonomous-mission/resume" && method == "POST" {
-        let Some(ref am) = autonomous_mission else {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
-        };
-        return post_autonomous_mission_status(data_dir, store_path, am, MissionStatusYaml::Active).await;
+    if let Some(resp) = crate::api_routes_mission::handle_mission_routes(
+        method,
+        path_only,
+        query_str,
+        body.as_deref(),
+        data_dir,
+        store_path,
+        autonomous_mission.clone(),
+    )
+    .await
+    {
+        return resp;
     }
 
     if method == "GET" && (path == "/" || path.is_empty()) {
@@ -13075,314 +12448,19 @@ data: {}\n\n",
         }
     }
 
-    // GET /api/agent-profile — read agent profile (name, personality, role, gender, formality, avatar, rules, can_do, cannot_do, traits_override, preferred_mode)
-    if method == "GET" && path == "/api/agent-profile" {
-        let profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
-        let body_json = serde_json::json!({
-            "name": profile.name,
-            "personality": profile.personality,
-            "role": profile.role,
-            "gender": profile.gender,
-            "formality": profile.formality,
-            "avatar": profile.avatar,
-            "rules": profile.rules,
-            "can_do": profile.can_do,
-            "cannot_do": profile.cannot_do,
-            "traits_override": profile.traits_override,
-            "preferred_mode": profile.preferred_mode
-        });
-        return json_response("200 OK", &body_json.to_string());
-    }
-
-    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, role?, gender?, formality?, avatar?, rules?, can_do?, cannot_do?, traits_override?, preferred_mode? }
-    if method == "POST" && path == "/api/agent-profile" {
-        let mut profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
-        if let Some(body) = body.as_deref() {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
-                if let Some(s) = v.get("name").and_then(|x| x.as_str()) {
-                    profile.name = Some(s.to_string());
-                }
-                if let Some(s) = v.get("personality").and_then(|x| x.as_str()) {
-                    profile.personality = Some(s.to_string());
-                }
-                if v.get("role").is_some() {
-                    profile.role = v.get("role").and_then(|x| x.as_str()).map(String::from);
-                }
-                if v.get("gender").is_some() {
-                    profile.gender = v.get("gender").and_then(|x| x.as_str()).map(String::from);
-                }
-                if let Some(fv) = v.get("formality") {
-                    if fv.is_null() {
-                        profile.formality = None;
-                    } else if let Some(s) = fv.as_str() {
-                        let t = s.trim().to_lowercase();
-                        profile.formality = match t.as_str() {
-                            "formal" => Some("formal".to_string()),
-                            "informal" => Some("informal".to_string()),
-                            _ => None,
-                        };
-                    }
-                }
-                if v.get("avatar").is_some() {
-                    profile.avatar = v.get("avatar").and_then(|x| x.as_str()).map(String::from);
-                }
-                if let Some(arr) = v.get("rules").and_then(|x| x.as_array()) {
-                    profile.rules = arr
-                        .iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect();
-                }
-                if let Some(arr) = v.get("can_do").and_then(|x| x.as_array()) {
-                    profile.can_do = arr
-                        .iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect();
-                }
-                if let Some(arr) = v.get("cannot_do").and_then(|x| x.as_array()) {
-                    profile.cannot_do = arr
-                        .iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect();
-                }
-                if let Some(obj) = v.get("traits_override").and_then(|x| x.as_object()) {
-                    let mut map = std::collections::HashMap::new();
-                    for (k, val) in obj {
-                        if let Some(n) = val.as_f64() {
-                            map.insert(k.clone(), n);
-                        }
-                    }
-                    profile.traits_override = if map.is_empty() { None } else { Some(map) };
-                }
-                if v.get("preferred_mode").is_some() {
-                    profile.preferred_mode = v
-                        .get("preferred_mode")
-                        .and_then(|x| x.as_str())
-                        .map(String::from);
-                }
-            }
-        }
-        // Persist default name if none or empty so the agent always has an identity on disk
-        if profile
-            .name
-            .as_deref()
-            .map(|s| s.trim().is_empty())
-            .unwrap_or(true)
-        {
-            profile.name = Some(AgentProfile::DEFAULT_NAME.to_string());
-        }
-        match profile.save(data_dir) {
-            Ok(()) => {
-                set_agent_profile_cache(agent_profile_cache, profile).await;
-                return json_response(
-                    "200 OK",
-                    r#"{"ok":true,"message":"Profil agent mis à jour"}"#,
-                );
-            }
-            Err(e) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({ "error": e.to_string() }).to_string(),
-                )
-            }
-        }
-    }
-
-    // GET /api/user-profile — read user profile (first_name, last_name, how_to_call, onboarding_completed)
-    if method == "GET" && path == "/api/user-profile" {
-        let profile = UserProfile::load(data_dir);
-        let body_json = serde_json::json!({
-            "first_name": profile.first_name,
-            "last_name": profile.last_name,
-            "how_to_call": profile.how_to_call,
-            "onboarding_completed": profile.onboarding_completed,
-            "proactive_check_in_enabled": profile.proactive_check_in_enabled,
-            "proactive_check_in_interval_days": profile.proactive_check_in_interval_days,
-        });
-        return json_response("200 OK", &body_json.to_string());
-    }
-
-    // POST /api/user-profile — update user profile. Body: { first_name?, last_name?, how_to_call?, onboarding_completed?, proactive_check_in_enabled?, proactive_check_in_interval_days? }
-    if method == "POST" && path == "/api/user-profile" {
-        let mut profile = UserProfile::load(data_dir);
-        if let Some(body) = body.as_deref() {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
-                if v.get("first_name").is_some() {
-                    profile.first_name = v
-                        .get("first_name")
-                        .and_then(|x| x.as_str())
-                        .map(String::from);
-                }
-                if v.get("last_name").is_some() {
-                    profile.last_name = v
-                        .get("last_name")
-                        .and_then(|x| x.as_str())
-                        .map(String::from);
-                }
-                if v.get("how_to_call").is_some() {
-                    profile.how_to_call = v
-                        .get("how_to_call")
-                        .and_then(|x| x.as_str())
-                        .map(|s| s.trim().to_string());
-                }
-                if let Some(b) = v.get("onboarding_completed").and_then(|x| x.as_bool()) {
-                    profile.onboarding_completed = b;
-                }
-                if v.get("proactive_check_in_enabled").is_some() {
-                    profile.proactive_check_in_enabled = v
-                        .get("proactive_check_in_enabled")
-                        .and_then(|x| x.as_bool())
-                        .unwrap_or(false);
-                }
-                if v.get("proactive_check_in_interval_days").is_some() {
-                    profile.proactive_check_in_interval_days =
-                        v.get("proactive_check_in_interval_days")
-                            .and_then(|x| x.as_u64())
-                            .unwrap_or(0) as u32;
-                }
-            }
-        }
-        match profile.save(data_dir) {
-            Ok(()) => {
-                return json_response(
-                    "200 OK",
-                    r#"{"ok":true,"message":"Profil utilisateur mis à jour"}"#,
-                )
-            }
-            Err(e) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({ "error": e.to_string() }).to_string(),
-                )
-            }
-        }
-    }
-
-    // GET /api/first-message?context=onboarding|first_today|proactive — agent-initiated first message (onboarding, daily greeting, proactive check-in)
-    if method == "GET" && path.starts_with("/api/first-message") {
-        let context = path
-            .split('?')
-            .nth(1)
-            .and_then(|q| {
-                q.split('&').find(|p| p.starts_with("context=")).map(|p| {
-                    urlencoding::decode(p.trim_start_matches("context="))
-                        .unwrap_or_default()
-                        .into_owned()
-                })
-            })
-            .unwrap_or_default();
-        let session_id = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
-        let user_profile = UserProfile::load(data_dir);
-
-        if context == "onboarding" && !user_profile.has_how_to_call() {
-            let message = "Bonjour ! Pour personnaliser nos échanges, comment dois-je vous appeler ? (prénom ou surnom)";
-            if let Some(ref st) = short_term {
-                st.append(&session_id, "assistant", message.to_string())
-                    .await;
-            }
-            let body_json = serde_json::json!({ "message": message, "session_id": session_id });
-            return json_response("200 OK", &body_json.to_string());
-        }
-
-        if context == "proactive"
-            && user_profile.has_how_to_call()
-            && user_profile.proactive_check_in_enabled
-            && user_profile.proactive_check_in_interval_days > 0
-        {
-            let now = chrono::Utc::now();
-            let last = UserProfile::load_last_activity(data_dir);
-            let interval_days = user_profile.proactive_check_in_interval_days as i64;
-            let show = match last {
-                None => true,
-                Some(t) => (now - t).num_days() >= interval_days,
-            };
-            if show {
-                let how = user_profile.how_to_call.as_deref().unwrap_or("").trim();
-                let message = format!(
-                    "Ça fait un moment, {} ! Tu veux qu'on travaille sur quelque chose ?",
-                    how
-                );
-                if let Some(ref st) = short_term {
-                    st.append(&session_id, "assistant", message.clone()).await;
-                }
-                let body_json = serde_json::json!({ "message": message, "session_id": session_id });
-                return json_response("200 OK", &body_json.to_string());
-            }
-        }
-
-        if context == "first_today" && user_profile.has_how_to_call() {
-            let how = user_profile.how_to_call.as_deref().unwrap_or("").trim();
-            let message = format!("Bonjour {}, quoi de neuf aujourd'hui ?", how);
-            if let Some(ref st) = short_term {
-                st.append(&session_id, "assistant", message.clone()).await;
-            }
-            let body_json = serde_json::json!({ "message": message, "session_id": session_id });
-            return json_response("200 OK", &body_json.to_string());
-        }
-
-        // Other contexts: return empty so UI does not show a duplicate message
-        let body_json = serde_json::json!({ "message": "", "session_id": session_id });
-        return json_response("200 OK", &body_json.to_string());
-    }
-
-    // POST /api/personality-memory — store a structured personality preference (Phase 3). Body: { "key": "preferred_tone"|"technical_depth_preference"|..., "value": "..." }
-    if method == "POST" && path == "/api/personality-memory" {
-        let Some(client) = long_term_client.clone() else {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"long_term_memory_unavailable"}"#,
-            );
-        };
-        let Some(body) = body.as_deref() else {
-            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-        };
-        let v: serde_json::Value = match serde_json::from_slice(body) {
-            Ok(x) => x,
-            Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
-        };
-        let key = match v.get("key").and_then(|x| x.as_str()) {
-            Some(k) if !k.trim().is_empty() => k.trim().to_string(),
-            _ => return json_response("400 Bad Request", r#"{"error":"key_required"}"#),
-        };
-        let value = v
-            .get("value")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
-        let payload = serde_json::json!({ "key": key, "value": value }).to_string();
-        let result = tokio::task::spawn_blocking(move || {
-            client.emit_event(
-                "personality_memory".to_string(),
-                payload,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-        })
-        .await;
-        match result {
-            Ok(Ok(id)) => {
-                return json_response(
-                    "200 OK",
-                    &serde_json::json!({ "ok": true, "id": id.to_string() }).to_string(),
-                )
-            }
-            Ok(Err(e)) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({ "error": e }).to_string(),
-                )
-            }
-            Err(e) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({ "error": e.to_string() }).to_string(),
-                )
-            }
-        }
+    if let Some(resp) = crate::api_routes_profiles::handle_profiles_routes(
+        method,
+        path_only,
+        query_str,
+        body.as_deref(),
+        data_dir,
+        agent_profile_cache,
+        short_term.clone(),
+        long_term_client.clone(),
+    )
+    .await
+    {
+        return resp;
     }
 
     // Second brain controls: settings, overview and clear.

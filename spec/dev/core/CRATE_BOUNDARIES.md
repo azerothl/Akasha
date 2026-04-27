@@ -39,6 +39,11 @@ flowchart LR
 2. **Nouveau provider / route LLM** : `akasha-llm`, exposer une API stable au daemon.
 3. **Réponse HTTP / parsing requête** : préférer `api_http` et petits modules `api_*` plutôt que d’agrandir `api.rs`.
 
+## Anti-patterns observés (daemon HTTP)
+
+1. **Dépendance circulaire `api` ↔ modules de routes** : des handlers dans `api_routes_*.rs` ne doivent pas importer `crate::api` pour éviter les cycles (ex. cache profil agent déplacé dans `agent_profile.rs`).
+2. **Sur-délégation dans `handle_api`** : garder le dispatch mince (`if let Some(r) = crate::api_routes_foo::handle...`) ; la logique métier persistante reste dans `akasha-store` / crates métier, pas dupliquée entre `api.rs` et les routes.
+
 ## Refactor en cours
 
 Voir [REFACTOR_MONOREPO_TRACKING.md](../quality/REFACTOR_MONOREPO_TRACKING.md).
