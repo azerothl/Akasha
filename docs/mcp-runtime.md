@@ -16,11 +16,16 @@ Spawns the configured process, sends JSON-RPC `initialize`, reads one response l
 
 ## HTTP transport & long-lived sessions
 
-See **`docs/mcp-mvp.md`** for MVP scope. HTTP/SSE client, connection pooling, and OAuth are covered in **`docs/mcp-oauth.md`** and the Hermes integration remainder doc.
+- `GET /api/mcp/runtime` — runtime summary (stdio server attached, oauth state mirror).
+- `GET /api/mcp/runtime/sse` — SSE-compatible runtime event payload (single-shot event for operator consumers).
+- `POST /api/mcp/runtime/stdio/start` / `POST /api/mcp/runtime/stdio/stop` — attach/detach a long-lived stdio child from `mcp.json`.
+- `GET /api/mcp/runtime/oauth` / `POST /api/mcp/runtime/oauth` — operator OAuth state (persisted in `mcp_oauth_state.json` under data dir).
+
+See **`docs/mcp-mvp.md`** for MVP scope. Full HTTP/SSE client pooling and provider OAuth exchange remain covered in **`docs/mcp-oauth.md`** and the Hermes integration remainder doc.
 
 ## Operator status (HTTP)
 
-- **`GET /api/mcp/status`** — reads `{data_dir}/mcp.json` if present, returns `config_present`, `valid` (schema validation), `server_count`, and a `runtime` phase string (`stdio_probe_and_validate_only` until long-lived MCP transport is wired). Same data directory as the SQLite task store parent.
+- **`GET /api/mcp/status`** — reads `{data_dir}/mcp.json` if present, returns `config_present`, `valid` (schema validation), `server_count`, and a runtime descriptor (`stdio_probe_validate_and_optional_long_lived`).
 
 ## Tests (Windows)
 

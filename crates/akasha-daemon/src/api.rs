@@ -12444,6 +12444,14 @@ pub async fn handle_api(
         let j = crate::mcp_runtime::summary().await;
         return json_response("200 OK", &j.to_string());
     }
+    if method == "GET" && path_only == "/api/mcp/runtime/sse" {
+        let summary = crate::mcp_runtime::summary().await.to_string();
+        return format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\nevent: runtime\n\
+data: {}\n\n",
+            summary.replace('\n', "").replace('\r', "")
+        );
+    }
     if method == "POST" && path_only == "/api/mcp/runtime/stdio/start" {
         let Some(b) = body.as_deref() else {
             return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
@@ -12478,7 +12486,7 @@ pub async fn handle_api(
         return json_response("200 OK", &j.to_string());
     }
     if method == "GET" && path_only == "/api/mcp/runtime/oauth" {
-        let j = crate::mcp_runtime::oauth_get().await;
+        let j = crate::mcp_runtime::oauth_get(data_dir).await;
         return json_response("200 OK", &j.to_string());
     }
     if method == "POST" && path_only == "/api/mcp/runtime/oauth" {
@@ -12503,8 +12511,15 @@ pub async fn handle_api(
             .filter(|s| !s.is_empty())
             .unwrap_or("configured")
             .to_string();
-        let j = crate::mcp_runtime::oauth_put(provider, status).await;
-        return json_response("200 OK", &j.to_string());
+        match crate::mcp_runtime::oauth_put(data_dir, provider, status).await {
+            Ok(j) => return json_response("200 OK", &j.to_string()),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({"error":"mcp_oauth_state_write_failed","detail":e}).to_string(),
+                );
+            }
+        }
     }
 
     // Operator: lifecycle_hooks.json summary (schedule hooks run today; HTTP gateway hooks reserved).

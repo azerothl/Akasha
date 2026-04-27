@@ -4,7 +4,7 @@
 
 **Still roadmap / deeper work:** plugin-level WASM hook **delivery** complète (événements côté host sur tout le catalogue), cache GET élargi à plus d’endpoints métiers, et industrialisation trust automation bout-en-bout côté `Akasha_plugins`.
 
-Track in the issue tracker and in **`docs/hermes-akasha-parity-matrix.md`**. Satellite repos: incremental PRs per repo as priorities allow (see README / `docs/HERMES_COCKPIT.md` / `EVALS_AND_VERSIONING.md` stubs).
+Track in the issue tracker and in **`docs/hermes-akasha-parity-matrix.md`**. For remaining “Partiel” domains (worktree/browser/crawl/migration), see **`docs/hermes-partial-domains-roadmap.md`**. Satellite repos: incremental PRs per repo as priorities allow (see README / `docs/HERMES_COCKPIT.md` / `EVALS_AND_VERSIONING.md` stubs).
 
 ## Definition of Done — PR « analyse Hermes → écosystème »
 

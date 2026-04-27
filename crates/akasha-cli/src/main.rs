@@ -217,6 +217,11 @@ enum WorktreeSub {
         /// Worktree path to remove
         path: PathBuf,
     },
+    /// Quick diagnostics for worktree setup (`git rev-parse`, branch, cleanliness, worktrees)
+    Doctor {
+        /// Path to git repository (directory containing .git)
+        repo: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -933,6 +938,57 @@ fn cmd_worktree(sub: WorktreeSub) -> anyhow::Result<()> {
                 anyhow::bail!("git worktree remove failed (status {:?})", st.code());
             }
             println!("Worktree removed: {}", path.display());
+        }
+        WorktreeSub::Doctor { repo } => {
+            let top = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["rev-parse", "--show-toplevel"])
+                .output()?;
+            if !top.status.success() {
+                anyhow::bail!(
+                    "git rev-parse failed: {}",
+                    String::from_utf8_lossy(&top.stderr)
+                );
+            }
+            let top_s = String::from_utf8_lossy(&top.stdout).trim().to_string();
+            println!("repo_root: {}", top_s);
+
+            let branch = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .output()?;
+            if branch.status.success() {
+                println!("branch: {}", String::from_utf8_lossy(&branch.stdout).trim());
+            }
+
+            let porcelain = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["status", "--porcelain"])
+                .output()?;
+            if porcelain.status.success() {
+                let dirty = !String::from_utf8_lossy(&porcelain.stdout).trim().is_empty();
+                println!("worktree_clean: {}", if dirty { "false" } else { "true" });
+            }
+
+            let wt = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["worktree", "list"])
+                .output()?;
+            if wt.status.success() {
+                let wt_text = String::from_utf8_lossy(&wt.stdout).to_string();
+                let lines: Vec<&str> = wt_text
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .collect();
+                println!("worktree_count: {}", lines.len());
+                for line in lines {
+                    println!("  {}", line);
+                }
+            }
         }
     }
     Ok(())

@@ -32,6 +32,28 @@ fn oauth_cell() -> &'static Mutex<Value> {
     })
 }
 
+fn oauth_state_path(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("mcp_oauth_state.json")
+}
+
+async fn oauth_load_from_disk(data_dir: &Path) -> Value {
+    let p = oauth_state_path(data_dir);
+    match tokio::fs::read_to_string(&p).await {
+        Ok(raw) => serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| {
+            json!({
+                "status": "invalid_state_file",
+                "provider": null,
+                "updated_at": null
+            })
+        }),
+        Err(_) => json!({
+            "status": "not_configured",
+            "provider": null,
+            "updated_at": null
+        }),
+    }
+}
+
 async fn write_framed(stdin: &mut (impl AsyncWriteExt + Unpin), msg: &Value) -> std::io::Result<()> {
     let body = msg.to_string();
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
@@ -56,18 +78,32 @@ pub async fn summary() -> Value {
     })
 }
 
-pub async fn oauth_get() -> Value {
-    oauth_cell().lock().await.clone()
+pub async fn oauth_get(data_dir: &Path) -> Value {
+    let disk = oauth_load_from_disk(data_dir).await;
+    let mut g = oauth_cell().lock().await;
+    if g.get("updated_at").and_then(|x| x.as_str()).is_none()
+        || g.get("updated_at").and_then(|x| x.as_str()).unwrap_or("")
+            < disk.get("updated_at").and_then(|x| x.as_str()).unwrap_or("")
+    {
+        *g = disk;
+    }
+    g.clone()
 }
 
-pub async fn oauth_put(provider: String, status: String) -> Value {
+pub async fn oauth_put(data_dir: &Path, provider: String, status: String) -> Result<Value, String> {
     let mut g = oauth_cell().lock().await;
     *g = json!({
         "status": status,
         "provider": provider,
         "updated_at": chrono::Utc::now().to_rfc3339(),
     });
-    g.clone()
+    let out = g.clone();
+    let p = oauth_state_path(data_dir);
+    let raw = serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?;
+    tokio::fs::write(&p, raw)
+        .await
+        .map_err(|e| format!("write {}: {}", p.display(), e))?;
+    Ok(out)
 }
 
 /// Spawn one MCP server from `mcp.json`, send `initialize`, keep the process alive for operator tooling.
