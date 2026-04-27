@@ -1,4 +1,5 @@
 //! HTTP handlers for `/api/studio/*` (Code Studio).
+use crate::api_http::json_response;
 use crate::studio::{is_strictly_under_studio_root, resolve_studio_project_dir, studio_projects_base};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -202,15 +203,6 @@ fn studio_ops_semaphore() -> &'static Semaphore {
             .unwrap_or(4);
         Semaphore::new(n)
     })
-}
-
-fn json_response(status: &str, body: &str) -> String {
-    format!(
-        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        status,
-        body.len(),
-        body
-    )
 }
 
 #[derive(Serialize)]

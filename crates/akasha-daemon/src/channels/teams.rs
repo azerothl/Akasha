@@ -222,52 +222,52 @@ pub async fn handle_teams_message(
     if let Err(e) = validate_teams_jwt(authorization, app_id).await {
         warn!(reason = e, "Teams: authentication failed");
         let body = serde_json::json!({ "error": "unauthorized", "detail": e });
-        return crate::api::json_response("401 Unauthorized", &body.to_string());
+        return crate::api_http::json_response("401 Unauthorized", &body.to_string());
     }
 
     let body = match body {
         Some(b) if !b.is_empty() => b,
         _ => {
-            return crate::api::json_response("400 Bad Request", r#"{"error":"missing_body"}"#);
+            return crate::api_http::json_response("400 Bad Request", r#"{"error":"missing_body"}"#);
         }
     };
     let activity: TeamsActivity = match serde_json::from_slice(&body) {
         Ok(a) => a,
         Err(e) => {
             warn!(error = %e, "Teams: invalid JSON");
-            return crate::api::json_response("400 Bad Request", r#"{"error":"invalid_json"}"#);
+            return crate::api_http::json_response("400 Bad Request", r#"{"error":"invalid_json"}"#);
         }
     };
     if activity.type_.as_deref() != Some("message") {
-        return crate::api::json_response("200 OK", "{}");
+        return crate::api_http::json_response("200 OK", "{}");
     }
     let text = activity.text.as_deref().unwrap_or("").trim().to_string();
     if text.is_empty() {
-        return crate::api::json_response("200 OK", "{}");
+        return crate::api_http::json_response("200 OK", "{}");
     }
     let service_url = match activity.service_url.as_deref() {
         Some(u) if !u.is_empty() => u.to_string(),
         _ => {
             warn!("Teams: missing serviceUrl");
-            return crate::api::json_response("400 Bad Request", r#"{"error":"missing_service_url"}"#);
+            return crate::api_http::json_response("400 Bad Request", r#"{"error":"missing_service_url"}"#);
         }
     };
     // Validate serviceUrl to prevent SSRF.
     if let Err(e) = validate_service_url(&service_url) {
         warn!(reason = e, service_url = %service_url, "Teams: serviceUrl validation failed");
         let body = serde_json::json!({ "error": "invalid_service_url", "detail": e });
-        return crate::api::json_response("400 Bad Request", &body.to_string());
+        return crate::api_http::json_response("400 Bad Request", &body.to_string());
     }
     let conversation_id = match activity.conversation.as_ref().and_then(|c| c.id.as_deref()) {
         Some(id) => id.to_string(),
         None => {
             warn!("Teams: missing conversation.id");
-            return crate::api::json_response("400 Bad Request", r#"{"error":"missing_conversation"}"#);
+            return crate::api_http::json_response("400 Bad Request", r#"{"error":"missing_conversation"}"#);
         }
     };
     if let Err(e) = akasha_core::check_prompt_injection(&text) {
         let body = serde_json::json!({ "error": "prompt_injection_rejected", "detail": e.to_string() });
-        return crate::api::json_response("400 Bad Request", &body.to_string());
+        return crate::api_http::json_response("400 Bad Request", &body.to_string());
     }
 
     let main_agent = main_agent.clone();
@@ -352,7 +352,7 @@ pub async fn handle_teams_message(
         }
     });
 
-    crate::api::json_response("200 OK", "{}")
+    crate::api_http::json_response("200 OK", "{}")
 }
 
 async fn post_teams_reply(

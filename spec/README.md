@@ -12,6 +12,8 @@ La documentation utilisateur finale est maintenue dans `docs/`.
 - Registre central: [feature_evolution_tracking.md](feature_evolution_tracking.md)
 - Resume d'avancement historique: [plan_avancement.md](plan_avancement.md)
 - Corrections doc/code: [51_doc_vs_code_audit.md](51_doc_vs_code_audit.md)
+- Refactor code (suivi): [dev/quality/REFACTOR_MONOREPO_TRACKING.md](dev/quality/REFACTOR_MONOREPO_TRACKING.md)
+- Frontières crates: [dev/core/CRATE_BOUNDARIES.md](dev/core/CRATE_BOUNDARIES.md)
 
 ## Blocs fonctionnels dev
 
@@ -120,6 +122,7 @@ La documentation utilisateur finale est maintenue dans `docs/`.
 - [dev/quality/bench_prompt_results.md](dev/quality/bench_prompt_results.md)
 - [dev/quality/tests_and_benchmarks.md](dev/quality/tests_and_benchmarks.md)
 - [dev/quality/documentation_coverage_audit.md](dev/quality/documentation_coverage_audit.md)
+- [dev/quality/REFACTOR_MONOREPO_TRACKING.md](dev/quality/REFACTOR_MONOREPO_TRACKING.md)
 
 #### Ops
 

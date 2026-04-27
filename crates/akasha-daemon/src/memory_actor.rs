@@ -1,6 +1,7 @@
 //! Long-term memory actor: runs on a dedicated thread (SQLite and embedder are !Send), services search/insert via channel.
 //! When neither "embeddings" nor "embeddings-tract" is enabled, no-op client and start_memory_actor returns Err.
 
+#[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
 use crate::memory_relation_semantic::auto_relation_kind;
 use std::path::Path;
 use std::thread;
@@ -109,7 +110,7 @@ impl LongTermMemoryClient {
         }
         #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
         {
-            let _ = (query_text, filter);
+            let _ = (query_text, top_k, filter);
             Vec::new()
         }
     }

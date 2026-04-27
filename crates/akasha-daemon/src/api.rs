@@ -28,64 +28,11 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// On Windows, paths with verbatim prefix `\\?\` can cause "file not found" with some APIs. Return a path without it.
-#[cfg(windows)]
-fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
-    let s = p.to_string_lossy();
-    if s.starts_with(r"\\?\") {
-        PathBuf::from(s.replace(r"\\?\", ""))
-    } else {
-        p
-    }
-}
-#[cfg(not(windows))]
-fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
-    p
-}
-
-/// Normalize common Unicode apostrophes in filenames (e.g. ’ -> ').
-/// LLM tool calls may use typographic quotes, while files on disk typically use ASCII quotes.
-fn normalize_apostrophes(s: &str) -> String {
-    s.replace('’', "'").replace('‘', "'")
-}
-
-/// Lorsque `read_file` est appelé sans `<offset> <limit>` et sans `--full`, on ne renvoie que ces lignes.
-const READ_FILE_DEFAULT_MAX_LINES: usize = 500;
-/// Plafond UTF-8 pour `read_file … --full` (évite les fichiers énormes en mémoire côté prompt).
-const READ_FILE_FULL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
-/// Sous-chaîne présente dans la sortie modèle quand la fenêtre par défaut (500 lignes) a été appliquée.
-const READ_FILE_PARTIAL_DEFAULT_MARKER: &str = "(read_file partial: default window";
-
-/// Retire `--full`, détecte une fenêtre de lignes en fin d'arguments (`offset` `limit` entiers > 0).
-fn parse_read_file_args(args: &[String]) -> (Vec<String>, Option<(usize, usize)>, bool) {
-    let mut want_full = false;
-    let filtered: Vec<String> = args
-        .iter()
-        .filter_map(|a| {
-            if a == "--full" {
-                want_full = true;
-                None
-            } else {
-                Some(a.clone())
-            }
-        })
-        .collect();
-    if filtered.len() >= 3 {
-        let maybe_limit = filtered.last().and_then(|s| s.parse::<usize>().ok());
-        let maybe_offset = filtered
-            .get(filtered.len().saturating_sub(2))
-            .and_then(|s| s.parse::<usize>().ok());
-        if let (Some(off), Some(lim)) = (maybe_offset, maybe_limit) {
-            if off > 0 && lim > 0 {
-                let mut path = filtered;
-                path.pop();
-                path.pop();
-                return (path, Some((off, lim)), want_full);
-            }
-        }
-    }
-    (filtered, None, want_full)
-}
+pub use crate::api_http::{json_response, parse_content_length, parse_request};
+pub use crate::api_path_utils::{
+    normalize_apostrophes, parse_read_file_args, strip_verbatim_prefix, READ_FILE_DEFAULT_MAX_LINES,
+    READ_FILE_FULL_OUTPUT_MAX_BYTES, READ_FILE_PARTIAL_DEFAULT_MARKER,
+};
 
 /// Séparateur recommandé entre l’ancien et le nouveau texte (`TOOL:` est découpé sur les espaces, d’où un token `|` seul).
 const SEARCH_REPLACE_DELIM: &str = " | ";
@@ -1412,90 +1359,6 @@ pub type HumanInputStore = Arc<RwLock<std::collections::HashMap<Uuid, PendingHum
 
 pub fn new_human_input_store() -> HumanInputStore {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
-}
-
-/// Parse headers from the first chunk to get header length and Content-Length. Returns (header_body_sep_index, content_length).
-/// header_body_sep_index is the index of the start of "\r\n\r\n"; body starts at header_body_sep_index + 4.
-pub fn parse_content_length(buf: &[u8]) -> Option<(usize, usize)> {
-    let sep = b"\r\n\r\n";
-    let header_end = buf.windows(sep.len()).position(|w| w == sep)?;
-    let header_slice = &buf[..header_end];
-    let mut content_length: Option<usize> = None;
-    for line in header_slice.split(|&b| b == b'\n') {
-        let line_str = String::from_utf8_lossy(line).to_string();
-        let line_str = line_str.trim_end_matches('\r');
-        if let Some((name, value)) = line_str.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                if let Ok(n) = value.trim().parse::<usize>() {
-                    content_length = Some(n);
-                }
-                break;
-            }
-        }
-    }
-    content_length.map(|cl| (header_end, cl))
-}
-
-/// Parsed HTTP request: method, path, body, and lowercase header map.
-pub fn parse_request(
-    buf: &[u8],
-) -> (
-    String,
-    String,
-    Option<Vec<u8>>,
-    std::collections::HashMap<String, String>,
-) {
-    let mut method = String::new();
-    let mut path = String::new();
-    let mut content_length = 0usize;
-    let mut headers = std::collections::HashMap::new();
-    let sep = b"\r\n\r\n";
-    let header_end = buf.windows(sep.len()).position(|w| w == sep);
-    let (header_slice, rest) = if let Some(i) = header_end {
-        (&buf[..i], &buf[i + sep.len()..])
-    } else {
-        (buf as &[u8], &[][..])
-    };
-    let lines: Vec<&[u8]> = header_slice.split(|&b| b == b'\n').collect();
-    for (i, line) in lines.iter().enumerate() {
-        let line_str = String::from_utf8_lossy(line)
-            .trim_end_matches('\r')
-            .to_string();
-        if i == 0 {
-            let parts: Vec<&str> = line_str.splitn(3, ' ').collect();
-            if parts.len() >= 2 {
-                method = parts[0].to_string();
-                path = parts[1].to_string();
-            }
-        } else if let Some((name, value)) = line_str.split_once(':') {
-            let name = name.trim().to_lowercase();
-            let value = value.trim().to_string();
-            if name == "content-length" {
-                if let Ok(n) = value.parse::<usize>() {
-                    content_length = n;
-                }
-            }
-            headers.insert(name, value);
-        }
-    }
-    const MAX_BODY_PARSE: usize = 10 * 1024 * 1024; // 10 MiB — refuse to allocate larger body
-    let will_allocate =
-        content_length > 0 && content_length <= MAX_BODY_PARSE && rest.len() >= content_length;
-    let body = if will_allocate {
-        Some(rest[..content_length].to_vec())
-    } else {
-        None
-    };
-    (method, path, body, headers)
-}
-
-pub fn json_response(status: &str, body: &str) -> String {
-    format!(
-        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
-        status,
-        body.len(),
-        body
-    )
 }
 
 /// Liste des outils disponibles (source unique pour le prompt et la doc).

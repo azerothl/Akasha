@@ -9,6 +9,8 @@ pub mod permissions_center;
 pub mod policy_engine;
 pub mod protocol_adapter;
 pub mod agent_contracts;
+pub mod api_http;
+pub mod api_path_utils;
 pub mod api;
 pub mod api_studio;
 pub mod api_workspace_graph;

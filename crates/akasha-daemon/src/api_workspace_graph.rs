@@ -1,6 +1,6 @@
 //! HTTP handlers for multi-workspace project knowledge graphs.
 
-use crate::api::json_response;
+use crate::api_http::json_response;
 use akasha_store::WorkspaceGraphStore;
 use akasha_workspace_graph::WorkspaceGraphConfig;
 use std::path::{Path, PathBuf};
