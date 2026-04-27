@@ -34,12 +34,15 @@ const MCP_STATUS_KEY: &str = "GET|/api/mcp/status|";
 pub fn cache_get_router_models() -> Option<String> {
     ttl()?;
     let mut g = cache().lock().ok()?;
-    let ent = g.get(ROUTER_MODELS_KEY)?;
-    if Instant::now() > ent.expires {
+    let expired = {
+        let ent = g.peek(ROUTER_MODELS_KEY)?;
+        Instant::now() > ent.expires
+    };
+    if expired {
         g.pop(ROUTER_MODELS_KEY);
         return None;
     }
-    Some(ent.body.clone())
+    g.get(ROUTER_MODELS_KEY).map(|ent| ent.body.clone())
 }
 
 pub fn cache_put_router_models(body: &str) {
@@ -77,12 +80,15 @@ pub fn invalidate_router_routes() {
 fn get(key: &str) -> Option<String> {
     ttl()?;
     let mut g = cache().lock().ok()?;
-    let ent = g.get(key)?;
-    if Instant::now() > ent.expires {
+    let expired = {
+        let ent = g.peek(key)?;
+        Instant::now() > ent.expires
+    };
+    if expired {
         g.pop(key);
         return None;
     }
-    Some(ent.body.clone())
+    g.get(key).map(|ent| ent.body.clone())
 }
 
 fn put(key: &str, body: &str) {

@@ -100,9 +100,17 @@ pub async fn oauth_put(data_dir: &Path, provider: String, status: String) -> Res
     let out = g.clone();
     let p = oauth_state_path(data_dir);
     let raw = serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?;
-    tokio::fs::write(&p, raw)
+    // Write atomically: write to a temp file then rename so a crash can never leave a
+    // partially-written state file (same pattern as session_state.rs / autonomous_mission_config.rs).
+    let tmp = p.with_extension("json.tmp");
+    tokio::fs::write(&tmp, raw)
         .await
-        .map_err(|e| format!("write {}: {}", p.display(), e))?;
+        .map_err(|e| format!("write {}: {}", tmp.display(), e))?;
+    // std::fs::rename on Windows fails when the destination already exists — remove it first.
+    let _ = tokio::fs::remove_file(&p).await;
+    tokio::fs::rename(&tmp, &p)
+        .await
+        .map_err(|e| format!("rename {} -> {}: {}", tmp.display(), p.display(), e))?;
     Ok(out)
 }
 

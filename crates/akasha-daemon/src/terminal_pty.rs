@@ -119,7 +119,17 @@ impl PtyManager {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(|n| {
+            .and_then(|n| {
+                // Sanitize to a safe filename: only ASCII alphanumeric, '.', '_', '-' are
+                // allowed so that path separators or '..' components cannot escape the
+                // pty_transcripts directory.
+                let safe: String = n
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '.' | '_' | '-'))
+                    .collect();
+                if safe.is_empty() {
+                    return None;
+                }
                 let p = std::env::var("AKASHA_DATA_DIR")
                     .ok()
                     .map(std::path::PathBuf::from)
@@ -130,7 +140,7 @@ impl PtyManager {
                     })
                     .join("pty_transcripts");
                 let _ = std::fs::create_dir_all(&p);
-                p.join(format!("{n}.log")).display().to_string()
+                Some(p.join(format!("{safe}.log")).display().to_string())
             });
 
         let r = {
