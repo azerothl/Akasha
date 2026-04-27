@@ -1,6 +1,6 @@
 # Matrice de parité Hermes Agent ↔ Akasha
 
-**Version:** 1.0.7  
+**Version:** 1.0.8  
 **Date:** 2026-04-27  
 **Références externes:** [Hermes Quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart), [Hermes Tools](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools/), [Hermes Features Overview](https://hermes-agent.nousresearch.com/docs/user-guide/features/overview), [README Hermes (GitHub)](https://github.com/NousResearch/hermes-agent/blob/main/README.md)
 
@@ -28,7 +28,7 @@ Légende: **Existe** = équivalent opérationnel dans Akasha · **Partiel** = in
 | Doctor | `hermes doctor` | `akasha doctor`, `/api/doctor` | Existe | Moyenne | Auto-triage incidents |
 | Perf / SLO | Dashboard local (Hermes récent) | Métriques routeur, `scripts/bench-e2e.ps1` | Partiel | Moyenne | Runbook `docs/runbooks/slo-akasha-internal.md` |
 | Cache idempotent | — | LRU **GET** `GET /api/router/models`, `GET /api/router/routes`, `GET /api/mcp/status` derrière `AKASHA_HTTP_CACHE_TTL_SECS` + plafond 256 / 256 Ko | Partiel | Moyenne | `docs/cache-strategy.md`, module `http_get_cache` |
-| Git worktree | — | `git_*` outils + `akasha worktree list|add|remove|doctor` | Partiel | Moyenne | Wrapper git local + diagnostics opérateur |
+| Git worktree | — | `git_*` outils + `akasha worktree list|add|remove|doctor` | Partiel | Moyenne | Wrapper git local + diagnostics opérateur + init projet Studio sur branche `main` et garde-fou reprise (`main`/`master`) |
 | Browser phase 2 | click/fill/… | Playwright `click|fill|wait|screenshot` + daemon | Partiel | Moyenne | `scripts/playwright-runner/run.mjs` |
 | Web crawl | — | Cloudflare API `web_crawl` / `web_crawl_status` | Partiel | Moyenne | `akasha-tools` + policy |
 | Migration OpenClaw-like | `hermes claw migrate` | Doc import settings/skills | Partiel | Faible | `Akasha_app` + spec |
@@ -43,7 +43,7 @@ Légende: **Existe** = équivalent opérationnel dans Akasha · **Partiel** = in
 | **`Akasha_app`** (site statique) | Hub public : comparaison, guides MCP/webhooks/toolsets/migration |
 | **`Akasha_skills`** | Catalogue vivant : semver, changelog, compat daemon, evals CI |
 | **`Akasha_plugins`** | Trust : WASM hash dans l’index, permissions visibles |
-| **`akasha-code-studio`** | Cockpit dev : jobs, `task_runs`, process watch, terminal, tools effective |
+| **`akasha-code-studio`** | Cockpit dev structuré : scheduler actionnable, `task_runs`, process watch, terminal, tools effective, MCP, lifecycle (+ fallback raw JSON) |
 | **`Rbitnet`** | Backend local : OpenAI-compatible, `/metrics`, doc `llm_router.yaml` |
 
 Légende pour le tableau ci-dessous : **C** = implémentation dans le core · **Doc** = documentation / site · **Cat** = catalogue skills/plugins · **Studio** = Code Studio · **Rbit** = Rbitnet · **UI** = app Tauri.
@@ -69,6 +69,7 @@ Synthèse : où la parité Hermes devient **visible** ou **opérable** hors du s
 
 ## Changelog matrice
 
+- **1.0.8** (2026-04-27): cockpit `akasha-code-studio` restructuré en sections opérateur typées (task runs, process watch, terminal, tools, MCP, lifecycle) avec actions scheduler + auto-refresh léger + fallback raw JSON ; E2E smoke cockpit renforcés ; doc `HERMES_COCKPIT.md` synchronisée ; création projet Studio avec initialisation git `main` et reprise projet avec garde-fou de branche primaire (`main`/`master`).
 - **1.0.7** (2026-04-27): OAuth MCP state persisté (`mcp_oauth_state.json`) via `GET/POST /api/mcp/runtime/oauth` ; docs runtime MCP alignées ; `akasha worktree doctor` ; roadmap explicite des domaines encore partiels (`docs/hermes-partial-domains-roadmap.md`).
 - **1.0.6** (2026-04-27): `terminal_session` branché sur API PTY (start/list/read/write/resize/stop) + sessions listables ; MCP OAuth state routes (`GET/POST /api/mcp/runtime/oauth`) ; sandbox hooks mode `strict` (allowlist commandes) ; rate-limit distribué webhooks via SQLite (`AKASHA_WEBHOOK_RATE_SQLITE`) ; cache LRU étendu (`/api/router/routes`, `/api/mcp/status`) ; cockpit opérateur enrichi (health résumé) sur Studio/TUI/Tauri ; CI skills auto-découverte des `self_check.sh`.
 - **1.0.5** (2026-04-27): **PTY HTTP** (`/api/terminal/pty/sessions*`, `portable-pty`) ; **MCP runtime** `GET /api/mcp/runtime`, stdio long-lived `POST /api/mcp/runtime/stdio/start|stop` ; **gateway hooks** `on_http_request_pre` / `on_http_request_post` (timeouts `AKASHA_GATEWAY_HOOK_TIMEOUT_SECS`) ; **cache LRU** GET `/api/router/models` (`AKASHA_HTTP_CACHE_TTL_SECS`) ; webhooks `AKASHA_WEBHOOK_IDEM_SQLITE` ; CLI `akasha terminal capabilities` ; cockpit **Code Studio** + **TUI** + **Tauri** (MCP runtime + terminal) ; **Akasha_app** docs Hermes (MCP + terminal) ; **Akasha_skills** pilotes `scripts/self_check.sh` + CI ; **Akasha_plugins** trust catalogue (hook events WASM) ; **Rbitnet** lien bench ↔ matrice.
