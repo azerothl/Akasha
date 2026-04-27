@@ -43,7 +43,9 @@ pub fn load(data_dir: &Path) -> PermissionCenterState {
 pub fn save(data_dir: &Path, state: &PermissionCenterState) -> anyhow::Result<()> {
     let path = state_path(data_dir);
     let raw = serde_json::to_string_pretty(state)?;
-    std::fs::write(path, raw)?;
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, raw.as_bytes())?;
+    std::fs::rename(&tmp_path, &path)?;
     Ok(())
 }
 

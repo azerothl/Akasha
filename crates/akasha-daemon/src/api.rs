@@ -154,7 +154,9 @@ fn load_budget_settings(data_dir: &Path) -> BudgetSettings {
 
 fn save_budget_settings(data_dir: &Path, settings: &BudgetSettings) -> anyhow::Result<()> {
     let path = data_dir.join(BUDGET_SETTINGS_FILE);
-    std::fs::write(path, serde_json::to_string_pretty(settings)?)?;
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, serde_json::to_string_pretty(settings)?.as_bytes())?;
+    std::fs::rename(&tmp_path, &path)?;
     Ok(())
 }
 
@@ -168,7 +170,23 @@ fn tool_scope_key(tool: &str, tool_args: &[String]) -> String {
             .join(" ")
             .trim()
             .to_string(),
-        "write_file" | "edit_file" | "apply_patch" | "delete_file" | "rename_path" | "move_tree" => {
+        "write_file" => {
+            // write_file may receive a JSON payload with a `path` key, or plain args[0]
+            if let Some(path_from_json) = parse_write_file_request(tool_args)
+                .map(|(p, _)| p)
+                .filter(|p| !p.is_empty())
+            {
+                path_from_json
+            } else {
+                tool_args.get(0).cloned().unwrap_or_else(|| "global".to_string())
+            }
+        }
+        "delete_file" => {
+            // delete_file joins all args as a single path (spaces in filenames)
+            let joined = tool_args.join(" ").trim().to_string();
+            if joined.is_empty() { "global".to_string() } else { joined }
+        }
+        "edit_file" | "apply_patch" | "rename_path" | "move_tree" => {
             tool_args.get(0).cloned().unwrap_or_else(|| "global".to_string())
         }
         _ => "global".to_string(),
@@ -202,7 +220,9 @@ fn load_permission_mode(data_dir: &Path) -> PermissionModeState {
 
 fn save_permission_mode(data_dir: &Path, state: &PermissionModeState) -> anyhow::Result<()> {
     let path = data_dir.join("permissions_mode.json");
-    std::fs::write(path, serde_json::to_string_pretty(state)?)?;
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, serde_json::to_string_pretty(state)?.as_bytes())?;
+    std::fs::rename(&tmp_path, &path)?;
     Ok(())
 }
 
@@ -5212,16 +5232,27 @@ async fn execute_tool_call(
             }
         }
         "schedule_task" => {
-            let cron = args.get(0).map(String::as_str).unwrap_or("").trim();
-            let prompt = args.get(1).map(String::as_str).unwrap_or("").trim();
-            let title = args
-                .get(2)
-                .cloned()
-                .unwrap_or_else(|| "Agent scheduled task".to_string());
+            let cron = args.get(0).map(String::as_str).unwrap_or("").trim().to_string();
+            let mut title = "Agent scheduled task".to_string();
+            let mut prompt_parts: Vec<&str> = Vec::new();
+            let mut i = 1;
+            while i < args.len() {
+                if args[i] == "--title" {
+                    if let Some(value) = args.get(i + 1) {
+                        title = value.clone();
+                        i += 2;
+                        continue;
+                    }
+                }
+                prompt_parts.push(args[i].as_str());
+                i += 1;
+            }
+            let prompt = prompt_parts.join(" ");
+            let prompt = prompt.trim();
             if cron.is_empty() || prompt.is_empty() {
                 return (
                     false,
-                    "[schedule_task] usage: schedule_task <cron> <prompt> [title]".to_string(),
+                    "[schedule_task] usage: schedule_task <cron> <prompt...> [--title <title>]".to_string(),
                     None,
                 );
             }
@@ -5346,26 +5377,19 @@ async fn execute_tool_call(
                 Some(path) => path.parent().map(load_budget_settings).unwrap_or_default(),
                 None => BudgetSettings::default(),
             };
-            let usage = if session_id.trim().is_empty() {
-                (0u64, 0.0f64)
+            let scope = if session_id.trim().is_empty() {
+                "global".to_string()
             } else {
-                (0u64, 0.0f64)
-            };
-            let ratio = if settings.daily_token_limit == 0 {
-                0.0
-            } else {
-                usage.0 as f64 / settings.daily_token_limit as f64
+                format!("session {}", session_id)
             };
             (
-                true,
+                false,
                 format!(
-                    "[budget_status] limit={} used_tokens={} cost_usd={:.4} warn_ratio={:.2} auto_concise={} over_warn={}",
+                    "[budget_status] limit={} warn_ratio={:.2} auto_concise={} scope={} usage_unavailable=true message=\"live usage is not available from this tool path; query the local /api/budget endpoint for accurate totals\"",
                     settings.daily_token_limit,
-                    usage.0,
-                    usage.1,
                     settings.warn_ratio,
                     settings.auto_concise,
-                    ratio >= settings.warn_ratio
+                    scope
                 ),
                 None,
             )
@@ -15417,7 +15441,10 @@ data: {}\n\n",
             pairing_code: code.clone(),
             requested_at: chrono::Utc::now().to_rfc3339(),
         });
-        let _ = crate::channel_access::save(data_dir, &state);
+        if let Err(e) = crate::channel_access::save(data_dir, &state) {
+            tracing::error!(error = %e, "channel-access: failed to persist pairing request");
+            return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+        }
         let body = serde_json::json!({ "ok": true, "pairing_code": code });
         return json_response("200 OK", &body.to_string());
     }
@@ -15459,7 +15486,10 @@ data: {}\n\n",
             },
             approved_at: chrono::Utc::now().to_rfc3339(),
         });
-        let _ = crate::channel_access::save(data_dir, &state);
+        if let Err(e) = crate::channel_access::save(data_dir, &state) {
+            tracing::error!(error = %e, "channel-access: failed to persist approve");
+            return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+        }
         return json_response("200 OK", r#"{"ok":true}"#);
     }
     if method == "POST" && path_only == "/api/channel-access/telegram/reject" {
@@ -15476,7 +15506,10 @@ data: {}\n\n",
         let mut state = crate::channel_access::load(data_dir);
         let before = state.pending.len();
         state.pending.retain(|p| p.user_id != user_id);
-        let _ = crate::channel_access::save(data_dir, &state);
+        if let Err(e) = crate::channel_access::save(data_dir, &state) {
+            tracing::error!(error = %e, "channel-access: failed to persist reject");
+            return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+        }
         let removed = before != state.pending.len();
         return json_response(
             "200 OK",
@@ -15497,7 +15530,10 @@ data: {}\n\n",
         let mut state = crate::channel_access::load(data_dir);
         let before = state.approved.len();
         state.approved.retain(|u| u.user_id != user_id);
-        let _ = crate::channel_access::save(data_dir, &state);
+        if let Err(e) = crate::channel_access::save(data_dir, &state) {
+            tracing::error!(error = %e, "channel-access: failed to persist remove");
+            return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+        }
         let removed = before != state.approved.len();
         return json_response(
             "200 OK",
@@ -15518,7 +15554,10 @@ data: {}\n\n",
         let mut state = crate::channel_access::load(data_dir);
         if let Some(u) = state.approved.iter_mut().find(|u| u.user_id == user_id) {
             u.role = crate::channel_access::TelegramRole::Admin;
-            let _ = crate::channel_access::save(data_dir, &state);
+            if let Err(e) = crate::channel_access::save(data_dir, &state) {
+                tracing::error!(error = %e, "channel-access: failed to persist promote");
+                return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+            }
             return json_response("200 OK", r#"{"ok":true}"#);
         }
         return json_response("404 Not Found", r#"{"error":"user_not_found"}"#);
@@ -15537,14 +15576,20 @@ data: {}\n\n",
         let mut state = crate::channel_access::load(data_dir);
         if let Some(u) = state.approved.iter_mut().find(|u| u.user_id == user_id) {
             u.role = crate::channel_access::TelegramRole::Member;
-            let _ = crate::channel_access::save(data_dir, &state);
+            if let Err(e) = crate::channel_access::save(data_dir, &state) {
+                tracing::error!(error = %e, "channel-access: failed to persist demote");
+                return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+            }
             return json_response("200 OK", r#"{"ok":true}"#);
         }
         return json_response("404 Not Found", r#"{"error":"user_not_found"}"#);
     }
     if method == "POST" && path_only == "/api/channel-access/telegram/reset" {
         let state = crate::channel_access::TelegramAccessState::default();
-        let _ = crate::channel_access::save(data_dir, &state);
+        if let Err(e) = crate::channel_access::save(data_dir, &state) {
+            tracing::error!(error = %e, "channel-access: failed to persist reset");
+            return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+        }
         return json_response("200 OK", r#"{"ok":true}"#);
     }
 
@@ -18358,5 +18403,147 @@ mod tests {
         let exp = std::fs::canonicalize(tmp.path()).unwrap();
         let got_c = std::fs::canonicalize(&got).unwrap();
         assert_eq!(got_c, exp);
+    }
+
+    // --- tool_scope_key ---
+
+    #[test]
+    fn tool_scope_key_run_command_joins_first_two_args() {
+        let args = vec![s("git"), s("status"), s("--short")];
+        let key = super::tool_scope_key("run_command", &args);
+        assert_eq!(key, "git status");
+    }
+
+    #[test]
+    fn tool_scope_key_delete_file_joins_all_args_for_spaced_paths() {
+        let args = vec![s("Cas"), s("d'usage.pdf")];
+        let key = super::tool_scope_key("delete_file", &args);
+        assert_eq!(key, "Cas d'usage.pdf");
+    }
+
+    #[test]
+    fn tool_scope_key_delete_file_single_arg() {
+        let args = vec![s("/tmp/test.txt")];
+        let key = super::tool_scope_key("delete_file", &args);
+        assert_eq!(key, "/tmp/test.txt");
+    }
+
+    #[test]
+    fn tool_scope_key_write_file_uses_plain_path_from_first_arg() {
+        let args = vec![s("/tmp/hello.txt"), s("content here")];
+        let key = super::tool_scope_key("write_file", &args);
+        assert_eq!(key, "/tmp/hello.txt");
+    }
+
+    #[test]
+    fn tool_scope_key_write_file_parses_json_path() {
+        let args = vec![s(r#"{"path":"/tmp/from_json.txt","content":"hello"}"#)];
+        let key = super::tool_scope_key("write_file", &args);
+        assert_eq!(key, "/tmp/from_json.txt");
+    }
+
+    #[test]
+    fn tool_scope_key_edit_file_uses_first_arg() {
+        let args = vec![s("/some/file.rs"), s("1"), s("5"), s("new content")];
+        let key = super::tool_scope_key("edit_file", &args);
+        assert_eq!(key, "/some/file.rs");
+    }
+
+    #[test]
+    fn tool_scope_key_unknown_tool_returns_global() {
+        let args = vec![s("whatever")];
+        let key = super::tool_scope_key("unknown_tool", &args);
+        assert_eq!(key, "global");
+    }
+
+    #[test]
+    fn tool_scope_key_empty_args_returns_global_for_write_file() {
+        let args: Vec<String> = vec![];
+        let key = super::tool_scope_key("write_file", &args);
+        assert_eq!(key, "global");
+    }
+
+    // --- permissions_center (load/save/lookup) ---
+
+    #[test]
+    fn permissions_center_save_load_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::permissions_center::PermissionCenterState {
+            decisions: vec![crate::permissions_center::PermissionDecision {
+                id: "abc".to_string(),
+                tool: "delete_file".to_string(),
+                scope: "/tmp/foo.txt".to_string(),
+                mode: crate::permissions_center::DecisionMode::AllowPersistent,
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+            }],
+        };
+        crate::permissions_center::save(tmp.path(), &state).unwrap();
+        let loaded = crate::permissions_center::load(tmp.path());
+        assert_eq!(loaded.decisions.len(), 1);
+        assert_eq!(loaded.decisions[0].tool, "delete_file");
+        assert_eq!(loaded.decisions[0].scope, "/tmp/foo.txt");
+        assert_eq!(loaded.decisions[0].mode, crate::permissions_center::DecisionMode::AllowPersistent);
+    }
+
+    #[test]
+    fn permissions_center_lookup_returns_matching_decision() {
+        let state = crate::permissions_center::PermissionCenterState {
+            decisions: vec![
+                crate::permissions_center::PermissionDecision {
+                    id: "d1".to_string(),
+                    tool: "write_file".to_string(),
+                    scope: "/tmp/a.txt".to_string(),
+                    mode: crate::permissions_center::DecisionMode::DenyPersistent,
+                    created_at: "2024-01-01T00:00:00Z".to_string(),
+                    expires_at: None,
+                },
+            ],
+        };
+        let found = crate::permissions_center::lookup("write_file", "/tmp/a.txt", &state);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().mode, crate::permissions_center::DecisionMode::DenyPersistent);
+    }
+
+    #[test]
+    fn permissions_center_lookup_returns_none_for_different_scope() {
+        let state = crate::permissions_center::PermissionCenterState {
+            decisions: vec![crate::permissions_center::PermissionDecision {
+                id: "d1".to_string(),
+                tool: "write_file".to_string(),
+                scope: "/tmp/a.txt".to_string(),
+                mode: crate::permissions_center::DecisionMode::AllowPersistent,
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+            }],
+        };
+        let not_found = crate::permissions_center::lookup("write_file", "/tmp/b.txt", &state);
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn permissions_center_lookup_returns_none_for_different_tool() {
+        let state = crate::permissions_center::PermissionCenterState {
+            decisions: vec![crate::permissions_center::PermissionDecision {
+                id: "d1".to_string(),
+                tool: "write_file".to_string(),
+                scope: "global".to_string(),
+                mode: crate::permissions_center::DecisionMode::AllowPersistent,
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+            }],
+        };
+        let not_found = crate::permissions_center::lookup("delete_file", "global", &state);
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn permissions_center_save_is_atomic_via_tmp_rename() {
+        // Verify no .tmp file is left behind after a successful save.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::permissions_center::PermissionCenterState::default();
+        crate::permissions_center::save(tmp.path(), &state).unwrap();
+        let tmp_file = tmp.path().join("permissions_center.json.tmp");
+        assert!(!tmp_file.exists(), ".tmp file should not remain after save");
     }
 }

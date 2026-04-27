@@ -262,13 +262,13 @@ pub async fn run_telegram_bot(
             let data_dir = resolve_data_dir();
             let access = crate::channel_access::load(data_dir.as_path());
 
-            let payload = if command == "/akasha" {
-                rest
+            let payload: String = if command == "/akasha" {
+                rest.to_string()
             } else if command == "/start" {
                 if from_user_id == 0 {
-                    "Unable to identify Telegram user."
+                    "Unable to identify Telegram user.".to_string()
                 } else if crate::channel_access::is_approved_user(&access, from_user_id) {
-                    "You are already approved. Use /akasha <message>."
+                    "You are already approved. Use /akasha <message>.".to_string()
                 } else {
                     let req_url = format!("{}/api/channel-access/telegram/request", daemon_base_url);
                     let req_body = serde_json::json!({
@@ -282,22 +282,22 @@ pub async fn run_telegram_bot(
                                 .get("pairing_code")
                                 .and_then(|s| s.as_str())
                                 .unwrap_or("pending");
-                            Box::leak(format!("Pairing request created. Share this code with an Akasha admin: {}", code).into_boxed_str())
+                            format!("Pairing request created. Share this code with an Akasha admin: {}", code)
                         }
-                        Err(_) => "Pairing request failed. Try again later.",
+                        Err(_) => "Pairing request failed. Try again later.".to_string(),
                     }
                 }
             } else if command == "/status" {
                 let url = format!("{}/api/status", daemon_base_url);
                 match client.get(&url).send().await {
-                    Ok(resp) => Box::leak(resp.text().await.unwrap_or_else(|_| "status unavailable".to_string()).into_boxed_str()),
-                    Err(_) => "status unavailable",
+                    Ok(resp) => resp.text().await.unwrap_or_else(|_| "status unavailable".to_string()),
+                    Err(_) => "status unavailable".to_string(),
                 }
             } else if command == "/budget" {
                 let url = format!("{}/api/budget", daemon_base_url);
                 match client.get(&url).send().await {
-                    Ok(resp) => Box::leak(resp.text().await.unwrap_or_else(|_| "budget unavailable".to_string()).into_boxed_str()),
-                    Err(_) => "budget unavailable",
+                    Ok(resp) => resp.text().await.unwrap_or_else(|_| "budget unavailable".to_string()),
+                    Err(_) => "budget unavailable".to_string(),
                 }
             } else if command == "/permissions" {
                 let mode = if rest.eq_ignore_ascii_case("allow_all") {
@@ -310,31 +310,31 @@ pub async fn run_telegram_bot(
                 if mode.is_empty() {
                     let url = format!("{}/api/permissions/mode", daemon_base_url);
                     match client.get(&url).send().await {
-                        Ok(resp) => Box::leak(resp.text().await.unwrap_or_else(|_| "permissions mode unavailable".to_string()).into_boxed_str()),
-                        Err(_) => "permissions mode unavailable",
+                        Ok(resp) => resp.text().await.unwrap_or_else(|_| "permissions mode unavailable".to_string()),
+                        Err(_) => "permissions mode unavailable".to_string(),
                     }
                 } else {
                     let url = format!("{}/api/permissions/mode", daemon_base_url);
                     let body = serde_json::json!({ "mode": mode });
                     match client.post(&url).json(&body).send().await {
-                        Ok(_) => Box::leak(format!("permissions mode set to {}", mode).into_boxed_str()),
-                        Err(_) => "failed to set permissions mode",
+                        Ok(_) => format!("permissions mode set to {}", mode),
+                        Err(_) => "failed to set permissions mode".to_string(),
                     }
                 }
             } else if command == "/memory" {
                 let url = format!("{}/api/memory/second-brain/overview", daemon_base_url);
                 match client.get(&url).send().await {
-                    Ok(resp) => Box::leak(resp.text().await.unwrap_or_else(|_| "memory unavailable".to_string()).into_boxed_str()),
-                    Err(_) => "memory unavailable",
+                    Ok(resp) => resp.text().await.unwrap_or_else(|_| "memory unavailable".to_string()),
+                    Err(_) => "memory unavailable".to_string(),
                 }
             } else if command == "/tasks" {
                 let url = format!("{}/api/schedules", daemon_base_url);
                 match client.get(&url).send().await {
-                    Ok(resp) => Box::leak(resp.text().await.unwrap_or_else(|_| "tasks unavailable".to_string()).into_boxed_str()),
-                    Err(_) => "tasks unavailable",
+                    Ok(resp) => resp.text().await.unwrap_or_else(|_| "tasks unavailable".to_string()),
+                    Err(_) => "tasks unavailable".to_string(),
                 }
             } else if chat_type == "private" && !text.starts_with('/') {
-                text
+                text.to_string()
             } else {
                 let hint = "Use /akasha <your message>. In groups: /akasha@BotUsername <message>.";
                 if let Err(e) = send_telegram(&client, &send_message_url, chat_id, hint).await {
@@ -351,7 +351,7 @@ pub async fn run_telegram_bot(
                 continue;
             }
             if command == "/start" {
-                if let Err(e) = send_telegram(&client, &send_message_url, chat_id, payload).await {
+                if let Err(e) = send_telegram(&client, &send_message_url, chat_id, &payload).await {
                     warn!(error = %e, "Telegram /start reply failed");
                 }
                 continue;
@@ -362,7 +362,7 @@ pub async fn run_telegram_bot(
                 || command == "/memory"
                 || command == "/tasks"
             {
-                if let Err(e) = send_telegram(&client, &send_message_url, chat_id, payload).await {
+                if let Err(e) = send_telegram(&client, &send_message_url, chat_id, &payload).await {
                     warn!(error = %e, "Telegram command reply failed");
                 }
                 continue;
@@ -377,7 +377,7 @@ pub async fn run_telegram_bot(
                 .await;
                 continue;
             }
-            if let Err(e) = akasha_core::check_prompt_injection(payload) {
+            if let Err(e) = akasha_core::check_prompt_injection(&payload) {
                 let _ = send_telegram(
                     &client,
                     &send_message_url,
