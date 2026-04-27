@@ -5,8 +5,10 @@
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const OUTPUT_CAP_BYTES: usize = 512 * 1024;
 
@@ -17,6 +19,10 @@ pub struct PtyCreateBody {
     pub argv: Option<Vec<String>>,
     #[serde(default)]
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub transcript_name: Option<String>,
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
     #[serde(default = "default_cols")]
     pub cols: u16,
     #[serde(default = "default_rows")]
@@ -33,6 +39,7 @@ fn default_rows() -> u16 {
 #[derive(Debug, Serialize)]
 pub struct PtyCreateResponse {
     pub session_id: String,
+    pub idle_timeout_secs: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +62,15 @@ pub struct PtyOutputResponse {
     pub bytes: usize,
 }
 
+#[derive(Debug, Serialize)]
+pub struct PtySessionStatus {
+    pub session_id: String,
+    pub transcript_path: Option<String>,
+    pub created_at_rfc3339: String,
+    pub idle_for_secs: u64,
+    pub idle_timeout_secs: u64,
+}
+
 pub struct PtyManager {
     sessions: Mutex<HashMap<String, Arc<PtySessionInner>>>,
 }
@@ -65,6 +81,10 @@ pub struct PtySessionInner {
     out: Arc<Mutex<VecDeque<u8>>>,
     child: Arc<Mutex<Option<Box<dyn Child + Send + Sync>>>>,
     reader: Mutex<Option<std::thread::JoinHandle<()>>>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    last_activity: Arc<Mutex<Instant>>,
+    idle_timeout: Duration,
+    transcript_path: Option<String>,
 }
 
 impl PtyManager {
@@ -76,6 +96,7 @@ impl PtyManager {
     }
 
     pub fn create(&self, body: PtyCreateBody) -> anyhow::Result<PtyCreateResponse> {
+        self.start_reaper_once();
         let system = native_pty_system();
         let size = PtySize {
             rows: body.rows,
@@ -90,6 +111,27 @@ impl PtyManager {
 
         let master = Arc::new(Mutex::new(pair.master));
         let out = Arc::new(Mutex::new(VecDeque::new()));
+        let last_activity = Arc::new(Mutex::new(Instant::now()));
+        let created_at = chrono::Utc::now();
+        let idle_timeout = Duration::from_secs(body.idle_timeout_secs.unwrap_or(900).max(30));
+        let transcript_path = body
+            .transcript_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|n| {
+                let p = std::env::var("AKASHA_DATA_DIR")
+                    .ok()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| {
+                        dirs::home_dir()
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            .join("akasha")
+                    })
+                    .join("pty_transcripts");
+                let _ = std::fs::create_dir_all(&p);
+                p.join(format!("{n}.log")).display().to_string()
+            });
 
         let r = {
             let g = master
@@ -98,6 +140,8 @@ impl PtyManager {
             g.try_clone_reader()?
         };
         let out_thread = Arc::clone(&out);
+        let activity_thread = Arc::clone(&last_activity);
+        let transcript_thread = transcript_path.clone();
         let reader_handle = std::thread::spawn(move || {
             let mut r = r;
             let mut buf = [0u8; 4096];
@@ -105,6 +149,9 @@ impl PtyManager {
                 match r.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        if let Ok(mut a) = activity_thread.lock() {
+                            *a = Instant::now();
+                        }
                         let Ok(mut q) = out_thread.lock() else {
                             break;
                         };
@@ -113,6 +160,13 @@ impl PtyManager {
                             while q.len() > OUTPUT_CAP_BYTES {
                                 q.pop_front();
                             }
+                        }
+                        if let Some(tp) = &transcript_thread {
+                            let _ = OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(tp)
+                                .and_then(|mut f| f.write_all(&buf[..n]));
                         }
                     }
                     Err(_) => break,
@@ -137,6 +191,10 @@ impl PtyManager {
             out,
             child: Arc::clone(&child_holder),
             reader: Mutex::new(Some(reader_handle)),
+            created_at,
+            last_activity,
+            idle_timeout,
+            transcript_path: transcript_path.clone(),
         });
 
         self.sessions
@@ -144,7 +202,10 @@ impl PtyManager {
             .map_err(|e| anyhow::anyhow!("pty sessions lock poisoned: {}", e))?
             .insert(session_id.clone(), inner);
 
-        Ok(PtyCreateResponse { session_id })
+        Ok(PtyCreateResponse {
+            session_id,
+            idle_timeout_secs: idle_timeout.as_secs(),
+        })
     }
 
     pub fn write_input(&self, id: &str, body: PtyInputBody) -> anyhow::Result<()> {
@@ -170,6 +231,9 @@ impl PtyManager {
             .map_err(|e| anyhow::anyhow!("pty writer lock poisoned: {}", e))?;
         w.write_all(&data)?;
         w.flush()?;
+        if let Ok(mut a) = inner.last_activity.lock() {
+            *a = Instant::now();
+        }
         Ok(())
     }
 
@@ -230,6 +294,56 @@ impl PtyManager {
             }
         }
         Ok(())
+    }
+
+    pub fn list_sessions(&self) -> anyhow::Result<Vec<PtySessionStatus>> {
+        let map = self
+            .sessions
+            .lock()
+            .map_err(|e| anyhow::anyhow!("pty sessions lock poisoned: {}", e))?;
+        let mut out = Vec::with_capacity(map.len());
+        for (id, s) in map.iter() {
+            let idle_for = s
+                .last_activity
+                .lock()
+                .ok()
+                .map(|t| t.elapsed())
+                .unwrap_or_else(|| Duration::from_secs(0));
+            out.push(PtySessionStatus {
+                session_id: id.clone(),
+                transcript_path: s.transcript_path.clone(),
+                created_at_rfc3339: s.created_at.to_rfc3339(),
+                idle_for_secs: idle_for.as_secs(),
+                idle_timeout_secs: s.idle_timeout.as_secs(),
+            });
+        }
+        Ok(out)
+    }
+
+    fn start_reaper_once(&self) {
+        static REAPER: OnceLock<()> = OnceLock::new();
+        REAPER.get_or_init(|| {
+            std::thread::spawn(|| loop {
+                std::thread::sleep(Duration::from_secs(15));
+                let mut to_close = Vec::new();
+                if let Ok(map) = PtyManager::global().sessions.lock() {
+                    for (id, s) in map.iter() {
+                        let idle = s
+                            .last_activity
+                            .lock()
+                            .ok()
+                            .map(|t| t.elapsed())
+                            .unwrap_or_default();
+                        if idle > s.idle_timeout {
+                            to_close.push(id.clone());
+                        }
+                    }
+                }
+                for id in to_close {
+                    let _ = PtyManager::global().close(&id);
+                }
+            });
+        });
     }
 
     fn get_arc(&self, id: &str) -> anyhow::Result<Arc<PtySessionInner>> {

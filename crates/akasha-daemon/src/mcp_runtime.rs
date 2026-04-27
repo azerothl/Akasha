@@ -16,9 +16,20 @@ struct StdioState {
 }
 
 static STDIO: OnceLock<Mutex<Option<StdioState>>> = OnceLock::new();
+static OAUTH_STATE: OnceLock<Mutex<Value>> = OnceLock::new();
 
 fn cell() -> &'static Mutex<Option<StdioState>> {
     STDIO.get_or_init(|| Mutex::new(None))
+}
+
+fn oauth_cell() -> &'static Mutex<Value> {
+    OAUTH_STATE.get_or_init(|| {
+        Mutex::new(json!({
+            "status": "not_configured",
+            "provider": null,
+            "updated_at": null
+        }))
+    })
 }
 
 async fn write_framed(stdin: &mut (impl AsyncWriteExt + Unpin), msg: &Value) -> std::io::Result<()> {
@@ -39,9 +50,24 @@ pub async fn summary() -> Value {
         },
         "transports": {
             "stdio_long_lived": "POST /api/mcp/runtime/stdio/start { \"server\": \"name\" }",
-            "http_sse": "roadmap"
-        }
+            "http_sse": "GET /api/mcp/runtime/sse (phase next: heartbeat stream)"
+        },
+        "oauth_state": oauth_cell().lock().await.clone(),
     })
+}
+
+pub async fn oauth_get() -> Value {
+    oauth_cell().lock().await.clone()
+}
+
+pub async fn oauth_put(provider: String, status: String) -> Value {
+    let mut g = oauth_cell().lock().await;
+    *g = json!({
+        "status": status,
+        "provider": provider,
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+    });
+    g.clone()
 }
 
 /// Spawn one MCP server from `mcp.json`, send `initialize`, keep the process alive for operator tooling.

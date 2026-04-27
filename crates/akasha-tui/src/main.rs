@@ -1167,11 +1167,15 @@ impl App {
             ("lifecycle", "/api/lifecycle/hooks"),
         ];
         let mut parts: Vec<String> = Vec::new();
+        let mut ok = 0usize;
         for (label, path) in paths {
             let url = format!("{base}{path}");
             let line = match client.get(&url).send() {
                 Ok(r) => {
                     let status = r.status();
+                    if status.is_success() {
+                        ok += 1;
+                    }
                     let body = r.text().unwrap_or_default();
                     format!("{label} {path} → {status}\n{}", trim_tui(&body, 1400))
                 }
@@ -1179,7 +1183,9 @@ impl App {
             };
             parts.push(line);
         }
-        self.hermes_ops_text = parts.join("\n---\n");
+        let mut out = vec![format!("Cockpit health: {ok}/{} endpoints OK", parts.len())];
+        out.extend(parts);
+        self.hermes_ops_text = out.join("\n---\n");
     }
 
     /// Non-blocking: POST /api/message, send ack via tx, then poll and send final reply (FR-025).

@@ -27,6 +27,8 @@ fn cache() -> &'static Mutex<LruCache<String, Entry>> {
 const MAX_BODY_BYTES: usize = 256 * 1024;
 
 const ROUTER_MODELS_KEY: &str = "GET|/api/router/models|";
+const ROUTER_ROUTES_KEY: &str = "GET|/api/router/routes|";
+const MCP_STATUS_KEY: &str = "GET|/api/mcp/status|";
 
 /// Return cached JSON body for `GET /api/router/models` if still valid.
 pub fn cache_get_router_models() -> Option<String> {
@@ -41,6 +43,49 @@ pub fn cache_get_router_models() -> Option<String> {
 }
 
 pub fn cache_put_router_models(body: &str) {
+    put(ROUTER_MODELS_KEY, body);
+}
+
+pub fn cache_get_router_routes() -> Option<String> {
+    get(ROUTER_ROUTES_KEY)
+}
+
+pub fn cache_put_router_routes(body: &str) {
+    put(ROUTER_ROUTES_KEY, body);
+}
+
+pub fn cache_get_mcp_status() -> Option<String> {
+    get(MCP_STATUS_KEY)
+}
+
+pub fn cache_put_mcp_status(body: &str) {
+    put(MCP_STATUS_KEY, body);
+}
+
+pub fn invalidate_router_models() {
+    if let Ok(mut g) = cache().lock() {
+        g.pop(ROUTER_MODELS_KEY);
+    }
+}
+
+pub fn invalidate_router_routes() {
+    if let Ok(mut g) = cache().lock() {
+        g.pop(ROUTER_ROUTES_KEY);
+    }
+}
+
+fn get(key: &str) -> Option<String> {
+    ttl()?;
+    let mut g = cache().lock().ok()?;
+    let ent = g.get(key)?;
+    if Instant::now() > ent.expires {
+        g.pop(key);
+        return None;
+    }
+    Some(ent.body.clone())
+}
+
+fn put(key: &str, body: &str) {
     let Some(ttl) = ttl() else {
         return;
     };
@@ -49,18 +94,12 @@ pub fn cache_put_router_models(body: &str) {
     }
     if let Ok(mut g) = cache().lock() {
         g.put(
-            ROUTER_MODELS_KEY.to_string(),
+            key.to_string(),
             Entry {
                 body: body.to_string(),
                 expires: Instant::now() + ttl,
             },
         );
-    }
-}
-
-pub fn invalidate_router_models() {
-    if let Ok(mut g) = cache().lock() {
-        g.pop(ROUTER_MODELS_KEY);
     }
 }
 

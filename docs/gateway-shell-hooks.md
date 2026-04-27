@@ -27,7 +27,10 @@ Execution is **fire-and-forget** with a **30s** timeout per argv list; failures 
 ## 2) Gateway / plugin hooks
 
 - **Operator summary:** `GET /api/lifecycle/hooks` returns whether `lifecycle_hooks.json` exists and counts hook arrays (`on_schedule_fire`, `on_http_request_pre`, `on_http_request_post`).
-- **Gateway (MVP):** `on_http_request_pre` runs **before** the main HTTP handler (after path parsing); each argv list is executed with **`AKASHA_GATEWAY_HOOK_TIMEOUT_SECS`** (default **3s**) per command. Environment: `AKASHA_DATA_DIR`, `AKASHA_HTTP_METHOD`, `AKASHA_HTTP_PATH`, `AKASHA_GATEWAY_HOOK_SANDBOX` (metadata flag for operators; advanced isolation remains roadmap). `on_http_request_post` is **spawned when the API handler returns** (response body already built); same timeout and env vars. Failures are logged only.
+- **Gateway (MVP+):** `on_http_request_pre` runs **before** the main HTTP handler (after path parsing); each argv list is executed with **`AKASHA_GATEWAY_HOOK_TIMEOUT_SECS`** (default **3s**) per command. Environment: `AKASHA_DATA_DIR`, `AKASHA_HTTP_METHOD`, `AKASHA_HTTP_PATH`, `AKASHA_GATEWAY_HOOK_SANDBOX`.
+  - `AKASHA_GATEWAY_HOOK_SANDBOX=none` (défaut): pas de filtre additionnel.
+  - `AKASHA_GATEWAY_HOOK_SANDBOX=strict`: allowlist de commandes (python/node/pwsh/bash/sh), les autres sont refusées côté daemon.
+  `on_http_request_post` est **spawned when the API handler returns** (response body déjà construit) ; même timeout et env vars. Failures are logged only.
 - **External automation:** use signed **`/api/automation/webhook`** (or `/direct`) for triggers that bypass the HTTP hook path.
 - **Plugin:** WASM plugin host events — extend `Akasha_plugins` + daemon registry (see plugins trust doc).
 - **Shell (general):** unify with `lifecycle_hooks.json` schema extensions (`on_task_start`, …) in a future release.

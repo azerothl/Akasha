@@ -149,6 +149,35 @@ fn gateway_sandbox_flag() -> String {
     std::env::var("AKASHA_GATEWAY_HOOK_SANDBOX").unwrap_or_else(|_| "none".into())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HookSandboxMode {
+    None,
+    Strict,
+}
+
+fn gateway_sandbox_mode() -> HookSandboxMode {
+    match gateway_sandbox_flag().to_ascii_lowercase().as_str() {
+        "strict" => HookSandboxMode::Strict,
+        _ => HookSandboxMode::None,
+    }
+}
+
+fn is_hook_command_allowed(program: &str, mode: HookSandboxMode) -> bool {
+    if mode == HookSandboxMode::None {
+        return true;
+    }
+    let p = std::path::Path::new(program);
+    let name = p
+        .file_name()
+        .and_then(|x| x.to_str())
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "python" | "python3" | "node" | "pwsh" | "powershell" | "bash" | "sh"
+    )
+}
+
 async fn load_http_hook_argv(data_dir: &Path, key: &str) -> Vec<Vec<String>> {
     let path = data_dir.join("lifecycle_hooks.json");
     let raw = match tokio::fs::read_to_string(&path).await {
@@ -185,8 +214,13 @@ async fn run_http_hook_array(
     }
     let timeout_d = gateway_hook_timeout();
     let sandbox = gateway_sandbox_flag();
+    let sandbox_mode = gateway_sandbox_mode();
     for argv in hooks {
         let prog = argv[0].clone();
+        if !is_hook_command_allowed(&prog, sandbox_mode) {
+            tracing::warn!(prog = %prog, sandbox = %sandbox, "gateway_http_hooks: command denied by strict sandbox");
+            continue;
+        }
         let rest: Vec<String> = argv[1..].to_vec();
         let dd = data_dir.to_path_buf();
         let method = method.to_string();

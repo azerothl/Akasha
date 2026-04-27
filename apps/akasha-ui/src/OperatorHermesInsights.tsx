@@ -27,6 +27,7 @@ type Props = {
  * Links point at GitHub-hosted markdown in the Akasha repo (readable without a local checkout).
  */
 export function OperatorHermesInsights({ sessionId, daemonUrl, expert, labels }: Props) {
+  const [opsSummary, setOpsSummary] = useState<string>("");
   const [resumeJson, setResumeJson] = useState<string>("");
   const [toolsJson, setToolsJson] = useState<string>("");
   const [recallJson, setRecallJson] = useState<string>("");
@@ -70,6 +71,22 @@ export function OperatorHermesInsights({ sessionId, daemonUrl, expert, labels }:
         if (!cancelled) {
           setLifecycleJson(lh.ok ? lht : `${labels.loadError}: lifecycle/hooks HTTP ${lh.status}`);
         }
+        const sc = await fetch(daemonUrl("/api/schedules"));
+        const sct = await sc.text();
+        const runs = await fetch(daemonUrl("/api/task_runs"));
+        const runst = await runs.text();
+        const pw = await fetch(daemonUrl("/api/process/watch/recent?limit=20"));
+        const pwt = await pw.text();
+        if (!cancelled) {
+          const lines = [
+            `schedules: ${sc.status}`,
+            `task_runs: ${runs.status}`,
+            `process_watch: ${pw.status}`,
+          ];
+          setOpsSummary(
+            `${lines.join(" | ")}\n\n--- /api/schedules ---\n${sct}\n\n--- /api/task_runs ---\n${runst}\n\n--- /api/process/watch/recent ---\n${pwt}`,
+          );
+        }
         if (sessionId?.trim()) {
           const q = new URLSearchParams({ session_id: sessionId.trim() });
           const rr = await fetch(daemonUrl(`/api/session/resume-brief?${q.toString()}`));
@@ -108,7 +125,13 @@ export function OperatorHermesInsights({ sessionId, daemonUrl, expert, labels }:
         </a>
       </p>
       {err ? <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err">{err}</p> : null}
-      <h4 className="settings-plugin-status-title">{labels.resumeHeading}</h4>
+      <h4 className="settings-plugin-status-title">Scheduler / task runs / process watch</h4>
+      <pre className="operator-hermes-pre" tabIndex={0}>
+        {opsSummary || "…"}
+      </pre>
+      <h4 className="settings-plugin-status-title" style={{ marginTop: "1rem" }}>
+        {labels.resumeHeading}
+      </h4>
       <pre className="operator-hermes-pre" tabIndex={0}>
         {resumeJson || "…"}
       </pre>

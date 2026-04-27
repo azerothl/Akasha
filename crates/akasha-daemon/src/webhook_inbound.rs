@@ -101,6 +101,12 @@ pub fn webhook_idempotency_db_path(data_dir: &Path) -> std::path::PathBuf {
         .unwrap_or_else(|| data_dir.join("webhook_idempotency.sqlite3"))
 }
 
+pub fn webhook_rate_limit_db_path(data_dir: &Path) -> std::path::PathBuf {
+    std::env::var_os("AKASHA_WEBHOOK_RATE_SQLITE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("webhook_rate_limit.sqlite3"))
+}
+
 fn webhook_idem_disk_try_insert(data_dir: &Path, key: &str, ttl: Duration) -> Result<bool, String> {
     let path = webhook_idempotency_db_path(data_dir);
     let conn = rusqlite::Connection::open(&path).map_err(|e| e.to_string())?;
@@ -160,6 +166,79 @@ pub async fn check_automation_idempotency(
         Err(e) => {
             tracing::warn!(error = %e, "webhook idempotency: spawn_blocking failed, falling back to in-memory");
             gate.check_idempotency(key, ttl)
+        }
+    }
+}
+
+fn webhook_rate_disk_check(
+    data_dir: &Path,
+    route_key: &str,
+    max_per_minute: u32,
+) -> Result<bool, String> {
+    let path = webhook_rate_limit_db_path(data_dir);
+    let conn = rusqlite::Connection::open(&path).map_err(|e| e.to_string())?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         CREATE TABLE IF NOT EXISTS webhook_rate_limit (
+             route_key TEXT NOT NULL,
+             minute_bucket INTEGER NOT NULL,
+             hits INTEGER NOT NULL,
+             PRIMARY KEY(route_key, minute_bucket)
+         );",
+    )
+    .map_err(|e| e.to_string())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let minute_bucket = now / 60;
+    let cutoff = minute_bucket.saturating_sub(2);
+    conn.execute(
+        "DELETE FROM webhook_rate_limit WHERE minute_bucket < ?1",
+        rusqlite::params![cutoff],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO webhook_rate_limit (route_key, minute_bucket, hits) VALUES (?1, ?2, 1)
+         ON CONFLICT(route_key, minute_bucket) DO UPDATE SET hits = hits + 1",
+        rusqlite::params![route_key, minute_bucket],
+    )
+    .map_err(|e| e.to_string())?;
+    let hits: i64 = conn
+        .query_row(
+            "SELECT hits FROM webhook_rate_limit WHERE route_key = ?1 AND minute_bucket = ?2",
+            rusqlite::params![route_key, minute_bucket],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok((hits as u32) <= max_per_minute)
+}
+
+pub async fn check_rate_distributed(
+    data_dir: &Path,
+    gate: &Arc<IdempotencyAndRateLimit>,
+    route_key: &str,
+    max_per_minute: u32,
+) -> bool {
+    let memory_only = std::env::var("AKASHA_WEBHOOK_RATE_MEMORY_ONLY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if memory_only {
+        return gate.check_rate(route_key, max_per_minute);
+    }
+    let dd = data_dir.to_path_buf();
+    let key = route_key.to_string();
+    match tokio::task::spawn_blocking(move || webhook_rate_disk_check(&dd, &key, max_per_minute))
+        .await
+    {
+        Ok(Ok(ok)) => ok,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "webhook distributed rate: disk failed, fallback memory");
+            gate.check_rate(route_key, max_per_minute)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "webhook distributed rate: spawn failed, fallback memory");
+            gate.check_rate(route_key, max_per_minute)
         }
     }
 }

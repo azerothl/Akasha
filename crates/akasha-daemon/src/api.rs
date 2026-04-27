@@ -4698,7 +4698,91 @@ async fn execute_tool_call(
                 None => (false, "[run_command_background] process registry not available".to_string(), None),
             }
         }
-        "terminal_session" => (true, "[terminal_session] PTY HTTP API: GET /api/terminal/capabilities, POST /api/terminal/pty/sessions (spec 43). For one-shot: run_command or run_terminal; background: run_command_background + process.".to_string(), None),
+        "terminal_session" => {
+            let sub = args.get(0).map(String::as_str).unwrap_or("");
+            match sub {
+                "list" => {
+                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().list_sessions()).await {
+                        Ok(Ok(v)) => (true, serde_json::to_string_pretty(&v).unwrap_or_else(|_| "[]".to_string()), None),
+                        Ok(Err(e)) => (false, format!("[terminal_session list] {}", e), None),
+                        Err(e) => (false, format!("[terminal_session list] join: {}", e), None),
+                    }
+                }
+                "start" => {
+                    let create = crate::terminal_pty::PtyCreateBody {
+                        argv: None,
+                        cwd: None,
+                        transcript_name: Some(format!("session-{}", uuid::Uuid::new_v4())),
+                        idle_timeout_secs: Some(900),
+                        cols: 80,
+                        rows: 24,
+                    };
+                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().create(create)).await {
+                        Ok(Ok(v)) => (
+                            true,
+                            format!(
+                                "[terminal_session start] session_id={} idle_timeout_secs={} (use terminal_session read|write|resize|stop)",
+                                v.session_id, v.idle_timeout_secs
+                            ),
+                            None
+                        ),
+                        Ok(Err(e)) => (false, format!("[terminal_session start] {}", e), None),
+                        Err(e) => (false, format!("[terminal_session start] join: {}", e), None),
+                    }
+                }
+                "read" => {
+                    let sid = args.get(1).cloned().unwrap_or_default();
+                    if sid.trim().is_empty() {
+                        return (false, "[terminal_session read] usage: terminal_session read <session_id> [max]".to_string(), None);
+                    }
+                    let max = args.get(2).and_then(|x| x.parse::<usize>().ok()).unwrap_or(4096);
+                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().read_output(&sid, max)).await {
+                        Ok(Ok(v)) => (true, serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".to_string()), None),
+                        Ok(Err(e)) => (false, format!("[terminal_session read] {}", e), None),
+                        Err(e) => (false, format!("[terminal_session read] join: {}", e), None),
+                    }
+                }
+                "write" => {
+                    let sid = args.get(1).cloned().unwrap_or_default();
+                    let payload = args.get(2..).unwrap_or(&[]).join(" ");
+                    if sid.trim().is_empty() || payload.is_empty() {
+                        return (false, "[terminal_session write] usage: terminal_session write <session_id> <text...>".to_string(), None);
+                    }
+                    let body = crate::terminal_pty::PtyInputBody { text: Some(payload), bytes_b64: None };
+                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().write_input(&sid, body)).await {
+                        Ok(Ok(())) => (true, "[terminal_session write] ok".to_string(), None),
+                        Ok(Err(e)) => (false, format!("[terminal_session write] {}", e), None),
+                        Err(e) => (false, format!("[terminal_session write] join: {}", e), None),
+                    }
+                }
+                "resize" => {
+                    let sid = args.get(1).cloned().unwrap_or_default();
+                    let cols = args.get(2).and_then(|x| x.parse::<u16>().ok()).unwrap_or(80);
+                    let rows = args.get(3).and_then(|x| x.parse::<u16>().ok()).unwrap_or(24);
+                    if sid.trim().is_empty() {
+                        return (false, "[terminal_session resize] usage: terminal_session resize <session_id> <cols> <rows>".to_string(), None);
+                    }
+                    let body = crate::terminal_pty::PtyResizeBody { cols, rows };
+                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().resize(&sid, body)).await {
+                        Ok(Ok(())) => (true, "[terminal_session resize] ok".to_string(), None),
+                        Ok(Err(e)) => (false, format!("[terminal_session resize] {}", e), None),
+                        Err(e) => (false, format!("[terminal_session resize] join: {}", e), None),
+                    }
+                }
+                "stop" => {
+                    let sid = args.get(1).cloned().unwrap_or_default();
+                    if sid.trim().is_empty() {
+                        return (false, "[terminal_session stop] usage: terminal_session stop <session_id>".to_string(), None);
+                    }
+                    match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().close(&sid)).await {
+                        Ok(Ok(())) => (true, "[terminal_session stop] ok".to_string(), None),
+                        Ok(Err(e)) => (false, format!("[terminal_session stop] {}", e), None),
+                        Err(e) => (false, format!("[terminal_session stop] join: {}", e), None),
+                    }
+                }
+                _ => (true, "[terminal_session] usage: terminal_session start|list|read|write|resize|stop. HTTP API: GET /api/terminal/capabilities.".to_string(), None),
+            }
+        },
         "process" => {
             let sub = args.get(0).map(String::as_str).unwrap_or("");
             match (process_registry, sub) {
@@ -12049,7 +12133,14 @@ pub async fn handle_api(
         {
             return json_response("409 Conflict", r#"{"error":"duplicate_idempotency_key"}"#);
         }
-        if !gate.check_rate("automation_webhook", 120) {
+        if !crate::webhook_inbound::check_rate_distributed(
+            data_dir,
+            &gate,
+            "automation_webhook",
+            120,
+        )
+        .await
+        {
             return json_response("429 Too Many Requests", r#"{"error":"rate_limited"}"#);
         }
         let parsed: serde_json::Value = match serde_json::from_slice(body_bytes) {
@@ -12121,7 +12212,14 @@ pub async fn handle_api(
         {
             return json_response("409 Conflict", r#"{"error":"duplicate_idempotency_key"}"#);
         }
-        if !gate.check_rate("automation_webhook_direct", 120) {
+        if !crate::webhook_inbound::check_rate_distributed(
+            data_dir,
+            &gate,
+            "automation_webhook_direct",
+            120,
+        )
+        .await
+        {
             return json_response("429 Too Many Requests", r#"{"error":"rate_limited"}"#);
         }
         if let Err(e) = serde_json::from_str::<serde_json::Value>(direct.trim()) {
@@ -12151,6 +12249,7 @@ pub async fn handle_api(
             "current": ["run_command", "run_terminal", "run_command_background", "process list|poll|kill"],
             "pty_api": {
                 "create": "POST /api/terminal/pty/sessions",
+                "list": "GET /api/terminal/pty/sessions",
                 "input": "POST /api/terminal/pty/sessions/{id}/input",
                 "output": "GET /api/terminal/pty/sessions/{id}/output?max=8192",
                 "resize": "POST /api/terminal/pty/sessions/{id}/resize",
@@ -12159,6 +12258,26 @@ pub async fn handle_api(
             "spec": "spec/43_session_terminal.md"
         });
         return json_response("200 OK", &j.to_string());
+    }
+
+    if method == "GET" && path_only == "/api/terminal/pty/sessions" {
+        let res =
+            tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().list_sessions())
+                .await;
+        return match res {
+            Ok(Ok(v)) => json_response(
+                "200 OK",
+                &serde_json::to_string(&v).unwrap_or_else(|_| "[]".to_string()),
+            ),
+            Ok(Err(e)) => json_response(
+                "500 Internal Server Error",
+                &serde_json::json!({"error":"pty_list_failed","detail": e.to_string()}).to_string(),
+            ),
+            Err(e) => json_response(
+                "500 Internal Server Error",
+                &serde_json::json!({"error":"pty_list_join","detail": e.to_string()}).to_string(),
+            ),
+        };
     }
 
     // PTY sessions (Hermes tranche 1 — portable-pty).
@@ -12312,8 +12431,13 @@ pub async fn handle_api(
 
     // Operator: MCP config on disk (validate only; runtime spawn is roadmap — see docs/mcp-mvp.md).
     if method == "GET" && path_only == "/api/mcp/status" {
+        if let Some(cached) = crate::http_get_cache::cache_get_mcp_status() {
+            return json_response("200 OK", &cached);
+        }
         let j = crate::mcp::mcp_operator_status(data_dir);
-        return json_response("200 OK", &j.to_string());
+        let body = j.to_string();
+        crate::http_get_cache::cache_put_mcp_status(&body);
+        return json_response("200 OK", &body);
     }
 
     if method == "GET" && path_only == "/api/mcp/runtime" {
@@ -12351,6 +12475,35 @@ pub async fn handle_api(
     }
     if method == "POST" && path_only == "/api/mcp/runtime/stdio/stop" {
         let j = crate::mcp_runtime::stop_stdio_server().await;
+        return json_response("200 OK", &j.to_string());
+    }
+    if method == "GET" && path_only == "/api/mcp/runtime/oauth" {
+        let j = crate::mcp_runtime::oauth_get().await;
+        return json_response("200 OK", &j.to_string());
+    }
+    if method == "POST" && path_only == "/api/mcp/runtime/oauth" {
+        let Some(b) = body.as_deref() else {
+            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
+        };
+        let v: serde_json::Value = match serde_json::from_slice(b) {
+            Ok(v) => v,
+            Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
+        };
+        let provider = v
+            .get("provider")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("unknown")
+            .to_string();
+        let status = v
+            .get("status")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("configured")
+            .to_string();
+        let j = crate::mcp_runtime::oauth_put(provider, status).await;
         return json_response("200 OK", &j.to_string());
     }
 
@@ -15052,6 +15205,7 @@ pub async fn handle_api(
                     "message": "Route updated (in memory and saved to llm_router.yaml)."
                 });
                 crate::http_get_cache::invalidate_router_models();
+                crate::http_get_cache::invalidate_router_routes();
                 return json_response("200 OK", &body_ok.to_string());
             }
             _ => {
@@ -15064,8 +15218,12 @@ pub async fn handle_api(
 
     // GET /api/router/routes — list primary + fallback per category (for CLI and TUI "models by category")
     if method == "GET" && path == "/api/router/routes" {
+        if let Some(cached) = crate::http_get_cache::cache_get_router_routes() {
+            return json_response("200 OK", &cached);
+        }
         let routes = llm_router.routes_by_category();
         let body = serde_json::to_string(&routes).unwrap_or_else(|_| "{}".to_string());
+        crate::http_get_cache::cache_put_router_routes(&body);
         return json_response("200 OK", &body);
     }
 
