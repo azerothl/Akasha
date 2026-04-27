@@ -5,8 +5,8 @@
 //! `AKASHA_WEBHOOK_DIRECT_BODY_JSON` after the same HMAC + idempotency checks.
 //!
 //! **Idempotency:** by default, non-empty `Idempotency-Key` values are recorded in
-//! `{data_dir}/webhook_idempotency.sqlite3` so replays survive process restarts (multi-instance still
-//! needs shared storage — one SQLite file per data dir). Set `AKASHA_WEBHOOK_IDEMPOTENCY_MEMORY_ONLY=1`
+//! `{data_dir}/webhook_idempotency.sqlite3` (override with `AKASHA_WEBHOOK_IDEM_SQLITE` for a shared path
+//! across instances, e.g. on a network filesystem). Set `AKASHA_WEBHOOK_IDEMPOTENCY_MEMORY_ONLY=1`
 //! to use only the in-process map (legacy behaviour).
 
 use hmac::{Hmac, Mac};
@@ -93,8 +93,16 @@ pub fn automation_gate() -> Arc<IdempotencyAndRateLimit> {
         .clone()
 }
 
+/// SQLite path for webhook idempotency. Override with `AKASHA_WEBHOOK_IDEM_SQLITE` so several
+/// daemon instances can share one file (e.g. NFS-mounted data dir) for Hermes-style distribution.
+pub fn webhook_idempotency_db_path(data_dir: &Path) -> std::path::PathBuf {
+    std::env::var_os("AKASHA_WEBHOOK_IDEM_SQLITE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("webhook_idempotency.sqlite3"))
+}
+
 fn webhook_idem_disk_try_insert(data_dir: &Path, key: &str, ttl: Duration) -> Result<bool, String> {
-    let path = data_dir.join("webhook_idempotency.sqlite3");
+    let path = webhook_idempotency_db_path(data_dir);
     let conn = rusqlite::Connection::open(&path).map_err(|e| e.to_string())?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;

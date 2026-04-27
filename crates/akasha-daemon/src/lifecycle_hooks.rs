@@ -25,8 +25,8 @@ pub fn lifecycle_hooks_summary(data_dir: &Path) -> Value {
         return json!({
             "present": false,
             "path": path.display().to_string(),
-            "executed_phases": ["on_schedule_fire"],
-            "note": "Gateway HTTP pre/post hooks are reserved; only on_schedule_fire is executed today."
+            "executed_phases": ["on_schedule_fire", "on_http_request_pre", "on_http_request_post"],
+            "note": "HTTP gateway: on_http_request_pre awaited at request entry; on_http_request_post spawned when the handler returns (see gateway-shell-hooks.md)."
         });
     }
     let raw = match std::fs::read_to_string(&path) {
@@ -56,8 +56,8 @@ pub fn lifecycle_hooks_summary(data_dir: &Path) -> Value {
         "on_schedule_fire": hook_array_len(&v, "on_schedule_fire"),
         "on_http_request_pre": hook_array_len(&v, "on_http_request_pre"),
         "on_http_request_post": hook_array_len(&v, "on_http_request_post"),
-        "executed_phases": ["on_schedule_fire"],
-        "note": "on_http_request_* arrays are parsed for forward compatibility; they are not invoked on HTTP traffic yet."
+        "executed_phases": ["on_schedule_fire", "on_http_request_pre", "on_http_request_post"],
+        "note": "on_http_request_pre runs at API entry; on_http_request_post runs on Drop after response is built. Timeouts: AKASHA_GATEWAY_HOOK_TIMEOUT_SECS (default 3). Sandbox flag: AKASHA_GATEWAY_HOOK_SANDBOX."
     })
 }
 
@@ -134,4 +134,115 @@ pub fn fire_on_schedule_fire_async(data_dir: &Path, schedule_id: Uuid, task_id: 
             }
         }
     });
+}
+
+fn gateway_hook_timeout() -> Duration {
+    std::env::var("AKASHA_GATEWAY_HOOK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map(Duration::from_secs)
+        .filter(|d| *d > Duration::ZERO)
+        .unwrap_or_else(|| Duration::from_secs(3))
+}
+
+fn gateway_sandbox_flag() -> String {
+    std::env::var("AKASHA_GATEWAY_HOOK_SANDBOX").unwrap_or_else(|_| "none".into())
+}
+
+async fn load_http_hook_argv(data_dir: &Path, key: &str) -> Vec<Vec<String>> {
+    let path = data_dir.join("lifecycle_hooks.json");
+    let raw = match tokio::fs::read_to_string(&path).await {
+        Ok(s) => s,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(_) => return Vec::new(),
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    let Some(arr) = v.get(key).and_then(|x| x.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|entry| {
+            entry.as_array().map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .filter(|v| !v.is_empty())
+        .collect()
+}
+
+async fn run_http_hook_array(
+    data_dir: &Path,
+    hooks: &[Vec<String>],
+    method: &str,
+    path: &str,
+) {
+    if hooks.is_empty() {
+        return;
+    }
+    let timeout_d = gateway_hook_timeout();
+    let sandbox = gateway_sandbox_flag();
+    for argv in hooks {
+        let prog = argv[0].clone();
+        let rest: Vec<String> = argv[1..].to_vec();
+        let dd = data_dir.to_path_buf();
+        let method = method.to_string();
+        let path = path.to_string();
+        match tokio::time::timeout(
+            timeout_d,
+            tokio::process::Command::new(&prog)
+                .args(&rest)
+                .env("AKASHA_DATA_DIR", dd.as_os_str())
+                .env("AKASHA_HTTP_METHOD", &method)
+                .env("AKASHA_HTTP_PATH", &path)
+                .env("AKASHA_GATEWAY_HOOK_SANDBOX", &sandbox)
+                .output(),
+        )
+        .await
+        {
+            Err(_) => tracing::warn!(prog = %prog, timeout = ?timeout_d, "gateway_http_hooks: timed out"),
+            Ok(Err(e)) => tracing::warn!(prog = %prog, error = %e, "gateway_http_hooks: spawn failed"),
+            Ok(Ok(out)) if !out.status.success() => tracing::warn!(
+                prog = %prog,
+                exit_code = ?out.status.code(),
+                stderr = %String::from_utf8_lossy(&out.stderr).chars().take(512).collect::<String>(),
+                "gateway_http_hooks: non-zero exit"
+            ),
+            Ok(Ok(_)) => {}
+        }
+    }
+}
+
+/// Run `on_http_request_pre` hooks from `lifecycle_hooks.json` (blocking up to timeout per hook).
+pub async fn run_http_request_pre_hooks(data_dir: &Path, method: &str, path: &str) {
+    let hooks = load_http_hook_argv(data_dir, "on_http_request_pre").await;
+    run_http_hook_array(data_dir, &hooks, method, path).await;
+}
+
+async fn run_http_request_post_hooks(data_dir: &Path, method: &str, path: &str) {
+    let hooks = load_http_hook_argv(data_dir, "on_http_request_post").await;
+    run_http_hook_array(data_dir, &hooks, method, path).await;
+}
+
+/// When dropped at the end of `handle_api`, spawns `on_http_request_post` hooks (best-effort).
+pub struct HttpPostLifecycleHooks {
+    pub data_dir: std::path::PathBuf,
+    pub method: String,
+    pub path: String,
+}
+
+impl Drop for HttpPostLifecycleHooks {
+    fn drop(&mut self) {
+        let dd = self.data_dir.clone();
+        let m = self.method.clone();
+        let p = self.path.clone();
+        if let Ok(h) = tokio::runtime::Handle::try_current() {
+            h.spawn(async move {
+                run_http_request_post_hooks(&dd, &m, &p).await;
+            });
+        }
+    }
 }

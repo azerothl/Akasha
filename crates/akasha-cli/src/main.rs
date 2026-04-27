@@ -100,6 +100,17 @@ enum Commands {
         #[command(subcommand)]
         sub: McpSub,
     },
+    /// Terminal / PTY: capabilities from daemon (requires daemon on AKASHA_PORT)
+    Terminal {
+        #[command(subcommand)]
+        sub: TerminalSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum TerminalSub {
+    /// GET /api/terminal/capabilities (PTY + one-shot tools)
+    Capabilities,
 }
 
 #[derive(Subcommand)]
@@ -488,7 +499,27 @@ fn main() -> anyhow::Result<()> {
         Commands::Toolset { sub } => cmd_toolset(sub),
         Commands::Worktree { sub } => cmd_worktree(sub),
         Commands::Mcp { sub } => cmd_mcp(sub),
+        Commands::Terminal { sub } => cmd_terminal(sub),
     }
+}
+
+fn cmd_terminal(sub: TerminalSub) -> anyhow::Result<()> {
+    match sub {
+        TerminalSub::Capabilities => {
+            let client = reqwest::blocking::Client::new();
+            let base = daemon_base_url();
+            let resp = client
+                .get(format!("{}/api/terminal/capabilities", base))
+                .timeout(std::time::Duration::from_secs(8))
+                .send()?;
+            if !resp.status().is_success() {
+                anyhow::bail!("Daemon error: {}", resp.status());
+            }
+            let j: serde_json::Value = resp.json()?;
+            println!("{}", serde_json::to_string_pretty(&j)?);
+        }
+    }
+    Ok(())
 }
 
 fn validate_mcp_config_json_local(root: &serde_json::Value) -> Result<(), String> {

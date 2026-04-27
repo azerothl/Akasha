@@ -50,8 +50,16 @@ pub fn mcp_operator_status(data_dir: &Path) -> Value {
         "config_present": present,
         "valid": Value::Null,
         "server_count": 0_i32,
-        "runtime": "stdio_probe_and_validate_only",
-        "oauth": "documented_only_see_docs_mcp_oauth_md",
+        "runtime": "stdio_probe_validate_and_optional_long_lived",
+        "oauth": {
+            "mode": "documented_vault_reserved",
+            "see": "docs/mcp-oauth.md"
+        },
+        "mcp_runtime_http": {
+            "GET /api/mcp/runtime": "attached stdio server + transport roadmap",
+            "POST /api/mcp/runtime/stdio/start": { "body": { "server": "mcpServers key" } },
+            "POST /api/mcp/runtime/stdio/stop": "kill attached stdio child"
+        },
     });
     if !present {
         return out;

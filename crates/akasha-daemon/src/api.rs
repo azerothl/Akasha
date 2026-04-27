@@ -1369,7 +1369,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("run_command", "run_command [--cwd <path>] <cmd> [arg1 arg2 ...] — exécuter une commande (autorisée par la politique). Optionnel : --cwd workspace:/ ou chemin disque (allowed_read_paths). Si tools_policy run_command_default_cwd_workspace: true, cwd par défaut = workspace de la tâche. Pour GitHub depuis le shell, préférer gh-axi (npm install -g gh-axi ; principes AXI https://axi.md/) s'il est installé — sorties compactes pour l'agent. Pour l'automation navigateur en CLI, chrome-devtools-axi (même dépôt https://github.com/kunchenguid/axi) en complément d'Akasha browser."),
     ("run_terminal", "run_terminal [--cwd <path>] <cmd> [args...] — exécuter une commande (même que run_command)"),
     ("run_command_background", "run_command_background [--cwd <path>] <cmd> [args...] — lancer en arrière-plan, retourne session_id pour process poll/kill"),
-    ("terminal_session", "terminal_session — PTY interactif planifié (spec/43_session_terminal.md). Capacités: GET /api/terminal/capabilities. En attendant: run_command / run_terminal, run_command_background + process list|poll|kill, GET /api/process/watch/recent."),
+    ("terminal_session", "terminal_session — PTY interactif: GET /api/terminal/capabilities ; API HTTP /api/terminal/pty/sessions (spec/43_session_terminal.md). Sinon: run_command / run_terminal, run_command_background + process list|poll|kill, GET /api/process/watch/recent."),
     ("process", "process list | process poll <session_id> | process kill <session_id> — lister, consulter ou arrêter des commandes en arrière-plan"),
     ("file_diff", "file_diff <path_a> <path_b> — diff texte entre deux fichiers (ligne à ligne)"),
     ("diff_unified", "diff_unified <path_a> <path_b> [context_lines] — diff unifié style patch (défaut context_lines=3) ; chemins réels ou workspace:/"),
@@ -4698,7 +4698,7 @@ async fn execute_tool_call(
                 None => (false, "[run_command_background] process registry not available".to_string(), None),
             }
         }
-        "terminal_session" => (true, "[terminal_session] Interactive PTY session planned (spec 43). Use run_command or run_terminal for a single command; run_command_background + process for background execution.".to_string(), None),
+        "terminal_session" => (true, "[terminal_session] PTY HTTP API: GET /api/terminal/capabilities, POST /api/terminal/pty/sessions (spec 43). For one-shot: run_command or run_terminal; background: run_command_background + process.".to_string(), None),
         "process" => {
             let sub = args.get(0).map(String::as_str).unwrap_or("");
             match (process_registry, sub) {
@@ -11985,6 +11985,12 @@ pub async fn handle_api(
     }
 
     let (path_only, query_str) = split_path_query(path);
+    let _http_post_lifecycle = crate::lifecycle_hooks::HttpPostLifecycleHooks {
+        data_dir: data_dir.to_path_buf(),
+        method: method.to_string(),
+        path: path_only.to_string(),
+    };
+    crate::lifecycle_hooks::run_http_request_pre_hooks(data_dir, method, path_only).await;
 
     if let Some(resp) = crate::api_studio::handle_studio_route(
         method,
@@ -12141,16 +12147,210 @@ pub async fn handle_api(
 
     if method == "GET" && path_only == "/api/terminal/capabilities" {
         let j = serde_json::json!({
-            "interactive_pty": "planned",
+            "interactive_pty": "available",
             "current": ["run_command", "run_terminal", "run_command_background", "process list|poll|kill"],
+            "pty_api": {
+                "create": "POST /api/terminal/pty/sessions",
+                "input": "POST /api/terminal/pty/sessions/{id}/input",
+                "output": "GET /api/terminal/pty/sessions/{id}/output?max=8192",
+                "resize": "POST /api/terminal/pty/sessions/{id}/resize",
+                "close": "DELETE /api/terminal/pty/sessions/{id}"
+            },
             "spec": "spec/43_session_terminal.md"
         });
         return json_response("200 OK", &j.to_string());
     }
 
+    // PTY sessions (Hermes tranche 1 — portable-pty).
+    if method == "POST" && path_only == "/api/terminal/pty/sessions" {
+        let Some(b) = body.as_deref() else {
+            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
+        };
+        let parsed: Result<crate::terminal_pty::PtyCreateBody, _> = serde_json::from_slice(b);
+        let Ok(create_body) = parsed else {
+            return json_response(
+                "400 Bad Request",
+                &serde_json::json!({"error":"invalid_json"}).to_string(),
+            );
+        };
+        let res = tokio::task::spawn_blocking(move || {
+            crate::terminal_pty::PtyManager::global().create(create_body)
+        })
+        .await;
+        match res {
+            Ok(Ok(r)) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::to_string(&r).unwrap_or_else(|_| "{}".to_string()),
+                );
+            }
+            Ok(Err(e)) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({"error":"pty_create_failed","detail": e.to_string()}).to_string(),
+                );
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({"error":"pty_create_join","detail": e.to_string()}).to_string(),
+                );
+            }
+        }
+    }
+
+    if let Some(rest) = path_only.strip_prefix("/api/terminal/pty/sessions/") {
+        let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.len() == 1 {
+            let sid = parts[0];
+            if method == "DELETE" {
+                let sid = sid.to_string();
+                let res = tokio::task::spawn_blocking(move || {
+                    crate::terminal_pty::PtyManager::global().close(&sid)
+                })
+                .await;
+                return match res {
+                    Ok(Ok(())) => json_response("200 OK", r#"{"ok":true}"#),
+                    Ok(Err(e)) => json_response(
+                        "404 Not Found",
+                        &serde_json::json!({"error":"pty_close_failed","detail": e.to_string()}).to_string(),
+                    ),
+                    Err(e) => json_response(
+                        "500 Internal Server Error",
+                        &serde_json::json!({"error":"pty_close_join","detail": e.to_string()}).to_string(),
+                    ),
+                };
+            }
+        }
+        if parts.len() == 2 {
+            let sid = parts[0].to_string();
+            let action = parts[1];
+            if action == "output" && method == "GET" {
+                let max = parse_query_param(query_str, "max")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(8192);
+                let sid2 = sid.clone();
+                let res = tokio::task::spawn_blocking(move || {
+                    crate::terminal_pty::PtyManager::global().read_output(&sid2, max)
+                })
+                .await;
+                return match res {
+                    Ok(Ok(o)) => json_response(
+                        "200 OK",
+                        &serde_json::to_string(&o).unwrap_or_else(|_| "{}".to_string()),
+                    ),
+                    Ok(Err(e)) => json_response(
+                        "404 Not Found",
+                        &serde_json::json!({"error":"pty_read_failed","detail": e.to_string()}).to_string(),
+                    ),
+                    Err(e) => json_response(
+                        "500 Internal Server Error",
+                        &serde_json::json!({"error":"pty_read_join","detail": e.to_string()}).to_string(),
+                    ),
+                };
+            }
+            if action == "input" && method == "POST" {
+                let Some(b) = body.as_deref() else {
+                    return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
+                };
+                let parsed: Result<crate::terminal_pty::PtyInputBody, _> = serde_json::from_slice(b);
+                if parsed.is_err() {
+                    return json_response(
+                        "400 Bad Request",
+                        r#"{"error":"invalid_json"}"#,
+                    );
+                }
+                let input_body = parsed.unwrap();
+                let sid2 = sid.clone();
+                let res = tokio::task::spawn_blocking(move || {
+                    crate::terminal_pty::PtyManager::global().write_input(&sid2, input_body)
+                })
+                .await;
+                return match res {
+                    Ok(Ok(())) => json_response("200 OK", r#"{"ok":true}"#),
+                    Ok(Err(e)) => json_response(
+                        "400 Bad Request",
+                        &serde_json::json!({"error":"pty_write_failed","detail": e.to_string()}).to_string(),
+                    ),
+                    Err(e) => json_response(
+                        "500 Internal Server Error",
+                        &serde_json::json!({"error":"pty_write_join","detail": e.to_string()}).to_string(),
+                    ),
+                };
+            }
+            if action == "resize" && method == "POST" {
+                let Some(b) = body.as_deref() else {
+                    return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
+                };
+                let parsed: Result<crate::terminal_pty::PtyResizeBody, _> = serde_json::from_slice(b);
+                if parsed.is_err() {
+                    return json_response(
+                        "400 Bad Request",
+                        r#"{"error":"invalid_json"}"#,
+                    );
+                }
+                let resize_body = parsed.unwrap();
+                let sid2 = sid.clone();
+                let res = tokio::task::spawn_blocking(move || {
+                    crate::terminal_pty::PtyManager::global().resize(&sid2, resize_body)
+                })
+                .await;
+                return match res {
+                    Ok(Ok(())) => json_response("200 OK", r#"{"ok":true}"#),
+                    Ok(Err(e)) => json_response(
+                        "400 Bad Request",
+                        &serde_json::json!({"error":"pty_resize_failed","detail": e.to_string()}).to_string(),
+                    ),
+                    Err(e) => json_response(
+                        "500 Internal Server Error",
+                        &serde_json::json!({"error":"pty_resize_join","detail": e.to_string()}).to_string(),
+                    ),
+                };
+            }
+        }
+    }
+
     // Operator: MCP config on disk (validate only; runtime spawn is roadmap — see docs/mcp-mvp.md).
     if method == "GET" && path_only == "/api/mcp/status" {
         let j = crate::mcp::mcp_operator_status(data_dir);
+        return json_response("200 OK", &j.to_string());
+    }
+
+    if method == "GET" && path_only == "/api/mcp/runtime" {
+        let j = crate::mcp_runtime::summary().await;
+        return json_response("200 OK", &j.to_string());
+    }
+    if method == "POST" && path_only == "/api/mcp/runtime/stdio/start" {
+        let Some(b) = body.as_deref() else {
+            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
+        };
+        let v: serde_json::Value = match serde_json::from_slice(b) {
+            Ok(v) => v,
+            Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
+        };
+        let server = v
+            .get("server")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+        if server.is_empty() {
+            return json_response(
+                "400 Bad Request",
+                r#"{"error":"missing_server","hint":"{\"server\":\"myMcpKey\"}"}"#,
+            );
+        }
+        match crate::mcp_runtime::start_stdio_server(data_dir, server).await {
+            Ok(j) => return json_response("200 OK", &j.to_string()),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({"error":"mcp_stdio_start_failed","detail": e}).to_string(),
+                );
+            }
+        }
+    }
+    if method == "POST" && path_only == "/api/mcp/runtime/stdio/stop" {
+        let j = crate::mcp_runtime::stop_stdio_server().await;
         return json_response("200 OK", &j.to_string());
     }
 
@@ -14851,6 +15051,7 @@ pub async fn handle_api(
                     "model": modl,
                     "message": "Route updated (in memory and saved to llm_router.yaml)."
                 });
+                crate::http_get_cache::invalidate_router_models();
                 return json_response("200 OK", &body_ok.to_string());
             }
             _ => {
@@ -14870,6 +15071,9 @@ pub async fn handle_api(
 
     // GET /api/router/models — list models from all providers (config + Ollama live when available)
     if method == "GET" && path == "/api/router/models" {
+        if let Some(cached) = crate::http_get_cache::cache_get_router_models() {
+            return json_response("200 OK", &cached);
+        }
         let mut providers: std::collections::HashMap<String, Vec<String>> =
             llm_router.list_models_from_config();
         if let Some(base_url) = ollama_base_url
@@ -14911,7 +15115,9 @@ pub async fn handle_api(
             }
         }
         let body = serde_json::json!({ "providers": providers });
-        return json_response("200 OK", &body.to_string());
+        let body_str = body.to_string();
+        crate::http_get_cache::cache_put_router_models(&body_str);
+        return json_response("200 OK", &body_str);
     }
 
     // GET /api/router/ollama/models — list models from configured Ollama (kept for backward compat)

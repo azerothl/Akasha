@@ -2,7 +2,7 @@
 
 ## Statut
 
-**Session terminal interactive (PTY)** : prévue pour une version ultérieure. Décision documentée.
+**Session terminal interactive (PTY)** : **tranche 1** exposée côté daemon (HTTP + `portable-pty`). Voir `GET /api/terminal/capabilities` (`pty_api`).
 
 ## Actuellement
 
@@ -11,13 +11,23 @@
 
 L’agent peut donc déjà « utiliser le terminal » au sens d’exécuter des commandes et d’en récupérer la sortie.
 
-## Prévu (optionnel)
+## API HTTP (daemon)
 
-- Session **PTY** interactive : stdin/stdout/stderr, timeout, isolation.
-- Exposition via outil dédié (ex. `terminal_session start` / `terminal_session send` / `terminal_session stop`) ou API.
-- UI pour afficher/saisir (Tauri, TUI).
+| Méthode | Chemin | Rôle |
+|--------|--------|------|
+| `POST` | `/api/terminal/pty/sessions` | Créer une session. Corps JSON : `argv?`, `cwd?`, `cols`, `rows`. Réponse : `{ "session_id" }`. |
+| `GET` | `/api/terminal/pty/sessions/{id}/output?max=8192` | Lire jusqu’à `max` octets depuis le tampon de sortie (retour `data_b64`). |
+| `POST` | `/api/terminal/pty/sessions/{id}/input` | Corps : `{ "text": "..." }` et/ou `bytes_b64`. |
+| `POST` | `/api/terminal/pty/sessions/{id}/resize` | Corps : `{ "cols": 80, "rows": 24 }`. |
+| `DELETE` | `/api/terminal/pty/sessions/{id}` | Fermer la session (tue le processus enfant). |
 
-Livrable cible : agent peut ouvrir une session terminal interactive, envoyer des lignes, recevoir la sortie, fermer la session.
+CLI opérateur : `akasha terminal capabilities` (requiert le daemon).
+
+## Suite (optionnel)
+
+- Persistance / reprise de session, transcript disque, timeouts d’inactivité côté daemon.
+- Outil agent `terminal_session` branché sur cette API (aujourd’hui message d’orientation vers HTTP + `run_command`).
+- UI pour afficher/saisir (Tauri, TUI, Code Studio).
 
 ## Références
 

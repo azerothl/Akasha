@@ -60,6 +60,8 @@ urlencoding = "2.1"
 base64 = "0.22"
 pdf-extract = "0.10"
 rusqlite = { version = "0.31", features = ["bundled"] }
+portable-pty = "0.8"
+lru = "0.12"
 
 [dev-dependencies]
 criterion = "0.5"

@@ -1155,7 +1155,7 @@ impl App {
                 return;
             }
         };
-        let paths: [(&str, &str); 8] = [
+        let paths: [(&str, &str); 9] = [
             ("schedules", "/api/schedules"),
             ("task_runs", "/api/task_runs"),
             ("process_watch", "/api/process/watch/recent?limit=12"),
@@ -1163,6 +1163,7 @@ impl App {
             ("tools", "/api/tools/effective"),
             ("recall", "/api/memory/recall-metrics"),
             ("mcp", "/api/mcp/status"),
+            ("mcp_runtime", "/api/mcp/runtime"),
             ("lifecycle", "/api/lifecycle/hooks"),
         ];
         let mut parts: Vec<String> = Vec::new();

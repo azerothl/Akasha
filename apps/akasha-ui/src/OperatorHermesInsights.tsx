@@ -31,6 +31,7 @@ export function OperatorHermesInsights({ sessionId, daemonUrl, expert, labels }:
   const [toolsJson, setToolsJson] = useState<string>("");
   const [recallJson, setRecallJson] = useState<string>("");
   const [mcpJson, setMcpJson] = useState<string>("");
+  const [terminalJson, setTerminalJson] = useState<string>("");
   const [lifecycleJson, setLifecycleJson] = useState<string>("");
   const [err, setErr] = useState<string>("");
 
@@ -52,8 +53,17 @@ export function OperatorHermesInsights({ sessionId, daemonUrl, expert, labels }:
         }
         const ms = await fetch(daemonUrl("/api/mcp/status"));
         const mst = await ms.text();
+        const mr = await fetch(daemonUrl("/api/mcp/runtime"));
+        const mrt = await mr.text();
         if (!cancelled) {
-          setMcpJson(ms.ok ? mst : `${labels.loadError}: mcp/status HTTP ${ms.status}`);
+          const statusPart = ms.ok ? mst : `${labels.loadError}: mcp/status HTTP ${ms.status}`;
+          const runtimePart = mr.ok ? mrt : `${labels.loadError}: mcp/runtime HTTP ${mr.status}`;
+          setMcpJson(`${statusPart}\n\n--- /api/mcp/runtime ---\n${runtimePart}`);
+        }
+        const tc = await fetch(daemonUrl("/api/terminal/capabilities"));
+        const tct = await tc.text();
+        if (!cancelled) {
+          setTerminalJson(tc.ok ? tct : `${labels.loadError}: terminal/capabilities HTTP ${tc.status}`);
         }
         const lh = await fetch(daemonUrl("/api/lifecycle/hooks"));
         const lht = await lh.text();
@@ -119,6 +129,12 @@ export function OperatorHermesInsights({ sessionId, daemonUrl, expert, labels }:
       </h4>
       <pre className="operator-hermes-pre" tabIndex={0}>
         {mcpJson || "…"}
+      </pre>
+      <h4 className="settings-plugin-status-title" style={{ marginTop: "1rem" }}>
+        Terminal / PTY
+      </h4>
+      <pre className="operator-hermes-pre" tabIndex={0}>
+        {terminalJson || "…"}
       </pre>
       <h4 className="settings-plugin-status-title" style={{ marginTop: "1rem" }}>
         {labels.lifecycleHeading}
