@@ -1,13 +1,9 @@
 # Guide utilisateur Akasha
 
-Le **guide utilisateur complet** est maintenu dans le dépôt à l’emplacement suivant :
+Ce document est la copie de diffusion du guide utilisateur final.
 
-- **[spec/user_guide.md](../spec/user_guide.md)** — Commandes CLI, configuration, interfaces (TUI, Web), commandes slash, canaux, référence rapide.
+- Guide principal: [user_guide_final.md](user_guide_final.md)
+- Affichage en interface: onglet **Doc** (TUI et interface desktop/web)
+- Endpoint HTTP: `GET /api/docs`
 
-**Autres ressources :**
-
-- **Premier lancement** : [spec/onboarding.md](../spec/onboarding.md)
-- **Index des spécifications** : [spec/README.md](../spec/README.md)
-- **Vue d’ensemble du projet** : [README.md](../README.md) (racine)
-
-Quand le daemon Akasha est démarré, le contenu du guide utilisateur est également servi en markdown via l’API **GET /api/docs** et affiché dans l’onglet **Doc** de l’interface TUI et de l’interface web.
+Pour eviter toute derive, les mises a jour de contenu doivent d'abord etre faites dans `user_guide_final.md`.

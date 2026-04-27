@@ -21,7 +21,7 @@ Spawns the configured process, sends JSON-RPC `initialize`, reads one response l
 - `POST /api/mcp/runtime/stdio/start` / `POST /api/mcp/runtime/stdio/stop` — attach/detach a long-lived stdio child from `mcp.json`.
 - `GET /api/mcp/runtime/oauth` / `POST /api/mcp/runtime/oauth` — operator OAuth state (persisted in `mcp_oauth_state.json` under data dir).
 
-See **`docs/mcp-mvp.md`** for MVP scope. Full HTTP/SSE client pooling and provider OAuth exchange remain covered in **`docs/mcp-oauth.md`** and the Hermes integration remainder doc.
+See **`mcp-mvp.md`** for MVP scope. Full HTTP/SSE client pooling and provider OAuth exchange remain covered in **`mcp-oauth.md`** and the Hermes integration remainder doc.
 
 ## Operator status (HTTP)
 
@@ -29,4 +29,4 @@ See **`docs/mcp-mvp.md`** for MVP scope. Full HTTP/SSE client pooling and provid
 
 ## Tests (Windows)
 
-Prefer `cargo test -p akasha-daemon --lib --no-default-features --features embedded mcp` if default features hit ONNX/CRT link issues (see `docs/mcp-mvp.md`).
+Prefer `cargo test -p akasha-daemon --lib --no-default-features --features embedded mcp` if default features hit ONNX/CRT link issues (see `mcp-mvp.md`).

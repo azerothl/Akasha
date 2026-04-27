@@ -2,7 +2,7 @@
 
 Ce guide s'adresse aux utilisateurs qui ont téléchargé les **binaires précompilés** d'Akasha (sans compiler l'application). Il décrit les commandes, la configuration et les interfaces disponibles. Cette documentation est affichée dans l'onglet **Doc** des interfaces lorsque le daemon est démarré depuis le dossier d'extraction contenant le dossier `docs`.
 
-**Maintenance** : le workflow Release copie ce fichier vers `docs/user_guide.md` dans les archives. Le guide **développeur** (dépôt source, build, détails techniques) est [spec/user_guide.md](../spec/user_guide.md). Le site public **Akasha_app** (`docs.html`, anglais) est tenu manuellement ; une checklist de synchronisation figure dans le dépôt **Akasha_app** (`docs/DOCUMENTATION_SYNC.md`).
+**Maintenance** : le workflow Release copie ce fichier vers `docs/user_guide.md` dans les archives. Le site public **Akasha_app** (`docs.html`, anglais) est tenu manuellement ; une checklist de synchronisation figure dans le dépôt **Akasha_app** (`docs/DOCUMENTATION_SYNC.md`).
 
 ---
 
@@ -94,7 +94,7 @@ Le répertoire de données est créé automatiquement par `akasha init` ou `akas
 
 Les archives de release incluent un sous-dossier **`spec/`** avec des **fichiers d'exemple** (politique d'outils, routeur vocal, routeur LLM) utilisés par `akasha init` pour générer la configuration par défaut lorsque ces fichiers sont présents. Le daemon résout le dossier `spec` utilisé à l'exécution dans cet ordre : variable d'environnement **`AKASHA_SPEC_DIR`** (si elle pointe vers un répertoire existant) → **`spec/` à côté du binaire `akasha-daemon`** → **`data_dir/spec`** s'il existe → sinon le chemin relatif **`spec`** (cas habituel du dépôt source lancé depuis la racine du projet). La commande **`akasha paths`** affiche le chemin retenu et la source (variable, binaire, données, ou relatif).
 
-L'onglet **Doc** des interfaces charge le guide depuis `spec/user_guide.md`, ou à défaut depuis **`docs/user_guide.md`** à côté des binaires (puis éventuellement `data_dir/docs/user_guide.md`). Les spécifications et documents d'architecture complets du dépôt Git ne sont pas tous inclus dans le zip utilisateur ; ils restent disponibles dans le dépôt source sous **`spec/`**.
+L'onglet **Doc** des interfaces charge le guide depuis **`docs/user_guide.md`** a cote des binaires (puis, si besoin, depuis `data_dir/docs/user_guide.md`).
 
 ---
 
@@ -346,7 +346,7 @@ Les variables d'activation sont chargées depuis le fichier **connectors.env** d
 | Vérifier une mise à jour | `akasha update check` |
 | Ouvrir la page de téléchargement | `akasha update install` |
 
-Cette documentation est également affichée dans l'**onglet Doc** des interfaces lorsque le daemon est démarré depuis le dossier d'extraction contenant le dossier `docs`. Pour les contributeurs et développeurs, la documentation technique (spécifications, architecture, runbooks) est disponible dans le dépôt source (dossier `spec/` et README à la racine).
+Cette documentation est également affichée dans l'**onglet Doc** des interfaces lorsque le daemon est démarré depuis le dossier d'extraction contenant le dossier `docs`.
 
 ---
 

@@ -19,4 +19,4 @@
 - [ ] Confirm command + args are not `curl | sh` or other opaque installers.
 - [ ] Scope filesystem / network via OS sandbox or dedicated VM if the server is not fully trusted.
 
-See also **`docs/mcp-runtime.md`** and **`docs/hermes-integration-remainder.md`**.
+See also **`mcp-runtime.md`** and **`../roadmap/hermes-integration-remainder.md`**.

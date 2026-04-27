@@ -29,4 +29,4 @@ Browser `Origin` rules apply to `POST` (see daemon `handle_api`). Server-to-serv
 
 ## Schedule lifecycle hooks
 
-For **sandboxed** shell hooks on schedule fire (separate from HTTP webhooks), see `lifecycle_hooks.json` in **`docs/gateway-shell-hooks.md`**.
+For **sandboxed** shell hooks on schedule fire (separate from HTTP webhooks), see `lifecycle_hooks.json` in **`../runtime/gateway-shell-hooks.md`**.
