@@ -1355,16 +1355,6 @@ async fn git_branch_clean_worktree_lines(
     (branch, clean, lines_out)
 }
 
-async fn git_checkout_mainish(project_root: &Path) -> Result<(), String> {
-    for b in ["main", "master"] {
-        let o = git_output(project_root, &["checkout", b]).await?;
-        if o.status.success() {
-            return Ok(());
-        }
-    }
-    Err("could not checkout main or master".to_string())
-}
-
 /// Ensure at least one primary branch exists and is checked out.
 /// Priority: existing `main`, existing `master`, otherwise create `main`.
 async fn ensure_main_or_master_branch(project_root: &Path) -> Result<(), String> {
@@ -2817,7 +2807,7 @@ pub async fn handle_studio_route(
                 .unwrap_or_else(|| evo_id.chars().take(8).collect());
             let branch = format!("studio/{slug}");
             let _permit = studio_ops_semaphore().acquire().await.ok();
-            if let Err(e) = git_checkout_mainish(&root).await {
+            if let Err(e) = ensure_main_or_master_branch(&root).await {
                 return Some(json_response(
                     "500 Internal Server Error",
                     &serde_json::json!({ "error": e }).to_string(),
@@ -2913,7 +2903,7 @@ pub async fn handle_studio_route(
                     ));
                 }
                 let _permit = studio_ops_semaphore().acquire().await.ok();
-                if git_checkout_mainish(&root).await.is_err() {
+                if ensure_main_or_master_branch(&root).await.is_err() {
                     return Some(json_response(
                         "500 Internal Server Error",
                         r#"{"error":"checkout_main_failed"}"#,
@@ -3054,7 +3044,7 @@ pub async fn handle_studio_route(
                     return Some(json_response("404 Not Found", r#"{"error":"evolution_not_found"}"#));
                 };
                 let _permit = studio_ops_semaphore().acquire().await.ok();
-                let _ = git_checkout_mainish(&root).await;
+                let _ = ensure_main_or_master_branch(&root).await;
                 let _ = git_output(&root, &["branch", "-D", &branch]).await;
                 for e in meta.evolutions.iter_mut() {
                     if e.id == eid {
@@ -3123,7 +3113,7 @@ fn guess_mime_and_text(rel: &str, bytes: &[u8]) -> (&'static str, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::studio_command_from_argv;
+    use super::{ensure_main_or_master_branch, studio_command_from_argv};
     use std::ffi::OsStr;
 
     #[test]
@@ -3279,6 +3269,52 @@ Try `npm i --save-dev @types/jest`";
         let ex = v["exclude"].as_array().unwrap();
         assert!(ex.iter().any(|x| x == "**/*.test.tsx"));
         assert!(!try_merge_exclude_into_tsconfig(&path).unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn ensure_main_or_master_branch_creates_main_when_missing() {
+        use std::process::Command;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let git_available = Command::new("git")
+            .arg("--version")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !git_available {
+            return;
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("akasha_studio_main_guard_{stamp}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let init = Command::new("git").arg("init").current_dir(&dir).status().unwrap();
+        assert!(init.success());
+
+        // Move default branch to a non-primary name so neither main nor master exist.
+        let rename = Command::new("git")
+            .args(["branch", "-m", "feature/tmp"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(rename.success());
+
+        ensure_main_or_master_branch(&dir).await.expect("must create or checkout primary branch");
+
+        let head = Command::new("git")
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(head.status.success());
+        let branch = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        assert_eq!(branch, "main");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

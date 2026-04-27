@@ -419,6 +419,8 @@ mod tests {
                 "printf 'PTY_OK'; exit 0".into(),
             ]),
             cwd: None,
+            transcript_name: None,
+            idle_timeout_secs: None,
             cols: 80,
             rows: 24,
         };
@@ -430,6 +432,8 @@ mod tests {
                 "echo PTY_OK".into(),
             ]),
             cwd: None,
+            transcript_name: None,
+            idle_timeout_secs: None,
             cols: 80,
             rows: 24,
         };
