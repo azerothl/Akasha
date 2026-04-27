@@ -1365,6 +1365,46 @@ async fn git_checkout_mainish(project_root: &Path) -> Result<(), String> {
     Err("could not checkout main or master".to_string())
 }
 
+/// Ensure at least one primary branch exists and is checked out.
+/// Priority: existing `main`, existing `master`, otherwise create `main`.
+async fn ensure_main_or_master_branch(project_root: &Path) -> Result<(), String> {
+    if !is_git_repo(project_root).await {
+        return Ok(());
+    }
+    let head = git_output(project_root, &["symbolic-ref", "--short", "HEAD"]).await;
+    if let Ok(o) = head {
+        if o.status.success() {
+            let cur = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if cur == "main" || cur == "master" {
+                return Ok(());
+            }
+        }
+    }
+    let has_main = git_output(project_root, &["show-ref", "--verify", "--quiet", "refs/heads/main"])
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if has_main {
+        let _ = git_output(project_root, &["checkout", "main"]).await?;
+        return Ok(());
+    }
+    let has_master = git_output(project_root, &["show-ref", "--verify", "--quiet", "refs/heads/master"])
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if has_master {
+        let _ = git_output(project_root, &["checkout", "master"]).await?;
+        return Ok(());
+    }
+    for args in [["checkout", "-B", "main"], ["switch", "-c", "main"], ["checkout", "-b", "main"]] {
+        match git_output(project_root, &args).await {
+            Ok(o) if o.status.success() => return Ok(()),
+            _ => {}
+        }
+    }
+    Err("failed to ensure main/master branch".to_string())
+}
+
 /// Public: resolve evolution branch from `.akasha-studio.json` (used by `POST /api/message`).
 pub fn evolution_branch_for_id(data_dir: &Path, project_id: &str, evolution_id: &str) -> Option<String> {
     let root = resolve_studio_project_dir(data_dir, project_id).ok()?;
@@ -1467,16 +1507,24 @@ pub async fn handle_studio_route(
             );
         }
         if !dir.join(".git").exists() {
-            let mut g = Command::new("git");
-            g.arg("init").current_dir(&dir).kill_on_drop(true);
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x08000000;
-                g.as_std_mut().creation_flags(CREATE_NO_WINDOW);
-            }
-            if let Err(e) = g.status().await {
-                tracing::warn!(error = %e, path = %dir.display(), "git init failed for new studio project");
+            let init_main = git_output(&dir, &["init", "-b", "main"]).await;
+            let init_ok = match init_main {
+                Ok(o) if o.status.success() => true,
+                _ => {
+                    match git_output(&dir, &["init"]).await {
+                        Ok(o2) if o2.status.success() => true,
+                        Ok(_) => false,
+                        Err(e) => {
+                            tracing::warn!(error = %e, path = %dir.display(), "git init failed for new studio project");
+                            false
+                        }
+                    }
+                }
+            };
+            if init_ok {
+                if let Err(e) = ensure_main_or_master_branch(&dir).await {
+                    tracing::warn!(error = %e, path = %dir.display(), "failed to ensure main/master after git init");
+                }
             }
         }
         schedule_studio_code_rag_index(data_dir, &id, &dir, false);
@@ -1501,6 +1549,9 @@ pub async fn handle_studio_route(
                 };
                 if !root.is_dir() {
                     return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                }
+                if let Err(e) = ensure_main_or_master_branch(&root).await {
+                    tracing::warn!(error = %e, path = %root.display(), "failed to ensure main/master on project resume");
                 }
                 let meta = load_studio_meta(&root).unwrap_or(StudioMeta {
                     id: id.to_string(),
