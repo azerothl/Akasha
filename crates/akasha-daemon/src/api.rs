@@ -175,6 +175,37 @@ fn tool_scope_key(tool: &str, tool_args: &[String]) -> String {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct PermissionModeState {
+    mode: String,
+    updated_at: String,
+}
+
+impl Default for PermissionModeState {
+    fn default() -> Self {
+        Self {
+            mode: "ask_me".to_string(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+fn load_permission_mode(data_dir: &Path) -> PermissionModeState {
+    let path = data_dir.join("permissions_mode.json");
+    let raw = match std::fs::read_to_string(path) {
+        Ok(v) => v,
+        Err(_) => return PermissionModeState::default(),
+    };
+    serde_json::from_str::<PermissionModeState>(&raw).unwrap_or_default()
+}
+
+fn save_permission_mode(data_dir: &Path, state: &PermissionModeState) -> anyhow::Result<()> {
+    let path = data_dir.join("permissions_mode.json");
+    std::fs::write(path, serde_json::to_string_pretty(state)?)?;
+    Ok(())
+}
+
 /// `args[0]` = chemin ; le reste = « ancien » puis ` | ` (recommandé) ou `|`, puis « nouveau ».
 /// Retire les `|` initiaux issus du découpage (`path | old | new` → `old | new`).
 fn parse_search_replace_payload(args: &[String]) -> Result<(String, String), &'static str> {
@@ -5209,7 +5240,8 @@ async fn execute_tool_call(
                             end_at: None,
                             channel_context: Some(
                                 serde_json::json!({
-                                    "prompt": prompt,
+                                    "message": prompt,
+                                    "session_id": format!("task:{}", task_id),
                                     "source": "tool:schedule_task",
                                     "created_by_task_id": task_id.to_string()
                                 })
@@ -10182,6 +10214,10 @@ pub(crate) async fn run_message_via_llm(
                         );
                         // Phase 3.1: tools in require_approval need user confirmation before execution.
                         if exec.policy.requires_approval(&actual_tool) {
+                            let permission_mode = load_permission_mode(data_dir);
+                            if permission_mode.mode == "allow_all" {
+                                // Global session mode bypasses interactive approval prompts.
+                            } else {
                             let scope_key = tool_scope_key(&actual_tool, &tool_args);
                             let state = crate::permissions_center::load(data_dir);
                             let mut already_granted = false;
@@ -10373,6 +10409,7 @@ pub(crate) async fn run_message_via_llm(
                                     tool_results.push("Action nécessitant approbation impossible (human_input_store indisponible).".to_string());
                                     continue;
                                 }
+                            }
                             }
                             }
                         }
@@ -15339,6 +15376,213 @@ data: {}\n\n",
                     "503 Service Unavailable",
                     r#"{"error":"tools_executor_unavailable"}"#,
                 );
+            }
+        }
+    }
+
+    // Telegram channel access (pairing + RBAC lifecycle)
+    if method == "GET" && path_only == "/api/channel-access/telegram/users" {
+        let state = crate::channel_access::load(data_dir);
+        let body = serde_json::json!({
+            "approved": state.approved,
+            "pending": state.pending
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/request" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        if user_id == 0 {
+            return json_response("400 Bad Request", r#"{"error":"missing_user_id"}"#);
+        }
+        let username = body_json
+            .as_ref()
+            .and_then(|v| v.get("username").and_then(|s| s.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let mut state = crate::channel_access::load(data_dir);
+        if crate::channel_access::is_approved_user(&state, user_id) {
+            return json_response("200 OK", r#"{"ok":true,"already_approved":true}"#);
+        }
+        state.pending.retain(|p| p.user_id != user_id);
+        let code = format!("TG-{}", Uuid::new_v4().to_string()[..8].to_uppercase());
+        state.pending.push(crate::channel_access::TelegramPending {
+            user_id,
+            username,
+            pairing_code: code.clone(),
+            requested_at: chrono::Utc::now().to_rfc3339(),
+        });
+        let _ = crate::channel_access::save(data_dir, &state);
+        let body = serde_json::json!({ "ok": true, "pairing_code": code });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/approve" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let code = body_json
+            .as_ref()
+            .and_then(|v| v.get("pairing_code").and_then(|s| s.as_str()))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        let mut state = crate::channel_access::load(data_dir);
+        let pending = if !code.is_empty() {
+            let idx = state.pending.iter().position(|p| p.pairing_code == code);
+            idx.map(|i| state.pending.remove(i))
+        } else if user_id != 0 {
+            let idx = state.pending.iter().position(|p| p.user_id == user_id);
+            idx.map(|i| state.pending.remove(i))
+        } else {
+            None
+        };
+        let Some(pending) = pending else {
+            return json_response("404 Not Found", r#"{"error":"pending_not_found"}"#);
+        };
+        let is_first = state.approved.is_empty();
+        state.approved.retain(|u| u.user_id != pending.user_id);
+        state.approved.push(crate::channel_access::TelegramUser {
+            user_id: pending.user_id,
+            username: pending.username,
+            role: if is_first {
+                crate::channel_access::TelegramRole::Admin
+            } else {
+                crate::channel_access::TelegramRole::Member
+            },
+            approved_at: chrono::Utc::now().to_rfc3339(),
+        });
+        let _ = crate::channel_access::save(data_dir, &state);
+        return json_response("200 OK", r#"{"ok":true}"#);
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/reject" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        if user_id == 0 {
+            return json_response("400 Bad Request", r#"{"error":"missing_user_id"}"#);
+        }
+        let mut state = crate::channel_access::load(data_dir);
+        let before = state.pending.len();
+        state.pending.retain(|p| p.user_id != user_id);
+        let _ = crate::channel_access::save(data_dir, &state);
+        let removed = before != state.pending.len();
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "ok": true, "removed": removed }).to_string(),
+        );
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/remove" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        if user_id == 0 {
+            return json_response("400 Bad Request", r#"{"error":"missing_user_id"}"#);
+        }
+        let mut state = crate::channel_access::load(data_dir);
+        let before = state.approved.len();
+        state.approved.retain(|u| u.user_id != user_id);
+        let _ = crate::channel_access::save(data_dir, &state);
+        let removed = before != state.approved.len();
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "ok": true, "removed": removed }).to_string(),
+        );
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/promote" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        if user_id == 0 {
+            return json_response("400 Bad Request", r#"{"error":"missing_user_id"}"#);
+        }
+        let mut state = crate::channel_access::load(data_dir);
+        if let Some(u) = state.approved.iter_mut().find(|u| u.user_id == user_id) {
+            u.role = crate::channel_access::TelegramRole::Admin;
+            let _ = crate::channel_access::save(data_dir, &state);
+            return json_response("200 OK", r#"{"ok":true}"#);
+        }
+        return json_response("404 Not Found", r#"{"error":"user_not_found"}"#);
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/demote" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        if user_id == 0 {
+            return json_response("400 Bad Request", r#"{"error":"missing_user_id"}"#);
+        }
+        let mut state = crate::channel_access::load(data_dir);
+        if let Some(u) = state.approved.iter_mut().find(|u| u.user_id == user_id) {
+            u.role = crate::channel_access::TelegramRole::Member;
+            let _ = crate::channel_access::save(data_dir, &state);
+            return json_response("200 OK", r#"{"ok":true}"#);
+        }
+        return json_response("404 Not Found", r#"{"error":"user_not_found"}"#);
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/reset" {
+        let state = crate::channel_access::TelegramAccessState::default();
+        let _ = crate::channel_access::save(data_dir, &state);
+        return json_response("200 OK", r#"{"ok":true}"#);
+    }
+
+    if method == "GET" && path_only == "/api/permissions/mode" {
+        let state = load_permission_mode(data_dir);
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "mode": state.mode, "updated_at": state.updated_at }).to_string(),
+        );
+    }
+    if method == "POST" && path_only == "/api/permissions/mode" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let mode = body_json
+            .as_ref()
+            .and_then(|v| v.get("mode").and_then(|s| s.as_str()))
+            .unwrap_or("")
+            .to_lowercase();
+        if mode != "ask_me" && mode != "allow_all" {
+            return json_response("400 Bad Request", r#"{"error":"invalid_mode"}"#);
+        }
+        let state = PermissionModeState {
+            mode,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        match save_permission_mode(data_dir, &state) {
+            Ok(()) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "mode": state.mode }).to_string(),
+                )
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
             }
         }
     }

@@ -156,12 +156,26 @@ async fn tick(
                     )
                     .with_correlation(task_id),
                 );
-                let message = schedule
+                let mut message = schedule
                     .channel_context
                     .as_deref()
                     .unwrap_or("Exécution planifiée.")
                     .to_string();
-                let session_id = format!("schedule:{}", schedule.id);
+                let mut session_id = format!("schedule:{}", schedule.id);
+                if let Some(ctx) = schedule.channel_context.as_deref() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(ctx) {
+                        if let Some(m) = v.get("message").and_then(|s| s.as_str()) {
+                            if !m.trim().is_empty() {
+                                message = m.trim().to_string();
+                            }
+                        }
+                        if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
+                            if !sid.trim().is_empty() {
+                                session_id = sid.trim().to_string();
+                            }
+                        }
+                    }
+                }
                 pending.push((run_id, task_id, message, session_id));
             }
         }

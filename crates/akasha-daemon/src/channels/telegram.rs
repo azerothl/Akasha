@@ -14,6 +14,15 @@ const TELEGRAM_GETUPDATES_TIMEOUT: u64 = 25;
 const TELEGRAM_GETUPDATES_RETRIES: u32 = 4;
 const TELEGRAM_RETRY_DELAYS_SECS: [u64; 4] = [2, 5, 10, 20];
 
+fn resolve_data_dir() -> std::path::PathBuf {
+    if let Ok(v) = std::env::var("AKASHA_DATA_DIR") {
+        return std::path::PathBuf::from(v);
+    }
+    dirs::home_dir()
+        .map(|p| p.join("akasha"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".akasha"))
+}
+
 fn is_telegram_unauthorized(err: &str, status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::UNAUTHORIZED || err.contains("401") || err.to_lowercase().contains("unauthorized")
 }
@@ -230,6 +239,15 @@ pub async fn run_telegram_bot(
                 Some(id) => id,
                 None => continue,
             };
+            let from = message.get("from");
+            let from_user_id = from
+                .and_then(|f| f.get("id"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let from_username = from
+                .and_then(|f| f.get("username"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let text = match message.get("text").and_then(|v| v.as_str()) {
                 Some(t) => t.trim(),
                 None => {
@@ -241,10 +259,80 @@ pub async fn run_telegram_bot(
             let (command_raw, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
             let command = command_raw.split('@').next().unwrap_or(command_raw);
             let rest = rest.trim();
+            let data_dir = resolve_data_dir();
+            let access = crate::channel_access::load(data_dir.as_path());
+
             let payload = if command == "/akasha" {
                 rest
             } else if command == "/start" {
-                "Usage: /akasha <your message> to talk to Akasha. In groups use /akasha@BotName <message>."
+                if from_user_id == 0 {
+                    "Unable to identify Telegram user."
+                } else if crate::channel_access::is_approved_user(&access, from_user_id) {
+                    "You are already approved. Use /akasha <message>."
+                } else {
+                    let req_url = format!("{}/api/channel-access/telegram/request", daemon_base_url);
+                    let req_body = serde_json::json!({
+                        "user_id": from_user_id,
+                        "username": from_username
+                    });
+                    match client.post(&req_url).json(&req_body).send().await {
+                        Ok(resp) => {
+                            let v = resp.json::<serde_json::Value>().await.unwrap_or_default();
+                            let code = v
+                                .get("pairing_code")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("pending");
+                            Box::leak(format!("Pairing request created. Share this code with an Akasha admin: {}", code).into_boxed_str())
+                        }
+                        Err(_) => "Pairing request failed. Try again later.",
+                    }
+                }
+            } else if command == "/status" {
+                let url = format!("{}/api/status", daemon_base_url);
+                match client.get(&url).send().await {
+                    Ok(resp) => Box::leak(resp.text().await.unwrap_or_else(|_| "status unavailable".to_string()).into_boxed_str()),
+                    Err(_) => "status unavailable",
+                }
+            } else if command == "/budget" {
+                let url = format!("{}/api/budget", daemon_base_url);
+                match client.get(&url).send().await {
+                    Ok(resp) => Box::leak(resp.text().await.unwrap_or_else(|_| "budget unavailable".to_string()).into_boxed_str()),
+                    Err(_) => "budget unavailable",
+                }
+            } else if command == "/permissions" {
+                let mode = if rest.eq_ignore_ascii_case("allow_all") {
+                    "allow_all"
+                } else if rest.eq_ignore_ascii_case("ask_me") {
+                    "ask_me"
+                } else {
+                    ""
+                };
+                if mode.is_empty() {
+                    let url = format!("{}/api/permissions/mode", daemon_base_url);
+                    match client.get(&url).send().await {
+                        Ok(resp) => Box::leak(resp.text().await.unwrap_or_else(|_| "permissions mode unavailable".to_string()).into_boxed_str()),
+                        Err(_) => "permissions mode unavailable",
+                    }
+                } else {
+                    let url = format!("{}/api/permissions/mode", daemon_base_url);
+                    let body = serde_json::json!({ "mode": mode });
+                    match client.post(&url).json(&body).send().await {
+                        Ok(_) => Box::leak(format!("permissions mode set to {}", mode).into_boxed_str()),
+                        Err(_) => "failed to set permissions mode",
+                    }
+                }
+            } else if command == "/memory" {
+                let url = format!("{}/api/memory/second-brain/overview", daemon_base_url);
+                match client.get(&url).send().await {
+                    Ok(resp) => Box::leak(resp.text().await.unwrap_or_else(|_| "memory unavailable".to_string()).into_boxed_str()),
+                    Err(_) => "memory unavailable",
+                }
+            } else if command == "/tasks" {
+                let url = format!("{}/api/schedules", daemon_base_url);
+                match client.get(&url).send().await {
+                    Ok(resp) => Box::leak(resp.text().await.unwrap_or_else(|_| "tasks unavailable".to_string()).into_boxed_str()),
+                    Err(_) => "tasks unavailable",
+                }
             } else if chat_type == "private" && !text.starts_with('/') {
                 text
             } else {
@@ -266,6 +354,27 @@ pub async fn run_telegram_bot(
                 if let Err(e) = send_telegram(&client, &send_message_url, chat_id, payload).await {
                     warn!(error = %e, "Telegram /start reply failed");
                 }
+                continue;
+            }
+            if command == "/status"
+                || command == "/budget"
+                || command == "/permissions"
+                || command == "/memory"
+                || command == "/tasks"
+            {
+                if let Err(e) = send_telegram(&client, &send_message_url, chat_id, payload).await {
+                    warn!(error = %e, "Telegram command reply failed");
+                }
+                continue;
+            }
+            if from_user_id != 0 && !crate::channel_access::is_approved_user(&access, from_user_id) {
+                let _ = send_telegram(
+                    &client,
+                    &send_message_url,
+                    chat_id,
+                    "Access pending approval. Send /start to get your pairing code and ask an admin to approve it.",
+                )
+                .await;
                 continue;
             }
             if let Err(e) = akasha_core::check_prompt_injection(payload) {

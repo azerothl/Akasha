@@ -19,6 +19,7 @@ pub mod autonomous_mission_config;
 pub mod session_state;
 pub mod browser;
 pub mod channels;
+pub mod channel_access;
 pub mod code_rag;
 pub mod studio_task_snapshot;
 pub mod daemon;
