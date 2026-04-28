@@ -3,10 +3,9 @@
 use crate::api_http::json_response;
 use std::path::{Path, PathBuf};
 
-#[path = "workspace_graph_handlers.rs"]
-mod workspace_graph_handlers;
+mod handlers;
 
-use workspace_graph_handlers::{
+use handlers::{
     delete_workspace, get_export_workspace, get_graph_json_workspace, get_html_workspace,
     get_legacy_config, get_legacy_first_export, get_legacy_first_html, get_legacy_first_report,
     get_legacy_summary, get_report_workspace, get_workspaces_list, post_create_workspace,
