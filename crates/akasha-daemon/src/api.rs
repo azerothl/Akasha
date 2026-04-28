@@ -16,6 +16,7 @@ use crate::autonomous_mission_config::{AutonomousMissionConfig, MissionStatusYam
 use crate::user_profile::UserProfile;
 use akasha_core::{EventEnvelope, EventType};
 use akasha_llm::CompletionRequest;
+use akasha_plugin_api::{PluginKind, PluginManifest};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use akasha_store::{
     format_todos_plan_block, parse_todos_from_payload, Schedule,
@@ -1534,108 +1535,8 @@ struct MessageIntentFlags {
     geolocation_distance: bool,
 }
 
-#[derive(Debug, Clone, Default)]
-struct RuntimeToolRoutingEnforcer {
-    preferred_tools: std::collections::HashSet<String>,
-    forbidden_tools: std::collections::HashSet<String>,
-}
-
-impl RuntimeToolRoutingEnforcer {
-    fn from_rules(rules: &[crate::plugins::registry::MatchedRoutingRule]) -> Option<Self> {
-        if rules.is_empty() {
-            return None;
-        }
-        let mut preferred_tools = std::collections::HashSet::new();
-        let mut forbidden_tools = std::collections::HashSet::new();
-        for rule in rules {
-            for tool in &rule.preferred_tools {
-                let t = tool.trim().to_lowercase();
-                if !t.is_empty() {
-                    preferred_tools.insert(t);
-                }
-            }
-            for tool in &rule.forbidden_tools {
-                let t = tool.trim().to_lowercase();
-                if !t.is_empty() {
-                    forbidden_tools.insert(t);
-                }
-            }
-        }
-        Some(Self {
-            preferred_tools,
-            forbidden_tools,
-        })
-    }
-
-    fn is_tool_allowed(&self, tool_name: &str, args: &[String]) -> bool {
-        let tool = canonicalize_tool_name(tool_name).to_lowercase();
-
-        if self.is_forbidden(&tool, args) {
-            return false;
-        }
-
-        // If no preferred list is declared, only forbidden list is enforced.
-        if self.preferred_tools.is_empty() {
-            return true;
-        }
-
-        // Always allow ask_user to unblock missing parameters.
-        if tool == "ask_user" {
-            return true;
-        }
-
-        if self.preferred_tools.contains(&tool) {
-            return true;
-        }
-
-        // Allow plugin.call / plugin.<id> when it targets a preferred plugin/tool family.
-        if tool == "plugin.call" || tool == "plugin_call" {
-            if let Some(plugin_id) = args.first().map(|s| s.trim().to_lowercase()) {
-                if self.preferred_tools.contains(&plugin_id)
-                    || self
-                        .preferred_tools
-                        .iter()
-                        .any(|p| p.starts_with(&(plugin_id.clone() + "_")))
-                {
-                    return true;
-                }
-            }
-        }
-
-        if let Some(plugin_id) = tool.strip_prefix("plugin.") {
-            let plugin_id = plugin_id.trim().to_lowercase();
-            if self.preferred_tools.contains(&plugin_id)
-                || self
-                    .preferred_tools
-                    .iter()
-                    .any(|p| p.starts_with(&(plugin_id.clone() + "_")))
-            {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn is_forbidden(&self, tool_name: &str, args: &[String]) -> bool {
-        if self.forbidden_tools.is_empty() {
-            return false;
-        }
-        if self.forbidden_tools.contains(tool_name) {
-            return true;
-        }
-        if (tool_name == "plugin.call" || tool_name == "plugin_call")
-            && args
-                .first()
-                .map(|s| self.forbidden_tools.contains(&s.trim().to_lowercase()))
-                .unwrap_or(false)
-        {
-            return true;
-        }
-        false
-    }
-}
-
+/// Heuristic intent labels for **debug only** (`GET/POST /api/plugins/routing_rules`).
+/// Runtime tool execution is no longer gated on manifest `routing_rules` / these intents.
 fn active_intents_from_flags(flags: &MessageIntentFlags) -> Vec<&'static str> {
     let mut out = Vec::new();
     if flags.save_file {
@@ -1666,104 +1567,6 @@ fn active_intents_from_flags(flags: &MessageIntentFlags) -> Vec<&'static str> {
         out.push("geolocation_distance");
     }
     out
-}
-
-fn code_studio_disable_plugin_intents(flags: &mut MessageIntentFlags) {
-    // Code Studio requests are code/project scoped; plugin routing intents for travel/geolocation
-    // can hijack tool selection and force unrelated plugins.
-    flags.transport = false;
-    flags.geolocation_distance = false;
-}
-
-fn build_plugin_routing_reminders(
-    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
-    message: &str,
-    flags: &MessageIntentFlags,
-    tools_executor_snapshot: Option<&std::sync::Arc<akasha_tools::ToolExecutor>>,
-) -> (String, bool) {
-    let Some(registry) = plugin_registry else {
-        return (String::new(), false);
-    };
-    let intents = active_intents_from_flags(flags);
-    if intents.is_empty() {
-        return (String::new(), false);
-    }
-
-    let rules = registry.match_routing_rules(message, &intents, |tool_name| {
-        tools_executor_snapshot
-            .as_ref()
-            .map(|e| e.policy.can_use_tool(tool_name))
-            .unwrap_or(false)
-    });
-    if rules.is_empty() {
-        return (String::new(), false);
-    }
-
-    let matched_plugins: Vec<String> = rules.iter().map(|r| r.plugin_id.clone()).collect();
-    tracing::info!(
-        intents = ?intents,
-        matched_rules = rules.len(),
-        plugins = ?matched_plugins,
-        "Dynamic plugin routing rules matched"
-    );
-
-    let mut seen = std::collections::HashSet::new();
-    let mut lines = Vec::new();
-    let mut geolocation_handled = false;
-    for rule in rules.into_iter().take(4) {
-        if rule
-            .intent
-            .as_deref()
-            .is_some_and(|intent| intent.eq_ignore_ascii_case("geolocation_distance"))
-        {
-            geolocation_handled = true;
-        }
-        let instruction = rule.instruction.trim();
-        if instruction.is_empty() {
-            continue;
-        }
-        if seen.insert(instruction.to_string()) {
-            lines.push(format!("- {}", instruction));
-        }
-    }
-    if lines.is_empty() {
-        return (String::new(), geolocation_handled);
-    }
-
-    let block = format!(
-        "\n[Dynamic plugin routing rules — auto-loaded from installed plugin manifests]\n{}\n\n",
-        lines.join("\n")
-    );
-    (block, geolocation_handled)
-}
-
-fn build_runtime_tool_routing_enforcer(
-    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
-    message: &str,
-    flags: &MessageIntentFlags,
-    tools_executor_snapshot: Option<&std::sync::Arc<akasha_tools::ToolExecutor>>,
-) -> Option<RuntimeToolRoutingEnforcer> {
-    let registry = plugin_registry?;
-    let intents = active_intents_from_flags(flags);
-    if intents.is_empty() {
-        return None;
-    }
-
-    let rules = registry.match_routing_rules(message, &intents, |tool_name| {
-        tools_executor_snapshot
-            .as_ref()
-            .map(|e| e.policy.can_use_tool(tool_name))
-            .unwrap_or(false)
-    });
-
-    let enforcer = RuntimeToolRoutingEnforcer::from_rules(&rules)?;
-    tracing::info!(
-        intents = ?intents,
-        preferred_tools = ?enforcer.preferred_tools,
-        forbidden_tools = ?enforcer.forbidden_tools,
-        "Runtime tool routing enforcement enabled"
-    );
-    Some(enforcer)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8316,21 +8119,46 @@ pub(crate) async fn run_message_via_llm(
     // IMPORTANT: intent classification must use the clean user message (without guardrail/prefix
     // injections). Using the raw `message` can falsely trigger intents (e.g. transport/maps)
     // from injected context blocks and activate unrelated plugin routing.
-    let mut intent_flags = compute_message_intent_flags(clean_message);
-    if code_studio_disk_task {
-        code_studio_disable_plugin_intents(&mut intent_flags);
-    }
-    let runtime_tool_routing_enforcer = if code_studio_disk_task {
-        // Hard guard: Code Studio tasks must stay project/code oriented and must not be
-        // hijacked by dynamic plugin routing (maps/graph/external intents).
-        None
+    let intent_flags = compute_message_intent_flags(clean_message);
+    let plugin_catalog_reminder = if code_studio_disk_task
+        || is_small_talk_fast_lane
+        || plugin_registry.is_none()
+    {
+        String::new()
     } else {
-        build_runtime_tool_routing_enforcer(
-            plugin_registry.as_ref(),
-            clean_message,
-            &intent_flags,
-            tools_executor_snapshot.as_ref(),
-        )
+        match plugin_registry.as_ref() {
+            None => String::new(),
+            Some(reg) => {
+                let all_tool: Vec<PluginManifest> = reg
+                    .manifests()
+                    .into_iter()
+                    .filter(|m| m.kind == PluginKind::Tool)
+                    .collect();
+                if all_tool.is_empty() {
+                    String::new()
+                } else {
+                    let selected_ids = crate::plugins::selection::select_relevant_plugins_via_llm(
+                        llm_router.as_ref(),
+                        clean_message,
+                        &all_tool,
+                    )
+                    .await;
+                    let id_lower: std::collections::HashSet<String> = selected_ids
+                        .iter()
+                        .map(|s| s.to_lowercase())
+                        .collect();
+                    let mut picked: Vec<PluginManifest> = all_tool
+                        .iter()
+                        .filter(|m| id_lower.contains(&m.id.to_lowercase()))
+                        .cloned()
+                        .collect();
+                    if picked.is_empty() {
+                        picked.clone_from(&all_tool);
+                    }
+                    crate::plugins::selection::build_plugin_catalog_block(&picked)
+                }
+            }
+        }
     };
     let write_reminder = if intent_flags.save_file {
         WRITE_FILE_REMINDER
@@ -8383,19 +8211,7 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let (plugin_routing_reminder, plugin_handles_geo_distance) = if code_studio_disk_task {
-        (String::new(), false)
-    } else {
-        build_plugin_routing_reminders(
-            plugin_registry.as_ref(),
-            clean_message,
-            &intent_flags,
-            tools_executor_snapshot.as_ref(),
-        )
-    };
-    let geolocation_distance_reminder: &str = if intent_flags.geolocation_distance
-        && !plugin_handles_geo_distance
-    {
+    let geolocation_distance_reminder: &str = if intent_flags.geolocation_distance {
         let has_any_tool = tools_executor_snapshot
             .as_ref()
             .map(|e| e.policy.can_use_tool("web_search") || e.policy.can_use_tool("plugin.call"))
@@ -8471,7 +8287,7 @@ pub(crate) async fn run_message_via_llm(
             web_search_followup_reminder,
             transport_reminder,
             geolocation_distance_reminder,
-            plugin_routing_reminder,
+            plugin_catalog_reminder,
             social_feed_reminder,
             device_camera_reminder,
             image_generation_reminder,
@@ -8489,7 +8305,7 @@ pub(crate) async fn run_message_via_llm(
             web_search_followup_reminder,
             transport_reminder,
             geolocation_distance_reminder,
-            plugin_routing_reminder,
+            plugin_catalog_reminder,
             social_feed_reminder,
             device_camera_reminder,
             image_generation_reminder,
@@ -8592,34 +8408,6 @@ pub(crate) async fn run_message_via_llm(
             String,
             std::collections::HashSet<String>,
         > = std::collections::HashMap::new();
-        let strict_tools_first = runtime_tool_routing_enforcer
-            .as_ref()
-            .map(|e| !e.preferred_tools.is_empty())
-            .unwrap_or(false);
-        let strict_tools_instruction = if strict_tools_first {
-            let preferred = runtime_tool_routing_enforcer
-                .as_ref()
-                .map(|e| {
-                    let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
-                    v.sort();
-                    v.join(", ")
-                })
-                .unwrap_or_default();
-            format!(
-                "\n\n[TOOLS-FIRST STRICT MODE]\n- PRIMARY USER REQUEST (must be satisfied): {}\n- You MUST output TOOL lines only until at least one allowed tool succeeds.\n- Preferred tools: {}\n- If inputs are missing, output ONLY: TOOL: ask_user {{\"question\":\"...\",\"context\":\"...\",\"choices\":[...]}}\n- Do NOT output prose, role acknowledgements, policy acknowledgements, or generic greetings.\n",
-                user_message, preferred
-            )
-        } else {
-            String::new()
-        };
-        let mut strict_no_tool_rounds = 0u32;
-        let mut strict_successful_tool_calls = 0u32;
-        let mut strict_preferred_tool_replay_input: Option<String> = None;
-        // In strict tools-first mode, deterministic preferred-tool attempts must run only once before
-        // the first LLM call. `round` stays 0 until the model emits parseable TOOL lines, so without
-        // this flag we would re-run deterministic maps (etc.) on every strict re-prompt and burn a
-        // full LLM timeout budget on a duplicate hung stream.
-        let mut deterministic_preferred_attempted = false;
         // Orchestrated deliverables: re-prompts when the model returns no parseable TOOL lines.
         let mut orch_disk_write_nags = 0u32;
         // Code Studio implementation agents: prevent "copy/paste this file" fallback
@@ -8643,149 +8431,6 @@ pub(crate) async fn run_message_via_llm(
             .unwrap_or_else(|| llm_timeout_secs.min(300));
 
         'tool_rounds: loop {
-            let strict_mode_active = strict_tools_first && strict_successful_tool_calls == 0;
-            if strict_mode_active {
-                let _ = bus.send(
-                    EventEnvelope::new(
-                        EventType::ProgressUpdate,
-                        Some(serde_json::json!({
-                            "task_id": task_id.to_string(),
-                            "progress_pct": 30,
-                            "message": "Applying dynamic plugin routing rules (tools-first)…"
-                        })),
-                    )
-                    .with_correlation(task_id),
-                );
-            }
-
-            // Deterministic first attempt in strict tools-first mode:
-            // try preferred tools with the full user request as input before asking the LLM again.
-            let run_deterministic_preferred =
-                crate::api_llm_loop::should_run_deterministic_preferred(
-                    strict_mode_active,
-                    strict_preferred_tool_replay_input.is_some(),
-                    deterministic_preferred_attempted,
-                    round,
-                );
-            if run_deterministic_preferred {
-                if let (Some(enforcer), Some(exec)) = (
-                    &runtime_tool_routing_enforcer,
-                    tools_executor_snapshot.as_ref(),
-                ) {
-                    let preferred_tool_request = strict_preferred_tool_replay_input
-                        .take()
-                        .unwrap_or_else(|| user_message.clone());
-                    let mut deterministic_results: Vec<String> = Vec::new();
-                    const MAPS_RESULT_FULL_MAX: usize = 400_000;
-                    for preferred_tool in enforcer.preferred_tools.iter().take(3) {
-                        let args_preview = if preferred_tool_request.chars().count() > 240 {
-                            format!(
-                                "{}…",
-                                preferred_tool_request.chars().take(240).collect::<String>()
-                            )
-                        } else {
-                            preferred_tool_request.clone()
-                        };
-                        let _ = bus.send(
-                            EventEnvelope::new(
-                                EventType::TimelineMilestone,
-                                Some(serde_json::json!({
-                                    "name": "deterministic_preferred_tool_attempt",
-                                    "task_id": task_id.to_string(),
-                                    "round": round,
-                                    "tool": preferred_tool,
-                                    "args_preview": args_preview,
-                                })),
-                            )
-                            .with_correlation(timeline_correlation),
-                        );
-                        let auto_args = vec![preferred_tool_request.clone()];
-                        let (success, res, captured_image) = execute_tool_call(
-                            exec,
-                            preferred_tool,
-                            &auto_args,
-                            process_registry.as_ref(),
-                            long_term_client.as_ref(),
-                            task_id,
-                            Some(store_path.as_path()),
-                            conv_tx.clone(),
-                            message_webhook_url.as_deref(),
-                            plugin_registry.as_ref(),
-                            device_bridge.as_ref(),
-                            workspace_store.as_ref(),
-                            browser_registry.as_ref(),
-                            Some(tool_disk_workspace_root.as_path()),
-                        )
-                        .await;
-                        let result_preview = if res.chars().count() > 320 {
-                            format!("{}…", res.chars().take(320).collect::<String>())
-                        } else {
-                            res.clone()
-                        };
-                        // UI (chat) needs full plugin JSON for rich views (e.g. maps); preview is truncated.
-                        let mut milestone = serde_json::json!({
-                            "name": "deterministic_preferred_tool_result",
-                            "task_id": task_id.to_string(),
-                            "round": round,
-                            "tool": preferred_tool,
-                            "success": success,
-                            "result_preview": result_preview,
-                        });
-                        if success
-                            && preferred_tool.starts_with("maps_")
-                            && res.len() <= MAPS_RESULT_FULL_MAX
-                        {
-                            milestone["result_full"] = serde_json::Value::String(res.clone());
-                        }
-                        let _ = bus.send(
-                            EventEnvelope::new(EventType::TimelineMilestone, Some(milestone))
-                                .with_correlation(timeline_correlation),
-                        );
-                        tool_loop_history_by_agent
-                            .entry(loop_agent_key.clone())
-                            .or_default()
-                            .push((
-                                preferred_tool.clone(),
-                                if success { "success" } else { "failure" }.to_string(),
-                            ));
-                        if let Some(img) = captured_image {
-                            last_captured_image_base64 = Some(img);
-                        }
-                        deterministic_results.push(res.clone());
-                        if success {
-                            strict_successful_tool_calls =
-                                strict_successful_tool_calls.saturating_add(1);
-                            log_tool_journal_if_write(preferred_tool, &auto_args, &res).await;
-                            break;
-                        }
-                    }
-                    if strict_successful_tool_calls > 0 {
-                        let results_blob = deterministic_results.join("\n");
-                        last_tool_results_blob = Some(results_blob.clone());
-                        current_prompt = format!(
-                        "User request: {}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, answer the user's request now. Do NOT reply with a promise. No TOOL: lines.",
-                        user_message,
-                        results_blob
-                    );
-                        // Continue to next round so the model synthesizes from concrete tool results.
-                        continue;
-                    }
-                    let _ = bus.send(
-                    EventEnvelope::new(
-                        EventType::TimelineMilestone,
-                        Some(serde_json::json!({
-                            "name": "deterministic_preferred_tool_no_success",
-                            "task_id": task_id.to_string(),
-                            "round": round,
-                            "attempted_tools": enforcer.preferred_tools.iter().cloned().collect::<Vec<_>>(),
-                        })),
-                    )
-                    .with_correlation(timeline_correlation),
-                );
-                }
-                deterministic_preferred_attempted = true;
-            }
-
             // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
             if let Some(ref store) = task_usage_store {
                 let (session_tokens, session_cost) =
@@ -8826,11 +8471,7 @@ pub(crate) async fn run_message_via_llm(
             };
             let preferred_task_type = Some(router_task_type_for_llm);
             let request = CompletionRequest {
-                prompt: if strict_mode_active {
-                    format!("{}{}", current_prompt, strict_tools_instruction)
-                } else {
-                    format!("{}{}", current_prompt, tool_instruction)
-                },
+                prompt: format!("{}{}", current_prompt, tool_instruction),
                 max_tokens: Some(completion_max_tokens),
                 temperature: Some(0.7),
                 preferred_task_type,
@@ -9058,37 +8699,6 @@ pub(crate) async fn run_message_via_llm(
                 .trim()
                 .to_string();
 
-            if strict_tools_first
-                && no_parseable_tools_this_round
-                && strict_successful_tool_calls == 0
-            {
-                strict_no_tool_rounds = strict_no_tool_rounds.saturating_add(1);
-                let preferred_tools_hint = runtime_tool_routing_enforcer
-                    .as_ref()
-                    .map(|e| {
-                        let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
-                        v.sort();
-                        v.join(", ")
-                    })
-                    .unwrap_or_default();
-
-                if strict_no_tool_rounds <= 1 {
-                    current_prompt = format!(
-                    "User request: {}\n\nYour previous reply:\n{}\n\nDynamic plugin routing rules are active for this request. You MUST emit TOOL lines only. Preferred tools: {}. If inputs are missing, call TOOL: ask_user with one precise question. Do NOT output prose-only answers now.",
-                    user_message,
-                    response_plain,
-                    preferred_tools_hint
-                );
-                    continue;
-                }
-
-                reply_text = format!(
-                "Impossible de répondre de façon fiable sans exécuter un outil autorisé. Outils attendus: {}. Vérifiez les règles de routage des plugins installés ou fournissez les paramètres manquants.",
-                preferred_tools_hint
-            );
-                break 'tool_rounds;
-            }
-
             if no_parseable_tools_this_round
                 && meta_response_retry_count < 2
                 && (is_subagent || assigned_agent != "conversation" || orch_disk_deliverables)
@@ -9106,7 +8716,6 @@ pub(crate) async fn run_message_via_llm(
             const MAX_STUDIO_PROSE_ONLY_WRITE_NAGS: u32 = 4;
             if code_studio_disk_task
                 && no_parseable_tools_this_round
-                && strict_successful_tool_calls == 0
                 && studio_prose_only_write_nags < MAX_STUDIO_PROSE_ONLY_WRITE_NAGS
                 && looks_like_code_studio_prose_only_implementation_reply(&response_plain)
             {
@@ -9162,58 +8771,7 @@ pub(crate) async fn run_message_via_llm(
                             None => name.clone(),
                         };
                         let actual_tool = canonicalize_tool_name(&actual_tool);
-                        let should_forward_user_request = strict_tools_first
-                            && args.is_empty()
-                            && !actual_tool.eq_ignore_ascii_case("ask_user")
-                            && runtime_tool_routing_enforcer
-                                .as_ref()
-                                .map(|e| e.preferred_tools.contains(&actual_tool))
-                                .unwrap_or(false);
-                        let forwarded_args: Vec<String> = if should_forward_user_request {
-                            vec![user_message.clone()]
-                        } else {
-                            args.clone()
-                        };
-                        let tool_args: &[String] = &forwarded_args;
-                        let effective_tool_for_routing = if actual_tool.is_empty() {
-                            name.as_str()
-                        } else {
-                            actual_tool.as_str()
-                        };
-                        let device_routing_bypass = intent_flags.camera_or_mic
-                            && (effective_tool_for_routing.eq_ignore_ascii_case("device_discover")
-                                || effective_tool_for_routing
-                                    .eq_ignore_ascii_case("device_invoke"));
-                        if let Some(enforcer) = &runtime_tool_routing_enforcer {
-                            if !device_routing_bypass
-                                && !enforcer.is_tool_allowed(effective_tool_for_routing, tool_args)
-                            {
-                                let blocked = format!(
-                            "[tool_blocked_by_routing_rules] tool={} blocked by dynamic plugin routing rules",
-                            effective_tool_for_routing
-                        );
-                                let payload = serde_json::json!({
-                                    "tool": effective_tool_for_routing,
-                                    "args": tool_args,
-                                    "result_preview": blocked,
-                                    "success": false,
-                                    "reason": "blocked_by_dynamic_plugin_routing_rules"
-                                });
-                                let _ = bus.send(
-                                    EventEnvelope::new(EventType::ToolInvoked, Some(payload))
-                                        .with_correlation(timeline_correlation),
-                                );
-                                tracing::warn!(
-                                    task_id = %task_id,
-                                    tool = %effective_tool_for_routing,
-                                    preferred = ?enforcer.preferred_tools,
-                                    forbidden = ?enforcer.forbidden_tools,
-                                    "Tool blocked by runtime routing enforcer"
-                                );
-                                tool_results.push(blocked);
-                                continue;
-                            }
-                        }
+                        let tool_args: &[String] = args.as_slice();
                         // Hard guardrail: if read_file on this path was already truncated for this
                         // agent key, block repeated full-file reads and require chunked/windowed read.
                         if actual_tool.eq_ignore_ascii_case("read_file") {
@@ -10048,20 +9606,6 @@ pub(crate) async fn run_message_via_llm(
                         if let Some(img) = captured_image {
                             last_captured_image_base64 = Some(img);
                         }
-                        if success
-                            && strict_tools_first
-                            && actual_tool.eq_ignore_ascii_case("ask_user")
-                        {
-                            if let Some(reply) = res.strip_prefix("[ask_user] User replied: ") {
-                                let reply = reply.trim();
-                                if !reply.is_empty() {
-                                    strict_preferred_tool_replay_input = Some(format!(
-                                        "Original user request: {}\n\nUser clarification: {}",
-                                        user_message, reply
-                                    ));
-                                }
-                            }
-                        }
                         // Phase F: emit ToolInvoked for Actions tab (spec 33)
                         // Redact or truncate args in the event to avoid leaking large blobs or secrets.
                         let redacted_args: Vec<String> = if matches!(
@@ -10117,7 +9661,7 @@ pub(crate) async fn run_message_via_llm(
                             )
                             .with_correlation(timeline_correlation),
                         );
-                        // Chat UI loads map / rich views from timeline_milestone + result_full (same as strict tools-first path).
+                        // Chat UI loads map / rich views from timeline_milestone + result_full.
                         if success && tool_display.starts_with("maps_") && res.len() <= 400_000usize
                         {
                             let result_preview = if res.chars().count() > 320 {
@@ -10140,13 +9684,6 @@ pub(crate) async fn run_message_via_llm(
                             );
                         }
                         if success {
-                            // In tools-first strict mode, ask_user is a clarification step, not
-                            // a terminal success for the primary objective. Keep strict mode active
-                            // until a non-ask_user tool actually succeeds.
-                            if !actual_tool.eq_ignore_ascii_case("ask_user") {
-                                strict_successful_tool_calls =
-                                    strict_successful_tool_calls.saturating_add(1);
-                            }
                             if code_studio_disk_task
                                 && matches!(
                                     actual_tool.as_str(),
@@ -10485,21 +10022,6 @@ pub(crate) async fn run_message_via_llm(
                     continue;
                 }
             }
-            if strict_tools_first && strict_successful_tool_calls == 0 {
-                let preferred_tools_hint = runtime_tool_routing_enforcer
-                    .as_ref()
-                    .map(|e| {
-                        let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
-                        v.sort();
-                        v.join(", ")
-                    })
-                    .unwrap_or_default();
-                reply_text = format!(
-                "Réponse bloquée: aucune exécution d'outil autorisé n'a réussi pour cette demande. Outils attendus: {}. Merci de vérifier la configuration des plugins/routing rules ou de préciser les paramètres requis.",
-                preferred_tools_hint
-            );
-                break;
-            }
             // If we already ran tools but the model returned a placeholder ("Je vais… Une seconde."), force one more round to get the actual answer.
             let tool_loop_history = tool_loop_history_by_agent
                 .get(&loop_agent_key)
@@ -10520,10 +10042,9 @@ pub(crate) async fn run_message_via_llm(
             );
                 continue;
             }
-            // Guardrail: when a plugin/tool already succeeded, reject generic
-            // greeting responses and force one synthesis round from tool outputs.
-            if strict_tools_first
-                && strict_successful_tool_calls > 0
+            // Guardrail: when tools already produced results, reject generic greeting responses
+            // and force one synthesis round from tool outputs.
+            if !tool_loop_history.is_empty()
                 && last_tool_results_blob
                     .as_ref()
                     .map_or(false, |b| !b.is_empty())
@@ -13303,6 +12824,8 @@ pub async fn handle_api(
             "active_intents": active_intents,
             "matched_rules_count": matched_rules.len(),
             "matched_rules": matched_rules,
+            "routing_rules_deprecated": true,
+            "routing_rules_note": "Manifest routing_rules are no longer enforced at runtime. Plugin hints are chosen via a short system LLM call from plugin descriptions; this endpoint remains for debugging legacy manifests.",
         });
         return json_response("200 OK", &body.to_string());
     }
@@ -13383,6 +12906,8 @@ pub async fn handle_api(
             "allowed_tools": allowed_tools,
             "matched_rules_count": matched_rules.len(),
             "matched_rules": matched_rules,
+            "routing_rules_deprecated": true,
+            "routing_rules_note": "Manifest routing_rules are no longer enforced at runtime. Plugin hints are chosen via a short system LLM call from plugin descriptions; this endpoint remains for debugging legacy manifests.",
         });
         return json_response("200 OK", &body.to_string());
     }

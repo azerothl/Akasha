@@ -411,6 +411,8 @@ Propriétés supportées :
 | `akasha plugin uninstall ID` | Désinstalle un plugin. |
 | `akasha plugin catalog` | Affiche le catalogue local des plugins. |
 
+**Sélection des plugins (daemon)** : pour chaque message utilisateur (hors petit-talk et tâches Code Studio disque), le daemon interroge brièvement le modèle configuré pour la route **`system`** dans `llm_router.yaml` afin de choisir quels plugins WASM (tool) sont pertinents d’après leur **description** ; un bloc récapitulatif est ajouté au prompt. Les anciennes règles `routing_rules` des manifests ne bloquent plus les autres outils (`write_file`, etc.) — seule la politique **`tools_policy.yaml`** s’applique à l’exécution.
+
 ### Interfaces
 
 | Commande | Description |
@@ -453,6 +455,7 @@ En cas de fichier manquant, `akasha doctor --fix` crée le data_dir et des fichi
 | `AKASHA_MAX_RESPONSE_TOKENS` | Nombre max de tokens pour les réponses chat | 4096 |
 | `AKASHA_APP_BASE_URL` | URL du site des releases (pour `akasha update check`) | https://azerothl.github.io/Akasha_app |
 | `AKASHA_SYSTEM_TASK_MAX_TOKENS` | Tokens max pour les tâches système (mémoire, décomposition). À augmenter (ex. 8192) si un modèle « thinking » renvoie des réponses vides | 4096 |
+| `AKASHA_PLUGIN_SELECT_MAX_TOKENS` | Tokens max pour la réponse JSON du sélecteur de plugins (route `system`) | 512 |
 | `OLLAMA_HOST` | URL d'Ollama si non configuré ailleurs | http://localhost:11434 |
 | `AKASHA_TELEGRAM_ENABLED` | `1` pour activer Telegram | — |
 | `AKASHA_DISCORD_ENABLED` | `1` pour activer Discord | — |
@@ -480,7 +483,7 @@ Les variables définies via `akasha config env set` sont enregistrées dans le f
 - **Données** : dans Paramètres → **Données**, deux sous-onglets — **RAG utilisateur** (documents texte indexés, extraits injectés dans le contexte de l’agent) et **Graphe projet** (plusieurs dossiers de projet enregistrés, index SQLite + rapports sous `workspace_graph/out/<id>/` ; ouverture du HTML par workspace ; agents enrichis automatiquement et outil `workspace_graph_search` si autorisé). Sans interface web, gérer via `/api/user-rag/...` et `/api/workspace-graph/workspaces` (voir le guide complet).
 - **Profil de l'agent** : dans Paramètres → Profil de l'agent, vous pouvez définir le nom, le rôle, la personnalité, les règles et les comportements autorisés/interdits ; des modèles (Neutre, Bienveillant, Concis/technique, etc.) sont proposés. Depuis la version **0.8.0**, un réglage **Tutoiement / vouvoiement** (formel, informel ou par défaut) oriente le registre de l'agent — en français, cela correspond au vouvoiement ou au tutoiement ; dans les autres langues, le registre s'adapte de la même manière.
 - **Mission autonome** : onglet **Mission** pour définir un objectif de fond, le contexte, des règles, des rôles (organisation) et la fréquence des **heartbeats**. Tant que la mission est activée et **active**, le daemon lance périodiquement une tâche orchestrée (type d’agent du premier pas configurable, souvent *chef de projet*) ; l’orchestrateur peut déléguer à d’autres agents. Les rapports Markdown vont dans le répertoire configuré (relatif au data_dir). Fichier **`autonomous_mission.yaml`** ; API **`GET` / `PUT /api/autonomous-mission`**, pause/reprise **`POST`** sur `/api/autonomous-mission/pause` et `/resume`. L’historique des événements de mission est consultable via **`GET /api/autonomous-mission/events`** (paramètres optionnels `limit`, `since` en date ISO). Pour appliquer aussi au **chat** le mode « sans questions » lié à la mission, utilisez le même **`session_id`** que dans la fiche mission. *Exemple* : maintenir un fichier `CHANGELOG_HEBDO.md` à jour dans un dépôt — renseignez l’objectif et le contexte (chemin du dépôt), horizon moyen, heartbeat 120 min, consultez les rapports sous le dossier indiqué après quelques cycles.
-- **Plugins** : la vue plugins affiche l’état d’activation, les règles de routage dynamiques et permet de réinitialiser la réputation d’un plugin (ou de tous les plugins) si nécessaire.
+- **Plugins** : la vue plugins affiche l’état d’activation et permet de réinitialiser la réputation d’un plugin (ou de tous les plugins) si nécessaire. Les règles `routing_rules` des manifests ne sont plus appliquées pour forcer ou bloquer des outils en runtime (sélection par description via le modèle `system` + `tools_policy.yaml` pour l’exécution).
 
 Le daemon écoute par défaut sur le port **3876**. Pour que l'onglet Doc affiche ce guide, lancez `akasha start` depuis le dossier où vous avez extrait l'archive (contenant le dossier `docs`).
 

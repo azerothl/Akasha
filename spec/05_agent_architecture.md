@@ -18,7 +18,7 @@ Chaque requête suit une boucle cognitive implicite ; les composants ci-dessous 
 |-------|------|------------------|
 | **1. Perceive** | Réception de la demande | Main Agent |
 | **2. Interpret** | Compréhension intention, mode (Direct/Guidé/Orchestré) | Supervisor (classifieur de complexité) ; optionnel : interprétation structurée (intent, entités) |
-| **3. Context** | Récupération mémoire, préférences, historique | Memory Orchestrator, recall dans run_message_via_llm |
+| **3. Context** | Récupération mémoire, préférences, historique | Memory Orchestrator, recall dans run_message_via_llm ; pour les plugins WASM **tool**, une étape LLM courte (`task_types.system`) sélectionne les ids pertinents d’après les **descriptions** de manifeste et injecte un bloc « plugins disponibles » dans le prompt (sans bloquer les autres outils — seule `tools_policy.yaml` filtre l’exécution) |
 | **4. Plan** | Décomposition en sous-tâches | Orchestrator (decompose_request, mode Guidé/Orchestré) |
 | **5. Decide** | Routage, création de tâche | Main Agent (conversation directe vs orchestrateur) |
 | **6. Act** | Exécution (LLM, outils, délégation) | Worker conversation, Orchestrator + agents spécialisés |
@@ -120,6 +120,7 @@ Accès:
 - **Todo list** : outils `write_todos`, `read_todos`, `update_todo` pour que l’agent définisse et suive des étapes ; persistance par tâche (table `task_todos`), événement `TodoListUpdated` pour l’UI.
 - **Structured output** : instruction stricte en fin de réponse (bloc ```json``` avec `status`, `summary`, `files_created`, `issues_found`, optionnel `blocked`) pour les agents production/QA ; parsing via `parse_contract_from_response`.
 - **Interrupt before tool** : configuration `require_approval` dans tools_policy ; pour les outils listés, pause et événements `TaskWaitingUserInput` + `ToolApprovalRequest` ; reprise après approbation/refus (ou `ToolApprovalExpired`).
+- **Plugins** : les `routing_rules` optionnelles des manifests ne sont plus utilisées pour un mode « tools-first » ni pour refuser des outils pendant toute une tâche ; la découverte des plugins pertinents repose sur la description + LLM `system`, l’exécution reste soumise à `tools_policy.yaml`.
 - **Skills à la demande** : outils `list_skills` et `read_skill` pour charger le détail d’un skill à la demande au lieu d’injecter tout le corps dans le prompt.
 - **Workspace virtuel** : chemins `workspace:/<path>` pour `read_file`/`write_file` sur un stockage temporaire par tâche (en mémoire) ; utile pour brouillons et gros contextes.
 - **Checkpointer** : en mode Orchestré, persistance du checkpoint (steps, etc.) dans `pipeline_context.checkpoint_json` ; au redémarrage du daemon, les tâches Running avec pipeline sont marquées Failed (interrompues).
