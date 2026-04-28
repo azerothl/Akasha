@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentProfile {
@@ -175,4 +177,33 @@ impl AgentProfile {
         out.push_str("\n");
         out
     }
+}
+
+/// In-memory cache for [`AgentProfile`] to avoid repeated disk reads.
+pub type AgentProfileCache = Arc<RwLock<Option<AgentProfile>>>;
+
+pub fn new_agent_profile_cache() -> AgentProfileCache {
+    Arc::new(RwLock::new(None))
+}
+
+/// Load profile from cache or disk and update cache.
+pub async fn get_or_load_agent_profile(data_dir: &Path, cache: &AgentProfileCache) -> AgentProfile {
+    {
+        let g = cache.read().await;
+        if let Some(ref p) = *g {
+            return p.clone();
+        }
+    }
+    let profile = AgentProfile::load(data_dir);
+    {
+        let mut g = cache.write().await;
+        *g = Some(profile.clone());
+    }
+    profile
+}
+
+/// Update cache after profile save (call after writing to disk).
+pub async fn set_agent_profile_cache(cache: &AgentProfileCache, profile: AgentProfile) {
+    let mut g = cache.write().await;
+    *g = Some(profile);
 }

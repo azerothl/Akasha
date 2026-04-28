@@ -127,6 +127,14 @@ Voir [tools_policy.example.yaml](tools_policy.example.yaml).
 - **Interfaces appareil (device)** : pour autoriser la découverte et l’invocation d’appareils (caméra, micro, imprimantes, etc.) via `device_discover` et `device_invoke`, définir `allowed_device_interfaces`. Ex. `["*"]` pour tout autoriser (avec `blocked_device_interfaces: [usb]` pour exclure l’USB) ; ou `[local_media, system]` pour uniquement média local et imprimantes ; ou `[local_media, synthetic_input]` pour ajouter les entrées synthétiques (raccourcis clavier, clics/déplacements souris — jeux, logiciels de dessin). Pour `synthetic_input`, il est recommandé d’ajouter `device_invoke` dans `require_approval` afin que l’utilisateur confirme chaque action (human-in-the-loop). Voir [tools_policy.example.yaml](tools_policy.example.yaml).
 - **Automation navigateur (spec 39)** : définir `browser_enabled: true` et optionnellement `browser_allowed_domains` / `browser_blocked_domains`. Le daemon peut installer automatiquement les dépendances npm et Chromium Playwright au premier appel à l’outil `browser` (sauf si `AKASHA_PLAYWRIGHT_AUTO_INSTALL=0`). En environnement restreint (sans réseau, sans npm), installer manuellement dans `scripts/playwright-runner` : `npm install` puis `npx playwright install chromium`. Voir [39_browser_automation.md](39_browser_automation.md).
 
+### Plugins WASM — sélection (LLM) et `routing_rules` dans les manifests
+
+- Les plugins **tool** installés sous `data_dir/plugins/` sont décrits dans `manifest.toml` / `manifest.json` (`id`, `description`, etc.). Avant le tour LLM principal, le daemon appelle une **requête courte** sur la route **`system`** de `llm_router.yaml` : le modèle retourne uniquement du JSON `{"plugin_ids":["..."]}` listant les ids pertinents pour la requête utilisateur.
+- Un bloc **`[Available plugins for this request]`** est injecté dans le prompt (souvent un sous-ensemble). Si la sélection échoue (parse, timeout) ou renvoie une liste vide alors qu’au moins un plugin tool existe, le **catalogue complet** des plugins tool est injecté pour limiter les faux négatifs.
+- Les champs **`routing_rules`** (`intent`, `keywords`, `preferred_tools`, `forbidden_tools`) restent **supportés à la désérialisation** pour compatibilité ascendante mais **ne sont plus utilisés** pour bloquer ou forcer l’exécution d’outils pendant la tâche. Les `preferred_tools` éventuels peuvent apparaître comme **indication non contraignante** dans le bloc catalogue. **Seule `tools_policy.yaml`** autorise ou refuse un outil à l’exécution.
+- Débogage : `GET /api/plugins/routing_rules` et `POST /api/plugins/routing_rules/match` incluent `routing_rules_deprecated: true` et une note ; ils servent uniquement à inspecter d’anciens manifests.
+- Variable d’environnement optionnelle : **`AKASHA_PLUGIN_SELECT_MAX_TOKENS`** — nombre max de tokens pour la réponse JSON du sélecteur de plugins (défaut : 512).
+
 ---
 
 ## 2b. agent_profile.json
