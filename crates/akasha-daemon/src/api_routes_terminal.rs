@@ -91,15 +91,14 @@ pub async fn handle_terminal_routes(
                 return Some(match res {
                     Ok(Ok(())) => json_response("200 OK", r#"{"ok":true}"#),
                     Ok(Err(e)) => {
-                        let msg = e.to_string();
-                        let (status, code) = if msg.contains("unknown session_id") {
+                        let (status, code) = if e.downcast_ref::<crate::terminal_pty::PtySessionNotFound>().is_some() {
                             ("404 Not Found", "pty_session_not_found")
                         } else {
                             ("500 Internal Server Error", "pty_close_failed")
                         };
                         json_response(
                             status,
-                            &serde_json::json!({"error": code, "detail": msg}).to_string(),
+                            &serde_json::json!({"error": code, "detail": e.to_string()}).to_string(),
                         )
                     }
                     Err(e) => json_response(
@@ -127,15 +126,14 @@ pub async fn handle_terminal_routes(
                         &serde_json::to_string(&o).unwrap_or_else(|_| "{}".to_string()),
                     ),
                     Ok(Err(e)) => {
-                        let msg = e.to_string();
-                        let (status, code) = if msg.contains("unknown session_id") {
+                        let (status, code) = if e.downcast_ref::<crate::terminal_pty::PtySessionNotFound>().is_some() {
                             ("404 Not Found", "pty_session_not_found")
                         } else {
                             ("500 Internal Server Error", "pty_read_failed")
                         };
                         json_response(
                             status,
-                            &serde_json::json!({"error": code, "detail": msg}).to_string(),
+                            &serde_json::json!({"error": code, "detail": e.to_string()}).to_string(),
                         )
                     }
                     Err(e) => json_response(
