@@ -13469,7 +13469,10 @@ pub async fn handle_api(
         state.decisions.retain(|d| d.id != id);
         let removed = before != state.decisions.len();
         if removed {
-            let _ = crate::permissions_center::save(data_dir, &state);
+            if let Err(e) = crate::permissions_center::save(data_dir, &state) {
+                tracing::error!(error = %e, id = %id, "permissions/decisions: failed to persist delete");
+                return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+            }
         }
         return json_response(
             "200 OK",

@@ -276,13 +276,25 @@ pub async fn run_telegram_bot(
                         "username": from_username
                     });
                     match client.post(&req_url).json(&req_body).send().await {
-                        Ok(resp) => {
+                        Ok(resp) if resp.status().is_success() => {
                             let v = resp.json::<serde_json::Value>().await.unwrap_or_default();
-                            let code = v
-                                .get("pairing_code")
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("pending");
-                            format!("Pairing request created. Share this code with an Akasha admin: {}", code)
+                            if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+                                if v.get("already_approved").and_then(|b| b.as_bool()).unwrap_or(false) {
+                                    "You are already approved. Use /akasha <message>.".to_string()
+                                } else {
+                                    let code = v
+                                        .get("pairing_code")
+                                        .and_then(|s| s.as_str())
+                                        .unwrap_or("pending");
+                                    format!("Pairing request created. Share this code with an Akasha admin: {}", code)
+                                }
+                            } else {
+                                "Pairing request failed: unexpected response from daemon. Try again later.".to_string()
+                            }
+                        }
+                        Ok(resp) => {
+                            let status = resp.status();
+                            format!("Pairing request failed (daemon returned {}). Try again later.", status.as_u16())
                         }
                         Err(_) => "Pairing request failed. Try again later.".to_string(),
                     }
@@ -317,7 +329,8 @@ pub async fn run_telegram_bot(
                     let url = format!("{}/api/permissions/mode", daemon_base_url);
                     let body = serde_json::json!({ "mode": mode });
                     match client.post(&url).json(&body).send().await {
-                        Ok(_) => format!("permissions mode set to {}", mode),
+                        Ok(resp) if resp.status().is_success() => format!("permissions mode set to {}", mode),
+                        Ok(resp) => format!("failed to set permissions mode (daemon returned {})", resp.status().as_u16()),
                         Err(_) => "failed to set permissions mode".to_string(),
                     }
                 }
