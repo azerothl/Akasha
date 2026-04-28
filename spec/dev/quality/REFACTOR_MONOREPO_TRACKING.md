@@ -4,7 +4,7 @@ Objectif: refactorisation progressive, PRs petites, sans régression fonctionnel
 
 ## Baseline (commandes de validation)
 
-À exécuter depuis la racine du dépôt `Akasha` (Linux/macOS: préférer `CXX=g++` selon [AGENTS.md](../../AGENTS.md)).
+À exécuter depuis la racine du dépôt `Akasha` (Linux/macOS: préférer `CXX=g++` selon [AGENTS.md](../../../AGENTS.md)).
 
 | Étape | Commande |
 |-------|------------|
