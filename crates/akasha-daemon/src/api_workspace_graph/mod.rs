@@ -45,6 +45,9 @@ fn parse_workspace_path(path_only: &str) -> Option<WsPath> {
     if parts.len() == 1 {
         return Some(WsPath::Resource { id, tail: None });
     }
+    if parts.len() != 2 {
+        return None;
+    }
     let tail = match parts[1] {
         "rebuild" => WsTail::Rebuild,
         "export" => WsTail::Export,

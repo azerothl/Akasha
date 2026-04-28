@@ -220,9 +220,12 @@ pub(crate) fn tool_supports_multiline_body(tool_name: &str) -> bool {
 
 pub(crate) fn tool_name_is_safe_identifier(tool_name: &str) -> bool {
     !tool_name.is_empty()
-        && tool_name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        && tool_name.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        })
 }
 
 /// DeepSeek / variantes : balises style `<｜DSML｜tool_calls>…<｜DSML｜invoke name="…">…</｜DSML｜invoke>`.

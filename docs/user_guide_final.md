@@ -94,7 +94,7 @@ Le répertoire de données est créé automatiquement par `akasha init` ou `akas
 
 Les archives de release incluent un sous-dossier **`spec/`** avec des **fichiers d'exemple** (politique d'outils, routeur vocal, routeur LLM) utilisés par `akasha init` pour générer la configuration par défaut lorsque ces fichiers sont présents. Le daemon résout le dossier `spec` utilisé à l'exécution dans cet ordre : variable d'environnement **`AKASHA_SPEC_DIR`** (si elle pointe vers un répertoire existant) → **`spec/` à côté du binaire `akasha-daemon`** → **`data_dir/spec`** s'il existe → sinon le chemin relatif **`spec`** (cas habituel du dépôt source lancé depuis la racine du projet). La commande **`akasha paths`** affiche le chemin retenu et la source (variable, binaire, données, ou relatif).
 
-L'onglet **Doc** des interfaces charge le guide depuis **`docs/user_guide.md`** a cote des binaires (puis, si besoin, depuis `data_dir/docs/user_guide.md`).
+L'onglet **Doc** des interfaces charge le guide depuis **`docs/user_guide.md`** à côté des binaires (puis, si besoin, depuis `data_dir/docs/user_guide.md`).
 
 ---
 
