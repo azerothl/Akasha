@@ -12962,6 +12962,60 @@ pub async fn handle_api(
         }
     }
 
+    // POST /api/plugins/{id}/disable | /enable | /uninstall — user plugin management
+    if method == "POST" && path.starts_with("/api/plugins/") {
+        if let Some(rest) = path.strip_prefix("/api/plugins/") {
+            let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+            if segs.len() == 2 {
+                let plugin_id = segs[0];
+                let action = segs[1];
+                if !akasha_plugin_api::is_safe_plugin_id(plugin_id) {
+                    let body = serde_json::json!({ "error": "invalid_plugin_id" });
+                    return json_response("400 Bad Request", &body.to_string());
+                }
+                let maybe_result = match action {
+                    "disable" => Some(plugin_registry.set_enabled(plugin_id, false)),
+                    "enable" => Some(plugin_registry.set_enabled(plugin_id, true)),
+                    "uninstall" => Some(plugin_registry.uninstall(plugin_id)),
+                    _ => None,
+                };
+                if let Some(result) = maybe_result {
+                    match result {
+                        Ok(()) => {
+                            let body = serde_json::json!({
+                                "ok": true,
+                                "id": plugin_id,
+                                "action": action,
+                            });
+                            return json_response("200 OK", &body.to_string());
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            let body = serde_json::json!({
+                                "error": "not_found",
+                                "detail": e.to_string(),
+                            });
+                            return json_response("404 Not Found", &body.to_string());
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+                            let body = serde_json::json!({
+                                "error": "invalid_plugin_id",
+                                "detail": e.to_string(),
+                            });
+                            return json_response("400 Bad Request", &body.to_string());
+                        }
+                        Err(e) => {
+                            let body = serde_json::json!({
+                                "error": "plugin_action_failed",
+                                "detail": e.to_string(),
+                            });
+                            return json_response("500 Internal Server Error", &body.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Phase D: Skills (loadable skills for agents; Agent Skills spec + flat YAML)
     if method == "GET" && path == "/api/skills" {
         let list = skill_registry.list().await;

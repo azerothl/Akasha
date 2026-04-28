@@ -2991,6 +2991,212 @@ a.settings-link-btn.refresh-btn {
   word-break: break-word;
 }
 
+.settings-system-subtabs {
+  display: flex;
+  gap: 0.25rem;
+  margin: 0.75rem 0 1rem;
+  flex-wrap: wrap;
+}
+.settings-system-subtabs button {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.875rem;
+  background: transparent;
+  color: var(--akasha-text-muted);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.settings-system-subtabs button:hover {
+  color: var(--akasha-text);
+  background: var(--akasha-bg-surface);
+}
+.settings-system-subtabs button.active {
+  color: var(--akasha-accent);
+  font-weight: 600;
+  background: var(--akasha-bg-surface);
+}
+
+.settings-plugin-table-wrap {
+  overflow-x: auto;
+  margin: 0.5rem 0 0.75rem;
+  max-width: 100%;
+}
+.settings-plugin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+.settings-plugin-table th,
+.settings-plugin-table td {
+  border: 1px solid var(--akasha-border);
+  padding: 0.5rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+.settings-plugin-table th {
+  background: var(--akasha-bg-surface);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.settings-plugin-table td.settings-plugin-desc-cell {
+  max-width: 18rem;
+  word-break: break-word;
+}
+.settings-plugin-table-namecell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.settings-plugin-table-name {
+  font-weight: 600;
+}
+.settings-plugin-table-id {
+  font-size: 0.72rem;
+  font-family: ui-monospace, monospace;
+}
+.settings-plugin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.settings-plugin-actions .btn-compact,
+.settings-plugin-actions button {
+  padding: 0.25rem 0.45rem;
+  font-size: 0.75rem;
+}
+.settings-plugin-score-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.settings-plugin-score-bar {
+  width: 4rem;
+  height: 0.35rem;
+  border-radius: 4px;
+  background: var(--akasha-border);
+  overflow: hidden;
+}
+.settings-plugin-score-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--akasha-accent);
+  border-radius: 4px;
+}
+.settings-plugin-score-num {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
+  color: var(--akasha-text-muted);
+}
+
+.settings-plugin-status-row {
+  margin-bottom: 0.75rem;
+}
+.settings-plugin-status-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.settings-plugin-status-title {
+  margin: 0;
+  font-size: 0.9375rem;
+}
+.settings-plugin-status-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+}
+.settings-plugin-status-item {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--akasha-border);
+}
+.settings-plugin-status-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.settings-plugin-status-id {
+  font-weight: 600;
+  font-family: ui-monospace, monospace;
+  font-size: 0.8125rem;
+}
+.settings-plugin-status-meta {
+  font-size: 0.75rem;
+  color: var(--akasha-text-muted);
+}
+.settings-plugin-status-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+  align-items: center;
+}
+.settings-plugin-status-pill {
+  font-size: 0.7rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--akasha-border);
+}
+.settings-plugin-status-pill-ok {
+  border-color: var(--akasha-success);
+  color: var(--akasha-success);
+}
+.settings-plugin-status-pill-off {
+  border-color: var(--akasha-text-muted);
+  color: var(--akasha-text-muted);
+}
+.settings-plugin-status-pill-reputation {
+  border-color: var(--akasha-error);
+  color: var(--akasha-error);
+}
+.settings-plugin-status-pill-manual {
+  border-color: var(--akasha-accent);
+  color: var(--akasha-accent);
+}
+.settings-plugin-status-score {
+  font-size: 0.72rem;
+  color: var(--akasha-text-muted);
+}
+
+.system-health-panel {
+  margin-top: 0.25rem;
+}
+.health-card {
+  margin: 1rem 0 0;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--akasha-border);
+  border-radius: 8px;
+  background: var(--akasha-bg-surface);
+  max-width: 52rem;
+}
+.health-card-title {
+  margin: 0 0 0.35rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+.health-card-summary {
+  margin: 0;
+}
+.health-card-line {
+  margin: 0.2rem 0 0;
+  font-size: 0.875rem;
+  line-height: 1.4;
+}
+.health-card-details {
+  margin-top: 0.5rem;
+}
+.health-card-details-summary {
+  cursor: pointer;
+  font-size: 0.8125rem;
+  color: var(--akasha-accent);
+  user-select: none;
+}
+.health-card-pre {
+  margin-top: 0.35rem;
+}
+
 .settings-row-actions {
   display: flex;
   flex-wrap: wrap;

@@ -1177,7 +1177,7 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
                 })?;
             let manifest = akasha_plugin_api::PluginManifest::load_from_path(&manifest_path)
                 .map_err(|e| anyhow::anyhow!("Invalid manifest: {}", e))?;
-            if !is_safe_plugin_id(&manifest.id) {
+            if !akasha_plugin_api::is_safe_plugin_id(&manifest.id) {
                 anyhow::bail!(
                     "Invalid plugin id '{}': expected only [A-Za-z0-9_-], no path separators",
                     manifest.id
@@ -1243,21 +1243,6 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-fn is_safe_plugin_id(id: &str) -> bool {
-    if id.is_empty() || id == "." || id == ".." {
-        return false;
-    }
-    if !id
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return false;
-    }
-    use std::path::Component;
-    let mut comps = std::path::Path::new(id).components();
-    matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none()
 }
 
 fn cmd_vault(sub: VaultSub) -> anyhow::Result<()> {

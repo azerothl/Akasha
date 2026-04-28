@@ -1,7 +1,7 @@
 //! Phase 5 — Plugin registry: load WASM from dir, list, call tool, reputation.
 
 use akasha_core::TrustStore;
-use akasha_plugin_api::{PluginManifest, PluginKind, PluginRoutingRule};
+use akasha_plugin_api::{is_safe_plugin_id, PluginKind, PluginManifest, PluginRoutingRule};
 use akasha_plugin_host::WasmPlugin;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -10,6 +10,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
 use super::reputation::ReputationStore;
+use super::state::PluginStateStore;
 
 #[derive(Clone, serde::Serialize)]
 pub struct PluginEntry {
@@ -17,6 +18,8 @@ pub struct PluginEntry {
     pub name: String,
     pub version: String,
     pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub enabled: bool,
     pub score: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -27,6 +30,7 @@ pub struct PluginRegistry {
     plugins_dir: PathBuf,
     plugins: std::sync::RwLock<HashMap<String, LoadedPlugin>>,
     reputation: Arc<ReputationStore>,
+    state: Arc<PluginStateStore>,
     trust_store: Option<Arc<TrustStore>>,
 }
 
@@ -75,16 +79,27 @@ fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_jso
     );
 }
 
+fn manifest_description(m: &PluginManifest) -> Option<String> {
+    let d = m.description.trim();
+    if d.is_empty() {
+        None
+    } else {
+        Some(d.to_string())
+    }
+}
+
 impl PluginRegistry {
     pub fn new(
         plugins_dir: PathBuf,
         reputation: Arc<ReputationStore>,
+        state: Arc<PluginStateStore>,
         trust_store: Option<Arc<TrustStore>>,
     ) -> Self {
         Self {
             plugins_dir,
             plugins: std::sync::RwLock::new(HashMap::new()),
             reputation,
+            state,
             trust_store,
         }
     }
@@ -118,8 +133,12 @@ impl PluginRegistry {
             if path.is_dir() {
                 for name in &["manifest.toml", "manifest.json"] {
                     let manifest_path = path.join(name);
-                    if manifest_path.exists() {
-                        if let Ok(manifest) = PluginManifest::load_from_path(&manifest_path) {
+                        if manifest_path.exists() {
+                            if let Ok(manifest) = PluginManifest::load_from_path(&manifest_path) {
+                            if self.state.is_disabled(&manifest.id) {
+                                info!(id = %manifest.id, "Plugin disabled (user), skipping");
+                                continue;
+                            }
                             if self.reputation.is_disabled(&manifest.id) {
                                 info!(id = %manifest.id, "Plugin disabled (reputation), skipping");
                                 continue;
@@ -179,24 +198,20 @@ impl PluginRegistry {
         let mut out: Vec<PluginEntry> = guard
             .values()
             .map(|p| {
-                let disabled = self.reputation.is_disabled(&p.manifest.id);
                 PluginEntry {
                     id: p.manifest.id.clone(),
                     name: p.manifest.name.clone(),
                     version: p.manifest.version.clone(),
                     kind: p.manifest.kind.to_string(),
-                    enabled: !disabled,
+                    description: manifest_description(&p.manifest),
+                    enabled: true,
                     score: self.reputation.score(&p.manifest.id),
-                    disabled_reason: if disabled {
-                        Some("reputation".to_string())
-                    } else {
-                        None
-                    },
+                    disabled_reason: None,
                 }
             })
             .collect();
 
-        // Add plugins that are currently disabled by reputation and therefore not loaded in memory.
+        // Add plugins on disk that are not loaded (user-disabled or reputation-disabled).
         let mut known_ids: std::collections::HashSet<String> =
             out.iter().map(|p| p.id.clone()).collect();
         if let Ok(read_dir) = std::fs::read_dir(&self.plugins_dir) {
@@ -214,17 +229,24 @@ impl PluginRegistry {
                         if known_ids.contains(&manifest.id) {
                             break;
                         }
-                        let disabled = self.reputation.is_disabled(&manifest.id);
-                        if disabled {
+                        let manual = self.state.is_disabled(&manifest.id);
+                        let rep = self.reputation.is_disabled(&manifest.id);
+                        if manual || rep {
                             known_ids.insert(manifest.id.clone());
+                            let disabled_reason = if manual {
+                                Some("manual".to_string())
+                            } else {
+                                Some("reputation".to_string())
+                            };
                             out.push(PluginEntry {
                                 id: manifest.id.clone(),
                                 name: manifest.name.clone(),
                                 version: manifest.version.clone(),
                                 kind: manifest.kind.to_string(),
+                                description: manifest_description(&manifest),
                                 enabled: false,
                                 score: self.reputation.score(&manifest.id),
-                                disabled_reason: Some("reputation".to_string()),
+                                disabled_reason,
                             });
                         }
                     }
@@ -322,6 +344,9 @@ impl PluginRegistry {
             }),
         );
         // #endregion
+        if self.state.is_disabled(plugin_id) {
+            return Err(akasha_plugin_api::PluginError::Disabled);
+        }
         if self.reputation.is_disabled(plugin_id) {
             return Err(akasha_plugin_api::PluginError::Disabled);
         }
@@ -370,6 +395,41 @@ impl PluginRegistry {
 
     pub fn reset_all_reputation(&self) -> std::io::Result<()> {
         self.reputation.reset_all()
+    }
+
+    /// Persist user enable/disable (separate from reputation). Reloads plugins from disk.
+    pub fn set_enabled(&self, plugin_id: &str, enabled: bool) -> std::io::Result<()> {
+        if !is_safe_plugin_id(plugin_id) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid plugin id",
+            ));
+        }
+        self.state.set_disabled(plugin_id, !enabled)?;
+        self.reload();
+        Ok(())
+    }
+
+    /// Remove plugin directory from `plugins_dir` and clear manual state + reputation entry.
+    pub fn uninstall(&self, plugin_id: &str) -> std::io::Result<()> {
+        if !is_safe_plugin_id(plugin_id) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid plugin id",
+            ));
+        }
+        let dest = self.plugins_dir.join(plugin_id);
+        if !dest.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "plugin not found",
+            ));
+        }
+        std::fs::remove_dir_all(&dest)?;
+        self.state.remove(plugin_id)?;
+        let _ = self.reputation.reset(plugin_id);
+        self.reload();
+        Ok(())
     }
 }
 

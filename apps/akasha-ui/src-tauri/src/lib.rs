@@ -611,6 +611,24 @@ async fn get_advice(health: serde_json::Value, port: Option<u16>) -> Result<serd
     Ok(json)
 }
 
+/// Generic GET passthrough to daemon HTTP for desktop UI panels.
+/// Restricts calls to local API paths for safety.
+#[tauri::command]
+async fn daemon_get_text(path: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let p = path.trim();
+    if !p.starts_with('/') || (!p.starts_with("/api/") && p != "/") {
+        return Err("invalid_path".to_string());
+    }
+    let url = format!("{}{}", daemon_base_url(port), p);
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let ok = resp.status().is_success();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "ok": ok, "status": status, "text": text }))
+}
+
 /// GET /api/plugins (for slash /plugins).
 #[tauri::command]
 async fn get_plugins(port: Option<u16>) -> Result<Vec<serde_json::Value>, String> {
@@ -634,6 +652,45 @@ async fn reload_plugins(port: Option<u16>) -> Result<(), String> {
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
+    }
+    Ok(())
+}
+
+/// POST /api/plugins/{id}/enable or /disable — user-controlled plugin load.
+#[tauri::command]
+async fn set_plugin_enabled(plugin_id: String, enabled: bool, port: Option<u16>) -> Result<(), String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let id = plugin_id.trim();
+    if id.is_empty() {
+        return Err("plugin_id required".to_string());
+    }
+    let action = if enabled { "enable" } else { "disable" };
+    let url = format!("{}/api/plugins/{}/{}", daemon_base_url(port), id, action);
+    let client = http_client();
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    Ok(())
+}
+
+/// POST /api/plugins/{id}/uninstall — remove plugin directory from data_dir/plugins.
+#[tauri::command]
+async fn uninstall_plugin(plugin_id: String, port: Option<u16>) -> Result<(), String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let id = plugin_id.trim();
+    if id.is_empty() {
+        return Err("plugin_id required".to_string());
+    }
+    let url = format!("{}/api/plugins/{}/uninstall", daemon_base_url(port), id);
+    let client = http_client();
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
     }
     Ok(())
 }
@@ -1842,8 +1899,11 @@ pub fn run() {
             open_path_in_explorer,
             read_file_as_data_url,
             get_advice,
+            daemon_get_text,
             get_plugins,
             reload_plugins,
+            set_plugin_enabled,
+            uninstall_plugin,
             get_skills,
             reload_skills,
             install_skill,

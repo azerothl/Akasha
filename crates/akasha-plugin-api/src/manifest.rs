@@ -109,6 +109,22 @@ pub struct PluginManifest {
     pub network: Option<PluginNetworkConfig>,
 }
 
+/// Returns true if `id` is safe to use as a directory name under `plugins/` (no path traversal).
+pub fn is_safe_plugin_id(id: &str) -> bool {
+    if id.is_empty() || id == "." || id == ".." {
+        return false;
+    }
+    if !id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return false;
+    }
+    use std::path::Component;
+    let mut comps = std::path::Path::new(id).components();
+    matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none()
+}
+
 impl PluginManifest {
     /// Load manifest from a TOML or JSON file.
     pub fn load_from_path(path: &Path) -> anyhow::Result<Self> {

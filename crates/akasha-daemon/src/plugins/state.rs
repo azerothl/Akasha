@@ -1,0 +1,68 @@
+//! User-controlled plugin enable/disable state (separate from reputation auto-disable).
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::RwLock;
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PluginStateFile {
+    /// When true, the plugin is not loaded until the user re-enables it.
+    #[serde(default)]
+    disabled: HashMap<String, bool>,
+}
+
+pub struct PluginStateStore {
+    path: std::path::PathBuf,
+    data: RwLock<PluginStateFile>,
+}
+
+impl PluginStateStore {
+    pub fn open(data_dir: &Path) -> std::io::Result<Self> {
+        let _ = std::fs::create_dir_all(data_dir);
+        let path = data_dir.join("plugin_state.json");
+        let data = if path.exists() {
+            let s = std::fs::read_to_string(&path).unwrap_or_default();
+            serde_json::from_str(&s).unwrap_or_default()
+        } else {
+            PluginStateFile::default()
+        };
+        Ok(Self {
+            path,
+            data: RwLock::new(data),
+        })
+    }
+
+    fn save(&self) -> std::io::Result<()> {
+        let data = self.data.read().map_err(|_| std::io::ErrorKind::Other)?;
+        let s = serde_json::to_string_pretty(&*data)?;
+        std::fs::write(&self.path, s)
+    }
+
+    pub fn is_disabled(&self, plugin_id: &str) -> bool {
+        let guard = self.data.read().unwrap();
+        guard
+            .disabled
+            .get(plugin_id)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    pub fn set_disabled(&self, plugin_id: &str, disabled: bool) -> std::io::Result<()> {
+        let mut guard = self.data.write().unwrap();
+        if disabled {
+            guard.disabled.insert(plugin_id.to_string(), true);
+        } else {
+            guard.disabled.remove(plugin_id);
+        }
+        drop(guard);
+        self.save()
+    }
+
+    pub fn remove(&self, plugin_id: &str) -> std::io::Result<()> {
+        let mut guard = self.data.write().unwrap();
+        guard.disabled.remove(plugin_id);
+        drop(guard);
+        self.save()
+    }
+}

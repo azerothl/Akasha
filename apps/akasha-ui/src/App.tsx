@@ -8,7 +8,7 @@ import { preprocessMessagePaths } from "./preprocessMessagePaths";
 import { getCached, setCached } from "./useTabCache";
 import { useI18n } from "./useI18n";
 import { GeoMapView } from "./GeoMapView";
-import { OperatorHermesInsights } from "./OperatorHermesInsights";
+import { SystemHealthPanel } from "./SystemHealthPanel";
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -1287,6 +1287,7 @@ type RouterMetrics = Record<string, ModelMetricsEntry>;
 type PluginStatusEntry = {
   id?: string;
   name?: string;
+  description?: string;
   version?: string;
   kind?: string;
   enabled?: boolean;
@@ -2077,6 +2078,8 @@ function App() {
   const [userProfileSaving, setUserProfileSaving] = useState(false);
   const [userProfileError, setUserProfileError] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("display");
+  const [systemSubTab, setSystemSubTab] = useState<"general" | "plugins" | "health">("general");
+  const [pluginTableBusyId, setPluginTableBusyId] = useState<string | null>(null);
   const [agentProfileSubTab, setAgentProfileSubTab] = useState<AgentProfileSubTab>("identity");
   const [rulesDraft, setRulesDraft] = useState("");
   const [canDoDraft, setCanDoDraft] = useState("");
@@ -3729,8 +3732,17 @@ function App() {
     setPluginStatusLoading(true);
     setPluginStatusError(null);
     try {
-      const list = await invoke<PluginStatusEntry[]>("get_plugins", { port: DAEMON_PORT });
-      setPluginStatusList(Array.isArray(list) ? list : []);
+      let list: PluginStatusEntry[] = [];
+      if (E2E_WEB) {
+        const res = await fetch(e2eDaemonHttpUrl("/api/plugins"));
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const j = (await res.json()) as unknown;
+        list = Array.isArray(j) ? (j as PluginStatusEntry[]) : [];
+      } else {
+        const inv = await invoke<PluginStatusEntry[]>("get_plugins", { port: DAEMON_PORT });
+        list = Array.isArray(inv) ? inv : [];
+      }
+      setPluginStatusList(list);
     } catch (e) {
       setPluginStatusError(String(e));
       setPluginStatusList([]);
@@ -3777,6 +3789,81 @@ function App() {
       setPluginReputationResetLoading(false);
     }
   }, [t, fetchPluginStatus]);
+
+  const reloadPluginsFromDisk = useCallback(async () => {
+    setPluginStatusError(null);
+    try {
+      if (E2E_WEB) {
+        const res = await fetch(e2eDaemonHttpUrl("/api/plugins/reload"), { method: "POST" });
+        if (!res.ok) throw new Error(await res.text());
+      } else {
+        await invoke("reload_plugins", { port: DAEMON_PORT });
+      }
+      await fetchPluginStatus();
+    } catch (e) {
+      setPluginStatusError(String(e));
+    }
+  }, [fetchPluginStatus]);
+
+  const setPluginRowEnabled = useCallback(
+    async (pluginId: string, enabled: boolean) => {
+      const id = pluginId.trim();
+      if (!id) return;
+      setPluginTableBusyId(id);
+      setPluginStatusError(null);
+      try {
+        if (E2E_WEB) {
+          const action = enabled ? "enable" : "disable";
+          const res = await fetch(e2eDaemonHttpUrl(`/api/plugins/${encodeURIComponent(id)}/${action}`), { method: "POST" });
+          if (!res.ok) throw new Error(await res.text());
+        } else {
+          await invoke("set_plugin_enabled", { pluginId: id, enabled, port: DAEMON_PORT });
+        }
+        await fetchPluginStatus();
+      } catch (e) {
+        setPluginStatusError(String(e));
+      } finally {
+        setPluginTableBusyId(null);
+      }
+    },
+    [fetchPluginStatus],
+  );
+
+  const uninstallPluginRow = useCallback(
+    async (pluginId: string) => {
+      const id = pluginId.trim();
+      if (!id) return;
+      const msg = t("settings.plugins_uninstall_confirm").replace("{id}", id);
+      if (!window.confirm(msg)) return;
+      setPluginTableBusyId(id);
+      setPluginStatusError(null);
+      try {
+        if (E2E_WEB) {
+          const res = await fetch(e2eDaemonHttpUrl(`/api/plugins/${encodeURIComponent(id)}/uninstall`), { method: "POST" });
+          if (!res.ok) throw new Error(await res.text());
+        } else {
+          await invoke("uninstall_plugin", { pluginId: id, port: DAEMON_PORT });
+        }
+        await fetchPluginStatus();
+      } catch (e) {
+        setPluginStatusError(String(e));
+      } finally {
+        setPluginTableBusyId(null);
+      }
+    },
+    [fetchPluginStatus, t],
+  );
+
+  const fetchSystemEndpoint = useCallback(async (path: string): Promise<{ ok: boolean; status: number; text: string }> => {
+    if (E2E_WEB) {
+      const res = await fetch(e2eDaemonHttpUrl(path));
+      return { ok: res.ok, status: res.status, text: await res.text() };
+    }
+    return invoke<{ ok: boolean; status: number; text: string }>("daemon_get_text", {
+      path,
+      port: DAEMON_PORT,
+    });
+  }, []);
 
   const fetchUserRagDocuments = useCallback(async () => {
     setUserRagLoading(true);
@@ -3920,10 +4007,10 @@ function App() {
   }, [tab, settingsSection, fetchUserProfile]);
 
   useEffect(() => {
-    if (tab === "settings" && settingsSection === "system") {
+    if (tab === "settings" && settingsSection === "system" && systemSubTab === "plugins") {
       fetchPluginStatus();
     }
-  }, [tab, settingsSection, fetchPluginStatus]);
+  }, [tab, settingsSection, systemSubTab, fetchPluginStatus]);
 
   useEffect(() => {
     if (tab === "settings" && settingsSection === "data" && dataSourcesSubTab === "project_graph") {
@@ -8526,53 +8613,66 @@ function App() {
             )}
             {settingsSection === "system" && (
               <div className="settings-section-content">
-                <dl className="settings-list">
-                  <dt>{t("settings.daemon_port")}</dt>
-                  <dd><code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})</dd>
-                  <dt>{t("settings.data_dir")}</dt>
-                  <dd><code>%LOCALAPPDATA%\akasha</code> (Windows) ou <code>~/.local/share/akasha</code> (Linux/macOS)</dd>
-                  <dt>{t("settings.documentation")}</dt>
-                  <dd>
-                    <button type="button" className="settings-link-btn" onClick={() => setTab("docs")}>
-                      {t("settings.open_docs_tab")}
-                    </button>
-                    <span className="settings-doc muted"> — {t("settings.doc_from_daemon")}</span>
-                  </dd>
-                </dl>
+                <div className="settings-system-subtabs" role="tablist" aria-label={t("settings.section_system")}>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={systemSubTab === "general"}
+                    className={systemSubTab === "general" ? "active" : ""}
+                    onClick={() => setSystemSubTab("general")}
+                  >
+                    {t("settings.system_subtab_general")}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={systemSubTab === "plugins"}
+                    className={systemSubTab === "plugins" ? "active" : ""}
+                    onClick={() => setSystemSubTab("plugins")}
+                  >
+                    {t("settings.system_subtab_plugins")}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={systemSubTab === "health"}
+                    className={systemSubTab === "health" ? "active" : ""}
+                    onClick={() => setSystemSubTab("health")}
+                  >
+                    {t("settings.system_subtab_health")}
+                  </button>
+                </div>
 
-                <OperatorHermesInsights
-                  sessionId={sessionId}
-                  daemonUrl={e2eDaemonHttpUrl}
-                  expert={uiMode === "expert"}
-                  labels={{
-                    title: t("settings.operator_hermes_title"),
-                    resumeHeading: t("settings.operator_hermes_resume"),
-                    toolsHeading: t("settings.operator_hermes_tools"),
-                    noSession: t("settings.operator_hermes_no_session"),
-                    docsMatrix: t("settings.operator_hermes_doc_matrix"),
-                    docsWebhooks: t("settings.operator_hermes_doc_webhooks"),
-                    docsMcp: t("settings.operator_hermes_doc_mcp"),
-                    recallHeading: t("settings.operator_hermes_recall"),
-                    mcpHeading: t("settings.operator_hermes_mcp_status"),
-                    lifecycleHeading: t("settings.operator_hermes_lifecycle"),
-                    loadError: t("settings.operator_hermes_load_error"),
-                  }}
-                />
-
-                <h3 className="settings-subtitle">{t("settings.plugin_reputation_title")}</h3>
-                <p className="settings-doc muted">{t("settings.plugin_reputation_desc")}</p>
-                <div className="settings-plugin-reputation-controls">
-                  <div className="settings-plugin-status-row">
-                    <div className="settings-plugin-status-header">
-                      <h4 className="settings-plugin-status-title">{t("settings.plugins_status_title")}</h4>
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        disabled={pluginStatusLoading}
-                        onClick={fetchPluginStatus}
-                      >
-                        {pluginStatusLoading ? t("common.loading") : t("sidebar.refresh_tasks")}
+                {systemSubTab === "general" && (
+                  <dl className="settings-list">
+                    <dt>{t("settings.daemon_port")}</dt>
+                    <dd><code>{DAEMON_PORT}</code> ({t("settings.daemon_default")})</dd>
+                    <dt>{t("settings.data_dir")}</dt>
+                    <dd><code>%LOCALAPPDATA%\akasha</code> (Windows) ou <code>~/.local/share/akasha</code> (Linux/macOS)</dd>
+                    <dt>{t("settings.documentation")}</dt>
+                    <dd>
+                      <button type="button" className="settings-link-btn" onClick={() => setTab("docs")}>
+                        {t("settings.open_docs_tab")}
                       </button>
+                      <span className="settings-doc muted"> — {t("settings.doc_from_daemon")}</span>
+                    </dd>
+                  </dl>
+                )}
+
+                {systemSubTab === "plugins" && (
+                  <>
+                    <h3 className="settings-subtitle">{t("settings.plugins_status_title")}</h3>
+                    <p className="settings-doc muted">{t("settings.plugin_reputation_desc")}</p>
+                    <div className="settings-plugin-status-header">
+                      <div />
+                      <div className="settings-row-actions">
+                        <button type="button" className="btn-secondary" disabled={pluginStatusLoading} onClick={fetchPluginStatus}>
+                          {pluginStatusLoading ? t("common.loading") : t("sidebar.refresh_tasks")}
+                        </button>
+                        <button type="button" className="btn-secondary" disabled={!!pluginTableBusyId} onClick={reloadPluginsFromDisk}>
+                          {t("settings.plugins_reload")}
+                        </button>
+                      </div>
                     </div>
                     {pluginStatusError && (
                       <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err" role="alert">
@@ -8583,78 +8683,187 @@ function App() {
                       <p className="settings-doc muted">{t("doctor.no_plugins")}</p>
                     )}
                     {pluginStatusList.length > 0 && (
-                      <ul className="settings-plugin-status-list" role="list">
-                        {pluginStatusList.map((p) => {
-                          const id = p.id ?? "?";
-                          const enabled = p.enabled !== false;
-                          const disabledByReputation = !enabled && p.disabled_reason === "reputation";
-                          return (
-                            <li key={id} className="settings-plugin-status-item">
-                              <div className="settings-plugin-status-main">
-                                <span className="settings-plugin-status-id">{id}</span>
-                                <span className="settings-plugin-status-meta">{p.name ?? "?"} · {p.version ?? "?"}</span>
-                              </div>
-                              <div className="settings-plugin-status-badges">
-                                <span className={`settings-plugin-status-pill ${enabled ? "settings-plugin-status-pill-ok" : "settings-plugin-status-pill-off"}`}>
-                                  {enabled ? t("settings.plugins_status_enabled") : t("settings.plugins_status_disabled")}
-                                </span>
-                                {disabledByReputation && (
-                                  <span className="settings-plugin-status-pill settings-plugin-status-pill-reputation">
-                                    {t("settings.plugins_status_disabled_reputation")}
-                                  </span>
-                                )}
-                                {typeof p.score === "number" && (
-                                  <span className="settings-plugin-status-score">score: {p.score}</span>
-                                )}
-                              </div>
-                            </li>
-                          );
-                        })}
-                      </ul>
+                      <div className="settings-plugin-table-wrap">
+                        <table className="settings-plugin-table">
+                          <thead>
+                            <tr>
+                              <th>{t("settings.plugins_table_name")}</th>
+                              <th>{t("settings.plugins_table_description")}</th>
+                              <th>{t("settings.plugins_table_version")}</th>
+                              <th>{t("settings.plugins_table_score")}</th>
+                              <th>{t("settings.plugins_table_status")}</th>
+                              <th>{t("settings.plugins_table_actions")}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {pluginStatusList.map((p) => {
+                              const id = p.id ?? "?";
+                              const enabled = p.enabled !== false;
+                              const reason = typeof p.disabled_reason === "string" ? p.disabled_reason : null;
+                              const disabledByReputation = !enabled && reason === "reputation";
+                              const disabledByManual = !enabled && reason === "manual";
+                              const scoreVal = typeof p.score === "number" ? p.score : 100;
+                              const busy = pluginTableBusyId === id;
+                              return (
+                                <tr key={id}>
+                                  <td>
+                                    <div className="settings-plugin-table-namecell">
+                                      <span className="settings-plugin-table-name">{p.name ?? id}</span>
+                                      <span className="settings-plugin-table-id muted">{id}</span>
+                                    </div>
+                                  </td>
+                                  <td className="settings-plugin-desc-cell muted">{p.description?.trim() || "—"}</td>
+                                  <td>{p.version ?? "—"}</td>
+                                  <td>
+                                    <div className="settings-plugin-score-wrap">
+                                      <span className="settings-plugin-score-num">{scoreVal}/100</span>
+                                      <div className="settings-plugin-score-bar" aria-hidden>
+                                        <span style={{ width: `${Math.min(100, Math.max(0, scoreVal))}%` }} />
+                                      </div>
+                                    </div>
+                                  </td>
+                                  <td>
+                                    <div className="settings-plugin-status-badges">
+                                      <span className={`settings-plugin-status-pill ${enabled ? "settings-plugin-status-pill-ok" : "settings-plugin-status-pill-off"}`}>
+                                        {enabled ? t("settings.plugins_status_enabled") : t("settings.plugins_status_disabled")}
+                                      </span>
+                                      {disabledByReputation && (
+                                        <span className="settings-plugin-status-pill settings-plugin-status-pill-reputation">
+                                          {t("settings.plugins_status_disabled_reputation")}
+                                        </span>
+                                      )}
+                                      {disabledByManual && (
+                                        <span className="settings-plugin-status-pill settings-plugin-status-pill-manual">
+                                          {t("settings.plugins_status_disabled_manual")}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td>
+                                    <div className="settings-plugin-actions">
+                                      {enabled ? (
+                                        <button
+                                          type="button"
+                                          className="btn-secondary"
+                                          disabled={busy || !!pluginTableBusyId || id === "?"}
+                                          onClick={() => setPluginRowEnabled(id, false)}
+                                        >
+                                          {t("settings.plugins_action_disable")}
+                                        </button>
+                                      ) : null}
+                                      {!enabled && reason !== "reputation" && (
+                                        <button
+                                          type="button"
+                                          className="btn-secondary"
+                                          disabled={busy || !!pluginTableBusyId || id === "?"}
+                                          onClick={() => setPluginRowEnabled(id, true)}
+                                        >
+                                          {t("settings.plugins_action_enable")}
+                                        </button>
+                                      )}
+                                      {disabledByReputation && (
+                                        <button
+                                          type="button"
+                                          className="settings-link-btn"
+                                          disabled={pluginReputationResetLoading || busy || !!pluginTableBusyId || id === "?"}
+                                          onClick={() => resetPluginReputation(id)}
+                                        >
+                                          {t("settings.plugins_action_reset_reputation")}
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        className="settings-link-btn"
+                                        disabled={busy || !!pluginTableBusyId || id === "?"}
+                                        onClick={() => uninstallPluginRow(id)}
+                                      >
+                                        {t("settings.plugins_action_uninstall")}
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
                     )}
-                  </div>
-                  <div className="settings-plugin-reputation-row">
-                    <label htmlFor="plugin-reputation-target" className="settings-label">
-                      {t("settings.plugin_reputation_plugin_id")}
-                    </label>
-                    <input
-                      id="plugin-reputation-target"
-                      type="text"
-                      className="settings-input"
-                      value={pluginReputationTarget}
-                      onChange={(e) => setPluginReputationTarget(e.target.value)}
-                      placeholder="maps"
-                    />
-                    <button
-                      type="button"
-                      className="settings-link-btn"
-                      disabled={pluginReputationResetLoading || !pluginReputationTarget.trim()}
-                      onClick={() => resetPluginReputation(pluginReputationTarget)}
-                    >
-                      {pluginReputationResetLoading ? t("common.loading") : t("settings.plugin_reputation_reset_one")}
-                    </button>
-                  </div>
-                  <div className="settings-plugin-reputation-row">
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      disabled={pluginReputationResetLoading}
-                      onClick={() => resetPluginReputation()}
-                    >
-                      {t("settings.plugin_reputation_reset_all")}
-                    </button>
-                  </div>
-                  {pluginReputationResetMessage && (
-                    <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-ok" role="status">
-                      {pluginReputationResetMessage}
-                    </p>
-                  )}
-                  {pluginReputationResetError && (
-                    <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err" role="alert">
-                      {pluginReputationResetError}
-                    </p>
-                  )}
-                </div>
+
+                    <details className="health-card" style={{ marginTop: "1.25rem" }}>
+                      <summary className="health-card-details-summary">{t("settings.plugins_reputation_section")}</summary>
+                      <h4 className="settings-plugin-status-title" style={{ marginTop: "0.75rem" }}>{t("settings.plugin_reputation_title")}</h4>
+                      <div className="settings-plugin-reputation-controls">
+                        <div className="settings-plugin-reputation-row">
+                          <label htmlFor="plugin-reputation-target" className="settings-label">
+                            {t("settings.plugin_reputation_plugin_id")}
+                          </label>
+                          <input
+                            id="plugin-reputation-target"
+                            type="text"
+                            className="settings-input"
+                            value={pluginReputationTarget}
+                            onChange={(e) => setPluginReputationTarget(e.target.value)}
+                            placeholder="maps"
+                          />
+                          <button
+                            type="button"
+                            className="settings-link-btn"
+                            disabled={pluginReputationResetLoading || !pluginReputationTarget.trim()}
+                            onClick={() => resetPluginReputation(pluginReputationTarget)}
+                          >
+                            {pluginReputationResetLoading ? t("common.loading") : t("settings.plugin_reputation_reset_one")}
+                          </button>
+                        </div>
+                        <div className="settings-plugin-reputation-row">
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            disabled={pluginReputationResetLoading}
+                            onClick={() => resetPluginReputation()}
+                          >
+                            {t("settings.plugin_reputation_reset_all")}
+                          </button>
+                        </div>
+                        {pluginReputationResetMessage && (
+                          <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-ok" role="status">
+                            {pluginReputationResetMessage}
+                          </p>
+                        )}
+                        {pluginReputationResetError && (
+                          <p className="settings-plugin-reputation-feedback settings-plugin-reputation-feedback-err" role="alert">
+                            {pluginReputationResetError}
+                          </p>
+                        )}
+                      </div>
+                    </details>
+                  </>
+                )}
+
+                {systemSubTab === "health" && (
+                  <SystemHealthPanel
+                    sessionId={sessionId}
+                    fetchEndpoint={fetchSystemEndpoint}
+                    expert={uiMode === "expert"}
+                    locale={locale}
+                    labels={{
+                      title: t("settings.system_health_title"),
+                      resumeHeading: t("settings.system_health_resume"),
+                      toolsHeading: t("settings.system_health_tools"),
+                      noSession: t("settings.system_health_no_session"),
+                      docsMatrix: t("settings.system_health_doc_matrix"),
+                      docsWebhooks: t("settings.system_health_doc_webhooks"),
+                      docsMcp: t("settings.system_health_doc_mcp"),
+                      recallHeading: t("settings.system_health_recall"),
+                      mcpHeading: t("settings.system_health_mcp_status"),
+                      lifecycleHeading: t("settings.system_health_lifecycle"),
+                      terminalHeading: t("settings.system_health_terminal"),
+                      opsHeading: t("settings.system_health_ops"),
+                      loadError: t("settings.system_health_load_error"),
+                      detailsToggle: t("settings.system_health_details_toggle"),
+                      summaryUnavailable: t("settings.system_health_summary_unavailable"),
+                    }}
+                  />
+                )}
               </div>
             )}
             {settingsSection === "agent" && (
