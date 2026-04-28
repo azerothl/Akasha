@@ -90,10 +90,18 @@ pub async fn handle_terminal_routes(
                 .await;
                 return Some(match res {
                     Ok(Ok(())) => json_response("200 OK", r#"{"ok":true}"#),
-                    Ok(Err(e)) => json_response(
-                        "404 Not Found",
-                        &serde_json::json!({"error":"pty_close_failed","detail": e.to_string()}).to_string(),
-                    ),
+                    Ok(Err(e)) => {
+                        let msg = e.to_string();
+                        let (status, code) = if msg.contains("unknown session_id") {
+                            ("404 Not Found", "pty_session_not_found")
+                        } else {
+                            ("500 Internal Server Error", "pty_close_failed")
+                        };
+                        json_response(
+                            status,
+                            &serde_json::json!({"error": code, "detail": msg}).to_string(),
+                        )
+                    }
                     Err(e) => json_response(
                         "500 Internal Server Error",
                         &serde_json::json!({"error":"pty_close_join","detail": e.to_string()}).to_string(),
@@ -118,10 +126,18 @@ pub async fn handle_terminal_routes(
                         "200 OK",
                         &serde_json::to_string(&o).unwrap_or_else(|_| "{}".to_string()),
                     ),
-                    Ok(Err(e)) => json_response(
-                        "404 Not Found",
-                        &serde_json::json!({"error":"pty_read_failed","detail": e.to_string()}).to_string(),
-                    ),
+                    Ok(Err(e)) => {
+                        let msg = e.to_string();
+                        let (status, code) = if msg.contains("unknown session_id") {
+                            ("404 Not Found", "pty_session_not_found")
+                        } else {
+                            ("500 Internal Server Error", "pty_read_failed")
+                        };
+                        json_response(
+                            status,
+                            &serde_json::json!({"error": code, "detail": msg}).to_string(),
+                        )
+                    }
                     Err(e) => json_response(
                         "500 Internal Server Error",
                         &serde_json::json!({"error":"pty_read_join","detail": e.to_string()}).to_string(),

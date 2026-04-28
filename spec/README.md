@@ -122,7 +122,6 @@ La documentation utilisateur finale est maintenue dans `docs/`.
 - [dev/quality/bench_prompt_results.md](dev/quality/bench_prompt_results.md)
 - [dev/quality/tests_and_benchmarks.md](dev/quality/tests_and_benchmarks.md)
 - [dev/quality/documentation_coverage_audit.md](dev/quality/documentation_coverage_audit.md)
-- [dev/quality/REFACTOR_MONOREPO_TRACKING.md](dev/quality/REFACTOR_MONOREPO_TRACKING.md)
 
 #### Ops
 
