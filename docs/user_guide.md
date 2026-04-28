@@ -6,4 +6,4 @@ Ce document est la copie de diffusion du guide utilisateur final.
 - Affichage en interface: onglet **Doc** (TUI et interface desktop/web)
 - Endpoint HTTP: `GET /api/docs`
 
-Pour eviter toute derive, les mises a jour de contenu doivent d'abord etre faites dans `user_guide_final.md`.
+Pour éviter toute dérive, les mises à jour de contenu doivent d'abord être faites dans `user_guide_final.md`.
