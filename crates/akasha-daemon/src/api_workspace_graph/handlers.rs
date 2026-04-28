@@ -1,11 +1,11 @@
-//! HTTP handlers for multi-workspace project knowledge graphs.
+//! Workspace graph store and legacy handlers (split from api_workspace_graph).
 
-use crate::api::json_response;
+use crate::api_http::json_response;
 use akasha_store::WorkspaceGraphStore;
 use akasha_workspace_graph::WorkspaceGraphConfig;
 use std::path::{Path, PathBuf};
 
-fn remove_workspace_artifacts(data_dir: &Path, workspace_id: &str) {
+pub(super) fn remove_workspace_artifacts(data_dir: &Path, workspace_id: &str) {
     let dir = data_dir
         .join("workspace_graph")
         .join("out")
@@ -15,7 +15,7 @@ fn remove_workspace_artifacts(data_dir: &Path, workspace_id: &str) {
     }
 }
 
-fn maybe_import_legacy_yaml(data_dir: &Path, store: &WorkspaceGraphStore) -> anyhow::Result<()> {
+pub(super) fn maybe_import_legacy_yaml(data_dir: &Path, store: &WorkspaceGraphStore) -> anyhow::Result<()> {
     if !store.list_workspaces()?.is_empty() {
         return Ok(());
     }
@@ -40,125 +40,11 @@ fn maybe_import_legacy_yaml(data_dir: &Path, store: &WorkspaceGraphStore) -> any
     let _ = std::fs::remove_file(WorkspaceGraphConfig::path(data_dir));
     Ok(())
 }
-
-#[derive(Debug)]
-enum WsTail {
-    Rebuild,
-    Export,
-    Report,
-    Html,
-    GraphJson,
-}
-
-#[derive(Debug)]
-enum WsPath {
-    Collection,
-    Resource {
-        id: String,
-        tail: Option<WsTail>,
-    },
-}
-
-fn parse_workspace_path(path_only: &str) -> Option<WsPath> {
-    const PREFIX: &str = "/api/workspace-graph/workspaces";
-    if path_only == PREFIX {
-        return Some(WsPath::Collection);
-    }
-    let rest = path_only.strip_prefix(&(PREFIX.to_string() + "/"))?;
-    if rest.is_empty() {
-        return None;
-    }
-    let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
-    let id = parts.first()?.to_string();
-    if parts.len() == 1 {
-        return Some(WsPath::Resource { id, tail: None });
-    }
-    let tail = match parts[1] {
-        "rebuild" => WsTail::Rebuild,
-        "export" => WsTail::Export,
-        "report" => WsTail::Report,
-        "html" => WsTail::Html,
-        "graph.json" => WsTail::GraphJson,
-        _ => return None,
-    };
-    Some(WsPath::Resource {
-        id,
-        tail: Some(tail),
-    })
-}
-
-/// Handle `/api/workspace-graph` routes. Returns `None` if the path does not match.
-pub async fn handle_workspace_graph(
-    method: &str,
-    path_only: &str,
-    body: Option<&[u8]>,
-    data_dir: &Path,
-    store_path: &Path,
-) -> Option<String> {
-    if !path_only.starts_with("/api/workspace-graph") {
-        return None;
-    }
-
-    // New multi-workspace API
-    if let Some(ws) = parse_workspace_path(path_only) {
-        return Some(match ws {
-            WsPath::Collection => match method {
-                "GET" => get_workspaces_list(data_dir, store_path),
-                "POST" => match body {
-                    Some(b) => post_create_workspace(data_dir, store_path, b).await,
-                    None => json_response("400 Bad Request", r#"{"error":"body_required"}"#),
-                },
-                _ => json_response("405 Method Not Allowed", r#"{"error":"method_not_allowed"}"#),
-            },
-            WsPath::Resource { id, tail } => match (method, tail) {
-                ("DELETE", None) => delete_workspace(data_dir, store_path, &id),
-                ("POST", Some(WsTail::Rebuild)) => {
-                    post_rebuild_workspace(data_dir, store_path, &id, body).await
-                }
-                ("GET", Some(WsTail::Export)) => get_export_workspace(store_path, &id),
-                ("GET", Some(WsTail::Report)) => get_report_workspace(data_dir, &id),
-                ("GET", Some(WsTail::Html)) => get_html_workspace(data_dir, &id),
-                ("GET", Some(WsTail::GraphJson)) => get_graph_json_workspace(data_dir, &id),
-                _ => json_response("405 Method Not Allowed", r#"{"error":"method_not_allowed"}"#),
-            },
-        });
-    }
-
-    // Deprecated single-workspace shims (minimal)
-    match (method, path_only) {
-        ("GET", "/api/workspace-graph") => Some(get_legacy_summary(data_dir, store_path)),
-        ("GET", "/api/workspace-graph/config") => Some(get_legacy_config(data_dir)),
-        ("PUT", "/api/workspace-graph/config") => match body {
-            Some(b) => Some(put_legacy_config(data_dir, store_path, b).await),
-            None => Some(json_response(
-                "400 Bad Request",
-                r#"{"error":"body_required"}"#,
-            )),
-        },
-        ("POST", "/api/workspace-graph/rebuild") => {
-            let root = body.and_then(|b| {
-                serde_json::from_slice::<serde_json::Value>(b)
-                    .ok()
-                    .and_then(|v| v.get("root").and_then(|x| x.as_str()).map(PathBuf::from))
-            });
-            Some(post_legacy_rebuild(data_dir, store_path, root).await)
-        }
-        ("GET", "/api/workspace-graph/export") => Some(get_legacy_first_export(store_path)),
-        ("GET", "/api/workspace-graph/report") => Some(get_legacy_first_report(data_dir, store_path)),
-        ("GET", "/api/workspace-graph/html") => Some(get_legacy_first_html(data_dir, store_path)),
-        _ if path_only.starts_with("/api/workspace-graph") => Some(json_response(
-            "404 Not Found",
-            r#"{"error":"not_found"}"#,
-        )),
-        _ => None,
-    }
-}
-
-fn open_store(store_path: &Path) -> Result<WorkspaceGraphStore, String> {
+pub(super) fn open_store(store_path: &Path) -> Result<WorkspaceGraphStore, String> {
     WorkspaceGraphStore::open(store_path).map_err(|e| e.to_string())
 }
 
-fn get_workspaces_list(data_dir: &Path, store_path: &Path) -> String {
+pub(super) fn get_workspaces_list(data_dir: &Path, store_path: &Path) -> String {
     let store = match open_store(store_path) {
         Ok(s) => s,
         Err(e) => {
@@ -212,7 +98,7 @@ fn get_workspaces_list(data_dir: &Path, store_path: &Path) -> String {
     )
 }
 
-async fn post_create_workspace(data_dir: &Path, store_path: &Path, body: &[u8]) -> String {
+pub(super) async fn post_create_workspace(data_dir: &Path, store_path: &Path, body: &[u8]) -> String {
     let v: serde_json::Value = match serde_json::from_slice(body) {
         Ok(x) => x,
         Err(e) => {
@@ -311,7 +197,7 @@ async fn post_create_workspace(data_dir: &Path, store_path: &Path, body: &[u8]) 
     }
 }
 
-fn delete_workspace(data_dir: &Path, store_path: &Path, id: &str) -> String {
+pub(super) fn delete_workspace(data_dir: &Path, store_path: &Path, id: &str) -> String {
     remove_workspace_artifacts(data_dir, id);
     match open_store(store_path) {
         Ok(store) => match store.delete_workspace(id) {
@@ -329,7 +215,7 @@ fn delete_workspace(data_dir: &Path, store_path: &Path, id: &str) -> String {
     }
 }
 
-async fn post_rebuild_workspace(
+pub(super) async fn post_rebuild_workspace(
     data_dir: &Path,
     store_path: &Path,
     id: &str,
@@ -414,7 +300,7 @@ async fn post_rebuild_workspace(
     }
 }
 
-fn get_export_workspace(store_path: &Path, id: &str) -> String {
+pub(super) fn get_export_workspace(store_path: &Path, id: &str) -> String {
     let store = match open_store(store_path) {
         Ok(s) => s,
         Err(e) => {
@@ -476,7 +362,7 @@ fn get_export_workspace(store_path: &Path, id: &str) -> String {
     )
 }
 
-fn get_report_workspace(data_dir: &Path, id: &str) -> String {
+pub(super) fn get_report_workspace(data_dir: &Path, id: &str) -> String {
     let p = data_dir
         .join("workspace_graph")
         .join("out")
@@ -494,7 +380,7 @@ fn get_report_workspace(data_dir: &Path, id: &str) -> String {
     }
 }
 
-fn get_html_workspace(data_dir: &Path, id: &str) -> String {
+pub(super) fn get_html_workspace(data_dir: &Path, id: &str) -> String {
     let p = data_dir
         .join("workspace_graph")
         .join("out")
@@ -509,7 +395,7 @@ fn get_html_workspace(data_dir: &Path, id: &str) -> String {
     }
 }
 
-fn get_graph_json_workspace(data_dir: &Path, id: &str) -> String {
+pub(super) fn get_graph_json_workspace(data_dir: &Path, id: &str) -> String {
     let p = data_dir
         .join("workspace_graph")
         .join("out")
@@ -530,7 +416,7 @@ fn get_graph_json_workspace(data_dir: &Path, id: &str) -> String {
 
 // --- Legacy (first workspace or yaml) ---
 
-fn get_legacy_summary(data_dir: &Path, store_path: &Path) -> String {
+pub(super) fn get_legacy_summary(data_dir: &Path, store_path: &Path) -> String {
     let store = match open_store(store_path) {
         Ok(s) => s,
         Err(e) => {
@@ -566,7 +452,7 @@ fn get_legacy_summary(data_dir: &Path, store_path: &Path) -> String {
     )
 }
 
-fn get_legacy_config(data_dir: &Path) -> String {
+pub(super) fn get_legacy_config(data_dir: &Path) -> String {
     match WorkspaceGraphConfig::load(data_dir) {
         Ok(c) => json_response(
             "200 OK",
@@ -579,7 +465,7 @@ fn get_legacy_config(data_dir: &Path) -> String {
     }
 }
 
-async fn put_legacy_config(data_dir: &Path, _store_path: &Path, body: &[u8]) -> String {
+pub(super) async fn put_legacy_config(data_dir: &Path, _store_path: &Path, body: &[u8]) -> String {
     let v: serde_json::Value = match serde_json::from_slice(body) {
         Ok(x) => x,
         Err(e) => {
@@ -607,7 +493,7 @@ async fn put_legacy_config(data_dir: &Path, _store_path: &Path, body: &[u8]) -> 
     )
 }
 
-async fn post_legacy_rebuild(data_dir: &Path, store_path: &Path, root: Option<PathBuf>) -> String {
+pub(super) async fn post_legacy_rebuild(data_dir: &Path, store_path: &Path, root: Option<PathBuf>) -> String {
     let data_dir = data_dir.to_path_buf();
     let store_path = store_path.to_path_buf();
     let res = tokio::task::spawn_blocking(move || {
@@ -676,7 +562,7 @@ async fn post_legacy_rebuild(data_dir: &Path, store_path: &Path, root: Option<Pa
     }
 }
 
-fn get_legacy_first_export(store_path: &Path) -> String {
+pub(super) fn get_legacy_first_export(store_path: &Path) -> String {
     let store = match open_store(store_path) {
         Ok(s) => s,
         Err(e) => {
@@ -692,7 +578,7 @@ fn get_legacy_first_export(store_path: &Path) -> String {
     get_export_workspace(store_path, &w.id)
 }
 
-fn get_legacy_first_report(data_dir: &Path, store_path: &Path) -> String {
+pub(super) fn get_legacy_first_report(data_dir: &Path, store_path: &Path) -> String {
     let store = match open_store(store_path) {
         Ok(s) => s,
         Err(e) => {
@@ -708,7 +594,7 @@ fn get_legacy_first_report(data_dir: &Path, store_path: &Path) -> String {
     get_report_workspace(data_dir, &w.id)
 }
 
-fn get_legacy_first_html(data_dir: &Path, store_path: &Path) -> String {
+pub(super) fn get_legacy_first_html(data_dir: &Path, store_path: &Path) -> String {
     let store = match open_store(store_path) {
         Ok(s) => s,
         Err(e) => {
@@ -724,7 +610,7 @@ fn get_legacy_first_html(data_dir: &Path, store_path: &Path) -> String {
     get_html_workspace(data_dir, &w.id)
 }
 
-fn http_html_response(body: &str) -> String {
+pub(super) fn http_html_response(body: &str) -> String {
     let bytes = body.as_bytes();
     format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",

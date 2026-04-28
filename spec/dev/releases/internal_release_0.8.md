@@ -42,7 +42,7 @@ Référence git : état du dépôt étiqueté **v0.7.0** → **0.8.0** (`[worksp
 
 ## Orchestration, outils et plugins
 
-- **Mode strict tools-first** : chemin déterministe pour un premier appel d’outil préféré lorsque le routeur l’exige ; évite les boucles redondantes ; logique dans `api.rs` (compteurs `strict_successful_tool_calls`, garde-fous avant forward user request).
+- **Plugins — sélection LLM** : plus de blocage d’outils sur toute la durée d’une tâche via les `routing_rules` des manifests ; sélection des plugins tool pertinents par une requête courte `system` + descriptions ; catalogue injecté dans le prompt ; exécution toujours filtrée par `tools_policy.yaml` uniquement.
 - **Petit parleur / requêtes légères** : refactor du traitement « small talk » et génération de réponses pour réduire les allers-retours inutiles vers le LLM lourd quand c’est pertinent.
 - **Suggestions de projet** : heuristiques et logs améliorés pour la détection de suggestions de workspace / projet (alignement UI graphe et agent).
 - **Contrat JSON (résumés utilisateur)** : validation qu’un bloc JSON clôturé est un « contrat » significatif avant strip ; strip des blocs purement JSON en fin de message pour le résumé affiché — `strip_trailing_contract` / `is_meaningful_contract` (crate concerné selon PR : contract).

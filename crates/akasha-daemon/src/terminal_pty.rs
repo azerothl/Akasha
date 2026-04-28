@@ -12,6 +12,19 @@ use std::time::{Duration, Instant};
 
 const OUTPUT_CAP_BYTES: usize = 512 * 1024;
 
+/// Structured error returned when a PTY session ID is not found.
+/// Use `anyhow::Error::downcast_ref::<PtySessionNotFound>()` to detect 404 vs 500.
+#[derive(Debug)]
+pub struct PtySessionNotFound(pub String);
+
+impl std::fmt::Display for PtySessionNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown session_id: {}", self.0)
+    }
+}
+
+impl std::error::Error for PtySessionNotFound {}
+
 #[derive(Debug, Deserialize)]
 pub struct PtyCreateBody {
     /// Full argv including program (e.g. `["/bin/bash","-l"]`). If omitted, default shell.
@@ -290,7 +303,7 @@ impl PtyManager {
                 .lock()
                 .map_err(|e| anyhow::anyhow!("pty sessions lock poisoned: {}", e))?;
             map.remove(id)
-                .ok_or_else(|| anyhow::anyhow!("unknown session_id"))?
+                .ok_or_else(|| anyhow::Error::new(PtySessionNotFound(id.to_string())))?
         };
         if let Ok(mut c) = inner.child.lock() {
             if let Some(mut ch) = c.take() {
@@ -363,7 +376,7 @@ impl PtyManager {
             .map_err(|e| anyhow::anyhow!("pty sessions lock poisoned: {}", e))?;
         map.get(id)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("unknown session_id"))
+            .ok_or_else(|| anyhow::Error::new(PtySessionNotFound(id.to_string())))
     }
 }
 

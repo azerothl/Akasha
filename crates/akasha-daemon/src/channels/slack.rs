@@ -95,25 +95,25 @@ pub fn handle_slack_command(
     let body = match body {
         Some(b) if !b.is_empty() => b,
         _ => {
-            return crate::api::json_response("400 Bad Request", r#"{"error":"missing_body"}"#);
+            return crate::api_http::json_response("400 Bad Request", r#"{"error":"missing_body"}"#);
         }
     };
     if !verify_signature(&body, signature_header, timestamp_header, signing_secret) {
-        return crate::api::json_response("401 Unauthorized", r#"{"error":"invalid_signature"}"#);
+        return crate::api_http::json_response("401 Unauthorized", r#"{"error":"invalid_signature"}"#);
     }
     let (response_url, text) = match parse_slash_form(&body) {
         Some(p) => p,
         None => {
-            return crate::api::json_response("400 Bad Request", r#"{"error":"invalid_form"}"#);
+            return crate::api_http::json_response("400 Bad Request", r#"{"error":"invalid_form"}"#);
         }
     };
     if let Err(e) = akasha_core::check_prompt_injection(&text) {
         let body = serde_json::json!({ "error": "prompt_injection_rejected", "detail": e.to_string() });
-        return crate::api::json_response("400 Bad Request", &body.to_string());
+        return crate::api_http::json_response("400 Bad Request", &body.to_string());
     }
 
     // Respond immediately so Slack gets 200 within 3s
-    let immediate = crate::api::json_response(
+    let immediate = crate::api_http::json_response(
         "200 OK",
         r#"{"response_type":"ephemeral","text":"Processing your request..."}"#,
     );
