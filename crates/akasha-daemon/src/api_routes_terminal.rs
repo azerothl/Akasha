@@ -161,10 +161,19 @@ pub async fn handle_terminal_routes(
                 .await;
                 return Some(match res {
                     Ok(Ok(())) => json_response("200 OK", r#"{"ok":true}"#),
-                    Ok(Err(e)) => json_response(
-                        "400 Bad Request",
-                        &serde_json::json!({"error":"pty_write_failed","detail": e.to_string()}).to_string(),
-                    ),
+                    Ok(Err(e)) => {
+                        if e.downcast_ref::<crate::terminal_pty::PtySessionNotFound>().is_some() {
+                            json_response(
+                                "404 Not Found",
+                                &serde_json::json!({"error":"session_not_found","detail": e.to_string()}).to_string(),
+                            )
+                        } else {
+                            json_response(
+                                "400 Bad Request",
+                                &serde_json::json!({"error":"pty_write_failed","detail": e.to_string()}).to_string(),
+                            )
+                        }
+                    }
                     Err(e) => json_response(
                         "500 Internal Server Error",
                         &serde_json::json!({"error":"pty_write_join","detail": e.to_string()}).to_string(),
@@ -190,10 +199,19 @@ pub async fn handle_terminal_routes(
                 .await;
                 return Some(match res {
                     Ok(Ok(())) => json_response("200 OK", r#"{"ok":true}"#),
-                    Ok(Err(e)) => json_response(
-                        "400 Bad Request",
-                        &serde_json::json!({"error":"pty_resize_failed","detail": e.to_string()}).to_string(),
-                    ),
+                    Ok(Err(e)) => {
+                        if e.downcast_ref::<crate::terminal_pty::PtySessionNotFound>().is_some() {
+                            json_response(
+                                "404 Not Found",
+                                &serde_json::json!({"error":"session_not_found","detail": e.to_string()}).to_string(),
+                            )
+                        } else {
+                            json_response(
+                                "400 Bad Request",
+                                &serde_json::json!({"error":"pty_resize_failed","detail": e.to_string()}).to_string(),
+                            )
+                        }
+                    }
                     Err(e) => json_response(
                         "500 Internal Server Error",
                         &serde_json::json!({"error":"pty_resize_join","detail": e.to_string()}).to_string(),

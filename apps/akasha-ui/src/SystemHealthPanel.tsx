@@ -116,7 +116,7 @@ function summarizeMcp(statusText: string, runtimeText: string, summaryUnavailabl
 function summarizeTerminal(jsonStr: string, summaryUnavailable: string, locale: LocaleId): string[] {
   const j = tryParseJson(jsonStr) as Record<string, unknown> | null;
   if (!j) return [summaryUnavailable];
-  const pty = j.pty ?? j.has_pty ?? j["pty_supported"];
+  const pty = j.interactive_pty ?? j.pty ?? j.has_pty ?? j["pty_supported"];
   const shell = j.shell ?? j.default_shell;
   const ptyLabel =
     typeof pty === "boolean"
@@ -331,15 +331,15 @@ export function SystemHealthPanel({ sessionId, fetchEndpoint, expert, locale, la
     <div className="operator-hermes-insights system-health-panel">
       <h3 className="settings-subtitle">{labels.title}</h3>
       <p className="settings-doc muted">
-        <a href="https://github.com/azerothl/Akasha/blob/main/docs/hermes-akasha-parity-matrix.md" target="_blank" rel="noopener noreferrer">
+        <a href="https://github.com/azerothl/Akasha/blob/main/spec/dev/roadmap/hermes-akasha-parity-matrix.md" target="_blank" rel="noopener noreferrer">
           {labels.docsMatrix}
         </a>
         {" · "}
-        <a href="https://github.com/azerothl/Akasha/blob/main/docs/automation-webhooks.md" target="_blank" rel="noopener noreferrer">
+        <a href="https://github.com/azerothl/Akasha/blob/main/spec/dev/integrations/automation-webhooks.md" target="_blank" rel="noopener noreferrer">
           {labels.docsWebhooks}
         </a>
         {" · "}
-        <a href="https://github.com/azerothl/Akasha/blob/main/docs/mcp-runtime.md" target="_blank" rel="noopener noreferrer">
+        <a href="https://github.com/azerothl/Akasha/blob/main/spec/dev/integrations/mcp-runtime.md" target="_blank" rel="noopener noreferrer">
           {labels.docsMcp}
         </a>
       </p>

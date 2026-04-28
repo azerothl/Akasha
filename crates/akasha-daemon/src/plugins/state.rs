@@ -36,7 +36,15 @@ impl PluginStateStore {
     fn save(&self) -> std::io::Result<()> {
         let data = self.data.read().map_err(|_| std::io::ErrorKind::Other)?;
         let s = serde_json::to_string_pretty(&*data)?;
-        std::fs::write(&self.path, s)
+        drop(data);
+        let tmp_path = self.path.with_extension("json.tmp");
+        let mut tmp_file = std::fs::File::create(&tmp_path)?;
+        std::io::Write::write_all(&mut tmp_file, s.as_bytes())?;
+        tmp_file.sync_all()?;
+        drop(tmp_file);
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(&self.path);
+        std::fs::rename(&tmp_path, &self.path)
     }
 
     pub fn is_disabled(&self, plugin_id: &str) -> bool {

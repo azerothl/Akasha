@@ -156,13 +156,19 @@ async fn tick(
                     )
                     .with_correlation(task_id),
                 );
-                let mut message = schedule.name.clone();
+                // Default: use schedule name; fall back to a fixed string if name is empty.
+                let mut message = if schedule.name.trim().is_empty() {
+                    "Exécution planifiée.".to_string()
+                } else {
+                    schedule.name.clone()
+                };
                 let mut session_id = format!("schedule:{}", schedule.id);
                 if let Some(ctx) = schedule.channel_context.as_deref() {
                     match serde_json::from_str::<serde_json::Value>(ctx) {
                         Ok(v) => {
                             // JSON: use the message field when present and non-empty;
-                            // otherwise keep schedule.name so raw JSON is never forwarded.
+                            // otherwise keep the default (schedule.name / fallback) so raw JSON
+                            // is never forwarded to the orchestrator.
                             if let Some(m) = v.get("message").and_then(|s| s.as_str()) {
                                 if !m.trim().is_empty() {
                                     message = m.trim().to_string();
