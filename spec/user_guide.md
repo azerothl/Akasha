@@ -407,7 +407,7 @@ cargo run -p akasha-evals
 - **Logs agent** : progression des tâches et sessions (niveaux configurables via `AKASHA_LOG`).
 - **`akasha doctor` / `--fix`** : scénarios **binaires + zip** et résolution **`spec/`** (`AKASHA_SPEC_DIR`, à côté du daemon, `data_dir/spec`).
 - **CI** : libération d’espace disque runners ; **E2E Playwright** UI (`apps/akasha-ui`) ; workflow **sync version** + `verify-release-version` sur tag (voir [AGENTS.md](../AGENTS.md)).
-- **Notes détaillées contributeurs** : [docs/internal_release_0.8.md](../docs/internal_release_0.8.md).
+- **Notes détaillées contributeurs** : [dev/releases/internal_release_0.8.md](dev/releases/internal_release_0.8.md).
 
 ---
 

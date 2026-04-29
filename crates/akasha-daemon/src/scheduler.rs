@@ -156,12 +156,38 @@ async fn tick(
                     )
                     .with_correlation(task_id),
                 );
-                let message = schedule
-                    .channel_context
-                    .as_deref()
-                    .unwrap_or("Exécution planifiée.")
-                    .to_string();
-                let session_id = format!("schedule:{}", schedule.id);
+                // Default: use schedule name; fall back to a fixed string if name is empty.
+                let mut message = if schedule.name.trim().is_empty() {
+                    "Exécution planifiée.".to_string()
+                } else {
+                    schedule.name.clone()
+                };
+                let mut session_id = format!("schedule:{}", schedule.id);
+                if let Some(ctx) = schedule.channel_context.as_deref() {
+                    match serde_json::from_str::<serde_json::Value>(ctx) {
+                        Ok(v) => {
+                            // JSON: use the message field when present and non-empty;
+                            // otherwise keep the default (schedule.name / fallback) so raw JSON
+                            // is never forwarded to the orchestrator.
+                            if let Some(m) = v.get("message").and_then(|s| s.as_str()) {
+                                if !m.trim().is_empty() {
+                                    message = m.trim().to_string();
+                                }
+                            }
+                            if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
+                                if !sid.trim().is_empty() {
+                                    session_id = sid.trim().to_string();
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Not JSON: use the raw channel_context as the message.
+                            if !ctx.trim().is_empty() {
+                                message = ctx.trim().to_string();
+                            }
+                        }
+                    }
+                }
                 pending.push((run_id, task_id, message, session_id));
             }
         }

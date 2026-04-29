@@ -25,6 +25,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Ensure daemon is running (start if needed) and print status summary
+    Up,
     /// Start the Akasha daemon (with watchdog supervision in background)
     Start {
         /// Run in foreground without watchdog
@@ -105,6 +107,22 @@ enum Commands {
         #[command(subcommand)]
         sub: TerminalSub,
     },
+    /// Telegram access lifecycle (pairing approvals, roles)
+    Telegram {
+        #[command(subcommand)]
+        sub: TelegramSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum TelegramSub {
+    List,
+    Approve { code_or_user_id: String },
+    Reject { user_id: i64 },
+    Remove { user_id: i64 },
+    Promote { user_id: i64 },
+    Demote { user_id: i64 },
+    Reset,
 }
 
 #[derive(Subcommand)]
@@ -489,6 +507,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Up => cmd_up(),
         Commands::Start { foreground } => cmd_start(foreground),
         Commands::Stop => cmd_stop(),
         Commands::Doctor { json, advice, fix } => cmd_doctor(json, advice, fix),
@@ -505,6 +524,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Worktree { sub } => cmd_worktree(sub),
         Commands::Mcp { sub } => cmd_mcp(sub),
         Commands::Terminal { sub } => cmd_terminal(sub),
+        Commands::Telegram { sub } => cmd_telegram(sub),
     }
 }
 
@@ -522,6 +542,102 @@ fn cmd_terminal(sub: TerminalSub) -> anyhow::Result<()> {
             }
             let j: serde_json::Value = resp.json()?;
             println!("{}", serde_json::to_string_pretty(&j)?);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_up() -> anyhow::Result<()> {
+    let base = daemon_base_url();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let running = client
+        .get(format!("{}/api/status", base))
+        .send()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+    if !running {
+        cmd_start(false)?;
+    }
+    let verify = client
+        .get(format!("{}/api/status", base))
+        .send()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+    if !verify {
+        anyhow::bail!("Daemon is not reachable after startup.");
+    }
+    let status = client
+        .get(format!("{}/api/status", base))
+        .send()?
+        .text()
+        .unwrap_or_else(|_| "{\"ok\":true}".to_string());
+    println!("akasha up: daemon running");
+    println!("{}", status);
+    Ok(())
+}
+
+fn cmd_telegram(sub: TelegramSub) -> anyhow::Result<()> {
+    let base = daemon_base_url();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()?;
+    match sub {
+        TelegramSub::List => {
+            let resp = client
+                .get(format!("{}/api/channel-access/telegram/users", base))
+                .send()?;
+            if !resp.status().is_success() {
+                anyhow::bail!("Daemon error: {}", resp.status());
+            }
+            println!("{}", resp.text().unwrap_or_default());
+        }
+        TelegramSub::Approve { code_or_user_id } => {
+            let body = if let Ok(user_id) = code_or_user_id.parse::<i64>() {
+                serde_json::json!({ "user_id": user_id })
+            } else {
+                serde_json::json!({ "pairing_code": code_or_user_id })
+            };
+            let resp = client
+                .post(format!("{}/api/channel-access/telegram/approve", base))
+                .json(&body)
+                .send()?;
+            println!("{}", resp.text().unwrap_or_default());
+        }
+        TelegramSub::Reject { user_id } => {
+            let resp = client
+                .post(format!("{}/api/channel-access/telegram/reject", base))
+                .json(&serde_json::json!({ "user_id": user_id }))
+                .send()?;
+            println!("{}", resp.text().unwrap_or_default());
+        }
+        TelegramSub::Remove { user_id } => {
+            let resp = client
+                .post(format!("{}/api/channel-access/telegram/remove", base))
+                .json(&serde_json::json!({ "user_id": user_id }))
+                .send()?;
+            println!("{}", resp.text().unwrap_or_default());
+        }
+        TelegramSub::Promote { user_id } => {
+            let resp = client
+                .post(format!("{}/api/channel-access/telegram/promote", base))
+                .json(&serde_json::json!({ "user_id": user_id }))
+                .send()?;
+            println!("{}", resp.text().unwrap_or_default());
+        }
+        TelegramSub::Demote { user_id } => {
+            let resp = client
+                .post(format!("{}/api/channel-access/telegram/demote", base))
+                .json(&serde_json::json!({ "user_id": user_id }))
+                .send()?;
+            println!("{}", resp.text().unwrap_or_default());
+        }
+        TelegramSub::Reset => {
+            let resp = client
+                .post(format!("{}/api/channel-access/telegram/reset", base))
+                .send()?;
+            println!("{}", resp.text().unwrap_or_default());
         }
     }
     Ok(())
@@ -1061,7 +1177,7 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
                 })?;
             let manifest = akasha_plugin_api::PluginManifest::load_from_path(&manifest_path)
                 .map_err(|e| anyhow::anyhow!("Invalid manifest: {}", e))?;
-            if !is_safe_plugin_id(&manifest.id) {
+            if !akasha_plugin_api::is_safe_plugin_id(&manifest.id) {
                 anyhow::bail!(
                     "Invalid plugin id '{}': expected only [A-Za-z0-9_-], no path separators",
                     manifest.id
@@ -1127,21 +1243,6 @@ fn cmd_plugin(sub: PluginSub) -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-fn is_safe_plugin_id(id: &str) -> bool {
-    if id.is_empty() || id == "." || id == ".." {
-        return false;
-    }
-    if !id
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return false;
-    }
-    use std::path::Component;
-    let mut comps = std::path::Path::new(id).components();
-    matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none()
 }
 
 fn cmd_vault(sub: VaultSub) -> anyhow::Result<()> {

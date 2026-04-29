@@ -166,8 +166,20 @@ impl Daemon {
                 return Err(e.into());
             }
         };
+        let plugin_state = match crate::plugins::PluginStateStore::open(&self.data_dir) {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                warn!(error = %e, "Plugin state store open failed");
+                return Err(e.into());
+            }
+        };
         let plugins_dir = self.data_dir.join("plugins");
-        let plugin_registry = Arc::new(crate::plugins::PluginRegistry::new(plugins_dir, reputation, trust_store));
+        let plugin_registry = Arc::new(crate::plugins::PluginRegistry::new(
+            plugins_dir,
+            reputation,
+            plugin_state,
+            trust_store,
+        ));
         plugin_registry.load_all();
 
         // Phase 6: LLM Router (task classifier, providers, fallback, degraded mode)

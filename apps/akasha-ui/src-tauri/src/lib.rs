@@ -611,6 +611,24 @@ async fn get_advice(health: serde_json::Value, port: Option<u16>) -> Result<serd
     Ok(json)
 }
 
+/// Generic GET passthrough to daemon HTTP for desktop UI panels.
+/// Restricts calls to local API paths for safety.
+#[tauri::command]
+async fn daemon_get_text(path: String, port: Option<u16>) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let p = path.trim();
+    if !p.starts_with('/') || (!p.starts_with("/api/") && p != "/") {
+        return Err("invalid_path".to_string());
+    }
+    let url = format!("{}{}", daemon_base_url(port), p);
+    let client = http_client();
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let ok = resp.status().is_success();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "ok": ok, "status": status, "text": text }))
+}
+
 /// GET /api/plugins (for slash /plugins).
 #[tauri::command]
 async fn get_plugins(port: Option<u16>) -> Result<Vec<serde_json::Value>, String> {
@@ -634,6 +652,45 @@ async fn reload_plugins(port: Option<u16>) -> Result<(), String> {
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("{}", resp.status()));
+    }
+    Ok(())
+}
+
+/// POST /api/plugins/{id}/enable or /disable — user-controlled plugin load.
+#[tauri::command]
+async fn set_plugin_enabled(plugin_id: String, enabled: bool, port: Option<u16>) -> Result<(), String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let id = plugin_id.trim();
+    if id.is_empty() {
+        return Err("plugin_id required".to_string());
+    }
+    let action = if enabled { "enable" } else { "disable" };
+    let url = format!("{}/api/plugins/{}/{}", daemon_base_url(port), id, action);
+    let client = http_client();
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
+    }
+    Ok(())
+}
+
+/// POST /api/plugins/{id}/uninstall — remove plugin directory from data_dir/plugins.
+#[tauri::command]
+async fn uninstall_plugin(plugin_id: String, port: Option<u16>) -> Result<(), String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let id = plugin_id.trim();
+    if id.is_empty() {
+        return Err("plugin_id required".to_string());
+    }
+    let url = format!("{}/api/plugins/{}/uninstall", daemon_base_url(port), id);
+    let client = http_client();
+    let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} — {}", status, err_body));
     }
     Ok(())
 }
@@ -1258,11 +1315,11 @@ async fn delete_user_rag_document(id: String, port: Option<u16>) -> Result<(), S
     Ok(())
 }
 
-/// Workspace knowledge graph: GET /api/workspace-graph
+/// Workspace knowledge graph status via modern endpoint: GET /api/workspace-graph/workspaces
 #[tauri::command]
 async fn get_workspace_graph_status(port: Option<u16>) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
-    let url = format!("{}/api/workspace-graph", daemon_base_url(port));
+    let url = format!("{}/api/workspace-graph/workspaces", daemon_base_url(port));
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
@@ -1272,18 +1329,25 @@ async fn get_workspace_graph_status(port: Option<u16>) -> Result<serde_json::Val
     Ok(json)
 }
 
-/// Workspace graph: PUT /api/workspace-graph/config — body `{ "root": "C:\\path" | null }`
+/// Workspace graph compatibility shim: ensure a default workspace exists for `root`.
 #[tauri::command]
 async fn put_workspace_graph_config(
     root: Option<String>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
-    let url = format!("{}/api/workspace-graph/config", daemon_base_url(port));
+    let Some(root) = root.map(|r| r.trim().to_string()).filter(|r| !r.is_empty()) else {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "deprecated": true,
+            "message": "No-op without root; use project workspace endpoints."
+        }));
+    };
+    let url = format!("{}/api/workspace-graph/workspaces", daemon_base_url(port));
     let client = http_client();
-    let body = serde_json::json!({ "root": root });
+    let body = serde_json::json!({ "name": "Default", "root_path": root, "rebuild": false });
     let resp = client
-        .put(&url)
+        .post(&url)
         .json(&body)
         .send()
         .await
@@ -1297,17 +1361,54 @@ async fn put_workspace_graph_config(
     Ok(json)
 }
 
-/// Workspace graph: POST /api/workspace-graph/rebuild — optional `{ "root": "..." }` (long-running).
+/// Workspace graph rebuild compatibility shim over modern endpoints.
 #[tauri::command]
 async fn post_workspace_graph_rebuild(
     root: Option<String>,
     port: Option<u16>,
 ) -> Result<serde_json::Value, String> {
     let port = port.unwrap_or(DAEMON_PORT);
-    let url = format!("{}/api/workspace-graph/rebuild", daemon_base_url(port));
     let client = http_client();
+    let list_url = format!("{}/api/workspace-graph/workspaces", daemon_base_url(port));
+    let list_resp = client.get(&list_url).send().await.map_err(|e| e.to_string())?;
+    if !list_resp.status().is_success() {
+        return Err(format!("{}", list_resp.status()));
+    }
+    let list_json: serde_json::Value = list_resp.json().await.map_err(|e| e.to_string())?;
+    let first_id = list_json
+        .get("workspaces")
+        .and_then(|w| w.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|w| w.get("id"))
+        .and_then(|id| id.as_str())
+        .map(|s| s.to_string());
+    let url = if let Some(id) = first_id {
+        format!(
+            "{}/api/workspace-graph/workspaces/{}/rebuild",
+            daemon_base_url(port),
+            urlencoding::encode(&id)
+        )
+    } else if let Some(r) = root.as_ref().map(|x| x.trim()).filter(|x| !x.is_empty()) {
+        let create_url = format!("{}/api/workspace-graph/workspaces", daemon_base_url(port));
+        let create_body = serde_json::json!({"name":"Default","root_path":r,"rebuild":true});
+        let create_resp = client
+            .post(&create_url)
+            .json(&create_body)
+            .timeout(std::time::Duration::from_secs(600))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !create_resp.status().is_success() {
+            let status = create_resp.status();
+            let text = create_resp.text().await.unwrap_or_default();
+            return Err(format!("{} {}", status, text));
+        }
+        return create_resp.json().await.map_err(|e| e.to_string());
+    } else {
+        return Err("No workspace found; provide root to create one".to_string());
+    };
     let body = match root {
-        Some(r) if !r.trim().is_empty() => serde_json::json!({ "root": r.trim() }),
+        Some(r) if !r.trim().is_empty() => serde_json::json!({ "root_path": r.trim() }),
         _ => serde_json::json!({}),
     };
     let resp = client
@@ -1798,8 +1899,11 @@ pub fn run() {
             open_path_in_explorer,
             read_file_as_data_url,
             get_advice,
+            daemon_get_text,
             get_plugins,
             reload_plugins,
+            set_plugin_enabled,
+            uninstall_plugin,
             get_skills,
             reload_skills,
             install_skill,

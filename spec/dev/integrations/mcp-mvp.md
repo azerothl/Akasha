@@ -7,7 +7,7 @@ Hermes-style **plug-and-play MCP**: declare servers in JSON, validate before ena
 ## What exists today
 
 - **Config validation** (library): `akasha_daemon::mcp::validate_mcp_config_json` checks a `mcpServers` object with per-server `command` + optional `args` array. Used by tests in `crates/akasha-daemon/src/mcp.rs`.
-- **Stdio probe** (library + CLI): `akasha_daemon::mcp::probe_stdio_mcp`, `akasha mcp validate|probe` — see **`docs/mcp-runtime.md`**.
+- **Stdio probe** (library + CLI): `akasha_daemon::mcp::probe_stdio_mcp`, `akasha mcp validate|probe` — see **`mcp-runtime.md`**.
 - **Plugin surface**: `PluginKind::Mcp` in `akasha-plugin-api` (bridge staged).
 
 ## Recommended config shape (stdio)
@@ -40,4 +40,4 @@ Hermes-style **plug-and-play MCP**: declare servers in JSON, validate before ena
 2. Map MCP tools into Akasha tool namespace with policy gates (`tools_policy.yaml`).
 3. Smoke tests against a reference stdio server (filesystem or echo).
 
-See also `docs/hermes-akasha-parity-matrix.md` and `spec/16_plugin_architecture.md`.
+See also `../roadmap/hermes-akasha-parity-matrix.md` and `../../16_plugin_architecture.md`.

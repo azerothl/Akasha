@@ -1,6 +1,9 @@
 //! Simple HTTP API: POST /api/message, GET /api/tasks/:id, GET / (health)
 
-use crate::agent_profile::AgentProfile;
+pub use crate::agent_profile::{
+    get_or_load_agent_profile, new_agent_profile_cache, set_agent_profile_cache, AgentProfile,
+    AgentProfileCache,
+};
 use crate::agents::{interpret_message, EventBus, OrchestratorTask, TaskPriority};
 use crate::latency::{
     clear_task_milestones, emit_timeline_once_for_task, env_duration_ms, log_latency_metric,
@@ -9,16 +12,14 @@ use crate::latency::{
 use crate::memory::ShortTermStore;
 use crate::memory_actor::LongTermMemoryClient;
 use crate::protocol_adapter::unknown_external_message_count;
-use crate::autonomous_mission_config::{
-    merge_from_json_partial, persist_config_and_snapshot, AutonomousMissionConfig, Horizon,
-    MissionStatusYaml,
-};
+use crate::autonomous_mission_config::{AutonomousMissionConfig, MissionStatusYaml};
 use crate::user_profile::UserProfile;
 use akasha_core::{EventEnvelope, EventType};
 use akasha_llm::CompletionRequest;
+use akasha_plugin_api::{PluginKind, PluginManifest};
 pub use akasha_store::tasks::MAX_PROGRESS_PER_TASK;
 use akasha_store::{
-    format_todos_plan_block, parse_todos_from_payload, AutonomousMissionStore, Schedule,
+    format_todos_plan_block, parse_todos_from_payload, Schedule,
     ScheduleException, ScheduleExceptionType, ScheduleStore, Task, TaskRunStatus, TaskStatus,
     TaskStore, TodoStatus, WorkspaceGraphStore,
 };
@@ -28,67 +29,150 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// On Windows, paths with verbatim prefix `\\?\` can cause "file not found" with some APIs. Return a path without it.
-#[cfg(windows)]
-fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
-    let s = p.to_string_lossy();
-    if s.starts_with(r"\\?\") {
-        PathBuf::from(s.replace(r"\\?\", ""))
-    } else {
-        p
-    }
-}
-#[cfg(not(windows))]
-fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
-    p
-}
-
-/// Normalize common Unicode apostrophes in filenames (e.g. ’ -> ').
-/// LLM tool calls may use typographic quotes, while files on disk typically use ASCII quotes.
-fn normalize_apostrophes(s: &str) -> String {
-    s.replace('’', "'").replace('‘', "'")
-}
-
-/// Lorsque `read_file` est appelé sans `<offset> <limit>` et sans `--full`, on ne renvoie que ces lignes.
-const READ_FILE_DEFAULT_MAX_LINES: usize = 500;
-/// Plafond UTF-8 pour `read_file … --full` (évite les fichiers énormes en mémoire côté prompt).
-const READ_FILE_FULL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
-/// Sous-chaîne présente dans la sortie modèle quand la fenêtre par défaut (500 lignes) a été appliquée.
-const READ_FILE_PARTIAL_DEFAULT_MARKER: &str = "(read_file partial: default window";
-
-/// Retire `--full`, détecte une fenêtre de lignes en fin d'arguments (`offset` `limit` entiers > 0).
-fn parse_read_file_args(args: &[String]) -> (Vec<String>, Option<(usize, usize)>, bool) {
-    let mut want_full = false;
-    let filtered: Vec<String> = args
-        .iter()
-        .filter_map(|a| {
-            if a == "--full" {
-                want_full = true;
-                None
-            } else {
-                Some(a.clone())
-            }
-        })
-        .collect();
-    if filtered.len() >= 3 {
-        let maybe_limit = filtered.last().and_then(|s| s.parse::<usize>().ok());
-        let maybe_offset = filtered
-            .get(filtered.len().saturating_sub(2))
-            .and_then(|s| s.parse::<usize>().ok());
-        if let (Some(off), Some(lim)) = (maybe_offset, maybe_limit) {
-            if off > 0 && lim > 0 {
-                let mut path = filtered;
-                path.pop();
-                path.pop();
-                return (path, Some((off, lim)), want_full);
-            }
-        }
-    }
-    (filtered, None, want_full)
-}
+pub use crate::api_http::{json_response, parse_content_length, parse_request};
+pub use crate::api_path_utils::{
+    normalize_apostrophes, parse_read_file_args, strip_verbatim_prefix, READ_FILE_DEFAULT_MAX_LINES,
+    READ_FILE_FULL_OUTPUT_MAX_BYTES, READ_FILE_PARTIAL_DEFAULT_MARKER,
+};
 
 /// Séparateur recommandé entre l’ancien et le nouveau texte (`TOOL:` est découpé sur les espaces, d’où un token `|` seul).
 const SEARCH_REPLACE_DELIM: &str = " | ";
+
+const BUDGET_SETTINGS_FILE: &str = "budget_settings.json";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct BudgetSettings {
+    daily_token_limit: u64,
+    warn_ratio: f64,
+    auto_concise: bool,
+}
+
+impl Default for BudgetSettings {
+    fn default() -> Self {
+        Self {
+            daily_token_limit: 1_000_000,
+            warn_ratio: 0.7,
+            auto_concise: true,
+        }
+    }
+}
+
+const SECOND_BRAIN_SETTINGS_FILE: &str = "memory_second_brain.json";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct SecondBrainSettings {
+    enabled: bool,
+    paused: bool,
+}
+
+impl Default for SecondBrainSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            paused: false,
+        }
+    }
+}
+
+fn load_second_brain_settings(data_dir: &Path) -> SecondBrainSettings {
+    let path = data_dir.join(SECOND_BRAIN_SETTINGS_FILE);
+    let raw = match std::fs::read_to_string(path) {
+        Ok(v) => v,
+        Err(_) => return SecondBrainSettings::default(),
+    };
+    serde_json::from_str::<SecondBrainSettings>(&raw).unwrap_or_default()
+}
+
+fn save_second_brain_settings(data_dir: &Path, settings: &SecondBrainSettings) -> anyhow::Result<()> {
+    let path = data_dir.join(SECOND_BRAIN_SETTINGS_FILE);
+    std::fs::write(path, serde_json::to_string_pretty(settings)?)?;
+    Ok(())
+}
+
+fn load_budget_settings(data_dir: &Path) -> BudgetSettings {
+    let path = data_dir.join(BUDGET_SETTINGS_FILE);
+    let raw = match std::fs::read_to_string(path) {
+        Ok(v) => v,
+        Err(_) => return BudgetSettings::default(),
+    };
+    serde_json::from_str::<BudgetSettings>(&raw).unwrap_or_default()
+}
+
+fn save_budget_settings(data_dir: &Path, settings: &BudgetSettings) -> anyhow::Result<()> {
+    let path = data_dir.join(BUDGET_SETTINGS_FILE);
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, serde_json::to_string_pretty(settings)?.as_bytes())?;
+    std::fs::rename(&tmp_path, &path)?;
+    Ok(())
+}
+
+fn tool_scope_key(tool: &str, tool_args: &[String]) -> String {
+    match tool {
+        "run_command" | "run_terminal" | "run_command_background" => tool_args
+            .iter()
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string(),
+        "write_file" => {
+            // write_file may receive a JSON payload with a `path` key, or plain args[0]
+            if let Some(path_from_json) = parse_write_file_request(tool_args)
+                .map(|(p, _)| p)
+                .filter(|p| !p.is_empty())
+            {
+                path_from_json
+            } else {
+                tool_args.get(0).cloned().unwrap_or_else(|| "global".to_string())
+            }
+        }
+        "delete_file" => {
+            // delete_file joins all args as a single path (spaces in filenames)
+            let joined = tool_args.join(" ").trim().to_string();
+            if joined.is_empty() { "global".to_string() } else { joined }
+        }
+        "edit_file" | "apply_patch" | "rename_path" | "move_tree" => {
+            tool_args.get(0).cloned().unwrap_or_else(|| "global".to_string())
+        }
+        _ => "global".to_string(),
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct PermissionModeState {
+    mode: String,
+    updated_at: String,
+}
+
+impl Default for PermissionModeState {
+    fn default() -> Self {
+        Self {
+            mode: "ask_me".to_string(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+fn load_permission_mode(data_dir: &Path) -> PermissionModeState {
+    let path = data_dir.join("permissions_mode.json");
+    let raw = match std::fs::read_to_string(path) {
+        Ok(v) => v,
+        Err(_) => return PermissionModeState::default(),
+    };
+    serde_json::from_str::<PermissionModeState>(&raw).unwrap_or_default()
+}
+
+fn save_permission_mode(data_dir: &Path, state: &PermissionModeState) -> anyhow::Result<()> {
+    let path = data_dir.join("permissions_mode.json");
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, serde_json::to_string_pretty(state)?.as_bytes())?;
+    std::fs::rename(&tmp_path, &path)?;
+    Ok(())
+}
 
 /// `args[0]` = chemin ; le reste = « ancien » puis ` | ` (recommandé) ou `|`, puis « nouveau ».
 /// Retire les `|` initiaux issus du découpage (`path | old | new` → `old | new`).
@@ -476,7 +560,7 @@ async fn pdf_extract_message_from_disk(
     }
 }
 
-fn resolve_tool_disk_path(raw: &str, workspace_root: Option<&Path>) -> PathBuf {
+pub(crate) fn resolve_tool_disk_path(raw: &str, workspace_root: Option<&Path>) -> PathBuf {
     let raw = normalize_tool_path_hint(raw);
     let raw = raw.trim();
     if raw.starts_with("workspace:/") || raw.starts_with("workspace:") {
@@ -515,41 +599,12 @@ use tokio::sync::RwLock;
 use tracing::Instrument;
 use uuid::Uuid;
 
-/// In-memory cache for AgentProfile to avoid repeated disk reads (invalidated on POST /api/agent-profile and after profile save in run_message_via_llm).
-pub type AgentProfileCache = Arc<RwLock<Option<AgentProfile>>>;
-
 /// Virtual workspace per task (Deep Agents-style). Paths prefixed with "workspace:/" or "workspace:" are read/written here instead of disk.
 pub type TaskWorkspaceStore =
     Arc<RwLock<std::collections::HashMap<Uuid, std::collections::HashMap<String, String>>>>;
 
 pub fn new_task_workspace_store() -> TaskWorkspaceStore {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
-}
-
-pub fn new_agent_profile_cache() -> AgentProfileCache {
-    Arc::new(RwLock::new(None))
-}
-
-/// Load profile from cache or disk and update cache.
-pub async fn get_or_load_agent_profile(data_dir: &Path, cache: &AgentProfileCache) -> AgentProfile {
-    {
-        let g = cache.read().await;
-        if let Some(ref p) = *g {
-            return p.clone();
-        }
-    }
-    let profile = AgentProfile::load(data_dir);
-    {
-        let mut g = cache.write().await;
-        *g = Some(profile.clone());
-    }
-    profile
-}
-
-/// Update cache after profile save (call after writing to disk).
-pub async fn set_agent_profile_cache(cache: &AgentProfileCache, profile: AgentProfile) {
-    let mut g = cache.write().await;
-    *g = Some(profile);
 }
 
 /// Cached result of fetching api/latest.json from the Akasha_app site (version, download_url, etc.).
@@ -956,6 +1011,13 @@ impl TaskUsageStore {
     pub async fn get_session(&self, session_id: &str) -> Option<(u64, f64)> {
         self.by_session.read().await.get(session_id).copied()
     }
+    pub async fn reset_session(&self, session_id: &str) {
+        self.by_session.write().await.remove(session_id);
+    }
+    pub async fn totals(&self) -> (u64, f64) {
+        let g = self.by_session.read().await;
+        g.values().fold((0u64, 0.0f64), |acc, v| (acc.0 + v.0, acc.1 + v.1))
+    }
 }
 
 pub fn new_task_completion_registry() -> TaskCompletionRegistry {
@@ -1271,90 +1333,6 @@ pub fn new_human_input_store() -> HumanInputStore {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
 }
 
-/// Parse headers from the first chunk to get header length and Content-Length. Returns (header_body_sep_index, content_length).
-/// header_body_sep_index is the index of the start of "\r\n\r\n"; body starts at header_body_sep_index + 4.
-pub fn parse_content_length(buf: &[u8]) -> Option<(usize, usize)> {
-    let sep = b"\r\n\r\n";
-    let header_end = buf.windows(sep.len()).position(|w| w == sep)?;
-    let header_slice = &buf[..header_end];
-    let mut content_length: Option<usize> = None;
-    for line in header_slice.split(|&b| b == b'\n') {
-        let line_str = String::from_utf8_lossy(line).to_string();
-        let line_str = line_str.trim_end_matches('\r');
-        if let Some((name, value)) = line_str.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                if let Ok(n) = value.trim().parse::<usize>() {
-                    content_length = Some(n);
-                }
-                break;
-            }
-        }
-    }
-    content_length.map(|cl| (header_end, cl))
-}
-
-/// Parsed HTTP request: method, path, body, and lowercase header map.
-pub fn parse_request(
-    buf: &[u8],
-) -> (
-    String,
-    String,
-    Option<Vec<u8>>,
-    std::collections::HashMap<String, String>,
-) {
-    let mut method = String::new();
-    let mut path = String::new();
-    let mut content_length = 0usize;
-    let mut headers = std::collections::HashMap::new();
-    let sep = b"\r\n\r\n";
-    let header_end = buf.windows(sep.len()).position(|w| w == sep);
-    let (header_slice, rest) = if let Some(i) = header_end {
-        (&buf[..i], &buf[i + sep.len()..])
-    } else {
-        (buf as &[u8], &[][..])
-    };
-    let lines: Vec<&[u8]> = header_slice.split(|&b| b == b'\n').collect();
-    for (i, line) in lines.iter().enumerate() {
-        let line_str = String::from_utf8_lossy(line)
-            .trim_end_matches('\r')
-            .to_string();
-        if i == 0 {
-            let parts: Vec<&str> = line_str.splitn(3, ' ').collect();
-            if parts.len() >= 2 {
-                method = parts[0].to_string();
-                path = parts[1].to_string();
-            }
-        } else if let Some((name, value)) = line_str.split_once(':') {
-            let name = name.trim().to_lowercase();
-            let value = value.trim().to_string();
-            if name == "content-length" {
-                if let Ok(n) = value.parse::<usize>() {
-                    content_length = n;
-                }
-            }
-            headers.insert(name, value);
-        }
-    }
-    const MAX_BODY_PARSE: usize = 10 * 1024 * 1024; // 10 MiB — refuse to allocate larger body
-    let will_allocate =
-        content_length > 0 && content_length <= MAX_BODY_PARSE && rest.len() >= content_length;
-    let body = if will_allocate {
-        Some(rest[..content_length].to_vec())
-    } else {
-        None
-    };
-    (method, path, body, headers)
-}
-
-pub fn json_response(status: &str, body: &str) -> String {
-    format!(
-        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
-        status,
-        body.len(),
-        body
-    )
-}
-
 /// Liste des outils disponibles (source unique pour le prompt et la doc).
 /// Format: une ligne par outil "nom — usage".
 /// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
@@ -1396,6 +1374,10 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("sessions_list", "sessions_list [limit] — lister les tâches/sessions récentes"),
     ("sessions_spawn", "sessions_spawn <message> [session_id] — créer une sous-tâche et la lancer"),
     ("session_status", "session_status <task_id> — statut d'une tâche donnée"),
+    ("schedule_task", "schedule_task <cron> <prompt> [title] — créer une tâche planifiée active."),
+    ("list_scheduled_tasks", "list_scheduled_tasks [limit] — lister les schedules actifs."),
+    ("cancel_scheduled_task", "cancel_scheduled_task <schedule_id> — supprimer un schedule par UUID."),
+    ("budget_status", "budget_status [session_id] — état budget (usage tokens/coût, seuil, auto-concise)."),
     ("message", "message send <channel> <text> — envoyer un message vers un canal (webhook configuré via AKASHA_MESSAGE_WEBHOOK_URL)"),
     ("browser", "browser navigate <url> — navigate (http/https; domain allowed). browser snapshot — texte + liens. browser screenshot | browser click <css> | browser fill <css> <texte> | browser wait <css_selector|ms> — automation Playwright (spec 39)."),
     ("install_playwright", "install_playwright — run npm install and npx playwright install chromium in the Playwright runner directory (scripts/playwright-runner or AKASHA_PLAYWRIGHT_RUNNER). Requires browser_enabled. Use after ask_user consent if you need explicit approval before download; optional require_approval in tools_policy."),
@@ -1553,108 +1535,8 @@ struct MessageIntentFlags {
     geolocation_distance: bool,
 }
 
-#[derive(Debug, Clone, Default)]
-struct RuntimeToolRoutingEnforcer {
-    preferred_tools: std::collections::HashSet<String>,
-    forbidden_tools: std::collections::HashSet<String>,
-}
-
-impl RuntimeToolRoutingEnforcer {
-    fn from_rules(rules: &[crate::plugins::registry::MatchedRoutingRule]) -> Option<Self> {
-        if rules.is_empty() {
-            return None;
-        }
-        let mut preferred_tools = std::collections::HashSet::new();
-        let mut forbidden_tools = std::collections::HashSet::new();
-        for rule in rules {
-            for tool in &rule.preferred_tools {
-                let t = tool.trim().to_lowercase();
-                if !t.is_empty() {
-                    preferred_tools.insert(t);
-                }
-            }
-            for tool in &rule.forbidden_tools {
-                let t = tool.trim().to_lowercase();
-                if !t.is_empty() {
-                    forbidden_tools.insert(t);
-                }
-            }
-        }
-        Some(Self {
-            preferred_tools,
-            forbidden_tools,
-        })
-    }
-
-    fn is_tool_allowed(&self, tool_name: &str, args: &[String]) -> bool {
-        let tool = canonicalize_tool_name(tool_name).to_lowercase();
-
-        if self.is_forbidden(&tool, args) {
-            return false;
-        }
-
-        // If no preferred list is declared, only forbidden list is enforced.
-        if self.preferred_tools.is_empty() {
-            return true;
-        }
-
-        // Always allow ask_user to unblock missing parameters.
-        if tool == "ask_user" {
-            return true;
-        }
-
-        if self.preferred_tools.contains(&tool) {
-            return true;
-        }
-
-        // Allow plugin.call / plugin.<id> when it targets a preferred plugin/tool family.
-        if tool == "plugin.call" || tool == "plugin_call" {
-            if let Some(plugin_id) = args.first().map(|s| s.trim().to_lowercase()) {
-                if self.preferred_tools.contains(&plugin_id)
-                    || self
-                        .preferred_tools
-                        .iter()
-                        .any(|p| p.starts_with(&(plugin_id.clone() + "_")))
-                {
-                    return true;
-                }
-            }
-        }
-
-        if let Some(plugin_id) = tool.strip_prefix("plugin.") {
-            let plugin_id = plugin_id.trim().to_lowercase();
-            if self.preferred_tools.contains(&plugin_id)
-                || self
-                    .preferred_tools
-                    .iter()
-                    .any(|p| p.starts_with(&(plugin_id.clone() + "_")))
-            {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn is_forbidden(&self, tool_name: &str, args: &[String]) -> bool {
-        if self.forbidden_tools.is_empty() {
-            return false;
-        }
-        if self.forbidden_tools.contains(tool_name) {
-            return true;
-        }
-        if (tool_name == "plugin.call" || tool_name == "plugin_call")
-            && args
-                .first()
-                .map(|s| self.forbidden_tools.contains(&s.trim().to_lowercase()))
-                .unwrap_or(false)
-        {
-            return true;
-        }
-        false
-    }
-}
-
+/// Heuristic intent labels for **debug only** (`GET/POST /api/plugins/routing_rules`).
+/// Runtime tool execution is no longer gated on manifest `routing_rules` / these intents.
 fn active_intents_from_flags(flags: &MessageIntentFlags) -> Vec<&'static str> {
     let mut out = Vec::new();
     if flags.save_file {
@@ -1685,104 +1567,6 @@ fn active_intents_from_flags(flags: &MessageIntentFlags) -> Vec<&'static str> {
         out.push("geolocation_distance");
     }
     out
-}
-
-fn code_studio_disable_plugin_intents(flags: &mut MessageIntentFlags) {
-    // Code Studio requests are code/project scoped; plugin routing intents for travel/geolocation
-    // can hijack tool selection and force unrelated plugins.
-    flags.transport = false;
-    flags.geolocation_distance = false;
-}
-
-fn build_plugin_routing_reminders(
-    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
-    message: &str,
-    flags: &MessageIntentFlags,
-    tools_executor_snapshot: Option<&std::sync::Arc<akasha_tools::ToolExecutor>>,
-) -> (String, bool) {
-    let Some(registry) = plugin_registry else {
-        return (String::new(), false);
-    };
-    let intents = active_intents_from_flags(flags);
-    if intents.is_empty() {
-        return (String::new(), false);
-    }
-
-    let rules = registry.match_routing_rules(message, &intents, |tool_name| {
-        tools_executor_snapshot
-            .as_ref()
-            .map(|e| e.policy.can_use_tool(tool_name))
-            .unwrap_or(false)
-    });
-    if rules.is_empty() {
-        return (String::new(), false);
-    }
-
-    let matched_plugins: Vec<String> = rules.iter().map(|r| r.plugin_id.clone()).collect();
-    tracing::info!(
-        intents = ?intents,
-        matched_rules = rules.len(),
-        plugins = ?matched_plugins,
-        "Dynamic plugin routing rules matched"
-    );
-
-    let mut seen = std::collections::HashSet::new();
-    let mut lines = Vec::new();
-    let mut geolocation_handled = false;
-    for rule in rules.into_iter().take(4) {
-        if rule
-            .intent
-            .as_deref()
-            .is_some_and(|intent| intent.eq_ignore_ascii_case("geolocation_distance"))
-        {
-            geolocation_handled = true;
-        }
-        let instruction = rule.instruction.trim();
-        if instruction.is_empty() {
-            continue;
-        }
-        if seen.insert(instruction.to_string()) {
-            lines.push(format!("- {}", instruction));
-        }
-    }
-    if lines.is_empty() {
-        return (String::new(), geolocation_handled);
-    }
-
-    let block = format!(
-        "\n[Dynamic plugin routing rules — auto-loaded from installed plugin manifests]\n{}\n\n",
-        lines.join("\n")
-    );
-    (block, geolocation_handled)
-}
-
-fn build_runtime_tool_routing_enforcer(
-    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
-    message: &str,
-    flags: &MessageIntentFlags,
-    tools_executor_snapshot: Option<&std::sync::Arc<akasha_tools::ToolExecutor>>,
-) -> Option<RuntimeToolRoutingEnforcer> {
-    let registry = plugin_registry?;
-    let intents = active_intents_from_flags(flags);
-    if intents.is_empty() {
-        return None;
-    }
-
-    let rules = registry.match_routing_rules(message, &intents, |tool_name| {
-        tools_executor_snapshot
-            .as_ref()
-            .map(|e| e.policy.can_use_tool(tool_name))
-            .unwrap_or(false)
-    });
-
-    let enforcer = RuntimeToolRoutingEnforcer::from_rules(&rules)?;
-    tracing::info!(
-        intents = ?intents,
-        preferred_tools = ?enforcer.preferred_tools,
-        forbidden_tools = ?enforcer.forbidden_tools,
-        "Runtime tool routing enforcement enabled"
-    );
-    Some(enforcer)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3371,802 +3155,13 @@ async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: 
     }
 }
 
-/// Split by whitespace but keep double-quoted segments as a single token (e.g. -H "Authorization: Bearer $X" -> [-H, "Authorization: Bearer $X"]).
-fn split_whitespace_respecting_quotes(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = s.trim();
-    while !rest.is_empty() {
-        rest = rest.trim_start();
-        if rest.is_empty() {
-            break;
-        }
-        if rest.starts_with('"') {
-            let mut end = 1usize;
-            while end < rest.len() {
-                let b = rest.as_bytes()[end];
-                if b == b'\\' && end + 1 < rest.len() {
-                    end += 2;
-                    continue;
-                }
-                if b == b'"' {
-                    out.push(rest[1..end].replace("\\\"", "\""));
-                    rest = &rest[end + 1..];
-                    break;
-                }
-                end += 1;
-            }
-            if end >= rest.len() {
-                // Unclosed quote: slice only if rest has content after the opening quote (avoid rest[1..] when len==1)
-                let quoted = if rest.len() > 1 { &rest[1..] } else { "" };
-                out.push(quoted.replace("\\\"", "\""));
-                rest = "";
-            }
-        } else {
-            let next_quote = rest.find('"').unwrap_or(rest.len());
-            let word_end = rest[..next_quote]
-                .find(|c: char| c.is_whitespace())
-                .unwrap_or(rest.len());
-            let word = rest[..word_end].trim();
-            if !word.is_empty() {
-                out.push(word.to_string());
-            }
-            rest = &rest[word_end..];
-        }
-    }
-    out
-}
+pub(crate) use crate::api_tool_parser::parse_tool_calls;
 
-/// Strip `- ` / `* ` / `1. ` list prefixes so tool lines can be detected.
-fn strip_optional_list_prefix(line: &str) -> &str {
-    let mut s = line.trim_start();
-    for p in ["- ", "* ", "+ ", "• "] {
-        if let Some(r) = s.strip_prefix(p) {
-            s = r.trim_start();
-            break;
-        }
-    }
-    if s.is_empty() {
-        return s;
-    }
-    if s.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        if let Some(dot) = s.find('.') {
-            if dot > 0 && s[..dot].chars().all(|c| c.is_ascii_digit()) {
-                return s[dot + 1..].trim_start();
-            }
-        }
-    }
-    s
-}
+pub(crate) use crate::api_tool_dispatch::process_ops::{parse_run_command_args, resolve_run_command_working_dir};
 
-/// Strip ATX heading hashes (`### Title` → `Title`).
-fn strip_markdown_heading_hashes(line: &str) -> &str {
-    let mut s = line.trim_start();
-    let mut n = 0usize;
-    while s.starts_with('#') && n < 7 {
-        n += 1;
-        s = &s[1..];
-    }
-    if n > 0 {
-        s = s.trim_start();
-    }
-    s
-}
+pub(crate) use crate::api_tool_dispatch::web_device_memory_ops::parse_device_invoke_params;
 
-/// Leading markdown noise before `TOOL` (table pipes, headings, lists, bold, backticks).
-fn strip_leading_tool_line_noise(line: &str) -> &str {
-    let mut s = line.trim_start();
-    while s.starts_with('|') {
-        s = s[1..].trim_start();
-    }
-    s = strip_markdown_heading_hashes(s);
-    s = strip_optional_list_prefix(s);
-    s = s
-        .trim_start_matches(|c: char| matches!(c, '*' | '`'))
-        .trim_start();
-    s
-}
-
-/// True if `prefix` is only whitespace and common markdown punctuation (no letters/words — avoids matching prose before `TOOL:`).
-fn tool_line_prefix_is_markdown_junk_only(prefix: &str) -> bool {
-    prefix.trim().chars().all(|c| {
-        c.is_whitespace()
-            || matches!(
-                c,
-                '#' | '*'
-                    | '`'
-                    | '|'
-                    | '•'
-                    | '-'
-                    | '+'
-                    | ':'
-                    | '.'
-                    | ';'
-                    | ','
-                    | '/'
-                    | '\\'
-                    | '('
-                    | ')'
-                    | '['
-                    | ']'
-            )
-            || c.is_ascii_digit()
-    })
-}
-
-/// First word after `TOOL:` must match a real tool when using the "inline" heuristic (avoids prose `… TOOL: …`).
-const ORCH_INLINE_TOOL_FIRST_WORDS: &[&str] = &[
-    "write_file",
-    "read_file",
-    "edit_file",
-    "search_replace",
-    "apply_patch",
-    "list_dir",
-    "grep_content",
-    "web_search",
-    "web_fetch",
-    "web_crawl",
-    "web_crawl_status",
-    "run_command",
-    "browser",
-    "install_playwright",
-    "read_skill",
-    "memory_store",
-    "workspace_graph_search",
-    "device_invoke",
-    "ask_user",
-    "generate_image",
-    "pdf",
-];
-
-/// `### Step — TOOL: write_file`, table junk, or other lines where `TOOL:` is not at column 0 after strips.
-fn inline_ascii_tool_colon_rest(line: &str) -> Option<&str> {
-    let t = line.trim();
-    let mut search = t;
-    let mut last_ok: Option<&str> = None;
-    while let Some(pos) = search.find("TOOL:") {
-        let abs = t.len() - search.len() + pos;
-        let prefix = &t[..abs];
-        let rest = t[abs + 5..].trim_start();
-        if let Some(tok) = rest.split_whitespace().next() {
-            let tl = tok.to_lowercase();
-            if ORCH_INLINE_TOOL_FIRST_WORDS
-                .iter()
-                .any(|&n| n == tl.as_str())
-            {
-                if tool_line_prefix_is_markdown_junk_only(prefix) {
-                    last_ok = Some(rest);
-                }
-            }
-        }
-        search = &t[abs + 5..];
-    }
-    last_ok
-}
-
-/// If the line begins with `tool` (case-insensitive) as a keyword followed by optional `*` / `` ` `` and `:`, return the rest.
-/// Handles models that emit `- Tool:`, `**TOOL:**`, table cells `| TOOL: ... |`, etc., when substring `TOOL:` is present but strict parse failed.
-fn line_rest_after_leading_tool(line: &str) -> Option<&str> {
-    line_rest_after_leading_tool_at_start(line).or_else(|| inline_ascii_tool_colon_rest(line))
-}
-
-fn line_rest_after_leading_tool_at_start(line: &str) -> Option<&str> {
-    let s = strip_leading_tool_line_noise(line);
-    if s.len() < 4 {
-        return None;
-    }
-    if !s.get(0..4)?.eq_ignore_ascii_case("tool") {
-        return None;
-    }
-    // Reject `tools:` / `toolkit:` — fifth char must not be ASCII letter.
-    if s.as_bytes().get(4).is_some_and(|b| b.is_ascii_alphabetic()) {
-        return None;
-    }
-    let mut rest = &s[4..];
-    rest = rest.trim_start();
-    while rest.starts_with('*') || rest.starts_with('`') {
-        rest = &rest[1..];
-    }
-    rest = rest.strip_prefix(':')?;
-    rest = rest.trim_start();
-    while rest.starts_with('*') || rest.starts_with('`') {
-        rest = &rest[1..];
-    }
-    // Drop trailing table pipe from first cell
-    let rest = rest.trim_end();
-    let rest = rest.strip_suffix('|').map(|x| x.trim_end()).unwrap_or(rest);
-    Some(rest.trim_start())
-}
-
-/// Returns true if `tool_name` (already lower-cased) takes a multiline body argument.
-fn tool_supports_multiline_body(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "apply_patch" | "edit_file" | "write_file" | "ask_user"
-    )
-}
-
-fn tool_name_is_safe_identifier(tool_name: &str) -> bool {
-    !tool_name.is_empty()
-        && tool_name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-}
-
-/// DeepSeek / variantes : balises style `<｜DSML｜tool_calls>…<｜DSML｜invoke name="…">…</｜DSML｜invoke>`.
-/// Le découpage sur espaces ne s’applique pas au XML ; on convertit en lignes `TOOL:` avant `parse_tool_calls`.
-fn normalize_dsml_tool_calls(response: &str) -> String {
-    let lower = response.to_ascii_lowercase();
-    if !lower.contains("dsml") || !lower.contains("invoke") || !response.contains('<') {
-        return response.to_string();
-    }
-    static DSML_TOOL_CALLS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    static DSML_INVOKE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    static DSML_PARAM: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let tc = DSML_TOOL_CALLS.get_or_init(|| {
-        regex::Regex::new(
-            r"(?is)<[^>]{0,160}?\bdsml[^>]{0,160}?\btool_calls[^>]*>([\s\S]*?)</[^>]{0,160}?\bdsml[^>]{0,160}?\btool_calls[^>]*>",
-        )
-        .expect("dsml tool_calls regex")
-    });
-    let inv = DSML_INVOKE.get_or_init(|| {
-        regex::Regex::new(
-            r#"(?is)<[^>]{0,160}?\binvoke\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</[^>]{0,160}?\binvoke[^>]*>"#,
-        )
-        .expect("dsml invoke regex")
-    });
-    let par = DSML_PARAM.get_or_init(|| {
-        regex::Regex::new(
-            r#"(?is)<[^>]{0,160}?\bparameter\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>\s*(.*?)\s*</[^>]{0,160}?\bparameter[^>]*>"#,
-        )
-        .expect("dsml parameter regex")
-    });
-
-    let mut s = tc
-        .replace_all(response, |caps: &regex::Captures| {
-            let inner = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            let lines = dsml_fragment_invokes_to_tool_lines(inner, inv, par);
-            if lines.is_empty() {
-                return caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default();
-            }
-            lines.join("\n")
-        })
-        .into_owned();
-
-    // Invokes restants (hors bloc tool_calls, ou variante sans wrapper)
-    static DSML_STANDALONE_INVOKE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let sinv = DSML_STANDALONE_INVOKE.get_or_init(|| {
-        regex::Regex::new(
-            r#"(?is)<[^>]{0,160}?\bdsml[^>]{0,160}?\binvoke\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</[^>]{0,160}?\bdsml[^>]{0,160}?\binvoke[^>]*>"#,
-        )
-        .expect("dsml standalone invoke regex")
-    });
-    s = sinv
-        .replace_all(&s, |caps: &regex::Captures| {
-            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("").trim();
-            let body = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-            let params = dsml_parse_parameters(body, par);
-            let args = dsml_params_to_tool_args(name, &params);
-            format!("TOOL: {} {}", name, args.join(" "))
-        })
-        .into_owned();
-
-    s
-}
-
-fn dsml_simple_entity_decode(s: &str) -> String {
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-}
-
-fn dsml_truthy_param(v: &str) -> bool {
-    matches!(
-        v.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on" | ""
-    )
-}
-
-fn dsml_parse_parameters(body: &str, par: &regex::Regex) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for c in par.captures_iter(body) {
-        let name = c.get(1).map(|m| m.as_str()).unwrap_or("").trim().to_string();
-        let val = dsml_simple_entity_decode(c.get(2).map(|m| m.as_str()).unwrap_or("").trim());
-        if !name.is_empty() {
-            out.push((name, val));
-        }
-    }
-    out
-}
-
-fn dsml_params_to_tool_args(tool: &str, params: &[(String, String)]) -> Vec<String> {
-    let tl = tool.trim().to_ascii_lowercase();
-    match tl.as_str() {
-        "search_files" => {
-            let mut dir = ".".to_string();
-            let mut pat = "*".to_string();
-            let mut no_ignore = false;
-            for (k, v) in params {
-                let kl = k.to_ascii_lowercase();
-                match kl.as_str() {
-                    "dir" => {
-                        if !v.is_empty() {
-                            dir = v.clone();
-                        }
-                    }
-                    "pattern" | "glob" => {
-                        if !v.is_empty() {
-                            pat = v.clone();
-                        }
-                    }
-                    "--no-ignore" | "--no-gitignore" | "no_ignore" => {
-                        if dsml_truthy_param(v) {
-                            no_ignore = true;
-                        }
-                    }
-                    "limit" | "offset" | "max" | "max_results" | "top_k" | "string" => {}
-                    _ => {}
-                }
-            }
-            let mut out = vec![dir, pat];
-            if no_ignore {
-                out.push("--no-ignore".to_string());
-            }
-            out
-        }
-        "grep_content" => {
-            let mut dir = ".".to_string();
-            let mut pattern = String::new();
-            let mut file_glob: Option<String> = None;
-            let mut no_ignore = false;
-            let mut use_regex = false;
-            for (k, v) in params {
-                let kl = k.to_ascii_lowercase();
-                match kl.as_str() {
-                    "dir" => {
-                        if !v.is_empty() {
-                            dir = v.clone();
-                        }
-                    }
-                    "pattern" | "query" => pattern = v.clone(),
-                    "file_glob" | "glob" => {
-                        if !v.is_empty() {
-                            file_glob = Some(v.clone());
-                        }
-                    }
-                    "--no-ignore" | "--no-gitignore" | "no_ignore" => {
-                        if dsml_truthy_param(v) {
-                            no_ignore = true;
-                        }
-                    }
-                    "--regex" | "-r" | "regex" => {
-                        if dsml_truthy_param(v) {
-                            use_regex = true;
-                        }
-                    }
-                    "limit" | "string" | "offset" => {}
-                    _ => {}
-                }
-            }
-            let mut out = vec![dir, pattern];
-            if let Some(g) = file_glob {
-                if !g.is_empty() {
-                    out.push(g);
-                }
-            }
-            if use_regex {
-                out.push("--regex".to_string());
-            }
-            if no_ignore {
-                out.push("--no-ignore".to_string());
-            }
-            out
-        }
-        _ => dsml_generic_params_to_args(params),
-    }
-}
-
-fn dsml_generic_params_to_args(params: &[(String, String)]) -> Vec<String> {
-    let mut out = Vec::new();
-    for (k, v) in params {
-        let kt = k.trim();
-        if kt.eq_ignore_ascii_case("string") {
-            continue;
-        }
-        if kt.starts_with("--") {
-            if dsml_truthy_param(v) {
-                out.push(kt.to_string());
-            }
-        } else if !v.is_empty() {
-            out.push(v.clone());
-        }
-    }
-    out
-}
-
-fn dsml_fragment_invokes_to_tool_lines(
-    inner: &str,
-    inv: &regex::Regex,
-    par: &regex::Regex,
-) -> Vec<String> {
-    let mut lines = Vec::new();
-    for c in inv.captures_iter(inner) {
-        let name = c.get(1).map(|m| m.as_str()).unwrap_or("").trim();
-        if name.is_empty() {
-            continue;
-        }
-        let body = c.get(2).map(|m| m.as_str()).unwrap_or("");
-        let params = dsml_parse_parameters(body, par);
-        let args = dsml_params_to_tool_args(name, &params);
-        lines.push(format!("TOOL: {} {}", name, args.join(" ")));
-    }
-    lines
-}
-
-/// Certains modèles enveloppent les appels outils en XML (`<tool_call>read_file …</tool_call>`)
-/// ou enchaînent avec `<tool_call>…<tool_call>…` sans fermeture. Convertir en lignes `TOOL:` pour `parse_tool_calls`.
-fn normalize_xml_tool_call_wrappers(response: &str) -> String {
-    static CLOSE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    static OPEN_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-
-    let lower = response.to_ascii_lowercase();
-    if !lower.contains("<tool_call") {
-        return response.to_string();
-    }
-    let close_re = CLOSE_RE.get_or_init(|| {
-        regex::Regex::new(r"(?i)</tool_call\s*>").expect("hard-coded close tool_call regex must compile")
-    });
-    let s = close_re.replace_all(response, "\n").to_string();
-    let open_re = OPEN_RE.get_or_init(|| {
-        regex::Regex::new(r"(?i)<tool_call(?:\s[^>]*)?>\s*")
-            .expect("hard-coded open tool_call regex must compile")
-    });
-    open_re.replace_all(&s, "\nTOOL: ").to_string()
-}
-
-/// Rewrite lines so strict `TOOL:` prefix parsing succeeds (see `parse_tool_calls`).
-///
-/// Lines that are inside the body of a multiline tool (`write_file`, `edit_file`,
-/// `apply_patch`, `ask_user`) are **not** normalized — only a real tool header
-/// (canonical `TOOL: …` or a sloppy markdown-style prefix recognized by
-/// `line_rest_after_leading_tool`, e.g. `- Tool: …` or `**TOOL:** …`) can
-/// terminate a body.  Lines that merely *mention* a tool mid-sentence
-/// (e.g. `### Step — TOOL: read_file`) remain body content because
-/// `line_rest_after_leading_tool` requires the keyword to appear at the effective
-/// start of the line after stripping markdown noise.
-fn normalize_response_tool_prefixes(response: &str) -> String {
-    let mut in_fence = false;
-    let mut in_multiline_body = false;
-    let mut out_lines = Vec::new();
-
-    for raw in response.lines() {
-        let trimmed = raw.trim();
-
-        // Track fenced code blocks (``` or ```lang) — never normalize inside them.
-        if trimmed.starts_with("```") {
-            in_fence = !in_fence;
-            out_lines.push(raw.to_string());
-            continue;
-        }
-
-        if in_fence {
-            out_lines.push(raw.to_string());
-            continue;
-        }
-
-        // Inside a multiline body, exit body mode only when the line is a real
-        // tool header — either the canonical "TOOL: …" form or a sloppy
-        // markdown-style prefix that `line_rest_after_leading_tool` recognises
-        // (e.g. "- Tool: …", "**TOOL:** …").  Lines where TOOL: is embedded
-        // after non-noise text (e.g. "### Step — TOOL: read_file") are kept as
-        // body content because `line_rest_after_leading_tool` requires the
-        // keyword at the effective start of the line.
-        if in_multiline_body {
-            if raw.trim_start().starts_with("TOOL:") || line_rest_after_leading_tool(raw).is_some()
-            {
-                // Real tool header (canonical or sloppy) — exit body mode and fall through.
-                in_multiline_body = false;
-            } else {
-                out_lines.push(raw.to_string());
-                continue;
-            }
-        }
-
-        if let Some(rest) = line_rest_after_leading_tool(raw) {
-            let normalized = format!("TOOL: {}", rest);
-            // If this tool supports a multiline body, subsequent lines are body content.
-            if let Some(name) = rest.split_whitespace().next() {
-                if tool_supports_multiline_body(&name.to_lowercase()) {
-                    in_multiline_body = true;
-                }
-            }
-            out_lines.push(normalized);
-        } else {
-            // Already canonical TOOL: line — still need to track body-mode entry.
-            if let Some(rest) = trimmed.strip_prefix("TOOL:") {
-                if let Some(name) = rest.trim().split_whitespace().next() {
-                    if tool_supports_multiline_body(&name.to_lowercase()) {
-                        in_multiline_body = true;
-                    }
-                }
-            }
-            out_lines.push(raw.to_string());
-        }
-    }
-
-    out_lines.join("\n")
-}
-
-/// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
-fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
-    let dsml_norm = normalize_dsml_tool_calls(response);
-    let xml_norm = normalize_xml_tool_call_wrappers(&dsml_norm);
-    let normalized = normalize_response_tool_prefixes(&xml_norm);
-    parse_tool_calls_strict(&normalized)
-}
-
-/// Parse already-normalized tool lines (internal).
-fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String>)> {
-    let mut out = Vec::new();
-    let lines: Vec<&str> = response.lines().collect();
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i].trim();
-        if let Some(rest) = line.strip_prefix("TOOL:") {
-            let rest = rest.trim();
-            // Split by whitespace, respecting double-quoted args (so run_command -H "Bearer $VAR" works)
-            let parts: Vec<String> = split_whitespace_respecting_quotes(rest);
-            if let Some((name, fixed_args)) = parts.split_first() {
-                let tool_name_lc = name.to_lowercase();
-                if !tool_name_is_safe_identifier(&tool_name_lc) {
-                    i += 1;
-                    continue;
-                }
-                let mut args = fixed_args.to_vec();
-                // Only certain tools support a multi-line body argument.
-                let supports_body = tool_supports_multiline_body(&tool_name_lc);
-
-                if supports_body {
-                    // Collect subsequent non-TOOL: lines as a raw multi-line body (for
-                    // tools like apply_patch / edit_file that need preserved whitespace).
-                    i += 1;
-                    let body_start = i;
-                    while i < lines.len() && !lines[i].trim_start().starts_with("TOOL:") {
-                        i += 1;
-                    }
-                    // Trim trailing blank lines from the body
-                    let mut body_end = i;
-                    while body_end > body_start && lines[body_end - 1].trim().is_empty() {
-                        body_end -= 1;
-                    }
-                    if body_end > body_start {
-                        args.push(lines[body_start..body_end].join("\n"));
-                    }
-                    out.push((name.clone(), args));
-                    continue;
-                } else {
-                    // For other tools, only use the header line arguments and
-                    // do not consume following lines as a body.
-                    out.push((name.clone(), args));
-                    i += 1;
-                    continue;
-                }
-            }
-        }
-        i += 1;
-    }
-    out
-}
-
-/// Parse run_command args: leading VAULT:vault_key=ENV_VAR entries are extracted;
-/// optional `--cwd <path>` (after VAULT lines) sets the working directory;
-/// the next token is the command, the rest are command arguments.
-/// Returns (vault_specs, cwd_flag, command, cmd_args).
-fn parse_run_command_args(
-    args: &[String],
-) -> (Vec<(String, String)>, Option<String>, String, Vec<String>) {
-    let mut vault_specs = Vec::new();
-    let mut rest: Vec<String> = Vec::new();
-    for arg in args {
-        if let Some(s) = arg.strip_prefix("VAULT:") {
-            if let Some((vault_key, env_var)) = s.split_once('=') {
-                vault_specs.push((vault_key.trim().to_string(), env_var.trim().to_string()));
-            }
-            continue;
-        }
-        rest.push(arg.clone());
-    }
-    let mut cwd_flag: Option<String> = None;
-    if rest.len() >= 2 && rest[0] == "--cwd" {
-        cwd_flag = Some(rest[1].clone());
-        rest.drain(..2);
-    }
-    let (command, cmd_args) = rest
-        .split_first()
-        .map(|(c, a)| (c.clone(), a.to_vec()))
-        .unwrap_or_else(|| (String::new(), Vec::new()));
-    (vault_specs, cwd_flag, command, cmd_args)
-}
-
-/// Resolve working directory for `run_command` / `run_terminal` / `run_command_background`.
-/// Returns `None` for legacy behavior (daemon process cwd). Returns `Some(path)` when `--cwd` was set
-/// or `run_command_default_cwd_workspace` applies.
-fn resolve_run_command_working_dir(
-    cwd_flag: Option<&str>,
-    workspace_root: Option<&std::path::Path>,
-    policy: &akasha_tools::ToolsPolicy,
-) -> Result<Option<std::path::PathBuf>, String> {
-    if let Some(raw) = cwd_flag {
-        let raw = raw.trim();
-        if raw.is_empty() {
-            return Err("--cwd requires a non-empty path".to_string());
-        }
-        let p = resolve_tool_disk_path(raw, workspace_root);
-        let p = strip_verbatim_prefix(p);
-        let meta = std::fs::metadata(&p).map_err(|e| format!("cwd {}: {}", p.display(), e))?;
-        if !meta.is_dir() {
-            return Err(format!("--cwd is not a directory: {}", p.display()));
-        }
-        if !policy.can_read(&p) {
-            return Err(format!(
-                "cwd not allowed by policy (allowed_read_paths): {}",
-                p.display()
-            ));
-        }
-        return Ok(Some(p));
-    }
-    if policy.run_command_default_cwd_workspace {
-        if let Some(root) = workspace_root {
-            let root_pb = strip_verbatim_prefix(root.to_path_buf());
-            if root_pb.is_dir() && policy.can_read(&root_pb) {
-                return Ok(Some(root_pb));
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Open a URL in the system default browser. Only http and https URLs are allowed.
-#[allow(dead_code)]
-fn open_url_in_browser(url: &str) -> Result<(), String> {
-    let url = url.trim();
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err("Only http and https URLs are allowed".to_string());
-    }
-    let parsed = url
-        .parse::<url::Url>()
-        .map_err(|e| format!("Invalid URL: {}", e))?;
-    let scheme = parsed.scheme().to_ascii_lowercase();
-    if scheme != "http" && scheme != "https" {
-        return Err("Only http and https URLs are allowed".to_string());
-    }
-    let status = match std::env::consts::OS {
-        "windows" => std::process::Command::new("cmd")
-            .args(["/c", "start", "", url])
-            .status()
-            .map_err(|e| e.to_string())?,
-        "macos" => std::process::Command::new("open")
-            .arg(url)
-            .status()
-            .map_err(|e| e.to_string())?,
-        _ => std::process::Command::new("xdg-open")
-            .arg(url)
-            .status()
-            .map_err(|e| e.to_string())?,
-    };
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("Command exited with: {}", status))
-    }
-}
-
-/// Parse `device_invoke` params from the tail of the args list (args[3..]).
-/// - No extra args → `{}`
-/// - Single arg that is valid JSON → that JSON value
-/// - Single arg that is not valid JSON → `{}`
-/// - Multiple args → JSON array of strings
-fn parse_device_invoke_params(args: &[String]) -> serde_json::Value {
-    if args.len() <= 3 {
-        serde_json::json!({})
-    } else if args.len() == 4 {
-        serde_json::from_str::<serde_json::Value>(&args[3])
-            .unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!(args[3..].to_vec())
-    }
-}
-
-/// Root task id for the `workspace:/` virtual store (same bucket as `write_file`).
-/// Orchestrated children must read the lineage root map; otherwise they miss files written under the parent id.
-fn workspace_lineage_root_task_id(task_id: Uuid, store_path: Option<&std::path::Path>) -> Uuid {
-    store_path
-        .and_then(|sp| TaskStore::open(sp).ok())
-        .map(|s| {
-            let mut current = task_id;
-            for _ in 0..8 {
-                let parent = s.get(current).ok().flatten().and_then(|t| t.parent_task_id);
-                match parent {
-                    Some(p) => current = p,
-                    None => break,
-                }
-            }
-            current
-        })
-        .unwrap_or(task_id)
-}
-
-/// LLMs often paste a **stale** root id into `workspace:/.akasha/plan_<uuid>.md` (e.g. from an older run).
-/// Rewrite to this task's lineage root so reads/writes target the live orchestration plan.
-fn rewrite_workspace_plan_key_to_lineage_root(
-    key: &str,
-    lineage_root: Uuid,
-) -> (String, Option<Uuid>) {
-    const PREFIX: &str = ".akasha/plan_";
-    const SUFFIX: &str = ".md";
-    let k = key.replace('\\', "/");
-    if !k.starts_with(PREFIX) || !k.ends_with(SUFFIX) {
-        return (key.to_string(), None);
-    }
-    let mid = &k[PREFIX.len()..k.len() - SUFFIX.len()];
-    let Ok(parsed) = Uuid::parse_str(mid) else {
-        return (key.to_string(), None);
-    };
-    if parsed == lineage_root {
-        return (k, None);
-    }
-    let new_key = format!("{PREFIX}{lineage_root}{SUFFIX}");
-    (new_key, Some(parsed))
-}
-
-/// Rewrite a full `workspace:/...` path string so that any stale plan UUID is replaced by the
-/// lineage-root UUID.  Non-workspace paths and non-plan-trace paths are returned unchanged.
-/// Used before calling `resolve_tool_disk_path` for partial-edit tools (`search_replace`,
-/// `edit_file`, `apply_patch`) so they operate on the live plan file rather than a stale copy.
-fn rewrite_workspace_plan_path_str(
-    path_str: &str,
-    task_id: Uuid,
-    store_path: Option<&std::path::Path>,
-) -> String {
-    if !(path_str.starts_with("workspace:/") || path_str.starts_with("workspace:")) {
-        return path_str.to_string();
-    }
-    let key = path_str
-        .trim_start_matches("workspace:/")
-        .trim_start_matches("workspace:")
-        .trim_start_matches('/');
-    let lineage_id = workspace_lineage_root_task_id(task_id, store_path);
-    let (new_key, _) = rewrite_workspace_plan_key_to_lineage_root(key, lineage_id);
-    format!("workspace:/{new_key}")
-}
-
-/// After a successful partial edit (`edit_file`, `search_replace`, `apply_patch`) on a `workspace:/` path,
-/// re-read the updated disk file and insert it into the in-memory workspace store so that subsequent
-/// `read_file workspace:/` calls return the latest content.
-async fn sync_workspace_store_from_disk(
-    workspace_store: Option<&TaskWorkspaceStore>,
-    task_id: Uuid,
-    store_path: Option<&std::path::Path>,
-    workspace_path_str: &str,
-    disk_path: &std::path::Path,
-) {
-    let Some(ws) = workspace_store else { return };
-    let key = workspace_path_str
-        .trim_start_matches("workspace:/")
-        .trim_start_matches("workspace:")
-        .trim_start_matches('/')
-        .to_string();
-    let lineage_task_id = workspace_lineage_root_task_id(task_id, store_path);
-    let (key, _) = rewrite_workspace_plan_key_to_lineage_root(&key, lineage_task_id);
-    if let Ok(updated) = tokio::fs::read_to_string(disk_path).await {
-        let mut guard = ws.write().await;
-        guard
-            .entry(lineage_task_id)
-            .or_default()
-            .insert(key, updated);
-    }
-}
+pub(crate) use crate::api_tool_dispatch::fs_ops::{rewrite_workspace_plan_key_to_lineage_root, rewrite_workspace_plan_path_str, sync_workspace_store_from_disk, workspace_lineage_root_task_id};
 
 fn parse_plugin_tool_invocation(
     plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
@@ -4227,6 +3222,43 @@ fn parse_plugin_tool_invocation(
 }
 
 async fn execute_tool_call(
+    executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
+    tool_name: &str,
+    args: &[String],
+    process_registry: Option<&ProcessRegistry>,
+    long_term_client: Option<&LongTermMemoryClient>,
+    task_id: Uuid,
+    store_path: Option<&std::path::Path>,
+    conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
+    message_webhook_url: Option<&str>,
+    plugin_registry: Option<&std::sync::Arc<crate::plugins::PluginRegistry>>,
+    device_bridge: Option<&std::sync::Arc<crate::device_bridge::DeviceBridge>>,
+    workspace_store: Option<&TaskWorkspaceStore>,
+    browser_registry: Option<&crate::browser::BrowserSessionRegistry>,
+    workspace_root: Option<&std::path::Path>,
+) -> (bool, String, Option<String>) {
+    crate::api_tool_dispatch::execute_tool_call(
+        crate::api_tool_dispatch::ToolCallContext {
+            process_registry,
+            long_term_client,
+            task_id,
+            store_path,
+            conv_tx,
+            message_webhook_url,
+            plugin_registry,
+            device_bridge,
+            workspace_store,
+            browser_registry,
+            workspace_root,
+        },
+        executor,
+        tool_name,
+        args,
+    )
+    .await
+}
+
+pub(crate) async fn execute_tool_call_impl(
     executor: &std::sync::Arc<akasha_tools::ToolExecutor>,
     tool_name: &str,
     args: &[String],
@@ -5079,6 +4111,169 @@ async fn execute_tool_call(
                 }
                 (_, _) => (false, "[sessions_spawn] store or conversation channel not available".to_string(), None),
             }
+        }
+        "schedule_task" => {
+            let cron = args.get(0).map(String::as_str).unwrap_or("").trim().to_string();
+            let mut title = "Agent scheduled task".to_string();
+            let mut prompt_parts: Vec<&str> = Vec::new();
+            let mut i = 1;
+            while i < args.len() {
+                if args[i] == "--title" {
+                    if let Some(value) = args.get(i + 1) {
+                        title = value.clone();
+                        i += 2;
+                        continue;
+                    }
+                }
+                prompt_parts.push(args[i].as_str());
+                i += 1;
+            }
+            let prompt = prompt_parts.join(" ");
+            let prompt = prompt.trim();
+            if cron.is_empty() || prompt.is_empty() {
+                return (
+                    false,
+                    "[schedule_task] usage: schedule_task <cron> <prompt...> [--title <title>]".to_string(),
+                    None,
+                );
+            }
+            match store_path {
+                Some(path) => match ScheduleStore::open(path) {
+                    Ok(store) => {
+                        let now = chrono::Utc::now();
+                        let s = Schedule {
+                            id: Uuid::new_v4(),
+                            name: title,
+                            description: prompt.to_string(),
+                            timezone: "UTC".to_string(),
+                            rrule: cron.to_string(),
+                            interval_seconds: None,
+                            start_at: now,
+                            end_at: None,
+                            channel_context: Some(
+                                serde_json::json!({
+                                    "message": prompt,
+                                    "session_id": format!("task:{}", task_id),
+                                    "source": "tool:schedule_task",
+                                    "created_by_task_id": task_id.to_string()
+                                })
+                                .to_string(),
+                            ),
+                            enabled: true,
+                            created_at: now,
+                            updated_at: now,
+                        };
+                        match store.insert_schedule(&s) {
+                            Ok(()) => (
+                                true,
+                                format!(
+                                    "[schedule_task] created schedule {} ({})",
+                                    s.id, cron
+                                ),
+                                None,
+                            ),
+                            Err(e) => (false, format!("[schedule_task] {}", e), None),
+                        }
+                    }
+                    Err(e) => (false, format!("[schedule_task] store error: {}", e), None),
+                },
+                None => (false, "[schedule_task] store not available".to_string(), None),
+            }
+        }
+        "list_scheduled_tasks" => {
+            let limit = args
+                .get(0)
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(20)
+                .min(100);
+            match store_path {
+                Some(path) => match ScheduleStore::open(path) {
+                    Ok(store) => match store.list_schedules() {
+                        Ok(list) => {
+                            let lines: Vec<String> = list
+                                .into_iter()
+                                .rev()
+                                .take(limit)
+                                .map(|s| {
+                                    format!(
+                                        "{} {} {} {}",
+                                        s.id,
+                                        if s.enabled { "enabled" } else { "disabled" },
+                                        "cron",
+                                        s.rrule
+                                    )
+                                })
+                                .collect();
+                            (
+                                true,
+                                format!(
+                                    "[list_scheduled_tasks] {} schedule(s): {}",
+                                    lines.len(),
+                                    lines.join(" ; ")
+                                ),
+                                None,
+                            )
+                        }
+                        Err(e) => (false, format!("[list_scheduled_tasks] {}", e), None),
+                    },
+                    Err(e) => (false, format!("[list_scheduled_tasks] store error: {}", e), None),
+                },
+                None => (false, "[list_scheduled_tasks] store not available".to_string(), None),
+            }
+        }
+        "cancel_scheduled_task" => {
+            let id = args
+                .get(0)
+                .and_then(|s| Uuid::parse_str(s).ok());
+            match (store_path, id) {
+                (Some(path), Some(schedule_id)) => match ScheduleStore::open(path) {
+                    Ok(store) => match store.get_schedule(schedule_id) {
+                        Ok(Some(_)) => match store.delete_schedule(schedule_id) {
+                            Ok(()) => (
+                                true,
+                                format!("[cancel_scheduled_task] deleted {}", schedule_id),
+                                None,
+                            ),
+                            Err(e) => (false, format!("[cancel_scheduled_task] {}", e), None),
+                        },
+                        Ok(None) => (
+                            false,
+                            format!("[cancel_scheduled_task] {} not found", schedule_id),
+                            None,
+                        ),
+                        Err(e) => (false, format!("[cancel_scheduled_task] {}", e), None),
+                    },
+                    Err(e) => (false, format!("[cancel_scheduled_task] store error: {}", e), None),
+                },
+                (_, _) => (
+                    false,
+                    "[cancel_scheduled_task] usage: cancel_scheduled_task <schedule_id>".to_string(),
+                    None,
+                ),
+            }
+        }
+        "budget_status" => {
+            let session_id = args.get(0).cloned().unwrap_or_default();
+            let settings = match store_path {
+                Some(path) => path.parent().map(load_budget_settings).unwrap_or_default(),
+                None => BudgetSettings::default(),
+            };
+            let scope = if session_id.trim().is_empty() {
+                "global".to_string()
+            } else {
+                format!("session {}", session_id)
+            };
+            (
+                false,
+                format!(
+                    "[budget_status] limit={} warn_ratio={:.2} auto_concise={} scope={} usage_unavailable=true message=\"live usage is not available from this tool path; query the local /api/budget endpoint for accurate totals\"",
+                    settings.daily_token_limit,
+                    settings.warn_ratio,
+                    settings.auto_concise,
+                    scope
+                ),
+                None,
+            )
         }
         "message" => {
             let sub = args.get(0).map(String::as_str).unwrap_or("");
@@ -8924,21 +8119,46 @@ pub(crate) async fn run_message_via_llm(
     // IMPORTANT: intent classification must use the clean user message (without guardrail/prefix
     // injections). Using the raw `message` can falsely trigger intents (e.g. transport/maps)
     // from injected context blocks and activate unrelated plugin routing.
-    let mut intent_flags = compute_message_intent_flags(clean_message);
-    if code_studio_disk_task {
-        code_studio_disable_plugin_intents(&mut intent_flags);
-    }
-    let runtime_tool_routing_enforcer = if code_studio_disk_task {
-        // Hard guard: Code Studio tasks must stay project/code oriented and must not be
-        // hijacked by dynamic plugin routing (maps/graph/external intents).
-        None
+    let intent_flags = compute_message_intent_flags(clean_message);
+    let plugin_catalog_reminder = if code_studio_disk_task
+        || is_small_talk_fast_lane
+        || plugin_registry.is_none()
+    {
+        String::new()
     } else {
-        build_runtime_tool_routing_enforcer(
-            plugin_registry.as_ref(),
-            clean_message,
-            &intent_flags,
-            tools_executor_snapshot.as_ref(),
-        )
+        match plugin_registry.as_ref() {
+            None => String::new(),
+            Some(reg) => {
+                let all_tool: Vec<PluginManifest> = reg
+                    .manifests()
+                    .into_iter()
+                    .filter(|m| m.kind == PluginKind::Tool)
+                    .collect();
+                if all_tool.is_empty() {
+                    String::new()
+                } else {
+                    let selected_ids = crate::plugins::selection::select_relevant_plugins_via_llm(
+                        llm_router.as_ref(),
+                        clean_message,
+                        &all_tool,
+                    )
+                    .await;
+                    let id_lower: std::collections::HashSet<String> = selected_ids
+                        .iter()
+                        .map(|s| s.to_lowercase())
+                        .collect();
+                    let mut picked: Vec<PluginManifest> = all_tool
+                        .iter()
+                        .filter(|m| id_lower.contains(&m.id.to_lowercase()))
+                        .cloned()
+                        .collect();
+                    if picked.is_empty() {
+                        picked.clone_from(&all_tool);
+                    }
+                    crate::plugins::selection::build_plugin_catalog_block(&picked)
+                }
+            }
+        }
     };
     let write_reminder = if intent_flags.save_file {
         WRITE_FILE_REMINDER
@@ -8991,19 +8211,7 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    let (plugin_routing_reminder, plugin_handles_geo_distance) = if code_studio_disk_task {
-        (String::new(), false)
-    } else {
-        build_plugin_routing_reminders(
-            plugin_registry.as_ref(),
-            clean_message,
-            &intent_flags,
-            tools_executor_snapshot.as_ref(),
-        )
-    };
-    let geolocation_distance_reminder: &str = if intent_flags.geolocation_distance
-        && !plugin_handles_geo_distance
-    {
+    let geolocation_distance_reminder: &str = if intent_flags.geolocation_distance {
         let has_any_tool = tools_executor_snapshot
             .as_ref()
             .map(|e| e.policy.can_use_tool("web_search") || e.policy.can_use_tool("plugin.call"))
@@ -9079,7 +8287,7 @@ pub(crate) async fn run_message_via_llm(
             web_search_followup_reminder,
             transport_reminder,
             geolocation_distance_reminder,
-            plugin_routing_reminder,
+            plugin_catalog_reminder,
             social_feed_reminder,
             device_camera_reminder,
             image_generation_reminder,
@@ -9097,7 +8305,7 @@ pub(crate) async fn run_message_via_llm(
             web_search_followup_reminder,
             transport_reminder,
             geolocation_distance_reminder,
-            plugin_routing_reminder,
+            plugin_catalog_reminder,
             social_feed_reminder,
             device_camera_reminder,
             image_generation_reminder,
@@ -9200,34 +8408,6 @@ pub(crate) async fn run_message_via_llm(
             String,
             std::collections::HashSet<String>,
         > = std::collections::HashMap::new();
-        let strict_tools_first = runtime_tool_routing_enforcer
-            .as_ref()
-            .map(|e| !e.preferred_tools.is_empty())
-            .unwrap_or(false);
-        let strict_tools_instruction = if strict_tools_first {
-            let preferred = runtime_tool_routing_enforcer
-                .as_ref()
-                .map(|e| {
-                    let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
-                    v.sort();
-                    v.join(", ")
-                })
-                .unwrap_or_default();
-            format!(
-                "\n\n[TOOLS-FIRST STRICT MODE]\n- PRIMARY USER REQUEST (must be satisfied): {}\n- You MUST output TOOL lines only until at least one allowed tool succeeds.\n- Preferred tools: {}\n- If inputs are missing, output ONLY: TOOL: ask_user {{\"question\":\"...\",\"context\":\"...\",\"choices\":[...]}}\n- Do NOT output prose, role acknowledgements, policy acknowledgements, or generic greetings.\n",
-                user_message, preferred
-            )
-        } else {
-            String::new()
-        };
-        let mut strict_no_tool_rounds = 0u32;
-        let mut strict_successful_tool_calls = 0u32;
-        let mut strict_preferred_tool_replay_input: Option<String> = None;
-        // In strict tools-first mode, deterministic preferred-tool attempts must run only once before
-        // the first LLM call. `round` stays 0 until the model emits parseable TOOL lines, so without
-        // this flag we would re-run deterministic maps (etc.) on every strict re-prompt and burn a
-        // full LLM timeout budget on a duplicate hung stream.
-        let mut deterministic_preferred_attempted = false;
         // Orchestrated deliverables: re-prompts when the model returns no parseable TOOL lines.
         let mut orch_disk_write_nags = 0u32;
         // Code Studio implementation agents: prevent "copy/paste this file" fallback
@@ -9251,145 +8431,6 @@ pub(crate) async fn run_message_via_llm(
             .unwrap_or_else(|| llm_timeout_secs.min(300));
 
         'tool_rounds: loop {
-            let strict_mode_active = strict_tools_first && strict_successful_tool_calls == 0;
-            if strict_mode_active {
-                let _ = bus.send(
-                    EventEnvelope::new(
-                        EventType::ProgressUpdate,
-                        Some(serde_json::json!({
-                            "task_id": task_id.to_string(),
-                            "progress_pct": 30,
-                            "message": "Applying dynamic plugin routing rules (tools-first)…"
-                        })),
-                    )
-                    .with_correlation(task_id),
-                );
-            }
-
-            // Deterministic first attempt in strict tools-first mode:
-            // try preferred tools with the full user request as input before asking the LLM again.
-            let run_deterministic_preferred = strict_mode_active
-                && (strict_preferred_tool_replay_input.is_some()
-                    || (!deterministic_preferred_attempted && round == 0));
-            if run_deterministic_preferred {
-                if let (Some(enforcer), Some(exec)) = (
-                    &runtime_tool_routing_enforcer,
-                    tools_executor_snapshot.as_ref(),
-                ) {
-                    let preferred_tool_request = strict_preferred_tool_replay_input
-                        .take()
-                        .unwrap_or_else(|| user_message.clone());
-                    let mut deterministic_results: Vec<String> = Vec::new();
-                    const MAPS_RESULT_FULL_MAX: usize = 400_000;
-                    for preferred_tool in enforcer.preferred_tools.iter().take(3) {
-                        let args_preview = if preferred_tool_request.chars().count() > 240 {
-                            format!(
-                                "{}…",
-                                preferred_tool_request.chars().take(240).collect::<String>()
-                            )
-                        } else {
-                            preferred_tool_request.clone()
-                        };
-                        let _ = bus.send(
-                            EventEnvelope::new(
-                                EventType::TimelineMilestone,
-                                Some(serde_json::json!({
-                                    "name": "deterministic_preferred_tool_attempt",
-                                    "task_id": task_id.to_string(),
-                                    "round": round,
-                                    "tool": preferred_tool,
-                                    "args_preview": args_preview,
-                                })),
-                            )
-                            .with_correlation(timeline_correlation),
-                        );
-                        let auto_args = vec![preferred_tool_request.clone()];
-                        let (success, res, captured_image) = execute_tool_call(
-                            exec,
-                            preferred_tool,
-                            &auto_args,
-                            process_registry.as_ref(),
-                            long_term_client.as_ref(),
-                            task_id,
-                            Some(store_path.as_path()),
-                            conv_tx.clone(),
-                            message_webhook_url.as_deref(),
-                            plugin_registry.as_ref(),
-                            device_bridge.as_ref(),
-                            workspace_store.as_ref(),
-                            browser_registry.as_ref(),
-                            Some(tool_disk_workspace_root.as_path()),
-                        )
-                        .await;
-                        let result_preview = if res.chars().count() > 320 {
-                            format!("{}…", res.chars().take(320).collect::<String>())
-                        } else {
-                            res.clone()
-                        };
-                        // UI (chat) needs full plugin JSON for rich views (e.g. maps); preview is truncated.
-                        let mut milestone = serde_json::json!({
-                            "name": "deterministic_preferred_tool_result",
-                            "task_id": task_id.to_string(),
-                            "round": round,
-                            "tool": preferred_tool,
-                            "success": success,
-                            "result_preview": result_preview,
-                        });
-                        if success
-                            && preferred_tool.starts_with("maps_")
-                            && res.len() <= MAPS_RESULT_FULL_MAX
-                        {
-                            milestone["result_full"] = serde_json::Value::String(res.clone());
-                        }
-                        let _ = bus.send(
-                            EventEnvelope::new(EventType::TimelineMilestone, Some(milestone))
-                                .with_correlation(timeline_correlation),
-                        );
-                        tool_loop_history_by_agent
-                            .entry(loop_agent_key.clone())
-                            .or_default()
-                            .push((
-                                preferred_tool.clone(),
-                                if success { "success" } else { "failure" }.to_string(),
-                            ));
-                        if let Some(img) = captured_image {
-                            last_captured_image_base64 = Some(img);
-                        }
-                        deterministic_results.push(res.clone());
-                        if success {
-                            strict_successful_tool_calls =
-                                strict_successful_tool_calls.saturating_add(1);
-                            log_tool_journal_if_write(preferred_tool, &auto_args, &res).await;
-                            break;
-                        }
-                    }
-                    if strict_successful_tool_calls > 0 {
-                        let results_blob = deterministic_results.join("\n");
-                        last_tool_results_blob = Some(results_blob.clone());
-                        current_prompt = format!(
-                        "User request: {}\n\nTool results:\n{}\n\nUsing ONLY the tool results above, answer the user's request now. Do NOT reply with a promise. No TOOL: lines.",
-                        user_message,
-                        results_blob
-                    );
-                        // Continue to next round so the model synthesizes from concrete tool results.
-                        continue;
-                    }
-                    let _ = bus.send(
-                    EventEnvelope::new(
-                        EventType::TimelineMilestone,
-                        Some(serde_json::json!({
-                            "name": "deterministic_preferred_tool_no_success",
-                            "task_id": task_id.to_string(),
-                            "round": round,
-                            "attempted_tools": enforcer.preferred_tools.iter().cloned().collect::<Vec<_>>(),
-                        })),
-                    )
-                    .with_correlation(timeline_correlation),
-                );
-                }
-                deterministic_preferred_attempted = true;
-            }
-
             // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
             if let Some(ref store) = task_usage_store {
                 let (session_tokens, session_cost) =
@@ -9430,11 +8471,7 @@ pub(crate) async fn run_message_via_llm(
             };
             let preferred_task_type = Some(router_task_type_for_llm);
             let request = CompletionRequest {
-                prompt: if strict_mode_active {
-                    format!("{}{}", current_prompt, strict_tools_instruction)
-                } else {
-                    format!("{}{}", current_prompt, tool_instruction)
-                },
+                prompt: format!("{}{}", current_prompt, tool_instruction),
                 max_tokens: Some(completion_max_tokens),
                 temperature: Some(0.7),
                 preferred_task_type,
@@ -9619,20 +8656,8 @@ pub(crate) async fn run_message_via_llm(
             // from the final body. Parsing tools only from `resp.text` then skips execution entirely (user sees text, no disk writes).
             // Use `parse_tool_calls` (which normalizes sloppy prefixes like `- Tool:` / `**TOOL:**`) instead of a raw
             // `contains("TOOL:")` check so that any provider-specific formatting is handled consistently.
-            let r = response.trim();
-            let a = accumulated.trim();
-            let a_has_tools = !a.is_empty() && !parse_tool_calls(a).is_empty();
-            let r_has_tools = !r.is_empty() && !parse_tool_calls(r).is_empty();
-            let merged_for_tools = if r.is_empty() && !a.is_empty() {
-                a.to_string()
-            } else if a_has_tools && !r_has_tools {
-                a.to_string()
-            } else if !r.is_empty() {
-                r.to_string()
-            } else {
-                a.to_string()
-            };
-            let response = merged_for_tools;
+            let response =
+                crate::api_llm_stream::choose_merged_response_for_tools(&response, &accumulated);
 
             if let Some(intent) = small_talk_intent {
                 if response_looks_off_topic_for_small_talk(&response) {
@@ -9674,37 +8699,6 @@ pub(crate) async fn run_message_via_llm(
                 .trim()
                 .to_string();
 
-            if strict_tools_first
-                && no_parseable_tools_this_round
-                && strict_successful_tool_calls == 0
-            {
-                strict_no_tool_rounds = strict_no_tool_rounds.saturating_add(1);
-                let preferred_tools_hint = runtime_tool_routing_enforcer
-                    .as_ref()
-                    .map(|e| {
-                        let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
-                        v.sort();
-                        v.join(", ")
-                    })
-                    .unwrap_or_default();
-
-                if strict_no_tool_rounds <= 1 {
-                    current_prompt = format!(
-                    "User request: {}\n\nYour previous reply:\n{}\n\nDynamic plugin routing rules are active for this request. You MUST emit TOOL lines only. Preferred tools: {}. If inputs are missing, call TOOL: ask_user with one precise question. Do NOT output prose-only answers now.",
-                    user_message,
-                    response_plain,
-                    preferred_tools_hint
-                );
-                    continue;
-                }
-
-                reply_text = format!(
-                "Impossible de répondre de façon fiable sans exécuter un outil autorisé. Outils attendus: {}. Vérifiez les règles de routage des plugins installés ou fournissez les paramètres manquants.",
-                preferred_tools_hint
-            );
-                break 'tool_rounds;
-            }
-
             if no_parseable_tools_this_round
                 && meta_response_retry_count < 2
                 && (is_subagent || assigned_agent != "conversation" || orch_disk_deliverables)
@@ -9722,7 +8716,6 @@ pub(crate) async fn run_message_via_llm(
             const MAX_STUDIO_PROSE_ONLY_WRITE_NAGS: u32 = 4;
             if code_studio_disk_task
                 && no_parseable_tools_this_round
-                && strict_successful_tool_calls == 0
                 && studio_prose_only_write_nags < MAX_STUDIO_PROSE_ONLY_WRITE_NAGS
                 && looks_like_code_studio_prose_only_implementation_reply(&response_plain)
             {
@@ -9778,58 +8771,7 @@ pub(crate) async fn run_message_via_llm(
                             None => name.clone(),
                         };
                         let actual_tool = canonicalize_tool_name(&actual_tool);
-                        let should_forward_user_request = strict_tools_first
-                            && args.is_empty()
-                            && !actual_tool.eq_ignore_ascii_case("ask_user")
-                            && runtime_tool_routing_enforcer
-                                .as_ref()
-                                .map(|e| e.preferred_tools.contains(&actual_tool))
-                                .unwrap_or(false);
-                        let forwarded_args: Vec<String> = if should_forward_user_request {
-                            vec![user_message.clone()]
-                        } else {
-                            args.clone()
-                        };
-                        let tool_args: &[String] = &forwarded_args;
-                        let effective_tool_for_routing = if actual_tool.is_empty() {
-                            name.as_str()
-                        } else {
-                            actual_tool.as_str()
-                        };
-                        let device_routing_bypass = intent_flags.camera_or_mic
-                            && (effective_tool_for_routing.eq_ignore_ascii_case("device_discover")
-                                || effective_tool_for_routing
-                                    .eq_ignore_ascii_case("device_invoke"));
-                        if let Some(enforcer) = &runtime_tool_routing_enforcer {
-                            if !device_routing_bypass
-                                && !enforcer.is_tool_allowed(effective_tool_for_routing, tool_args)
-                            {
-                                let blocked = format!(
-                            "[tool_blocked_by_routing_rules] tool={} blocked by dynamic plugin routing rules",
-                            effective_tool_for_routing
-                        );
-                                let payload = serde_json::json!({
-                                    "tool": effective_tool_for_routing,
-                                    "args": tool_args,
-                                    "result_preview": blocked,
-                                    "success": false,
-                                    "reason": "blocked_by_dynamic_plugin_routing_rules"
-                                });
-                                let _ = bus.send(
-                                    EventEnvelope::new(EventType::ToolInvoked, Some(payload))
-                                        .with_correlation(timeline_correlation),
-                                );
-                                tracing::warn!(
-                                    task_id = %task_id,
-                                    tool = %effective_tool_for_routing,
-                                    preferred = ?enforcer.preferred_tools,
-                                    forbidden = ?enforcer.forbidden_tools,
-                                    "Tool blocked by runtime routing enforcer"
-                                );
-                                tool_results.push(blocked);
-                                continue;
-                            }
-                        }
+                        let tool_args: &[String] = args.as_slice();
                         // Hard guardrail: if read_file on this path was already truncated for this
                         // agent key, block repeated full-file reads and require chunked/windowed read.
                         if actual_tool.eq_ignore_ascii_case("read_file") {
@@ -9924,6 +8866,54 @@ pub(crate) async fn run_message_via_llm(
                         );
                         // Phase 3.1: tools in require_approval need user confirmation before execution.
                         if exec.policy.requires_approval(&actual_tool) {
+                            let permission_mode = load_permission_mode(data_dir);
+                            if permission_mode.mode == "allow_all" {
+                                // Global session mode bypasses interactive approval prompts.
+                            } else {
+                            let scope_key = tool_scope_key(&actual_tool, &tool_args);
+                            let state = crate::permissions_center::load(data_dir);
+                            let mut already_granted = false;
+                            if let Some(decision) =
+                                crate::permissions_center::lookup(&actual_tool, &scope_key, &state)
+                            {
+                                match decision.mode {
+                                    crate::permissions_center::DecisionMode::AllowPersistent => {
+                                        already_granted = true;
+                                        let payload = serde_json::json!({
+                                            "tool": actual_tool,
+                                            "scope": scope_key,
+                                            "approved": true,
+                                            "mode": "allow_persistent",
+                                            "decision_id": decision.id
+                                        });
+                                        let _ = bus.send(
+                                            EventEnvelope::new(EventType::ToolInvoked, Some(payload))
+                                                .with_correlation(timeline_correlation),
+                                        );
+                                    }
+                                    crate::permissions_center::DecisionMode::DenyPersistent => {
+                                        tool_results.push(
+                                            "Action refusée par la politique d'approbation persistante."
+                                                .to_string(),
+                                        );
+                                        let payload = serde_json::json!({
+                                            "tool": actual_tool,
+                                            "scope": scope_key,
+                                            "approved": false,
+                                            "mode": "deny_persistent",
+                                            "decision_id": decision.id
+                                        });
+                                        let _ = bus.send(
+                                            EventEnvelope::new(EventType::ToolInvoked, Some(payload))
+                                                .with_correlation(timeline_correlation),
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+                            if already_granted {
+                                // Persistent approval matched: skip interactive prompt.
+                            } else {
                             match &human_input_store {
                                 Some(store) => {
                                     const APPROVAL_TIMEOUT_SECS: u64 = 300;
@@ -9962,8 +8952,11 @@ pub(crate) async fn run_message_via_llm(
                                         "Approuver l'action : {} — {} ?",
                                         actual_tool, args_preview
                                     );
-                                    let choices =
-                                        vec!["Approuver".to_string(), "Refuser".to_string()];
+                                    let choices = vec![
+                                        "Approuver".to_string(),
+                                        "Toujours autoriser".to_string(),
+                                        "Refuser".to_string(),
+                                    ];
                                     let (tx, rx) = tokio::sync::oneshot::channel();
                                     let pending = PendingHumanInput {
                                         question: question.clone(),
@@ -10004,15 +8997,13 @@ pub(crate) async fn run_message_via_llm(
                                         )
                                         .with_correlation(task_id),
                                     );
-                                    let granted = match tokio::time::timeout(
+                                    let answer = match tokio::time::timeout(
                                         std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS),
                                         rx,
                                     )
                                     .await
                                     {
-                                        Ok(Ok(reply)) => {
-                                            reply.trim().eq_ignore_ascii_case("Approuver")
-                                        }
+                                        Ok(Ok(reply)) => reply.trim().to_string(),
                                         _ => {
                                             // Timeout or channel error: remove stale pending entry to avoid it staying forever.
                                             {
@@ -10030,9 +9021,26 @@ pub(crate) async fn run_message_via_llm(
                                                 )
                                                 .with_correlation(task_id),
                                             );
-                                            false
+                                            "Refuser".to_string()
                                         }
                                     };
+                                    let granted = answer.eq_ignore_ascii_case("Approuver")
+                                        || answer.eq_ignore_ascii_case("Toujours autoriser");
+                                    if answer.eq_ignore_ascii_case("Toujours autoriser") {
+                                        let mut state = crate::permissions_center::load(data_dir);
+                                        state.decisions.retain(|d| {
+                                            !(d.tool == actual_tool && d.scope == scope_key)
+                                        });
+                                        state.decisions.push(crate::permissions_center::PermissionDecision {
+                                            id: Uuid::new_v4().to_string(),
+                                            tool: actual_tool.clone(),
+                                            scope: scope_key.clone(),
+                                            mode: crate::permissions_center::DecisionMode::AllowPersistent,
+                                            created_at: chrono::Utc::now().to_rfc3339(),
+                                            expires_at: None,
+                                        });
+                                        let _ = crate::permissions_center::save(data_dir, &state);
+                                    }
                                     if !granted {
                                         tool_results.push("Action refusée par l'utilisateur (approbation requise).".to_string());
                                         let payload = serde_json::json!({
@@ -10053,6 +9061,8 @@ pub(crate) async fn run_message_via_llm(
                                     tool_results.push("Action nécessitant approbation impossible (human_input_store indisponible).".to_string());
                                     continue;
                                 }
+                            }
+                            }
                             }
                         }
                         let tool_t0 = std::time::Instant::now();
@@ -10596,20 +9606,6 @@ pub(crate) async fn run_message_via_llm(
                         if let Some(img) = captured_image {
                             last_captured_image_base64 = Some(img);
                         }
-                        if success
-                            && strict_tools_first
-                            && actual_tool.eq_ignore_ascii_case("ask_user")
-                        {
-                            if let Some(reply) = res.strip_prefix("[ask_user] User replied: ") {
-                                let reply = reply.trim();
-                                if !reply.is_empty() {
-                                    strict_preferred_tool_replay_input = Some(format!(
-                                        "Original user request: {}\n\nUser clarification: {}",
-                                        user_message, reply
-                                    ));
-                                }
-                            }
-                        }
                         // Phase F: emit ToolInvoked for Actions tab (spec 33)
                         // Redact or truncate args in the event to avoid leaking large blobs or secrets.
                         let redacted_args: Vec<String> = if matches!(
@@ -10665,7 +9661,7 @@ pub(crate) async fn run_message_via_llm(
                             )
                             .with_correlation(timeline_correlation),
                         );
-                        // Chat UI loads map / rich views from timeline_milestone + result_full (same as strict tools-first path).
+                        // Chat UI loads map / rich views from timeline_milestone + result_full.
                         if success && tool_display.starts_with("maps_") && res.len() <= 400_000usize
                         {
                             let result_preview = if res.chars().count() > 320 {
@@ -10688,13 +9684,6 @@ pub(crate) async fn run_message_via_llm(
                             );
                         }
                         if success {
-                            // In tools-first strict mode, ask_user is a clarification step, not
-                            // a terminal success for the primary objective. Keep strict mode active
-                            // until a non-ask_user tool actually succeeds.
-                            if !actual_tool.eq_ignore_ascii_case("ask_user") {
-                                strict_successful_tool_calls =
-                                    strict_successful_tool_calls.saturating_add(1);
-                            }
                             if code_studio_disk_task
                                 && matches!(
                                     actual_tool.as_str(),
@@ -11033,21 +10022,6 @@ pub(crate) async fn run_message_via_llm(
                     continue;
                 }
             }
-            if strict_tools_first && strict_successful_tool_calls == 0 {
-                let preferred_tools_hint = runtime_tool_routing_enforcer
-                    .as_ref()
-                    .map(|e| {
-                        let mut v = e.preferred_tools.iter().cloned().collect::<Vec<_>>();
-                        v.sort();
-                        v.join(", ")
-                    })
-                    .unwrap_or_default();
-                reply_text = format!(
-                "Réponse bloquée: aucune exécution d'outil autorisé n'a réussi pour cette demande. Outils attendus: {}. Merci de vérifier la configuration des plugins/routing rules ou de préciser les paramètres requis.",
-                preferred_tools_hint
-            );
-                break;
-            }
             // If we already ran tools but the model returned a placeholder ("Je vais… Une seconde."), force one more round to get the actual answer.
             let tool_loop_history = tool_loop_history_by_agent
                 .get(&loop_agent_key)
@@ -11068,10 +10042,9 @@ pub(crate) async fn run_message_via_llm(
             );
                 continue;
             }
-            // Guardrail: when a plugin/tool already succeeded, reject generic
-            // greeting responses and force one synthesis round from tool outputs.
-            if strict_tools_first
-                && strict_successful_tool_calls > 0
+            // Guardrail: when tools already produced results, reject generic greeting responses
+            // and force one synthesis round from tool outputs.
+            if !tool_loop_history.is_empty()
                 && last_tool_results_blob
                     .as_ref()
                     .map_or(false, |b| !b.is_empty())
@@ -11849,171 +10822,6 @@ where
     Ok(())
 }
 
-fn split_path_query(path: &str) -> (&str, &str) {
-    path.split_once('?').map(|(p, q)| (p, q)).unwrap_or((path, ""))
-}
-
-fn parse_query_param(query: &str, key: &str) -> Option<String> {
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == key {
-                return Some(
-                    urlencoding::decode(v)
-                        .map(|c| c.into_owned())
-                        .unwrap_or_else(|_| v.to_string()),
-                );
-            }
-        }
-    }
-    None
-}
-
-async fn get_autonomous_mission_state(
-    data_dir: &Path,
-    store_path: &Path,
-    am: &Arc<RwLock<AutonomousMissionConfig>>,
-) -> String {
-    let cfg = am.read().await;
-    let am_store = match AutonomousMissionStore::open(store_path) {
-        Ok(s) => s,
-        Err(e) => {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    };
-    let (last_hb, last_tid) = am_store.get_meta().unwrap_or((None, None));
-    let report_abs = data_dir.join(&cfg.report_dir);
-    let horizon_s = match cfg.horizon {
-        Horizon::Short => "short",
-        Horizon::Medium => "medium",
-        Horizon::Long => "long",
-    };
-    let status_s = match cfg.status {
-        MissionStatusYaml::Active => "active",
-        MissionStatusYaml::Paused => "paused",
-        MissionStatusYaml::Completed => "completed",
-    };
-    let next_hb = last_hb.map(|t| t + chrono::Duration::minutes(cfg.heartbeat_interval_minutes as i64));
-    let role_definitions: Vec<serde_json::Value> = cfg
-        .role_definitions
-        .iter()
-        .map(|r| {
-            serde_json::json!({
-                "name": r.name,
-                "responsibility": r.responsibility,
-                "preferred_agent_type": r.preferred_agent_type,
-            })
-        })
-        .collect();
-    let body = serde_json::json!({
-        "enabled": cfg.enabled,
-        "global_context": cfg.global_context.as_str(),
-        "horizon": horizon_s,
-        "objective": cfg.objective.as_str(),
-        "heartbeat_interval_minutes": cfg.heartbeat_interval_minutes,
-        "report_dir": cfg.report_dir.as_str(),
-        "report_path_absolute": report_abs.display().to_string(),
-        "session_id": cfg.session_id.as_str(),
-        "status": status_s,
-        "operating_rules": cfg.operating_rules.as_str(),
-        "role_definitions": role_definitions,
-        "heartbeat_preferred_task_type": cfg.heartbeat_preferred_task_type.as_str(),
-        "last_heartbeat_at": last_hb.map(|t| t.to_rfc3339()),
-        "last_task_id": last_tid.map(|u| u.to_string()),
-        "next_heartbeat_approx_at": next_hb.map(|t| t.to_rfc3339()),
-    });
-    json_response("200 OK", &body.to_string())
-}
-
-async fn put_autonomous_mission_state(
-    data_dir: &Path,
-    store_path: &Path,
-    am: &Arc<RwLock<AutonomousMissionConfig>>,
-    body: &[u8],
-) -> String {
-    let v: serde_json::Value = match serde_json::from_slice(body) {
-        Ok(x) => x,
-        Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
-    };
-    {
-        let mut w = am.write().await;
-        let _ = merge_from_json_partial(&mut *w, &v);
-        if let Err(e) = persist_config_and_snapshot(data_dir, store_path, &*w) {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    }
-    get_autonomous_mission_state(data_dir, store_path, am).await
-}
-
-async fn get_autonomous_mission_events_list(store_path: &Path, query: &str) -> String {
-    let limit = parse_query_param(query, "limit")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(100)
-        .min(1000);
-    let since = parse_query_param(query, "since").and_then(|s| {
-        chrono::DateTime::parse_from_rfc3339(s.trim())
-            .ok()
-            .map(|d| d.with_timezone(&chrono::Utc))
-    });
-    let am_store = match AutonomousMissionStore::open(store_path) {
-        Ok(s) => s,
-        Err(e) => {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    };
-    let events = match am_store.list_events_since(since, limit) {
-        Ok(e) => e,
-        Err(e) => {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    };
-    let arr: Vec<_> = events
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "id": e.id,
-                "at": e.at.to_rfc3339(),
-                "event_type": e.event_type,
-                "payload": e.payload,
-            })
-        })
-        .collect();
-    json_response("200 OK", &serde_json::json!({ "events": arr }).to_string())
-}
-
-async fn post_autonomous_mission_status(
-    data_dir: &Path,
-    store_path: &Path,
-    am: &Arc<RwLock<AutonomousMissionConfig>>,
-    status: MissionStatusYaml,
-) -> String {
-    {
-        let mut w = am.write().await;
-        w.status = status;
-        if let Err(e) = persist_config_and_snapshot(data_dir, store_path, &*w) {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({ "error": e.to_string() }).to_string(),
-            );
-        }
-    }
-    get_autonomous_mission_state(data_dir, store_path, am).await
-}
-
 pub async fn handle_api(
     method: &str,
     path: &str,
@@ -12046,29 +10854,11 @@ pub async fn handle_api(
 ) -> String {
     let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_ref());
 
-    // CSRF protection: reject state-changing requests that originate from a non-local web page.
-    // Browsers include an Origin header on cross-origin requests; same-origin or non-browser clients
-    // (curl, CLI) typically do not. Allowing only localhost/tauri origins for mutating methods blocks
-    // attacks from malicious web pages opened in the same browser as the Tauri app.
-    if matches!(method, "POST" | "PUT" | "DELETE" | "PATCH") {
-        if let Some(origin) = headers.get("origin") {
-            let origin = origin.trim();
-            let is_local = origin == "null"
-                || origin.starts_with("http://localhost")
-                || origin.starts_with("http://127.0.0.1")
-                || origin.starts_with("https://localhost")
-                || origin.starts_with("https://127.0.0.1")
-                || origin.starts_with("http://tauri.localhost")
-                || origin.starts_with("https://tauri.localhost")
-                || origin.starts_with("tauri://");
-            if !is_local {
-                tracing::warn!(origin = %origin, method = %method, path = %path, "CSRF: rejected request from non-local origin");
-                return json_response("403 Forbidden", r#"{"error":"origin_not_allowed"}"#);
-            }
-        }
+    if let Some(resp) = crate::api_security::csrf_reject_response(method, path, headers) {
+        return resp;
     }
 
-    let (path_only, query_str) = split_path_query(path);
+    let (path_only, query_str) = crate::api_security::split_path_query(path);
     let _http_post_lifecycle = crate::lifecycle_hooks::HttpPostLifecycleHooks {
         data_dir: data_dir.to_path_buf(),
         method: method.to_string(),
@@ -12100,140 +10890,20 @@ pub async fn handle_api(
         return resp;
     }
 
-    // Signed inbound automation webhooks (Hermes-style external automation; no LLM in this path).
-    if method == "POST" && path_only == "/api/automation/webhook" {
-        let secret = std::env::var("AKASHA_AUTOMATION_WEBHOOK_SECRET").unwrap_or_default();
-        if secret.is_empty() {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"automation_webhook_secret_not_configured","hint":"Set AKASHA_AUTOMATION_WEBHOOK_SECRET and send HMAC-SHA256(body) in X-Signature (hex or sha256=<hex>)."}"#,
-            );
-        }
-        let body_bytes = body.as_deref().unwrap_or(&[]);
-        let sig = headers
-            .get("x-signature")
-            .or_else(|| headers.get("x-hub-signature-256"))
-            .map(String::as_str);
-        if !crate::webhook_inbound::verify_hmac_sha256(secret.as_bytes(), body_bytes, sig) {
-            return json_response("401 Unauthorized", r#"{"error":"invalid_signature"}"#);
-        }
-        let gate = crate::webhook_inbound::automation_gate();
-        let idem = headers
-            .get("idempotency-key")
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        if !idem.is_empty()
-            && !crate::webhook_inbound::check_automation_idempotency(
-                data_dir,
-                idem,
-                std::time::Duration::from_secs(86_400),
-                &gate,
-            )
-            .await
-        {
-            return json_response("409 Conflict", r#"{"error":"duplicate_idempotency_key"}"#);
-        }
-        if !crate::webhook_inbound::check_rate_distributed(
-            data_dir,
-            &gate,
-            "automation_webhook",
-            120,
-        )
-        .await
-        {
-            return json_response("429 Too Many Requests", r#"{"error":"rate_limited"}"#);
-        }
-        let parsed: serde_json::Value = match serde_json::from_slice(body_bytes) {
-            Ok(v) => v,
-            Err(_) => {
-                let keys_preview: Vec<&str> = vec![];
-                let body_out = serde_json::json!({
-                    "ok": true,
-                    "accepted": true,
-                    "invalid_json": true,
-                    "payload_key_count": 0,
-                    "payload_keys_preview": keys_preview,
-                });
-                return json_response(
-                    "202 Accepted",
-                    &serde_json::to_string(&body_out).unwrap_or_else(|_| "{}".to_string()),
-                );
-            }
-        };
-        let keys: Vec<_> = parsed
-            .as_object()
-            .map(|o| o.keys().map(|k| k.as_str()).collect())
-            .unwrap_or_default();
-        let body_out = serde_json::json!({
-            "ok": true,
-            "accepted": true,
-            "payload_key_count": keys.len(),
-            "payload_keys_preview": keys.into_iter().take(24).collect::<Vec<_>>(),
-        });
-        return json_response(
-            "202 Accepted",
-            &serde_json::to_string(&body_out).unwrap_or_else(|_| "{}".to_string()),
-        );
-    }
-
-    // Direct webhook delivery: returns fixed JSON from env (same HMAC gate; zero LLM tokens).
-    if method == "POST" && path_only == "/api/automation/webhook/direct" {
-        let secret = std::env::var("AKASHA_AUTOMATION_WEBHOOK_SECRET").unwrap_or_default();
-        let direct = std::env::var("AKASHA_WEBHOOK_DIRECT_BODY_JSON").unwrap_or_default();
-        if secret.is_empty() || direct.trim().is_empty() {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"direct_webhook_not_configured","hint":"Set AKASHA_AUTOMATION_WEBHOOK_SECRET and AKASHA_WEBHOOK_DIRECT_BODY_JSON (JSON text)."}"#,
-            );
-        }
-        let body_bytes = body.as_deref().unwrap_or(&[]);
-        let sig = headers
-            .get("x-signature")
-            .or_else(|| headers.get("x-hub-signature-256"))
-            .map(String::as_str);
-        if !crate::webhook_inbound::verify_hmac_sha256(secret.as_bytes(), body_bytes, sig) {
-            return json_response("401 Unauthorized", r#"{"error":"invalid_signature"}"#);
-        }
-        let gate = crate::webhook_inbound::automation_gate();
-        let idem = headers.get("idempotency-key").map(|s| s.as_str()).unwrap_or("");
-        let idem_key = if idem.is_empty() {
-            String::new()
-        } else {
-            format!("direct:{idem}")
-        };
-        if !idem_key.is_empty()
-            && !crate::webhook_inbound::check_automation_idempotency(
-                data_dir,
-                &idem_key,
-                std::time::Duration::from_secs(86_400),
-                &gate,
-            )
-            .await
-        {
-            return json_response("409 Conflict", r#"{"error":"duplicate_idempotency_key"}"#);
-        }
-        if !crate::webhook_inbound::check_rate_distributed(
-            data_dir,
-            &gate,
-            "automation_webhook_direct",
-            120,
-        )
-        .await
-        {
-            return json_response("429 Too Many Requests", r#"{"error":"rate_limited"}"#);
-        }
-        if let Err(e) = serde_json::from_str::<serde_json::Value>(direct.trim()) {
-            return json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({"error":"invalid_AKASHA_WEBHOOK_DIRECT_BODY_JSON","detail": e.to_string()}).to_string(),
-            );
-        }
-        let body_trim = direct.trim();
-        return json_response("200 OK", body_trim);
+    if let Some(resp) = crate::api_routes_automation::handle_automation_routes(
+        method,
+        path_only,
+        body.as_deref(),
+        headers,
+        data_dir,
+    )
+    .await
+    {
+        return resp;
     }
 
     if method == "GET" && path_only == "/api/process/watch/recent" {
-        let limit = parse_query_param(query_str, "limit")
+        let limit = crate::api_security::parse_query_param(query_str, "limit")
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(50);
         let ev = crate::process_watch::recent(limit).await;
@@ -12243,335 +10913,40 @@ pub async fn handle_api(
         );
     }
 
-    if method == "GET" && path_only == "/api/terminal/capabilities" {
-        let j = serde_json::json!({
-            "interactive_pty": "available",
-            "current": ["run_command", "run_terminal", "run_command_background", "process list|poll|kill"],
-            "pty_api": {
-                "create": "POST /api/terminal/pty/sessions",
-                "list": "GET /api/terminal/pty/sessions",
-                "input": "POST /api/terminal/pty/sessions/{id}/input",
-                "output": "GET /api/terminal/pty/sessions/{id}/output?max=8192",
-                "resize": "POST /api/terminal/pty/sessions/{id}/resize",
-                "close": "DELETE /api/terminal/pty/sessions/{id}"
-            },
-            "spec": "spec/43_session_terminal.md"
-        });
-        return json_response("200 OK", &j.to_string());
+    if let Some(resp) = crate::api_routes_terminal::handle_terminal_routes(
+        method,
+        path_only,
+        query_str,
+        body.as_deref(),
+    )
+    .await
+    {
+        return resp;
     }
 
-    if method == "GET" && path_only == "/api/terminal/pty/sessions" {
-        let res =
-            tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().list_sessions())
-                .await;
-        return match res {
-            Ok(Ok(v)) => json_response(
-                "200 OK",
-                &serde_json::to_string(&v).unwrap_or_else(|_| "[]".to_string()),
-            ),
-            Ok(Err(e)) => json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({"error":"pty_list_failed","detail": e.to_string()}).to_string(),
-            ),
-            Err(e) => json_response(
-                "500 Internal Server Error",
-                &serde_json::json!({"error":"pty_list_join","detail": e.to_string()}).to_string(),
-            ),
-        };
+    if let Some(resp) = crate::api_routes_mcp::handle_mcp_lifecycle_routes(
+        method,
+        path_only,
+        body.as_deref(),
+        data_dir,
+    )
+    .await
+    {
+        return resp;
     }
 
-    // PTY sessions (Hermes tranche 1 — portable-pty).
-    if method == "POST" && path_only == "/api/terminal/pty/sessions" {
-        let Some(b) = body.as_deref() else {
-            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-        };
-        let parsed: Result<crate::terminal_pty::PtyCreateBody, _> = serde_json::from_slice(b);
-        let Ok(create_body) = parsed else {
-            return json_response(
-                "400 Bad Request",
-                &serde_json::json!({"error":"invalid_json"}).to_string(),
-            );
-        };
-        let res = tokio::task::spawn_blocking(move || {
-            crate::terminal_pty::PtyManager::global().create(create_body)
-        })
-        .await;
-        match res {
-            Ok(Ok(r)) => {
-                return json_response(
-                    "200 OK",
-                    &serde_json::to_string(&r).unwrap_or_else(|_| "{}".to_string()),
-                );
-            }
-            Ok(Err(e)) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({"error":"pty_create_failed","detail": e.to_string()}).to_string(),
-                );
-            }
-            Err(e) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({"error":"pty_create_join","detail": e.to_string()}).to_string(),
-                );
-            }
-        }
-    }
-
-    if let Some(rest) = path_only.strip_prefix("/api/terminal/pty/sessions/") {
-        let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
-        if parts.len() == 1 {
-            let sid = parts[0];
-            if method == "DELETE" {
-                let sid = sid.to_string();
-                let res = tokio::task::spawn_blocking(move || {
-                    crate::terminal_pty::PtyManager::global().close(&sid)
-                })
-                .await;
-                return match res {
-                    Ok(Ok(())) => json_response("200 OK", r#"{"ok":true}"#),
-                    Ok(Err(e)) => json_response(
-                        "404 Not Found",
-                        &serde_json::json!({"error":"pty_close_failed","detail": e.to_string()}).to_string(),
-                    ),
-                    Err(e) => json_response(
-                        "500 Internal Server Error",
-                        &serde_json::json!({"error":"pty_close_join","detail": e.to_string()}).to_string(),
-                    ),
-                };
-            }
-        }
-        if parts.len() == 2 {
-            let sid = parts[0].to_string();
-            let action = parts[1];
-            if action == "output" && method == "GET" {
-                let max = parse_query_param(query_str, "max")
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(8192);
-                let sid2 = sid.clone();
-                let res = tokio::task::spawn_blocking(move || {
-                    crate::terminal_pty::PtyManager::global().read_output(&sid2, max)
-                })
-                .await;
-                return match res {
-                    Ok(Ok(o)) => json_response(
-                        "200 OK",
-                        &serde_json::to_string(&o).unwrap_or_else(|_| "{}".to_string()),
-                    ),
-                    Ok(Err(e)) => json_response(
-                        "404 Not Found",
-                        &serde_json::json!({"error":"pty_read_failed","detail": e.to_string()}).to_string(),
-                    ),
-                    Err(e) => json_response(
-                        "500 Internal Server Error",
-                        &serde_json::json!({"error":"pty_read_join","detail": e.to_string()}).to_string(),
-                    ),
-                };
-            }
-            if action == "input" && method == "POST" {
-                let Some(b) = body.as_deref() else {
-                    return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-                };
-                let parsed: Result<crate::terminal_pty::PtyInputBody, _> = serde_json::from_slice(b);
-                if parsed.is_err() {
-                    return json_response(
-                        "400 Bad Request",
-                        r#"{"error":"invalid_json"}"#,
-                    );
-                }
-                let input_body = parsed.unwrap();
-                let sid2 = sid.clone();
-                let res = tokio::task::spawn_blocking(move || {
-                    crate::terminal_pty::PtyManager::global().write_input(&sid2, input_body)
-                })
-                .await;
-                return match res {
-                    Ok(Ok(())) => json_response("200 OK", r#"{"ok":true}"#),
-                    Ok(Err(e)) => json_response(
-                        "400 Bad Request",
-                        &serde_json::json!({"error":"pty_write_failed","detail": e.to_string()}).to_string(),
-                    ),
-                    Err(e) => json_response(
-                        "500 Internal Server Error",
-                        &serde_json::json!({"error":"pty_write_join","detail": e.to_string()}).to_string(),
-                    ),
-                };
-            }
-            if action == "resize" && method == "POST" {
-                let Some(b) = body.as_deref() else {
-                    return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-                };
-                let parsed: Result<crate::terminal_pty::PtyResizeBody, _> = serde_json::from_slice(b);
-                if parsed.is_err() {
-                    return json_response(
-                        "400 Bad Request",
-                        r#"{"error":"invalid_json"}"#,
-                    );
-                }
-                let resize_body = parsed.unwrap();
-                let sid2 = sid.clone();
-                let res = tokio::task::spawn_blocking(move || {
-                    crate::terminal_pty::PtyManager::global().resize(&sid2, resize_body)
-                })
-                .await;
-                return match res {
-                    Ok(Ok(())) => json_response("200 OK", r#"{"ok":true}"#),
-                    Ok(Err(e)) => json_response(
-                        "400 Bad Request",
-                        &serde_json::json!({"error":"pty_resize_failed","detail": e.to_string()}).to_string(),
-                    ),
-                    Err(e) => json_response(
-                        "500 Internal Server Error",
-                        &serde_json::json!({"error":"pty_resize_join","detail": e.to_string()}).to_string(),
-                    ),
-                };
-            }
-        }
-    }
-
-    // Operator: MCP config on disk (validate only; runtime spawn is roadmap — see docs/mcp-mvp.md).
-    if method == "GET" && path_only == "/api/mcp/status" {
-        if let Some(cached) = crate::http_get_cache::cache_get_mcp_status() {
-            return json_response("200 OK", &cached);
-        }
-        let j = crate::mcp::mcp_operator_status(data_dir);
-        let body = j.to_string();
-        crate::http_get_cache::cache_put_mcp_status(&body);
-        return json_response("200 OK", &body);
-    }
-
-    if method == "GET" && path_only == "/api/mcp/runtime" {
-        let j = crate::mcp_runtime::summary().await;
-        return json_response("200 OK", &j.to_string());
-    }
-    if method == "GET" && path_only == "/api/mcp/runtime/sse" {
-        let summary = crate::mcp_runtime::summary().await.to_string();
-        return format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\nevent: runtime\n\
-data: {}\n\n",
-            summary.replace('\n', "").replace('\r', "")
-        );
-    }
-    if method == "POST" && path_only == "/api/mcp/runtime/stdio/start" {
-        let Some(b) = body.as_deref() else {
-            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-        };
-        let v: serde_json::Value = match serde_json::from_slice(b) {
-            Ok(v) => v,
-            Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
-        };
-        let server = v
-            .get("server")
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .unwrap_or("");
-        if server.is_empty() {
-            return json_response(
-                "400 Bad Request",
-                r#"{"error":"missing_server","hint":"{\"server\":\"myMcpKey\"}"}"#,
-            );
-        }
-        match crate::mcp_runtime::start_stdio_server(data_dir, server).await {
-            Ok(j) => return json_response("200 OK", &j.to_string()),
-            Err(e) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({"error":"mcp_stdio_start_failed","detail": e}).to_string(),
-                );
-            }
-        }
-    }
-    if method == "POST" && path_only == "/api/mcp/runtime/stdio/stop" {
-        let j = crate::mcp_runtime::stop_stdio_server().await;
-        return json_response("200 OK", &j.to_string());
-    }
-    if method == "GET" && path_only == "/api/mcp/runtime/oauth" {
-        let j = crate::mcp_runtime::oauth_get(data_dir).await;
-        return json_response("200 OK", &j.to_string());
-    }
-    if method == "POST" && path_only == "/api/mcp/runtime/oauth" {
-        let Some(b) = body.as_deref() else {
-            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-        };
-        let v: serde_json::Value = match serde_json::from_slice(b) {
-            Ok(v) => v,
-            Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
-        };
-        let provider = v
-            .get("provider")
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("unknown")
-            .to_string();
-        let status = v
-            .get("status")
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("configured")
-            .to_string();
-        match crate::mcp_runtime::oauth_put(data_dir, provider, status).await {
-            Ok(j) => return json_response("200 OK", &j.to_string()),
-            Err(e) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({"error":"mcp_oauth_state_write_failed","detail":e}).to_string(),
-                );
-            }
-        }
-    }
-
-    // Operator: lifecycle_hooks.json summary (schedule hooks run today; HTTP gateway hooks reserved).
-    if method == "GET" && path_only == "/api/lifecycle/hooks" {
-        let j = crate::lifecycle_hooks::lifecycle_hooks_summary(data_dir);
-        return json_response("200 OK", &j.to_string());
-    }
-
-    if path_only == "/api/autonomous-mission" {
-        let Some(ref am) = autonomous_mission else {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
-        };
-        if method == "GET" {
-            return get_autonomous_mission_state(data_dir, store_path, am).await;
-        }
-        if method == "PUT" {
-            let Some(ref b) = body else {
-                return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-            };
-            return put_autonomous_mission_state(data_dir, store_path, am, b).await;
-        }
-        return json_response("405 Method Not Allowed", r#"{"error":"method_not_allowed"}"#);
-    }
-    if path_only == "/api/autonomous-mission/events" && method == "GET" {
-        if autonomous_mission.is_none() {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
-        }
-        return get_autonomous_mission_events_list(store_path, query_str).await;
-    }
-    if path_only == "/api/autonomous-mission/pause" && method == "POST" {
-        let Some(ref am) = autonomous_mission else {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
-        };
-        return post_autonomous_mission_status(data_dir, store_path, am, MissionStatusYaml::Paused).await;
-    }
-    if path_only == "/api/autonomous-mission/resume" && method == "POST" {
-        let Some(ref am) = autonomous_mission else {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"autonomous_mission_unavailable"}"#,
-            );
-        };
-        return post_autonomous_mission_status(data_dir, store_path, am, MissionStatusYaml::Active).await;
+    if let Some(resp) = crate::api_routes_mission::handle_mission_routes(
+        method,
+        path_only,
+        query_str,
+        body.as_deref(),
+        data_dir,
+        store_path,
+        autonomous_mission.clone(),
+    )
+    .await
+    {
+        return resp;
     }
 
     if method == "GET" && (path == "/" || path.is_empty()) {
@@ -12830,314 +11205,119 @@ data: {}\n\n",
         }
     }
 
-    // GET /api/agent-profile — read agent profile (name, personality, role, gender, formality, avatar, rules, can_do, cannot_do, traits_override, preferred_mode)
-    if method == "GET" && path == "/api/agent-profile" {
-        let profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
-        let body_json = serde_json::json!({
-            "name": profile.name,
-            "personality": profile.personality,
-            "role": profile.role,
-            "gender": profile.gender,
-            "formality": profile.formality,
-            "avatar": profile.avatar,
-            "rules": profile.rules,
-            "can_do": profile.can_do,
-            "cannot_do": profile.cannot_do,
-            "traits_override": profile.traits_override,
-            "preferred_mode": profile.preferred_mode
-        });
-        return json_response("200 OK", &body_json.to_string());
+    if let Some(resp) = crate::api_routes_profiles::handle_profiles_routes(
+        method,
+        path_only,
+        query_str,
+        body.as_deref(),
+        data_dir,
+        agent_profile_cache,
+        short_term.clone(),
+        long_term_client.clone(),
+    )
+    .await
+    {
+        return resp;
     }
 
-    // POST /api/agent-profile — update agent profile (merge with existing). Body: { name?, personality?, role?, gender?, formality?, avatar?, rules?, can_do?, cannot_do?, traits_override?, preferred_mode? }
-    if method == "POST" && path == "/api/agent-profile" {
-        let mut profile = get_or_load_agent_profile(data_dir, agent_profile_cache).await;
-        if let Some(body) = body.as_deref() {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
-                if let Some(s) = v.get("name").and_then(|x| x.as_str()) {
-                    profile.name = Some(s.to_string());
-                }
-                if let Some(s) = v.get("personality").and_then(|x| x.as_str()) {
-                    profile.personality = Some(s.to_string());
-                }
-                if v.get("role").is_some() {
-                    profile.role = v.get("role").and_then(|x| x.as_str()).map(String::from);
-                }
-                if v.get("gender").is_some() {
-                    profile.gender = v.get("gender").and_then(|x| x.as_str()).map(String::from);
-                }
-                if let Some(fv) = v.get("formality") {
-                    if fv.is_null() {
-                        profile.formality = None;
-                    } else if let Some(s) = fv.as_str() {
-                        let t = s.trim().to_lowercase();
-                        profile.formality = match t.as_str() {
-                            "formal" => Some("formal".to_string()),
-                            "informal" => Some("informal".to_string()),
-                            _ => None,
-                        };
+    // Second brain controls: settings, overview and clear.
+    if method == "GET" && path == "/api/memory/second-brain/settings" {
+        let settings = load_second_brain_settings(data_dir);
+        let body = serde_json::json!({ "settings": settings });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path == "/api/memory/second-brain/settings" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let mut settings = load_second_brain_settings(data_dir);
+        if let Some(enabled) = body_json
+            .as_ref()
+            .and_then(|v| v.get("enabled").and_then(|b| b.as_bool()))
+        {
+            settings.enabled = enabled;
+        }
+        if let Some(paused) = body_json
+            .as_ref()
+            .and_then(|v| v.get("paused").and_then(|b| b.as_bool()))
+        {
+            settings.paused = paused;
+        }
+        match save_second_brain_settings(data_dir, &settings) {
+            Ok(()) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "settings": settings }).to_string(),
+                )
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+    if method == "GET" && path.starts_with("/api/memory/second-brain/overview") {
+        let settings = load_second_brain_settings(data_dir);
+        let (entries, total) = if let Some(ref client) = long_term_client {
+            let client = client.clone();
+            tokio::task::spawn_blocking(move || client.list(500, 0))
+                .await
+                .unwrap_or((vec![], 0))
+        } else {
+            (vec![], 0)
+        };
+        let mut by_type: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        for (_, _, source, _) in entries {
+            let t = if source.contains("preference") {
+                "preference"
+            } else if source.contains("goal") {
+                "goal"
+            } else if source.contains("project") {
+                "project"
+            } else if source.contains("decision") {
+                "decision"
+            } else if source.contains("constraint") {
+                "constraint"
+            } else if source.contains("identity") || source.contains("user_fact") {
+                "identity"
+            } else {
+                "other"
+            };
+            *by_type.entry(t.to_string()).or_insert(0) += 1;
+        }
+        let body = serde_json::json!({
+            "settings": settings,
+            "total_entries": total,
+            "typed_counts": by_type
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path == "/api/memory/second-brain/clear" {
+        let mut deleted = 0u64;
+        if let Some(ref client) = long_term_client {
+            let client = client.clone();
+            deleted = tokio::task::spawn_blocking(move || {
+                let mut removed = 0u64;
+                loop {
+                    let (rows, _total) = client.list(200, 0);
+                    if rows.is_empty() {
+                        break;
                     }
-                }
-                if v.get("avatar").is_some() {
-                    profile.avatar = v.get("avatar").and_then(|x| x.as_str()).map(String::from);
-                }
-                if let Some(arr) = v.get("rules").and_then(|x| x.as_array()) {
-                    profile.rules = arr
-                        .iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect();
-                }
-                if let Some(arr) = v.get("can_do").and_then(|x| x.as_array()) {
-                    profile.can_do = arr
-                        .iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect();
-                }
-                if let Some(arr) = v.get("cannot_do").and_then(|x| x.as_array()) {
-                    profile.cannot_do = arr
-                        .iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect();
-                }
-                if let Some(obj) = v.get("traits_override").and_then(|x| x.as_object()) {
-                    let mut map = std::collections::HashMap::new();
-                    for (k, val) in obj {
-                        if let Some(n) = val.as_f64() {
-                            map.insert(k.clone(), n);
+                    for (id, _content, _source, _created) in rows {
+                        if client.delete(id).is_ok() {
+                            removed += 1;
                         }
                     }
-                    profile.traits_override = if map.is_empty() { None } else { Some(map) };
                 }
-                if v.get("preferred_mode").is_some() {
-                    profile.preferred_mode = v
-                        .get("preferred_mode")
-                        .and_then(|x| x.as_str())
-                        .map(String::from);
-                }
-            }
-        }
-        // Persist default name if none or empty so the agent always has an identity on disk
-        if profile
-            .name
-            .as_deref()
-            .map(|s| s.trim().is_empty())
-            .unwrap_or(true)
-        {
-            profile.name = Some(AgentProfile::DEFAULT_NAME.to_string());
-        }
-        match profile.save(data_dir) {
-            Ok(()) => {
-                set_agent_profile_cache(agent_profile_cache, profile).await;
-                return json_response(
-                    "200 OK",
-                    r#"{"ok":true,"message":"Profil agent mis à jour"}"#,
-                );
-            }
-            Err(e) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({ "error": e.to_string() }).to_string(),
-                )
-            }
-        }
-    }
-
-    // GET /api/user-profile — read user profile (first_name, last_name, how_to_call, onboarding_completed)
-    if method == "GET" && path == "/api/user-profile" {
-        let profile = UserProfile::load(data_dir);
-        let body_json = serde_json::json!({
-            "first_name": profile.first_name,
-            "last_name": profile.last_name,
-            "how_to_call": profile.how_to_call,
-            "onboarding_completed": profile.onboarding_completed,
-            "proactive_check_in_enabled": profile.proactive_check_in_enabled,
-            "proactive_check_in_interval_days": profile.proactive_check_in_interval_days,
-        });
-        return json_response("200 OK", &body_json.to_string());
-    }
-
-    // POST /api/user-profile — update user profile. Body: { first_name?, last_name?, how_to_call?, onboarding_completed?, proactive_check_in_enabled?, proactive_check_in_interval_days? }
-    if method == "POST" && path == "/api/user-profile" {
-        let mut profile = UserProfile::load(data_dir);
-        if let Some(body) = body.as_deref() {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
-                if v.get("first_name").is_some() {
-                    profile.first_name = v
-                        .get("first_name")
-                        .and_then(|x| x.as_str())
-                        .map(String::from);
-                }
-                if v.get("last_name").is_some() {
-                    profile.last_name = v
-                        .get("last_name")
-                        .and_then(|x| x.as_str())
-                        .map(String::from);
-                }
-                if v.get("how_to_call").is_some() {
-                    profile.how_to_call = v
-                        .get("how_to_call")
-                        .and_then(|x| x.as_str())
-                        .map(|s| s.trim().to_string());
-                }
-                if let Some(b) = v.get("onboarding_completed").and_then(|x| x.as_bool()) {
-                    profile.onboarding_completed = b;
-                }
-                if v.get("proactive_check_in_enabled").is_some() {
-                    profile.proactive_check_in_enabled = v
-                        .get("proactive_check_in_enabled")
-                        .and_then(|x| x.as_bool())
-                        .unwrap_or(false);
-                }
-                if v.get("proactive_check_in_interval_days").is_some() {
-                    profile.proactive_check_in_interval_days =
-                        v.get("proactive_check_in_interval_days")
-                            .and_then(|x| x.as_u64())
-                            .unwrap_or(0) as u32;
-                }
-            }
-        }
-        match profile.save(data_dir) {
-            Ok(()) => {
-                return json_response(
-                    "200 OK",
-                    r#"{"ok":true,"message":"Profil utilisateur mis à jour"}"#,
-                )
-            }
-            Err(e) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({ "error": e.to_string() }).to_string(),
-                )
-            }
-        }
-    }
-
-    // GET /api/first-message?context=onboarding|first_today|proactive — agent-initiated first message (onboarding, daily greeting, proactive check-in)
-    if method == "GET" && path.starts_with("/api/first-message") {
-        let context = path
-            .split('?')
-            .nth(1)
-            .and_then(|q| {
-                q.split('&').find(|p| p.starts_with("context=")).map(|p| {
-                    urlencoding::decode(p.trim_start_matches("context="))
-                        .unwrap_or_default()
-                        .into_owned()
-                })
+                removed
             })
-            .unwrap_or_default();
-        let session_id = format!("day-{}", chrono::Utc::now().format("%Y-%m-%d"));
-        let user_profile = UserProfile::load(data_dir);
-
-        if context == "onboarding" && !user_profile.has_how_to_call() {
-            let message = "Bonjour ! Pour personnaliser nos échanges, comment dois-je vous appeler ? (prénom ou surnom)";
-            if let Some(ref st) = short_term {
-                st.append(&session_id, "assistant", message.to_string())
-                    .await;
-            }
-            let body_json = serde_json::json!({ "message": message, "session_id": session_id });
-            return json_response("200 OK", &body_json.to_string());
+            .await
+            .unwrap_or(0);
         }
-
-        if context == "proactive"
-            && user_profile.has_how_to_call()
-            && user_profile.proactive_check_in_enabled
-            && user_profile.proactive_check_in_interval_days > 0
-        {
-            let now = chrono::Utc::now();
-            let last = UserProfile::load_last_activity(data_dir);
-            let interval_days = user_profile.proactive_check_in_interval_days as i64;
-            let show = match last {
-                None => true,
-                Some(t) => (now - t).num_days() >= interval_days,
-            };
-            if show {
-                let how = user_profile.how_to_call.as_deref().unwrap_or("").trim();
-                let message = format!(
-                    "Ça fait un moment, {} ! Tu veux qu'on travaille sur quelque chose ?",
-                    how
-                );
-                if let Some(ref st) = short_term {
-                    st.append(&session_id, "assistant", message.clone()).await;
-                }
-                let body_json = serde_json::json!({ "message": message, "session_id": session_id });
-                return json_response("200 OK", &body_json.to_string());
-            }
-        }
-
-        if context == "first_today" && user_profile.has_how_to_call() {
-            let how = user_profile.how_to_call.as_deref().unwrap_or("").trim();
-            let message = format!("Bonjour {}, quoi de neuf aujourd'hui ?", how);
-            if let Some(ref st) = short_term {
-                st.append(&session_id, "assistant", message.clone()).await;
-            }
-            let body_json = serde_json::json!({ "message": message, "session_id": session_id });
-            return json_response("200 OK", &body_json.to_string());
-        }
-
-        // Other contexts: return empty so UI does not show a duplicate message
-        let body_json = serde_json::json!({ "message": "", "session_id": session_id });
-        return json_response("200 OK", &body_json.to_string());
-    }
-
-    // POST /api/personality-memory — store a structured personality preference (Phase 3). Body: { "key": "preferred_tone"|"technical_depth_preference"|..., "value": "..." }
-    if method == "POST" && path == "/api/personality-memory" {
-        let Some(client) = long_term_client.clone() else {
-            return json_response(
-                "503 Service Unavailable",
-                r#"{"error":"long_term_memory_unavailable"}"#,
-            );
-        };
-        let Some(body) = body.as_deref() else {
-            return json_response("400 Bad Request", r#"{"error":"body_required"}"#);
-        };
-        let v: serde_json::Value = match serde_json::from_slice(body) {
-            Ok(x) => x,
-            Err(_) => return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#),
-        };
-        let key = match v.get("key").and_then(|x| x.as_str()) {
-            Some(k) if !k.trim().is_empty() => k.trim().to_string(),
-            _ => return json_response("400 Bad Request", r#"{"error":"key_required"}"#),
-        };
-        let value = v
-            .get("value")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
-        let payload = serde_json::json!({ "key": key, "value": value }).to_string();
-        let result = tokio::task::spawn_blocking(move || {
-            client.emit_event(
-                "personality_memory".to_string(),
-                payload,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-        })
-        .await;
-        match result {
-            Ok(Ok(id)) => {
-                return json_response(
-                    "200 OK",
-                    &serde_json::json!({ "ok": true, "id": id.to_string() }).to_string(),
-                )
-            }
-            Ok(Err(e)) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({ "error": e }).to_string(),
-                )
-            }
-            Err(e) => {
-                return json_response(
-                    "500 Internal Server Error",
-                    &serde_json::json!({ "error": e.to_string() }).to_string(),
-                )
-            }
-        }
+        let body = serde_json::json!({ "ok": true, "deleted_entries": deleted });
+        return json_response("200 OK", &body.to_string());
     }
 
     // GET /api/memory/recall-metrics — counters from memory orchestrator (semantic recall hits/empty).
@@ -14644,6 +12824,8 @@ data: {}\n\n",
             "active_intents": active_intents,
             "matched_rules_count": matched_rules.len(),
             "matched_rules": matched_rules,
+            "routing_rules_deprecated": true,
+            "routing_rules_note": "Manifest routing_rules are no longer enforced at runtime. Plugin hints are chosen via a short system LLM call from plugin descriptions; this endpoint remains for debugging legacy manifests.",
         });
         return json_response("200 OK", &body.to_string());
     }
@@ -14724,6 +12906,8 @@ data: {}\n\n",
             "allowed_tools": allowed_tools,
             "matched_rules_count": matched_rules.len(),
             "matched_rules": matched_rules,
+            "routing_rules_deprecated": true,
+            "routing_rules_note": "Manifest routing_rules are no longer enforced at runtime. Plugin hints are chosen via a short system LLM call from plugin descriptions; this endpoint remains for debugging legacy manifests.",
         });
         return json_response("200 OK", &body.to_string());
     }
@@ -14774,6 +12958,60 @@ data: {}\n\n",
             Err(e) => {
                 let body = serde_json::json!({ "error": "reputation_reset_failed", "detail": e.to_string() });
                 return json_response("500 Internal Server Error", &body.to_string());
+            }
+        }
+    }
+
+    // POST /api/plugins/{id}/disable | /enable | /uninstall — user plugin management
+    if method == "POST" && path.starts_with("/api/plugins/") {
+        if let Some(rest) = path.strip_prefix("/api/plugins/") {
+            let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+            if segs.len() == 2 {
+                let plugin_id = segs[0];
+                let action = segs[1];
+                if !akasha_plugin_api::is_safe_plugin_id(plugin_id) {
+                    let body = serde_json::json!({ "error": "invalid_plugin_id" });
+                    return json_response("400 Bad Request", &body.to_string());
+                }
+                let maybe_result = match action {
+                    "disable" => Some(plugin_registry.set_enabled(plugin_id, false)),
+                    "enable" => Some(plugin_registry.set_enabled(plugin_id, true)),
+                    "uninstall" => Some(plugin_registry.uninstall(plugin_id)),
+                    _ => None,
+                };
+                if let Some(result) = maybe_result {
+                    match result {
+                        Ok(()) => {
+                            let body = serde_json::json!({
+                                "ok": true,
+                                "id": plugin_id,
+                                "action": action,
+                            });
+                            return json_response("200 OK", &body.to_string());
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            let body = serde_json::json!({
+                                "error": "not_found",
+                                "detail": e.to_string(),
+                            });
+                            return json_response("404 Not Found", &body.to_string());
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+                            let body = serde_json::json!({
+                                "error": "invalid_plugin_id",
+                                "detail": e.to_string(),
+                            });
+                            return json_response("400 Bad Request", &body.to_string());
+                        }
+                        Err(e) => {
+                            let body = serde_json::json!({
+                                "error": "plugin_action_failed",
+                                "detail": e.to_string(),
+                            });
+                            return json_response("500 Internal Server Error", &body.to_string());
+                        }
+                    }
+                }
             }
         }
     }
@@ -14920,6 +13158,418 @@ data: {}\n\n",
                 );
             }
         }
+    }
+
+    // Telegram channel access (pairing + RBAC lifecycle)
+    if method == "GET" && path_only == "/api/channel-access/telegram/users" {
+        let state = crate::channel_access::load(data_dir);
+        let body = serde_json::json!({
+            "approved": state.approved,
+            "pending": state.pending
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/request" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        if user_id == 0 {
+            return json_response("400 Bad Request", r#"{"error":"missing_user_id"}"#);
+        }
+        let username = body_json
+            .as_ref()
+            .and_then(|v| v.get("username").and_then(|s| s.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let mut state = crate::channel_access::load(data_dir);
+        if crate::channel_access::is_approved_user(&state, user_id) {
+            return json_response("200 OK", r#"{"ok":true,"already_approved":true}"#);
+        }
+        state.pending.retain(|p| p.user_id != user_id);
+        let code = format!("TG-{}", Uuid::new_v4().to_string()[..8].to_uppercase());
+        state.pending.push(crate::channel_access::TelegramPending {
+            user_id,
+            username,
+            pairing_code: code.clone(),
+            requested_at: chrono::Utc::now().to_rfc3339(),
+        });
+        if let Err(e) = crate::channel_access::save(data_dir, &state) {
+            tracing::error!(error = %e, "channel-access: failed to persist pairing request");
+            return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+        }
+        let body = serde_json::json!({ "ok": true, "pairing_code": code });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/approve" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let code = body_json
+            .as_ref()
+            .and_then(|v| v.get("pairing_code").and_then(|s| s.as_str()))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        let mut state = crate::channel_access::load(data_dir);
+        let pending = if !code.is_empty() {
+            let idx = state.pending.iter().position(|p| p.pairing_code == code);
+            idx.map(|i| state.pending.remove(i))
+        } else if user_id != 0 {
+            let idx = state.pending.iter().position(|p| p.user_id == user_id);
+            idx.map(|i| state.pending.remove(i))
+        } else {
+            None
+        };
+        let Some(pending) = pending else {
+            return json_response("404 Not Found", r#"{"error":"pending_not_found"}"#);
+        };
+        let is_first = state.approved.is_empty();
+        state.approved.retain(|u| u.user_id != pending.user_id);
+        state.approved.push(crate::channel_access::TelegramUser {
+            user_id: pending.user_id,
+            username: pending.username,
+            role: if is_first {
+                crate::channel_access::TelegramRole::Admin
+            } else {
+                crate::channel_access::TelegramRole::Member
+            },
+            approved_at: chrono::Utc::now().to_rfc3339(),
+        });
+        if let Err(e) = crate::channel_access::save(data_dir, &state) {
+            tracing::error!(error = %e, "channel-access: failed to persist approve");
+            return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+        }
+        return json_response("200 OK", r#"{"ok":true}"#);
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/reject" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        if user_id == 0 {
+            return json_response("400 Bad Request", r#"{"error":"missing_user_id"}"#);
+        }
+        let mut state = crate::channel_access::load(data_dir);
+        let before = state.pending.len();
+        state.pending.retain(|p| p.user_id != user_id);
+        if let Err(e) = crate::channel_access::save(data_dir, &state) {
+            tracing::error!(error = %e, "channel-access: failed to persist reject");
+            return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+        }
+        let removed = before != state.pending.len();
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "ok": true, "removed": removed }).to_string(),
+        );
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/remove" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        if user_id == 0 {
+            return json_response("400 Bad Request", r#"{"error":"missing_user_id"}"#);
+        }
+        let mut state = crate::channel_access::load(data_dir);
+        let before = state.approved.len();
+        state.approved.retain(|u| u.user_id != user_id);
+        if let Err(e) = crate::channel_access::save(data_dir, &state) {
+            tracing::error!(error = %e, "channel-access: failed to persist remove");
+            return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+        }
+        let removed = before != state.approved.len();
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "ok": true, "removed": removed }).to_string(),
+        );
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/promote" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        if user_id == 0 {
+            return json_response("400 Bad Request", r#"{"error":"missing_user_id"}"#);
+        }
+        let mut state = crate::channel_access::load(data_dir);
+        if let Some(u) = state.approved.iter_mut().find(|u| u.user_id == user_id) {
+            u.role = crate::channel_access::TelegramRole::Admin;
+            if let Err(e) = crate::channel_access::save(data_dir, &state) {
+                tracing::error!(error = %e, "channel-access: failed to persist promote");
+                return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+            }
+            return json_response("200 OK", r#"{"ok":true}"#);
+        }
+        return json_response("404 Not Found", r#"{"error":"user_not_found"}"#);
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/demote" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let user_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("user_id").and_then(|n| n.as_i64()))
+            .unwrap_or_default();
+        if user_id == 0 {
+            return json_response("400 Bad Request", r#"{"error":"missing_user_id"}"#);
+        }
+        let mut state = crate::channel_access::load(data_dir);
+        if let Some(u) = state.approved.iter_mut().find(|u| u.user_id == user_id) {
+            u.role = crate::channel_access::TelegramRole::Member;
+            if let Err(e) = crate::channel_access::save(data_dir, &state) {
+                tracing::error!(error = %e, "channel-access: failed to persist demote");
+                return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+            }
+            return json_response("200 OK", r#"{"ok":true}"#);
+        }
+        return json_response("404 Not Found", r#"{"error":"user_not_found"}"#);
+    }
+    if method == "POST" && path_only == "/api/channel-access/telegram/reset" {
+        let state = crate::channel_access::TelegramAccessState::default();
+        if let Err(e) = crate::channel_access::save(data_dir, &state) {
+            tracing::error!(error = %e, "channel-access: failed to persist reset");
+            return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+        }
+        return json_response("200 OK", r#"{"ok":true}"#);
+    }
+
+    if method == "GET" && path_only == "/api/permissions/mode" {
+        let state = load_permission_mode(data_dir);
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "mode": state.mode, "updated_at": state.updated_at }).to_string(),
+        );
+    }
+    if method == "POST" && path_only == "/api/permissions/mode" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let mode = body_json
+            .as_ref()
+            .and_then(|v| v.get("mode").and_then(|s| s.as_str()))
+            .unwrap_or("")
+            .to_lowercase();
+        if mode != "ask_me" && mode != "allow_all" {
+            return json_response("400 Bad Request", r#"{"error":"invalid_mode"}"#);
+        }
+        let state = PermissionModeState {
+            mode,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        match save_permission_mode(data_dir, &state) {
+            Ok(()) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "mode": state.mode }).to_string(),
+                )
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+
+    // Permission center: persisted approval decisions.
+    if method == "GET" && path_only == "/api/permissions/decisions" {
+        let state = crate::permissions_center::load(data_dir);
+        let body = serde_json::json!({ "decisions": state.decisions });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path_only == "/api/permissions/decisions" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let tool = body_json
+            .as_ref()
+            .and_then(|v| v.get("tool").and_then(|s| s.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let scope = body_json
+            .as_ref()
+            .and_then(|v| v.get("scope").and_then(|s| s.as_str()))
+            .unwrap_or("global")
+            .trim()
+            .to_string();
+        let mode_str = body_json
+            .as_ref()
+            .and_then(|v| v.get("mode").and_then(|s| s.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        let mode = match mode_str.as_str() {
+            "allow_persistent" => crate::permissions_center::DecisionMode::AllowPersistent,
+            "deny_persistent" => crate::permissions_center::DecisionMode::DenyPersistent,
+            _ => {
+                return json_response(
+                    "400 Bad Request",
+                    r#"{"error":"invalid_mode","expected":"allow_persistent|deny_persistent"}"#,
+                )
+            }
+        };
+        if tool.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_tool"}"#);
+        }
+        let mut state = crate::permissions_center::load(data_dir);
+        state
+            .decisions
+            .retain(|d| !(d.tool == tool && d.scope == scope));
+        let decision = crate::permissions_center::PermissionDecision {
+            id: Uuid::new_v4().to_string(),
+            tool,
+            scope,
+            mode,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            expires_at: None,
+        };
+        state.decisions.push(decision.clone());
+        match crate::permissions_center::save(data_dir, &state) {
+            Ok(()) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "decision": decision }).to_string(),
+                )
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+    if method == "DELETE" && path_only.starts_with("/api/permissions/decisions/") {
+        let id = path_only
+            .trim_start_matches("/api/permissions/decisions/")
+            .trim();
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
+        }
+        let mut state = crate::permissions_center::load(data_dir);
+        let before = state.decisions.len();
+        state.decisions.retain(|d| d.id != id);
+        let removed = before != state.decisions.len();
+        if removed {
+            if let Err(e) = crate::permissions_center::save(data_dir, &state) {
+                tracing::error!(error = %e, id = %id, "permissions/decisions: failed to persist delete");
+                return json_response("500 Internal Server Error", r#"{"error":"persistence_error"}"#);
+            }
+        }
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "ok": true, "removed": removed, "id": id }).to_string(),
+        );
+    }
+
+    // Budget controls (daily limit + warning ratio + auto-concise mode).
+    if method == "GET" && path_only == "/api/budget" {
+        let settings = load_budget_settings(data_dir);
+        let session_id = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| q.split('&').find(|p| p.starts_with("session_id=")))
+            .map(|p| p.trim_start_matches("session_id=").to_string())
+            .unwrap_or_default();
+        let session_usage = if session_id.is_empty() {
+            None
+        } else {
+            task_usage_store.get_session(&session_id).await
+        };
+        let totals = task_usage_store.totals().await;
+        let used_tokens = session_usage.map(|u| u.0).unwrap_or(totals.0);
+        let used_cost_usd = session_usage.map(|u| u.1).unwrap_or(totals.1);
+        let usage_ratio = if settings.daily_token_limit == 0 {
+            0.0
+        } else {
+            used_tokens as f64 / settings.daily_token_limit as f64
+        };
+        let body = serde_json::json!({
+            "settings": settings,
+            "session_id": if session_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(session_id) },
+            "usage": {
+                "tokens": used_tokens,
+                "cost_usd": used_cost_usd,
+                "ratio": usage_ratio,
+                "warn_reached": usage_ratio >= settings.warn_ratio
+            }
+        });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "POST" && path_only == "/api/budget" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let mut settings = load_budget_settings(data_dir);
+        if let Some(limit) = body_json
+            .as_ref()
+            .and_then(|v| v.get("daily_token_limit").and_then(|n| n.as_u64()))
+        {
+            settings.daily_token_limit = limit;
+        }
+        if let Some(warn_ratio) = body_json
+            .as_ref()
+            .and_then(|v| v.get("warn_ratio").and_then(|n| n.as_f64()))
+        {
+            settings.warn_ratio = warn_ratio.clamp(0.0, 1.0);
+        }
+        if let Some(auto_concise) = body_json
+            .as_ref()
+            .and_then(|v| v.get("auto_concise").and_then(|b| b.as_bool()))
+        {
+            settings.auto_concise = auto_concise;
+        }
+        match save_budget_settings(data_dir, &settings) {
+            Ok(()) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "settings": settings }).to_string(),
+                )
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+    if method == "POST" && path_only == "/api/budget/reset-session" {
+        let body_json = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let session_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("session_id").and_then(|s| s.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if session_id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_session_id"}"#);
+        }
+        task_usage_store.reset_session(&session_id).await;
+        return json_response(
+            "200 OK",
+            &serde_json::json!({ "ok": true, "session_id": session_id }).to_string(),
+        );
     }
 
     // User RAG: list documents
@@ -17512,5 +16162,147 @@ mod tests {
         let exp = std::fs::canonicalize(tmp.path()).unwrap();
         let got_c = std::fs::canonicalize(&got).unwrap();
         assert_eq!(got_c, exp);
+    }
+
+    // --- tool_scope_key ---
+
+    #[test]
+    fn tool_scope_key_run_command_joins_first_two_args() {
+        let args = vec![s("git"), s("status"), s("--short")];
+        let key = super::tool_scope_key("run_command", &args);
+        assert_eq!(key, "git status");
+    }
+
+    #[test]
+    fn tool_scope_key_delete_file_joins_all_args_for_spaced_paths() {
+        let args = vec![s("Cas"), s("d'usage.pdf")];
+        let key = super::tool_scope_key("delete_file", &args);
+        assert_eq!(key, "Cas d'usage.pdf");
+    }
+
+    #[test]
+    fn tool_scope_key_delete_file_single_arg() {
+        let args = vec![s("/tmp/test.txt")];
+        let key = super::tool_scope_key("delete_file", &args);
+        assert_eq!(key, "/tmp/test.txt");
+    }
+
+    #[test]
+    fn tool_scope_key_write_file_uses_plain_path_from_first_arg() {
+        let args = vec![s("/tmp/hello.txt"), s("content here")];
+        let key = super::tool_scope_key("write_file", &args);
+        assert_eq!(key, "/tmp/hello.txt");
+    }
+
+    #[test]
+    fn tool_scope_key_write_file_parses_json_path() {
+        let args = vec![s(r#"{"path":"/tmp/from_json.txt","content":"hello"}"#)];
+        let key = super::tool_scope_key("write_file", &args);
+        assert_eq!(key, "/tmp/from_json.txt");
+    }
+
+    #[test]
+    fn tool_scope_key_edit_file_uses_first_arg() {
+        let args = vec![s("/some/file.rs"), s("1"), s("5"), s("new content")];
+        let key = super::tool_scope_key("edit_file", &args);
+        assert_eq!(key, "/some/file.rs");
+    }
+
+    #[test]
+    fn tool_scope_key_unknown_tool_returns_global() {
+        let args = vec![s("whatever")];
+        let key = super::tool_scope_key("unknown_tool", &args);
+        assert_eq!(key, "global");
+    }
+
+    #[test]
+    fn tool_scope_key_empty_args_returns_global_for_write_file() {
+        let args: Vec<String> = vec![];
+        let key = super::tool_scope_key("write_file", &args);
+        assert_eq!(key, "global");
+    }
+
+    // --- permissions_center (load/save/lookup) ---
+
+    #[test]
+    fn permissions_center_save_load_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::permissions_center::PermissionCenterState {
+            decisions: vec![crate::permissions_center::PermissionDecision {
+                id: "abc".to_string(),
+                tool: "delete_file".to_string(),
+                scope: "/tmp/foo.txt".to_string(),
+                mode: crate::permissions_center::DecisionMode::AllowPersistent,
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+            }],
+        };
+        crate::permissions_center::save(tmp.path(), &state).unwrap();
+        let loaded = crate::permissions_center::load(tmp.path());
+        assert_eq!(loaded.decisions.len(), 1);
+        assert_eq!(loaded.decisions[0].tool, "delete_file");
+        assert_eq!(loaded.decisions[0].scope, "/tmp/foo.txt");
+        assert_eq!(loaded.decisions[0].mode, crate::permissions_center::DecisionMode::AllowPersistent);
+    }
+
+    #[test]
+    fn permissions_center_lookup_returns_matching_decision() {
+        let state = crate::permissions_center::PermissionCenterState {
+            decisions: vec![
+                crate::permissions_center::PermissionDecision {
+                    id: "d1".to_string(),
+                    tool: "write_file".to_string(),
+                    scope: "/tmp/a.txt".to_string(),
+                    mode: crate::permissions_center::DecisionMode::DenyPersistent,
+                    created_at: "2024-01-01T00:00:00Z".to_string(),
+                    expires_at: None,
+                },
+            ],
+        };
+        let found = crate::permissions_center::lookup("write_file", "/tmp/a.txt", &state);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().mode, crate::permissions_center::DecisionMode::DenyPersistent);
+    }
+
+    #[test]
+    fn permissions_center_lookup_returns_none_for_different_scope() {
+        let state = crate::permissions_center::PermissionCenterState {
+            decisions: vec![crate::permissions_center::PermissionDecision {
+                id: "d1".to_string(),
+                tool: "write_file".to_string(),
+                scope: "/tmp/a.txt".to_string(),
+                mode: crate::permissions_center::DecisionMode::AllowPersistent,
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+            }],
+        };
+        let not_found = crate::permissions_center::lookup("write_file", "/tmp/b.txt", &state);
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn permissions_center_lookup_returns_none_for_different_tool() {
+        let state = crate::permissions_center::PermissionCenterState {
+            decisions: vec![crate::permissions_center::PermissionDecision {
+                id: "d1".to_string(),
+                tool: "write_file".to_string(),
+                scope: "global".to_string(),
+                mode: crate::permissions_center::DecisionMode::AllowPersistent,
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                expires_at: None,
+            }],
+        };
+        let not_found = crate::permissions_center::lookup("delete_file", "global", &state);
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn permissions_center_save_is_atomic_via_tmp_rename() {
+        // Verify no .tmp file is left behind after a successful save.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::permissions_center::PermissionCenterState::default();
+        crate::permissions_center::save(tmp.path(), &state).unwrap();
+        let tmp_file = tmp.path().join("permissions_center.json.tmp");
+        assert!(!tmp_file.exists(), ".tmp file should not remain after save");
     }
 }
