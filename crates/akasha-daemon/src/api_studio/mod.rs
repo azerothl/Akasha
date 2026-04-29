@@ -1857,4 +1857,86 @@ Try `npm i --save-dev @types/jest`";
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[tokio::test]
+    async fn ensure_evolution_branch_committed_before_merge_auto_commits_pending_changes() {
+        use std::process::Command;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let git_available = Command::new("git")
+            .arg("--version")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !git_available {
+            return;
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "akasha_studio_evo_commit_{stamp}_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let init = Command::new("git").arg("init").current_dir(&dir).status().unwrap();
+        assert!(init.success());
+        let _ = Command::new("git")
+            .args(["config", "user.name", "Akasha Test"])
+            .current_dir(&dir)
+            .status();
+        let _ = Command::new("git")
+            .args(["config", "user.email", "akasha-test@example.com"])
+            .current_dir(&dir)
+            .status();
+
+        std::fs::write(dir.join("README.md"), "hello\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+
+        assert!(Command::new("git")
+            .args(["checkout", "-b", "studio/e2e"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(dir.join("README.md"), "hello\nchanges\n").unwrap();
+
+        let committed = super::ensure_evolution_branch_committed_before_merge(&dir, "studio/e2e")
+            .await
+            .expect("auto-commit should succeed");
+        assert!(committed);
+
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        assert!(String::from_utf8_lossy(&status.stdout).trim().is_empty());
+
+        let log = Command::new("git")
+            .args(["log", "-1", "--pretty=%s"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(log.status.success());
+        let msg = String::from_utf8_lossy(&log.stdout);
+        assert!(msg.contains("Akasha Code Studio: save pending evolution changes"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
