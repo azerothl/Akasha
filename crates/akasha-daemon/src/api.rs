@@ -839,6 +839,8 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
     // Studio swarm MVP: synthesize worker lifecycle events from existing delegation/task events.
     // This keeps backward compatibility while exposing stable status nodes to Code Studio Cockpit.
     let mut synthetic: Vec<TaskEventEntry> = Vec::new();
+    let mut spawned_workers: Vec<String> = Vec::new();
+    let mut saw_failed = false;
     for entry in &list {
         if entry.event_type == "sub_agent_spawned" {
             let worker_task_id = entry
@@ -878,6 +880,9 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
                 at: entry.at.clone(),
                 task_id: entry.task_id.clone(),
             });
+            if let Some(w) = worker_task_id {
+                spawned_workers.push(w);
+            }
         } else if entry.event_type == "task_completed" {
             synthetic.push(TaskEventEntry {
                 schema_version: 1,
@@ -891,6 +896,7 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
                 task_id: entry.task_id.clone(),
             });
         } else if entry.event_type == "task_failed" {
+            saw_failed = true;
             synthetic.push(TaskEventEntry {
                 schema_version: 1,
                 kind: "studio_worker_state_changed".to_string(),
@@ -903,6 +909,19 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
                 task_id: entry.task_id.clone(),
             });
         }
+    }
+    if saw_failed && spawned_workers.len() > 1 {
+        synthetic.push(TaskEventEntry {
+            schema_version: 1,
+            kind: "studio_conflict_notice".to_string(),
+            event_type: "studio_conflict_notice".to_string(),
+            payload: Some(serde_json::json!({
+                "reason": "Concurrent workers ended in failure; review potential file touch conflicts.",
+                "workers": spawned_workers,
+            })),
+            at: chrono::Utc::now().to_rfc3339(),
+            task_id: Some(id.to_string()),
+        });
     }
     list.extend(synthetic);
 

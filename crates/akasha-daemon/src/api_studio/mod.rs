@@ -26,10 +26,18 @@ const PREVIEW_PORT_MIN: u16 = 5180;
 const PREVIEW_PORT_MAX: u16 = 5279;
 /// Ring buffer for dev-server stdout/stderr (preview process).
 const MAX_PREVIEW_LOG_BYTES: usize = 256 * 1024;
+const PREVIEW_PROXY_TOKEN_TTL_SEC: i64 = 180;
 
 struct StudioPreviewProcess {
     child: tokio::process::Child,
     log: Arc<Mutex<String>>,
+}
+
+#[derive(Debug, Clone)]
+struct PreviewProxyTicket {
+    project_id: String,
+    port: u16,
+    expires_unix: i64,
 }
 
 /// Append to `log`, keeping only the last `MAX_PREVIEW_LOG_BYTES` UTF-8 bytes (best-effort).
@@ -71,6 +79,133 @@ async fn studio_pump_preview_stream<R: tokio::io::AsyncRead + Unpin>(
 fn studio_preview_registry() -> &'static Mutex<HashMap<String, StudioPreviewProcess>> {
     static REG: OnceLock<Mutex<HashMap<String, StudioPreviewProcess>>> = OnceLock::new();
     REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn preview_proxy_registry() -> &'static Mutex<HashMap<String, PreviewProxyTicket>> {
+    static REG: OnceLock<Mutex<HashMap<String, PreviewProxyTicket>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn issue_preview_proxy_token(project_id: &str, port: u16) -> String {
+    let token = format!("ppx_{}", uuid::Uuid::new_v4().simple());
+    let expires_unix = chrono::Utc::now().timestamp() + PREVIEW_PROXY_TOKEN_TTL_SEC;
+    let mut reg = preview_proxy_registry().lock().await;
+    reg.insert(
+        token.clone(),
+        PreviewProxyTicket {
+            project_id: project_id.to_string(),
+            port,
+            expires_unix,
+        },
+    );
+    token
+}
+
+async fn validate_preview_proxy_token(project_id: &str, token: &str) -> Result<u16, String> {
+    let now = chrono::Utc::now().timestamp();
+    let mut reg = preview_proxy_registry().lock().await;
+    reg.retain(|_, t| t.expires_unix > now);
+    let Some(ticket) = reg.get(token) else {
+        return Err("invalid_token".to_string());
+    };
+    if ticket.project_id != project_id {
+        return Err("project_scope_mismatch".to_string());
+    }
+    if ticket.expires_unix <= now {
+        return Err("token_expired".to_string());
+    }
+    Ok(ticket.port)
+}
+
+fn command_in_container_image(argv: &[String]) -> &'static str {
+    if argv.first().is_some_and(|c| c == "cargo" || c == "cargo.exe") {
+        "rust:1"
+    } else {
+        "node:20"
+    }
+}
+
+async fn run_build_in_container(
+    project_root: &Path,
+    argv: &[String],
+    timeout_sec: u64,
+) -> Result<(Option<i32>, String, String), String> {
+    if argv.is_empty() {
+        return Err("argv_required".to_string());
+    }
+    let root_s = project_root
+        .to_str()
+        .ok_or_else(|| "invalid_project_path".to_string())?;
+    let image = command_in_container_image(argv);
+    let shell_cmd = argv.join(" ");
+    let docker_argv = vec![
+        "docker".to_string(),
+        "run".to_string(),
+        "--rm".to_string(),
+        "-v".to_string(),
+        format!("{root_s}:/workspace"),
+        "-w".to_string(),
+        "/workspace".to_string(),
+        image.to_string(),
+        "sh".to_string(),
+        "-lc".to_string(),
+        shell_cmd,
+    ];
+    let mut cmd = Command::new("docker");
+    cmd.args(&docker_argv[1..]);
+    cmd.kill_on_drop(true);
+    let run = async move {
+        let mut child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let read_stdout = async move {
+            let mut out = String::new();
+            if let Some(s) = stdout {
+                let mut r = BufReader::new(s);
+                let mut buf = vec![0u8; 8192];
+                loop {
+                    let n = r.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    if out.len() < MAX_BUILD_OUTPUT_BYTES {
+                        let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(out.len()));
+                        out.push_str(&String::from_utf8_lossy(&buf[..take]));
+                    }
+                }
+            }
+            Ok::<_, std::io::Error>(out)
+        };
+        let read_stderr = async move {
+            let mut err = String::new();
+            if let Some(s) = stderr {
+                let mut r = BufReader::new(s);
+                let mut buf = vec![0u8; 8192];
+                loop {
+                    let n = r.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    if err.len() < MAX_BUILD_OUTPUT_BYTES {
+                        let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(err.len()));
+                        err.push_str(&String::from_utf8_lossy(&buf[..take]));
+                    }
+                }
+            }
+            Ok::<_, std::io::Error>(err)
+        };
+        let (out, err) = tokio::try_join!(read_stdout, read_stderr).map_err(|e| e.to_string())?;
+        let status = child.wait().await.map_err(|e| e.to_string())?;
+        Ok::<_, String>((status.code(), truncate_output(&out), truncate_output(&err)))
+    };
+    match timeout(Duration::from_secs(timeout_sec), run).await {
+        Ok(v) => v,
+        Err(_) => Err(format!("timeout after {}s", timeout_sec)),
+    }
 }
 
 /// Pick a TCP port on 127.0.0.1 (best-effort; released before the dev server binds).
