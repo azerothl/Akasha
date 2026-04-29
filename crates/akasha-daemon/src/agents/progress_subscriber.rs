@@ -171,6 +171,8 @@ pub async fn run_events_subscriber(bus: EventBus, events: EventsCache, persisten
                 let Some(task_id) = ev.correlation_id else { continue };
                 let at = Utc::now().to_rfc3339();
                 let entry = TaskEventEntry {
+                    schema_version: 1,
+                    kind: ev.event_type.as_str().to_string(),
                     event_type: ev.event_type.as_str().to_string(),
                     payload: ev.payload.clone(),
                     at: at.clone(),

@@ -294,7 +294,9 @@ function asRecord(v: unknown): Record<string, unknown> | null {
 }
 
 /** GET /api/tasks/:id/events → { task_id, events } — tolerate alternate key casings after IPC. */
-function normalizeTaskEventsInvokeResponse(data: unknown): Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> {
+function normalizeTaskEventsInvokeResponse(
+  data: unknown,
+): Array<{ schema_version?: number; kind?: string; event_type?: string; payload?: unknown; at?: string; task_id?: string }> {
   if (data == null || typeof data !== "object") return [];
   const o = data as Record<string, unknown>;
   const raw = o.events ?? o.Events;
@@ -302,8 +304,12 @@ function normalizeTaskEventsInvokeResponse(data: unknown): Array<{ event_type?: 
   return raw.map((e) => {
     if (e && typeof e === "object") {
       const ev = e as Record<string, unknown>;
+      const kind = (ev.kind ?? ev.Kind) as string | undefined;
+      const eventType = (ev.event_type ?? ev.EventType ?? ev.eventType ?? kind) as string | undefined;
       return {
-        event_type: (ev.event_type ?? ev.EventType ?? ev.eventType) as string | undefined,
+        schema_version: (ev.schema_version ?? ev.schemaVersion ?? ev.SchemaVersion) as number | undefined,
+        kind,
+        event_type: eventType,
         payload: ev.payload ?? ev.Payload,
         at: (ev.at ?? ev.created_at ?? ev.At) as string | undefined,
         task_id: (ev.task_id ?? ev.taskId) as string | undefined,

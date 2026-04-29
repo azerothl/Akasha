@@ -743,6 +743,8 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
             Ok(store) => {
                 if let Ok(persisted) = store.get_events(id) {
                     root_events.extend(persisted.into_iter().map(|e| TaskEventEntry {
+                        schema_version: 1,
+                        kind: e.event_type.clone(),
                         event_type: e.event_type,
                         payload: e.payload,
                         at: e.at,
@@ -805,6 +807,8 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
             {
                 if let Ok(persisted) = store.get_events(child_id) {
                     list.extend(persisted.into_iter().map(|e| TaskEventEntry {
+                        schema_version: 1,
+                        kind: e.event_type.clone(),
                         event_type: e.event_type,
                         payload: e.payload,
                         at: e.at,
@@ -907,6 +911,10 @@ pub type ProgressCache = Arc<RwLock<std::collections::HashMap<Uuid, VecDeque<Pro
 
 #[derive(Clone, serde::Serialize)]
 pub struct TaskEventEntry {
+    /// Contract version for client event envelopes.
+    pub schema_version: u8,
+    /// Normalized event kind for clients (kept in sync with event_type).
+    pub kind: String,
     pub event_type: String,
     pub payload: Option<serde_json::Value>,
     pub at: String,
@@ -985,18 +993,31 @@ pub type TaskCompletionRegistry =
 pub struct TaskUsageStore {
     by_task: RwLock<std::collections::HashMap<Uuid, (u64, f64)>>,
     by_session: RwLock<std::collections::HashMap<String, (u64, f64)>>,
+    by_task_last_turn: RwLock<std::collections::HashMap<Uuid, (u64, u64, f64)>>,
 }
 
 impl TaskUsageStore {
     pub fn new() -> Self {
         Self::default()
     }
-    pub async fn add(&self, task_id: Uuid, session_id: &str, tokens: u64, cost_usd: f64) {
+    pub async fn add(
+        &self,
+        task_id: Uuid,
+        session_id: &str,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        cost_usd: f64,
+    ) {
+        let tokens = prompt_tokens.saturating_add(completion_tokens);
         {
             let mut g = self.by_task.write().await;
             let e = g.entry(task_id).or_insert((0, 0.0));
             e.0 += tokens;
             e.1 += cost_usd;
+        }
+        {
+            let mut g = self.by_task_last_turn.write().await;
+            g.insert(task_id, (prompt_tokens, completion_tokens, cost_usd));
         }
         if !session_id.is_empty() {
             let mut g = self.by_session.write().await;
@@ -1010,6 +1031,9 @@ impl TaskUsageStore {
     }
     pub async fn get_session(&self, session_id: &str) -> Option<(u64, f64)> {
         self.by_session.read().await.get(session_id).copied()
+    }
+    pub async fn get_last_turn(&self, task_id: Uuid) -> Option<(u64, u64, f64)> {
+        self.by_task_last_turn.read().await.get(&task_id).copied()
     }
     pub async fn reset_session(&self, session_id: &str) {
         self.by_session.write().await.remove(session_id);
@@ -8614,13 +8638,23 @@ pub(crate) async fn run_message_via_llm(
                     Ok(Ok(Ok(resp))) => {
                         last_llm_model_used = Some(resp.model_used.clone());
                         if let Some(ref store) = task_usage_store {
-                            let tokens = resp
+                            let prompt_tokens =
+                                resp.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0);
+                            let completion_tokens = resp
                                 .usage
                                 .as_ref()
-                                .map(|u| u.prompt_tokens + u.completion_tokens)
+                                .map(|u| u.completion_tokens)
                                 .unwrap_or(0);
                             let cost = resp.cost_usd.unwrap_or(0.0);
-                            store.add(task_id, &session_id, tokens, cost).await;
+                            store
+                                .add(
+                                    task_id,
+                                    &session_id,
+                                    prompt_tokens,
+                                    completion_tokens,
+                                    cost,
+                                )
+                                .await;
                         }
                         resp.text.trim().to_string()
                     }
@@ -12371,6 +12405,11 @@ pub async fn handle_api(
             .and_then(|v| v.get("studio_code_mode").and_then(|x| x.as_str()))
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty());
+        let message_delivery_mode = body_json
+            .as_ref()
+            .and_then(|v| v.get("message_delivery_mode").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
         let studio_policy_hint = body_json
             .as_ref()
             .and_then(|v| v.get("studio_policy_hint").and_then(|x| x.as_str()))
@@ -12395,6 +12434,16 @@ pub async fn handle_api(
             .and_then(|v| v.get("studio_project_id").and_then(|x| x.as_str()))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        let fork_from_task_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("fork_from_task_id").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let fork_after_message_index = body_json
+            .as_ref()
+            .and_then(|v| v.get("fork_after_message_index").and_then(|x| x.as_i64()))
+            .filter(|n| *n >= 0)
+            .map(|n| n as u64);
         let studio_disk_root = if let Some(pid) = studio_project_id.as_deref()
         {
             match crate::studio::resolve_studio_project_dir(data_dir, pid.trim()) {
@@ -12442,6 +12491,23 @@ pub async fn handle_api(
         // Capture the raw user message for code-RAG retrieval before any prefixes are injected.
         let raw_user_message = message.clone();
         let mut message_for_llm = message;
+        if let Some(mode) = message_delivery_mode.as_deref() {
+            if mode == "steering" || mode == "follow_up" {
+                message_for_llm = format!(
+                    "[Delivery mode hint: `{mode}`. Prefer coherent continuation with the current session state.]\n\n{}",
+                    message_for_llm
+                );
+            }
+        }
+        if let Some(parent_task_id) = fork_from_task_id.as_ref() {
+            let cut = fork_after_message_index
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            message_for_llm = format!(
+                "[Session fork context] Parent task: {parent_task_id}; cut index: {cut}. Continue from this branch only.\n\n{}",
+                message_for_llm
+            );
+        }
         if let Some(ref root) = studio_disk_root {
             if let Some(plan) = crate::api_studio::studio_code_plan_message_prefix(root) {
                 message_for_llm = format!("{plan}{message_for_llm}");
@@ -14502,6 +14568,8 @@ async fn get_task_status(
         }
     }
     let (tokens_used, cost_usd) = task_usage_store.get_task(id).await.unwrap_or((0, 0.0));
+    let (last_turn_tokens_in, last_turn_tokens_out, last_turn_cost_usd) =
+        task_usage_store.get_last_turn(id).await.unwrap_or((0, 0, 0.0));
     let (todos, todos_updated_at) = store
         .get_todos_with_updated_at(id)
         .unwrap_or_else(|_| (Vec::new(), None));
@@ -14563,6 +14631,9 @@ async fn get_task_status(
         "progress": progress_list,
         "tokens_used": tokens_used,
         "cost_usd": cost_usd,
+        "last_turn_tokens_in": last_turn_tokens_in,
+        "last_turn_tokens_out": last_turn_tokens_out,
+        "last_turn_cost_usd": last_turn_cost_usd,
         "todos": todos_json,
         "suggested_actions": suggested
     });
