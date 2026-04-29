@@ -107,6 +107,11 @@ enum Commands {
         #[command(subcommand)]
         sub: TerminalSub,
     },
+    /// Task operations: watch status/events and cancel a run
+    Task {
+        #[command(subcommand)]
+        sub: TaskSub,
+    },
     /// Telegram access lifecycle (pairing approvals, roles)
     Telegram {
         #[command(subcommand)]
@@ -129,6 +134,34 @@ enum TelegramSub {
 enum TerminalSub {
     /// GET /api/terminal/capabilities (PTY + one-shot tools)
     Capabilities,
+}
+
+#[derive(Subcommand)]
+enum TaskSub {
+    /// Poll one task status until terminal state
+    Watch {
+        /// Task UUID
+        task_id: String,
+        /// Polling interval in milliseconds
+        #[arg(long, default_value_t = 1500)]
+        interval_ms: u64,
+    },
+    /// Fetch task events (`GET /api/tasks/:id/events`)
+    Events {
+        /// Task UUID
+        task_id: String,
+        /// Show only the last N events in human mode
+        #[arg(long, default_value_t = 40)]
+        limit: usize,
+        /// Print full JSON payload
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cancel a queued/running task
+    Cancel {
+        /// Task UUID
+        task_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -524,6 +557,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Worktree { sub } => cmd_worktree(sub),
         Commands::Mcp { sub } => cmd_mcp(sub),
         Commands::Terminal { sub } => cmd_terminal(sub),
+        Commands::Task { sub } => cmd_task(sub),
         Commands::Telegram { sub } => cmd_telegram(sub),
     }
 }
@@ -542,6 +576,139 @@ fn cmd_terminal(sub: TerminalSub) -> anyhow::Result<()> {
             }
             let j: serde_json::Value = resp.json()?;
             println!("{}", serde_json::to_string_pretty(&j)?);
+        }
+    }
+    Ok(())
+}
+
+fn is_terminal_task_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
+}
+
+fn cmd_task(sub: TaskSub) -> anyhow::Result<()> {
+    let base = daemon_base_url();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    match sub {
+        TaskSub::Watch {
+            task_id,
+            interval_ms,
+        } => {
+            let sleep_ms = interval_ms.clamp(500, 60_000);
+            let mut last_line = String::new();
+            println!("Watching task {} (interval={}ms)", task_id, sleep_ms);
+            loop {
+                let resp = client
+                    .get(format!("{}/api/tasks/{}", base, task_id))
+                    .send()?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Daemon error: {}", resp.status());
+                }
+                let j: serde_json::Value = resp.json()?;
+                let status = j
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let task = j
+                    .get("task_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&task_id)
+                    .to_string();
+                let mut line = format!("status={} task={}", status, task);
+                if let Some(progress) = j.get("progress").and_then(|v| v.as_array()) {
+                    if let Some(last) = progress.last() {
+                        let pct = last
+                            .get("progress_pct")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        let msg = last
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if !msg.trim().is_empty() {
+                            line.push_str(&format!(" progress={} message={}", pct, msg));
+                        }
+                    }
+                }
+                if status == "failed" || status == "cancelled" {
+                    if let Some(detail) = j.get("failure_detail").and_then(|v| v.as_str()) {
+                        if !detail.trim().is_empty() {
+                            line.push_str(&format!(" detail={}", detail));
+                        }
+                    }
+                }
+                if line != last_line {
+                    println!("{}", line);
+                    last_line = line;
+                }
+                if is_terminal_task_status(&status) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(sleep_ms));
+            }
+        }
+        TaskSub::Events {
+            task_id,
+            limit,
+            json,
+        } => {
+            let resp = client
+                .get(format!("{}/api/tasks/{}/events", base, task_id))
+                .send()?;
+            if !resp.status().is_success() {
+                anyhow::bail!("Daemon error: {}", resp.status());
+            }
+            let j: serde_json::Value = resp.json()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&j)?);
+                return Ok(());
+            }
+            let events = j
+                .get("events")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let take = limit.max(1);
+            let start = events.len().saturating_sub(take);
+            println!(
+                "Task events {} (showing {}/{}):",
+                task_id,
+                events.len().saturating_sub(start),
+                events.len()
+            );
+            for row in events.into_iter().skip(start) {
+                let at = row.get("at").and_then(|v| v.as_str()).unwrap_or("-");
+                let event_type = row
+                    .get("event_type")
+                    .or_else(|| row.get("kind"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let payload = row.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                let preview = if payload.is_null() {
+                    String::from("null")
+                } else {
+                    let raw = payload.to_string();
+                    if raw.len() > 220 {
+                        format!("{}…", &raw[..220])
+                    } else {
+                        raw
+                    }
+                };
+                println!("- {} | {} | {}", at, event_type, preview);
+            }
+        }
+        TaskSub::Cancel { task_id } => {
+            let resp = client
+                .post(format!("{}/api/tasks/{}/cancel", base, task_id))
+                .send()?;
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            if !status.is_success() {
+                anyhow::bail!("Daemon error {}: {}", status, body);
+            }
+            println!("{}", body);
         }
     }
     Ok(())

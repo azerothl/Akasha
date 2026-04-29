@@ -262,16 +262,21 @@ fn parse_generate_image_tool_args(args: &[String]) -> (String, Option<String>) {
     (args.join(" "), None)
 }
 
+/// Code Studio prepends retrieved index chunks to the user message unless explicitly disabled.
+/// `AKASHA_STUDIO_CODE_RAG_DISABLED=1|true|yes|on` turns that prefix off; unset or other values keep RAG on.
 fn studio_code_rag_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("AKASHA_STUDIO_CODE_RAG_ENABLED")
+        std::env::var("AKASHA_STUDIO_CODE_RAG_DISABLED")
             .ok()
             .map(|v| {
                 let t = v.trim().to_ascii_lowercase();
-                matches!(t.as_str(), "1" | "true" | "yes" | "on")
+                if t.is_empty() {
+                    return true;
+                }
+                !matches!(t.as_str(), "1" | "true" | "yes" | "on")
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
