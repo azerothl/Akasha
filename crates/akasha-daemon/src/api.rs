@@ -840,6 +840,102 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
     json_response("200 OK", &body.to_string())
 }
 
+async fn get_task_report(store_path: &Path, events: &EventsCache, id: Uuid) -> String {
+    let store = match TaskStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let task = match store.get(id) {
+        Ok(Some(t)) => t,
+        Ok(None) => return json_response("404 Not Found", r#"{"error":"task_not_found"}"#),
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let persisted_progress = store.get_progress(id).unwrap_or_default();
+    let mut done: Vec<String> = persisted_progress
+        .iter()
+        .filter(|(pct, msg)| *pct >= 100 && !task_progress_is_chat_stub(msg))
+        .map(|(_, msg)| msg.clone())
+        .collect();
+    done.truncate(5);
+
+    let mut failed: Vec<String> = Vec::new();
+    if matches!(task.status, TaskStatus::Failed | TaskStatus::Cancelled) {
+        if let Some((_, msg)) = persisted_progress
+            .iter()
+            .rev()
+            .find(|(_, msg)| !task_progress_is_chat_stub(msg))
+        {
+            failed.push(msg.chars().take(1200).collect());
+        } else {
+            failed.push("La tâche a échoué sans détail explicite.".to_string());
+        }
+    }
+
+    let mut needs_review: Vec<String> = Vec::new();
+    let mut saw_approval_request = store
+        .get_events(id)
+        .unwrap_or_default()
+        .iter()
+        .any(|e| e.event_type == "tool_approval_request");
+    if !saw_approval_request {
+        let g = events.read().await;
+        saw_approval_request = g
+            .get(&id)
+            .map(|q| q.iter().any(|e| e.event_type == "tool_approval_request"))
+            .unwrap_or(false);
+    }
+    if saw_approval_request {
+        needs_review.push("Une ou plusieurs actions sensibles ont demandé validation.".to_string());
+    }
+    let pending_queue = store_path
+        .parent()
+        .map(crate::permissions_queue::load)
+        .map(|q| {
+            q.requests
+                .into_iter()
+                .filter(|r| r.task_id == id.to_string() && r.status == crate::permissions_queue::QueueStatus::Pending)
+                .count()
+        })
+        .unwrap_or(0);
+    if pending_queue > 0 {
+        needs_review.push(format!("{pending_queue} demande(s) d'approbation en attente."));
+    }
+
+    let mut next_steps: Vec<String> = match task.status {
+        TaskStatus::Completed => vec![
+            "Relire le diff studio et exécuter une vérification locale.".to_string(),
+            "Si résultat valide, poursuivre avec la prochaine sous-tâche planifiée.".to_string(),
+        ],
+        TaskStatus::WaitingUserInput => vec![
+            "Répondre à la demande d'approbation ou d'information de l'agent.".to_string(),
+        ],
+        TaskStatus::Failed | TaskStatus::Cancelled => vec![
+            "Analyser la cause d'échec puis relancer avec une consigne ciblée.".to_string(),
+        ],
+        _ => vec!["Attendre la fin de la tâche puis relire le rapport.".to_string()],
+    };
+    next_steps.truncate(5);
+
+    let transcript_path = store_path
+        .parent()
+        .map(|d| d.join("transcripts").join(format!("{id}.json")));
+    let transcript = transcript_path
+        .as_ref()
+        .filter(|p| p.is_file())
+        .map(|p| p.to_string_lossy().to_string());
+
+    let body = serde_json::json!({
+        "task_id": id.to_string(),
+        "status": task.status.as_str(),
+        "done": done,
+        "needs_review": needs_review,
+        "failed": failed,
+        "next_steps": next_steps,
+        "transcript_path": transcript
+    });
+    json_response("200 OK", &body.to_string())
+}
+
 /// `GET /api/tasks/:id/studio-diff` — fichiers texte modifiés depuis le snapshot de début de tâche (Code Studio racine).
 async fn get_task_studio_diff(store_path: &Path, task_id: Uuid) -> String {
     let Some(data_dir) = store_path.parent().map(Path::to_path_buf) else {
@@ -8991,6 +9087,30 @@ pub(crate) async fn run_message_via_llm(
                                         "Toujours autoriser".to_string(),
                                         "Refuser".to_string(),
                                     ];
+                                    let approval_request_id = Uuid::new_v4().to_string();
+                                    let now = chrono::Utc::now();
+                                    let queue_req = crate::permissions_queue::PermissionQueueRequest {
+                                        id: approval_request_id.clone(),
+                                        task_id: task_id.to_string(),
+                                        tool: actual_tool.clone(),
+                                        scope: scope_key.clone(),
+                                        action: actual_tool.clone(),
+                                        description: format!("{} {}", actual_tool, args_preview),
+                                        rationale: format!(
+                                            "Outil sensible (confirmation requise) pour la tâche {}",
+                                            task_id
+                                        ),
+                                        urgency: "normal".to_string(),
+                                        status: crate::permissions_queue::QueueStatus::Pending,
+                                        created_at: now.to_rfc3339(),
+                                        updated_at: now.to_rfc3339(),
+                                        expires_at: Some(
+                                            (now + chrono::Duration::seconds(APPROVAL_TIMEOUT_SECS as i64))
+                                                .to_rfc3339(),
+                                        ),
+                                        decision_note: None,
+                                    };
+                                    let _ = crate::permissions_queue::upsert_request(data_dir, queue_req);
                                     let (tx, rx) = tokio::sync::oneshot::channel();
                                     let pending = PendingHumanInput {
                                         question: question.clone(),
@@ -9007,6 +9127,7 @@ pub(crate) async fn run_message_via_llm(
                                     }
                                     let payload = serde_json::json!({
                                         "task_id": task_id.to_string(),
+                                        "request_id": approval_request_id.clone(),
                                         "question": question,
                                         "context": format!("Outil : {}", actual_tool),
                                         "choices": choices,
@@ -9022,7 +9143,8 @@ pub(crate) async fn run_message_via_llm(
                                     let approval_payload = serde_json::json!({
                                         "tool": actual_tool,
                                         "args_redacted": args_preview,
-                                        "task_id": task_id.to_string()
+                                        "task_id": task_id.to_string(),
+                                        "request_id": approval_request_id.clone()
                                     });
                                     let _ = bus.send(
                                         EventEnvelope::new(
@@ -9047,7 +9169,14 @@ pub(crate) async fn run_message_via_llm(
                                             let expired_payload = serde_json::json!({
                                                 "task_id": task_id.to_string(),
                                                 "tool": actual_tool,
+                                                "request_id": approval_request_id.clone(),
                                             });
+                                            let _ = crate::permissions_queue::update_status(
+                                                data_dir,
+                                                &approval_request_id,
+                                                crate::permissions_queue::QueueStatus::Expired,
+                                                Some("timeout".to_string()),
+                                            );
                                             let _ = bus.send(
                                                 EventEnvelope::new(
                                                     EventType::ToolApprovalExpired,
@@ -9060,6 +9189,17 @@ pub(crate) async fn run_message_via_llm(
                                     };
                                     let granted = answer.eq_ignore_ascii_case("Approuver")
                                         || answer.eq_ignore_ascii_case("Toujours autoriser");
+                                    let queue_status = if granted {
+                                        crate::permissions_queue::QueueStatus::Approved
+                                    } else {
+                                        crate::permissions_queue::QueueStatus::Denied
+                                    };
+                                    let _ = crate::permissions_queue::update_status(
+                                        data_dir,
+                                        &approval_request_id,
+                                        queue_status,
+                                        Some(answer.clone()),
+                                    );
                                     if answer.eq_ignore_ascii_case("Toujours autoriser") {
                                         let mut state = crate::permissions_center::load(data_dir);
                                         state.decisions.retain(|d| {
@@ -12678,6 +12818,9 @@ pub async fn handle_api(
                 if method == "GET" && parts.get(1) == Some(&"events") {
                     return get_task_events(store_path, events, id).await;
                 }
+                if method == "GET" && parts.get(1) == Some(&"report") {
+                    return get_task_report(store_path, events, id).await;
+                }
                 if method == "GET" && parts.get(1) == Some(&"studio-diff") {
                     return get_task_studio_diff(store_path, id).await;
                 }
@@ -13459,6 +13602,135 @@ pub async fn handle_api(
         let state = crate::permissions_center::load(data_dir);
         let body = serde_json::json!({ "decisions": state.decisions });
         return json_response("200 OK", &body.to_string());
+    }
+    if method == "GET" && path_only == "/api/permissions/queue" {
+        let status_filter = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| q.split('&').find(|p| p.starts_with("status=")))
+            .and_then(|p| p.split_once('=').map(|(_, v)| decode_url_component(v)))
+            .and_then(|v| crate::permissions_queue::QueueStatus::parse(&v));
+        let limit = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| q.split('&').find(|p| p.starts_with("limit=")))
+            .and_then(|p| p.split_once('=').map(|(_, v)| v.to_string()))
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(100)
+            .clamp(1, 500);
+        let mut items = crate::permissions_queue::load(data_dir).requests;
+        if let Some(status) = status_filter {
+            items.retain(|i| i.status == status);
+        }
+        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.truncate(limit);
+        let body = serde_json::json!({ "items": items });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "GET" && path_only.starts_with("/api/permissions/queue/") {
+        let id = path_only.trim_start_matches("/api/permissions/queue/").trim();
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
+        }
+        if let Some(item) = crate::permissions_queue::get_request(data_dir, id) {
+            return json_response(
+                "200 OK",
+                &serde_json::json!({ "item": item }).to_string(),
+            );
+        }
+        return json_response("404 Not Found", r#"{"error":"request_not_found"}"#);
+    }
+    if method == "POST"
+        && (path_only.starts_with("/api/permissions/queue/") && path_only.ends_with("/approve"))
+    {
+        let id = path_only
+            .trim_start_matches("/api/permissions/queue/")
+            .trim_end_matches("/approve")
+            .trim_matches('/');
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
+        }
+        let note = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+            .and_then(|v| v.get("note").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        match crate::permissions_queue::update_status(
+            data_dir,
+            id,
+            crate::permissions_queue::QueueStatus::Approved,
+            note,
+        ) {
+            Ok(Some(item)) => {
+                if let (Some(store), Ok(task_id)) =
+                    (human_input_store.as_ref(), Uuid::parse_str(&item.task_id))
+                {
+                    let pending = {
+                        let mut g = store.write().await;
+                        g.remove(&task_id)
+                    };
+                    if let Some(pending) = pending {
+                        let _ = pending.response_tx.send("Approuver".to_string());
+                    }
+                }
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "item": item }).to_string(),
+                );
+            }
+            Ok(None) => return json_response("404 Not Found", r#"{"error":"request_not_found"}"#),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+    if method == "POST"
+        && (path_only.starts_with("/api/permissions/queue/") && path_only.ends_with("/deny"))
+    {
+        let id = path_only
+            .trim_start_matches("/api/permissions/queue/")
+            .trim_end_matches("/deny")
+            .trim_matches('/');
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
+        }
+        let note = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+            .and_then(|v| v.get("note").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        match crate::permissions_queue::update_status(
+            data_dir,
+            id,
+            crate::permissions_queue::QueueStatus::Denied,
+            note,
+        ) {
+            Ok(Some(item)) => {
+                if let (Some(store), Ok(task_id)) =
+                    (human_input_store.as_ref(), Uuid::parse_str(&item.task_id))
+                {
+                    let pending = {
+                        let mut g = store.write().await;
+                        g.remove(&task_id)
+                    };
+                    if let Some(pending) = pending {
+                        let _ = pending.response_tx.send("Refuser".to_string());
+                    }
+                }
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "item": item }).to_string(),
+                );
+            }
+            Ok(None) => return json_response("404 Not Found", r#"{"error":"request_not_found"}"#),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
     }
     if method == "POST" && path_only == "/api/permissions/decisions" {
         let body_json = body
