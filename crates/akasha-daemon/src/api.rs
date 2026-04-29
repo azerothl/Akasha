@@ -12434,11 +12434,23 @@ pub async fn handle_api(
             .and_then(|v| v.get("studio_project_id").and_then(|x| x.as_str()))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        let fork_from_task_id = body_json
-            .as_ref()
-            .and_then(|v| v.get("fork_from_task_id").and_then(|x| x.as_str()))
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+        let fork_from_task_id: Option<Uuid> = {
+            let raw = body_json
+                .as_ref()
+                .and_then(|v| v.get("fork_from_task_id").and_then(|x| x.as_str()))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            match raw {
+                None => None,
+                Some(s) => match Uuid::parse_str(&s) {
+                    Ok(id) => Some(id),
+                    Err(_) => {
+                        let body = serde_json::json!({ "error": "invalid_fork_from_task_id", "detail": "fork_from_task_id must be a valid UUID" });
+                        return json_response("400 Bad Request", &body.to_string());
+                    }
+                },
+            }
+        };
         let fork_after_message_index = body_json
             .as_ref()
             .and_then(|v| v.get("fork_after_message_index").and_then(|x| x.as_i64()))
