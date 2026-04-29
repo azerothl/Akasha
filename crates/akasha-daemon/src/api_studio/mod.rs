@@ -1430,6 +1430,66 @@ async fn git_output(project_root: &Path, args: &[&str]) -> Result<std::process::
     c.output().await.map_err(|e| e.to_string())
 }
 
+async fn git_current_branch(project_root: &Path) -> Result<String, String> {
+    let o = git_output(project_root, &["symbolic-ref", "--short", "HEAD"]).await?;
+    if !o.status.success() {
+        return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+async fn git_has_pending_changes(project_root: &Path) -> Result<bool, String> {
+    let o = git_output(project_root, &["status", "--porcelain"]).await?;
+    if !o.status.success() {
+        return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
+    }
+    Ok(!String::from_utf8_lossy(&o.stdout).trim().is_empty())
+}
+
+/// Before merging an evolution branch, persist pending local edits on that branch.
+/// Returns `Ok(true)` when an auto-commit was created.
+async fn ensure_evolution_branch_committed_before_merge(
+    project_root: &Path,
+    evolution_branch: &str,
+) -> Result<bool, String> {
+    let current = git_current_branch(project_root).await?;
+    let has_pending = git_has_pending_changes(project_root).await?;
+    if !has_pending {
+        return Ok(false);
+    }
+    if current != evolution_branch {
+        return Err(format!(
+            "pending_local_changes_on_branch:{current}; expected:{evolution_branch}"
+        ));
+    }
+    let add = git_output(project_root, &["add", "-A"]).await?;
+    if !add.status.success() {
+        return Err(format!(
+            "git_add_failed: {}",
+            String::from_utf8_lossy(&add.stderr).trim()
+        ));
+    }
+    let commit = git_output(
+        project_root,
+        &[
+            "commit",
+            "-m",
+            "Akasha Code Studio: save pending evolution changes",
+        ],
+    )
+    .await?;
+    if !commit.status.success() {
+        let err = String::from_utf8_lossy(&commit.stderr).trim().to_string();
+        let out = String::from_utf8_lossy(&commit.stdout).trim().to_string();
+        // If nothing actually changed after `add -A`, treat as non-fatal.
+        if err.contains("nothing to commit") || out.contains("nothing to commit") {
+            return Ok(false);
+        }
+        return Err(format!("git_commit_failed: {err}"));
+    }
+    Ok(true)
+}
+
 async fn is_git_repo(project_root: &Path) -> bool {
     match git_output(project_root, &["rev-parse", "--is-inside-work-tree"]).await {
         Ok(o) => o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true",

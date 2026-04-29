@@ -5,6 +5,7 @@ import RelationGraph from "relation-graph/react";
 import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
 import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
 import { preprocessMessagePaths } from "./preprocessMessagePaths";
+import { collapseStreamedProgressEvents } from "./taskEvents";
 import { getCached, setCached } from "./useTabCache";
 import { useI18n } from "./useI18n";
 import { GeoMapView } from "./GeoMapView";
@@ -2985,9 +2986,10 @@ function App() {
   }, [taskTreeData, collapsedTaskBranches]);
 
   const visibleTaskEvents = useMemo(() => {
-    if (!isSimpleMode) return tasksEvents;
-    return [...tasksEvents].slice(-8).reverse();
-  }, [isSimpleMode, tasksEvents]);
+    const compact = collapseStreamedProgressEvents(tasksEvents, selectedTask?.id ?? "root");
+    if (!isSimpleMode) return compact;
+    return [...compact].slice(-8).reverse();
+  }, [isSimpleMode, tasksEvents, selectedTask]);
 
   const selectedTaskHierarchy = useMemo(() => {
     if (!selectedTask) return [] as TaskListItem[];
@@ -5731,7 +5733,7 @@ function App() {
                                           {tid === rootTaskId ? `${t("chat.root_task")}${tid.slice(-8)}` : `${t("chat.sub_task")}${tid.slice(-8)}`}
                                         </div>
                                         <ul className="chat-subagents-events">
-                                          {evs.map((ev, idx) => (
+                                          {collapseStreamedProgressEvents(evs, tid).map((ev, idx) => (
                                             <li key={`${tid}-${idx}`} className="chat-subagents-event" data-type={ev.event_type} data-event-kind={classifyEventKind(ev.event_type)}>
                                               <span className="chat-subagents-event-dot" aria-hidden />
                                               <div className="chat-subagents-event-body">

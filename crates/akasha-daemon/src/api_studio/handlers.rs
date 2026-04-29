@@ -1580,6 +1580,15 @@ pub async fn handle_studio_route(
                     ));
                 }
                 let _permit = studio_ops_semaphore().acquire().await.ok();
+                match ensure_evolution_branch_committed_before_merge(&root, &branch).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        return Some(json_response(
+                            "409 Conflict",
+                            &serde_json::json!({ "error": "pre_merge_commit_failed", "detail": e }).to_string(),
+                        ));
+                    }
+                }
                 if ensure_main_or_master_branch(&root).await.is_err() {
                     return Some(json_response(
                         "500 Internal Server Error",
