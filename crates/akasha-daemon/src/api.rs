@@ -862,8 +862,8 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
                 event_type: "studio_worker_state_changed".to_string(),
                 payload: Some(serde_json::json!({
                     "state": "spawned",
-                    "worker_task_id": worker_task_id,
-                    "assigned_agent": assigned_agent,
+                    "worker_task_id": worker_task_id.clone(),
+                    "assigned_agent": assigned_agent.clone(),
                 })),
                 at: entry.at.clone(),
                 task_id: entry.task_id.clone(),
@@ -874,7 +874,7 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
                 event_type: "studio_worker_state_changed".to_string(),
                 payload: Some(serde_json::json!({
                     "state": "running",
-                    "worker_task_id": worker_task_id,
+                    "worker_task_id": worker_task_id.clone(),
                     "assigned_agent": assigned_agent,
                 })),
                 at: entry.at.clone(),
@@ -890,7 +890,7 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
                 event_type: "studio_worker_state_changed".to_string(),
                 payload: Some(serde_json::json!({
                     "state": "completed",
-                    "worker_task_id": entry.task_id,
+                    "worker_task_id": entry.task_id.clone(),
                 })),
                 at: entry.at.clone(),
                 task_id: entry.task_id.clone(),
@@ -903,7 +903,7 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
                 event_type: "studio_worker_state_changed".to_string(),
                 payload: Some(serde_json::json!({
                     "state": "failed",
-                    "worker_task_id": entry.task_id,
+                    "worker_task_id": entry.task_id.clone(),
                 })),
                 at: entry.at.clone(),
                 task_id: entry.task_id.clone(),

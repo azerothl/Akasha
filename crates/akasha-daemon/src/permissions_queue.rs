@@ -73,9 +73,19 @@ pub fn load(data_dir: &Path) -> PermissionQueueState {
 
 pub fn save(data_dir: &Path, state: &PermissionQueueState) -> anyhow::Result<()> {
     let path = state_path(data_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let raw = serde_json::to_string_pretty(state)?;
     let tmp_path = path.with_extension("json.tmp");
     std::fs::write(&tmp_path, raw.as_bytes())?;
+    // std::fs::rename fails on Windows when the destination already exists;
+    // remove it first to ensure a cross-platform atomic replace.
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
     std::fs::rename(&tmp_path, &path)?;
     Ok(())
 }

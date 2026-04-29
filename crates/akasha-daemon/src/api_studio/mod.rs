@@ -88,8 +88,10 @@ fn preview_proxy_registry() -> &'static Mutex<HashMap<String, PreviewProxyTicket
 
 async fn issue_preview_proxy_token(project_id: &str, port: u16) -> String {
     let token = format!("ppx_{}", uuid::Uuid::new_v4().simple());
-    let expires_unix = chrono::Utc::now().timestamp() + PREVIEW_PROXY_TOKEN_TTL_SEC;
+    let now = chrono::Utc::now().timestamp();
+    let expires_unix = now + PREVIEW_PROXY_TOKEN_TTL_SEC;
     let mut reg = preview_proxy_registry().lock().await;
+    reg.retain(|_, t| t.expires_unix > now);
     reg.insert(
         token.clone(),
         PreviewProxyTicket {
@@ -137,9 +139,7 @@ async fn run_build_in_container(
         .to_str()
         .ok_or_else(|| "invalid_project_path".to_string())?;
     let image = command_in_container_image(argv);
-    let shell_cmd = argv.join(" ");
-    let docker_argv = vec![
-        "docker".to_string(),
+    let mut docker_argv = vec![
         "run".to_string(),
         "--rm".to_string(),
         "-v".to_string(),
@@ -147,12 +147,10 @@ async fn run_build_in_container(
         "-w".to_string(),
         "/workspace".to_string(),
         image.to_string(),
-        "sh".to_string(),
-        "-lc".to_string(),
-        shell_cmd,
     ];
+    docker_argv.extend_from_slice(argv);
     let mut cmd = Command::new("docker");
-    cmd.args(&docker_argv[1..]);
+    cmd.args(&docker_argv);
     cmd.kill_on_drop(true);
     let run = async move {
         let mut child = cmd

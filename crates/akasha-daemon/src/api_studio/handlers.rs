@@ -1367,8 +1367,70 @@ pub async fn handle_studio_route(
         if patches.is_empty() {
             return Some(json_response("400 Bad Request", r#"{"error":"patches_required"}"#));
         }
+        fn invalid_patch_path(path: &str) -> bool {
+            if path.is_empty() || path == "/dev/null" {
+                return false;
+            }
+            if path.starts_with('/') || path.starts_with('\\') {
+                return true;
+            }
+            if path.len() >= 3 {
+                let b = path.as_bytes();
+                if b[1] == b':' && (b[2] == b'\\' || b[2] == b'/') && b[0].is_ascii_alphabetic() {
+                    return true;
+                }
+            }
+            path.split(&['/', '\\'][..]).any(|part| part == "..")
+        }
+        fn patch_has_invalid_paths(patch: &str) -> bool {
+            for line in patch.lines() {
+                if let Some(rest) = line.strip_prefix("diff --git ") {
+                    let mut parts = rest.split_whitespace();
+                    let left = match parts.next() {
+                        Some(v) => v,
+                        None => return true,
+                    };
+                    let right = match parts.next() {
+                        Some(v) => v,
+                        None => return true,
+                    };
+                    let left = match left.strip_prefix("a/") {
+                        Some(v) => v,
+                        None => return true,
+                    };
+                    let right = match right.strip_prefix("b/") {
+                        Some(v) => v,
+                        None => return true,
+                    };
+                    if invalid_patch_path(left) || invalid_patch_path(right) {
+                        return true;
+                    }
+                } else if let Some(path) = line.strip_prefix("--- ") {
+                    if path != "/dev/null" {
+                        let path = match path.strip_prefix("a/") {
+                            Some(v) => v,
+                            None => return true,
+                        };
+                        if invalid_patch_path(path) {
+                            return true;
+                        }
+                    }
+                } else if let Some(path) = line.strip_prefix("+++ ") {
+                    if path != "/dev/null" {
+                        let path = match path.strip_prefix("b/") {
+                            Some(v) => v,
+                            None => return true,
+                        };
+                        if invalid_patch_path(path) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
         for p in &patches {
-            if !p.contains("diff --git a/") || p.contains("..\\") || p.contains("../") || p.contains(" /") {
+            if !p.contains("diff --git a/") || p.contains("..\\") || p.contains("../") || patch_has_invalid_paths(p) {
                 return Some(json_response("400 Bad Request", r#"{"error":"invalid_patch_content"}"#));
             }
         }
