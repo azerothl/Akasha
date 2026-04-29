@@ -835,6 +835,77 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
         );
         seen.insert(key)
     });
+
+    // Studio swarm MVP: synthesize worker lifecycle events from existing delegation/task events.
+    // This keeps backward compatibility while exposing stable status nodes to Code Studio Cockpit.
+    let mut synthetic: Vec<TaskEventEntry> = Vec::new();
+    for entry in &list {
+        if entry.event_type == "sub_agent_spawned" {
+            let worker_task_id = entry
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("task_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let assigned_agent = entry
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("agent"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            synthetic.push(TaskEventEntry {
+                schema_version: 1,
+                kind: "studio_worker_state_changed".to_string(),
+                event_type: "studio_worker_state_changed".to_string(),
+                payload: Some(serde_json::json!({
+                    "state": "spawned",
+                    "worker_task_id": worker_task_id,
+                    "assigned_agent": assigned_agent,
+                })),
+                at: entry.at.clone(),
+                task_id: entry.task_id.clone(),
+            });
+            synthetic.push(TaskEventEntry {
+                schema_version: 1,
+                kind: "studio_worker_state_changed".to_string(),
+                event_type: "studio_worker_state_changed".to_string(),
+                payload: Some(serde_json::json!({
+                    "state": "running",
+                    "worker_task_id": worker_task_id,
+                    "assigned_agent": assigned_agent,
+                })),
+                at: entry.at.clone(),
+                task_id: entry.task_id.clone(),
+            });
+        } else if entry.event_type == "task_completed" {
+            synthetic.push(TaskEventEntry {
+                schema_version: 1,
+                kind: "studio_worker_state_changed".to_string(),
+                event_type: "studio_worker_state_changed".to_string(),
+                payload: Some(serde_json::json!({
+                    "state": "completed",
+                    "worker_task_id": entry.task_id,
+                })),
+                at: entry.at.clone(),
+                task_id: entry.task_id.clone(),
+            });
+        } else if entry.event_type == "task_failed" {
+            synthetic.push(TaskEventEntry {
+                schema_version: 1,
+                kind: "studio_worker_state_changed".to_string(),
+                event_type: "studio_worker_state_changed".to_string(),
+                payload: Some(serde_json::json!({
+                    "state": "failed",
+                    "worker_task_id": entry.task_id,
+                })),
+                at: entry.at.clone(),
+                task_id: entry.task_id.clone(),
+            });
+        }
+    }
+    list.extend(synthetic);
+
     list.sort_by(|a, b| a.at.cmp(&b.at));
     let body = serde_json::json!({ "task_id": id.to_string(), "events": list });
     json_response("200 OK", &body.to_string())
@@ -12469,7 +12540,7 @@ pub async fn handle_api(
             }
         };
         // Session: "new_session" => new UUID; else provided non-empty session_id; else day-YYYY-MM-DD (short-term = current day, survives UI restart).
-        let session_id = {
+        let mut session_id = {
             let new_session = body_json
                 .as_ref()
                 .and_then(|v| v.get("new_session"))
@@ -12596,6 +12667,40 @@ pub async fn handle_api(
             .and_then(|v| v.get("fork_after_message_index").and_then(|x| x.as_i64()))
             .filter(|n| *n >= 0)
             .map(|n| n as u64);
+        let mut fork_meta_for_task: Option<serde_json::Value> = None;
+        if let Some(parent_task_id) = fork_from_task_id.as_ref() {
+            let parent_session_id = session_id.clone();
+            let fork_session_id = format!("fork-{}", Uuid::new_v4().simple());
+            if let Some(st) = short_term.as_ref() {
+                let parent_turns = st.get_turns(&parent_session_id).await;
+                let keep = fork_after_message_index
+                    .map(|n| (n as usize).saturating_add(1))
+                    .unwrap_or(parent_turns.len())
+                    .min(parent_turns.len());
+                for turn in parent_turns.into_iter().take(keep) {
+                    st.append(&fork_session_id, &turn.role, turn.content).await;
+                }
+                fork_meta_for_task = Some(serde_json::json!({
+                    "fork_parent_task_id": parent_task_id.to_string(),
+                    "fork_parent_session_id": parent_session_id,
+                    "fork_session_id": fork_session_id,
+                    "fork_cut_index": fork_after_message_index,
+                    "fork_cut_turns": keep,
+                    "schema_version": 1
+                }));
+            } else {
+                fork_meta_for_task = Some(serde_json::json!({
+                    "fork_parent_task_id": parent_task_id.to_string(),
+                    "fork_parent_session_id": parent_session_id,
+                    "fork_session_id": fork_session_id,
+                    "fork_cut_index": fork_after_message_index,
+                    "fork_cut_turns": 0usize,
+                    "schema_version": 1,
+                    "note": "short_term_store_unavailable"
+                }));
+            }
+            session_id = fork_session_id;
+        }
         let studio_disk_root = if let Some(pid) = studio_project_id.as_deref()
         {
             match crate::studio::resolve_studio_project_dir(data_dir, pid.trim()) {
@@ -12764,6 +12869,16 @@ pub async fn handle_api(
         envelope.studio_evolution_branch = studio_evolution_branch;
         match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
             Ok(task_id) => {
+                if let Some(meta) = fork_meta_for_task {
+                    if let Ok(task_store) = TaskStore::open(store_path) {
+                        let _ = task_store.insert_event(
+                            task_id,
+                            "session_fork_created",
+                            Some(&meta),
+                            &chrono::Utc::now().to_rfc3339(),
+                        );
+                    }
+                }
                 let body = serde_json::json!({
                     "ack": true,
                     "task_id": task_id.to_string(),
