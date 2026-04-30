@@ -1,9 +1,14 @@
 //! HTTP handlers for `/api/studio/*` (Code Studio).
 mod acceptance;
+mod guardrails;
 pub(crate) use acceptance::{
     format_acceptance_prefix_for_llm, parse_api_acceptance_field, run_mechanical_acceptance_checks,
     strip_embedded_acceptance_json, studio_survey_tool, StudioAcceptancePayload, StudioCriterionKind,
     STUDIO_ACCEPTANCE_JSON_BEGIN, STUDIO_ACCEPTANCE_JSON_END,
+};
+pub(crate) use guardrails::{
+    code_studio_skip_zero_tool_mandatory_retry, looks_like_code_studio_promise_before_any_tools,
+    looks_like_code_studio_prose_only_implementation_reply,
 };
 
 use crate::api_http::json_response;

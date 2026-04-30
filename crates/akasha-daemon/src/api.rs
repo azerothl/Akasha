@@ -6691,138 +6691,6 @@ fn looks_like_manual_file_patch_reply(text: &str) -> bool {
     cues.iter().any(|c| lower.contains(c))
 }
 
-/// Returns true when a Code Studio implementation task received a prose-only audit/plan
-/// even though write tools are available. This catches replies like "ce qui manque...",
-/// "recommandations pour avancer", or "je ne peux pas modifier les fichiers" instead of
-/// applying changes with `TOOL:` lines.
-/// True when the model answered with a short "I'll start by examining / diagnostic / implement…"
-/// prose block but emitted **no** `TOOL:` lines yet — common failure mode where the task then completes.
-/// Stricter than [`looks_like_code_studio_prose_only_implementation_reply`] (audit/refusal/plan).
-fn looks_like_code_studio_promise_before_any_tools(text: &str) -> bool {
-    let t = text.trim();
-    if t.is_empty() {
-        return false;
-    }
-    // Avoid blocking long legitimate prose answers (e.g. planner) without tools.
-    const MAX_CHARS: usize = 1600;
-    if t.chars().count() > MAX_CHARS {
-        return false;
-    }
-    if t.contains("```") && t.len() > 120 {
-        return false;
-    }
-    let lower = t.to_lowercase();
-    let intent_future = [
-        "je vais ",
-        "j'ai l'intention",
-        "i will ",
-        "i'll ",
-        "i'm going to",
-        "i am going to",
-        "nous allons",
-        "we will ",
-        "commençons",
-        "let's ",
-        "let us ",
-        "pour commencer",
-        "to begin",
-        "d'abord ",
-        "first, ",
-        "first i'll",
-        "first i will",
-        "start by",
-        "starting with",
-    ]
-    .iter()
-    .any(|p| lower.contains(p));
-    if !intent_future {
-        return false;
-    }
-    [
-        "diagnostic",
-        "examiner",
-        "examine ",
-        "examiner l'",
-        "examiner la",
-        "explorer",
-        "explore ",
-        "état actuel",
-        "current state",
-        "look at the",
-        "look at this",
-        "regarder",
-        "implémenter",
-        "implement ",
-        "planifier",
-        "corriger",
-        "fix the",
-        "faire échouer",
-        "build",
-        "compilation",
-        "étape suivante",
-        "next step",
-    ]
-    .iter()
-    .any(|p| lower.contains(p))
-}
-
-/// Agents whose first reply may legitimately be prose-only (high-level plan) without tools.
-fn code_studio_skip_zero_tool_mandatory_retry(agent: &str) -> bool {
-    let a = agent.trim().to_ascii_lowercase();
-    matches!(a.as_str(), "studio_planner" | "conversation")
-}
-
-fn looks_like_code_studio_prose_only_implementation_reply(text: &str) -> bool {
-    let lower = text.trim().to_lowercase();
-    if lower.is_empty() {
-        return false;
-    }
-    let refusal_or_meta = [
-        "je ne peux pas modifier les fichiers",
-        "je ne peux pas modifier",
-        "i cannot modify files",
-        "i can't modify files",
-        "restriction « no tool lines »",
-        "restriction \"no tool lines\"",
-        "no tool lines",
-        "dans ce tour",
-        "in this turn",
-    ]
-    .iter()
-    .any(|p| lower.contains(p));
-    let plan_without_action = [
-        "ce qui manque",
-        "recommandations pour avancer",
-        "il faudrait",
-        "il faut ",
-        "prochaine étape",
-        "next steps",
-        "recommendations",
-        "should implement",
-        "should add",
-        "à mettre en place",
-        "mettre en place",
-    ]
-    .iter()
-    .any(|p| lower.contains(p));
-    let implementation_surface = [
-        "eslint",
-        "prettier",
-        "src/",
-        "package.json",
-        "composant",
-        "component",
-        "hook",
-        "tests",
-        "build",
-        "fichier",
-        "file",
-    ]
-    .iter()
-    .any(|p| lower.contains(p));
-    refusal_or_meta || (plan_without_action && implementation_surface)
-}
-
 fn looks_like_meta_agent_response(text: &str) -> bool {
     let lower = text.trim().to_lowercase();
     if lower.is_empty() {
@@ -9246,7 +9114,9 @@ pub(crate) async fn run_message_via_llm(
             if code_studio_disk_task
                 && no_parseable_tools_this_round
                 && studio_prose_only_write_nags < MAX_STUDIO_PROSE_ONLY_WRITE_NAGS
-                && looks_like_code_studio_prose_only_implementation_reply(&response_plain)
+                && crate::api_studio::looks_like_code_studio_prose_only_implementation_reply(
+                    &response_plain,
+                )
             {
                 let policy_allows_write = tools_executor_snapshot
                     .as_ref()
@@ -9274,13 +9144,19 @@ pub(crate) async fn run_message_via_llm(
                 .get(&loop_agent_key)
                 .map(|v| v.is_empty())
                 .unwrap_or(true);
-            if code_studio_disk_task
+            let enforce_pm_zero_tool_guard = code_studio_disk_task
+                || assigned_agent.eq_ignore_ascii_case("studio_project_manager");
+            if enforce_pm_zero_tool_guard
                 && tools_executor_snapshot.is_some()
                 && no_parseable_tools_this_round
                 && tool_history_empty
-                && !code_studio_skip_zero_tool_mandatory_retry(assigned_agent.as_str())
+                && !crate::api_studio::code_studio_skip_zero_tool_mandatory_retry(
+                    assigned_agent.as_str(),
+                )
                 && studio_zero_tool_promise_nags < MAX_STUDIO_ZERO_TOOL_PROMISE_NAGS
-                && looks_like_code_studio_promise_before_any_tools(&response_plain)
+                && crate::api_studio::looks_like_code_studio_promise_before_any_tools(
+                    &response_plain,
+                )
             {
                 studio_zero_tool_promise_nags += 1;
                 let _ = bus.send(
@@ -10743,10 +10619,16 @@ pub(crate) async fn run_message_via_llm(
                 })
                 .unwrap_or_default();
             let response_clean = ensure_no_open_code_block(&response_for_user);
-            let studio_no_tool_warning = if code_studio_disk_task
+            let enforce_pm_zero_tool_warning = code_studio_disk_task
+                || assigned_agent.eq_ignore_ascii_case("studio_project_manager");
+            let studio_no_tool_warning = if enforce_pm_zero_tool_warning
                 && tool_loop_history.is_empty()
-                && !code_studio_skip_zero_tool_mandatory_retry(assigned_agent.as_str())
-                && looks_like_code_studio_promise_before_any_tools(&response_for_user)
+                && !crate::api_studio::code_studio_skip_zero_tool_mandatory_retry(
+                    assigned_agent.as_str(),
+                )
+                && crate::api_studio::looks_like_code_studio_promise_before_any_tools(
+                    &response_for_user,
+                )
             {
                 "\n\n— *Akasha (Code Studio)* : aucune ligne `TOOL:` n’a été exécutée ; le dépôt n’a probablement pas été modifié. Relancez la tâche ou vérifiez le fournisseur LLM."
             } else {
@@ -16269,9 +16151,7 @@ mod tests {
         agent_role_system_prompt, build_image_markdown, build_session_recap_reply,
         canonicalize_tool_name, classify_small_talk_message, detect_session_recall_intent,
         ensure_no_open_code_block, extract_how_to_call_from_message, is_pausable, is_resumable,
-        code_studio_skip_zero_tool_mandatory_retry,
-        looks_like_code_studio_promise_before_any_tools, looks_like_meta_agent_response,
-        memory_profile_for_task, message_suggests_tool_only_action,
+        looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
         normalize_tool_path_hint, packaged_spec_check_ok, parse_content_length,
         parse_device_invoke_params, parse_generate_image_tool_args,
         parse_memory_store_explicit_links, parse_plugin_reputation_reset_body, parse_run_command_args,
@@ -16776,19 +16656,29 @@ mod tests {
     #[test]
     fn promise_before_tools_detects_diagnostic_preamble_fr() {
         let s = "Salut Loïc ! Je vais d'abord examiner l'état actuel du projet pour comprendre ce qui est déjà en place et ce qui fait échouer le build, puis je planifierai et implémenterai les fonctionnalités manquantes. Commençons par un diagnostic.";
-        assert!(looks_like_code_studio_promise_before_any_tools(s));
+        assert!(crate::api_studio::looks_like_code_studio_promise_before_any_tools(s));
+    }
+
+    #[test]
+    fn promise_before_tools_detects_inspect_and_delegate_wording() {
+        let s = "Je vais d'abord inspecter l'état actuel du projet pour identifier précisément ce qui manque, puis planifier et déléguer l'implémentation.";
+        assert!(crate::api_studio::looks_like_code_studio_promise_before_any_tools(s));
     }
 
     #[test]
     fn promise_before_tools_false_when_long_prose() {
         let s = "Je vais ".to_string() + &"x".repeat(1700);
-        assert!(!looks_like_code_studio_promise_before_any_tools(&s));
+        assert!(!crate::api_studio::looks_like_code_studio_promise_before_any_tools(&s));
     }
 
     #[test]
     fn skip_zero_tool_retry_for_planner_only() {
-        assert!(code_studio_skip_zero_tool_mandatory_retry("studio_planner"));
-        assert!(!code_studio_skip_zero_tool_mandatory_retry("studio_project_manager"));
+        assert!(crate::api_studio::code_studio_skip_zero_tool_mandatory_retry(
+            "studio_planner"
+        ));
+        assert!(!crate::api_studio::code_studio_skip_zero_tool_mandatory_retry(
+            "studio_project_manager"
+        ));
     }
 
     // Headings with textual content before `TOOL:` are not treated as tool calls.
