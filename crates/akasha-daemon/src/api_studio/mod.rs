@@ -1,4 +1,11 @@
 //! HTTP handlers for `/api/studio/*` (Code Studio).
+mod acceptance;
+pub(crate) use acceptance::{
+    format_acceptance_prefix_for_llm, parse_api_acceptance_field, run_mechanical_acceptance_checks,
+    strip_embedded_acceptance_json, studio_survey_tool, StudioAcceptancePayload, StudioCriterionKind,
+    STUDIO_ACCEPTANCE_JSON_BEGIN, STUDIO_ACCEPTANCE_JSON_END,
+};
+
 use crate::api_http::json_response;
 use crate::studio::{is_strictly_under_studio_root, resolve_studio_project_dir, studio_projects_base};
 use regex::Regex;
@@ -1173,6 +1180,15 @@ pub fn studio_reject_polluted_code_content(disk_path: &Path, content: &str) -> O
         );
     }
     None
+}
+
+/// Timeout (secondes) pour `command_ok` dans les critères d'acceptation — aligné sur `verify_timeout_sec` / build studio.
+pub(crate) fn studio_project_verify_timeout_sec(project_root: &Path) -> u64 {
+    load_studio_meta(project_root)
+        .and_then(|m| m.verify_timeout_sec)
+        .unwrap_or(DEFAULT_BUILD_TIMEOUT_SEC)
+        .min(3600)
+        .max(1)
 }
 
 /// After an agent task on a studio disk, run build/check when possible. Err = verify failed (task should fail).

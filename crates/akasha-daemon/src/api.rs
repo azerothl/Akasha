@@ -6980,6 +6980,85 @@ fn studio_verify_summary_heading_markdown(lang: StudioVerifyUserLanguage) -> &'s
     }
 }
 
+/// Revue légère post-build : critères **manuel** vs résumé des changements (1 appel LLM, sans outils). `None` = rien à signaler.
+async fn studio_semantic_acceptance_review(
+    llm_router: &std::sync::Arc<akasha_llm::LLMRouter>,
+    manual_lines: &[String],
+    diff_summary: &str,
+    user_excerpt: &str,
+    assistant_excerpt: &str,
+) -> Option<Vec<String>> {
+    if manual_lines.is_empty() {
+        return None;
+    }
+    if std::env::var("AKASHA_STUDIO_SEMANTIC_VERIFY").ok().as_deref() == Some("0") {
+        return None;
+    }
+    let crit = manual_lines.join("\n- ");
+    let system = "You are a strict checklist reviewer for a software agent task. \
+You ONLY compare the manual acceptance criteria list to the evidence (file change summary + short user goal + short assistant reply). \
+Reply with a single JSON object and no markdown fences, no other text. Schema: {\"satisfied\":[\"...\"],\"missing\":[\"...\"]}. \
+Put in \"missing\" any manual criterion that is clearly not addressed or contradicted by the evidence. If uncertain, prefer putting a short note in \"missing\" rather than assuming success. \
+Use the same language as the criteria when writing strings.";
+    let user = format!(
+        "Manual criteria (each must be satisfied unless impossible and stated):\n- {crit}\n\n\
+Summarized file diffs / changes (truncated):\n{}\n\nUser goal (excerpt):\n{}\n\nAssistant reply (excerpt):\n{}\n\n\
+Output JSON only.",
+        diff_summary.chars().take(10_000).collect::<String>(),
+        user_excerpt.chars().take(1_800).collect::<String>(),
+        assistant_excerpt.chars().take(1_800).collect::<String>()
+    );
+    let req = CompletionRequest {
+        prompt: user,
+        max_tokens: Some(500),
+        temperature: Some(0.05),
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        repeat_penalty: None,
+        num_ctx: None,
+        num_gpu: None,
+        thinking_level: None,
+        preferred_task_type: Some("conversation".to_string()),
+        system_prompt: Some(system.to_string()),
+        image_data_urls: None,
+    };
+    let raw = match tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        llm_router.complete(&req),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r.text,
+        _ => return None,
+    };
+    let trimmed = raw.trim();
+    let trimmed = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed)
+        .trim()
+        .trim_end_matches('`')
+        .trim();
+    let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let missing = v
+        .get("missing")
+        .and_then(|m| m.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if missing.is_empty() {
+        None
+    } else {
+        Some(missing)
+    }
+}
+
 /// Synthèse courte (LLM, sans outils) après échec de `studio_verify_after_agent_task`, pour l’utilisateur final.
 async fn studio_verify_explain_failure_to_user(
     llm_router: &std::sync::Arc<akasha_llm::LLMRouter>,
@@ -7629,6 +7708,8 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
+    let (message, embedded_studio_acceptance) =
+        crate::api_studio::strip_embedded_acceptance_json(&message);
     let lineage_for_studio = workspace_lineage_root_task_id(task_id, Some(store_path.as_path()));
     let tool_disk_workspace_root: std::path::PathBuf = {
         let reg = studio_disk_registry.read().await;
@@ -8605,6 +8686,8 @@ pub(crate) async fn run_message_via_llm(
             }
         }
         let mut round = 0u32;
+        // Tours d'affilée avec uniquement des outils d'exploration (Code Studio).
+        let mut studio_read_only_streak_rounds: u32 = 0;
         let mut social_snapshot_seen = false;
         // Loop detection history is tracked per "agent key".
         // For now, agent key = current task_id (sub-agent tasks each have their own task_id).
@@ -9994,6 +10077,43 @@ pub(crate) async fn run_message_via_llm(
                     }
                 }
                 let results_blob = tool_results.join("\n");
+                let mut studio_readonly_nudge: Option<String> = None;
+                if code_studio_disk_task && !calls.is_empty() {
+                    let only_survey = calls.iter().all(|(name, _)| {
+                        let c = canonicalize_tool_name(&name.trim().to_string());
+                        crate::api_studio::studio_survey_tool(&c)
+                    });
+                    if only_survey {
+                        studio_read_only_streak_rounds =
+                            studio_read_only_streak_rounds.saturating_add(1);
+                    } else {
+                        studio_read_only_streak_rounds = 0;
+                    }
+                    let max_streak = std::env::var("AKASHA_STUDIO_READ_ONLY_STREAK_MAX")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(4)
+                        .max(2)
+                        .min(20);
+                    if studio_read_only_streak_rounds >= max_streak {
+                        studio_read_only_streak_rounds = 0;
+                        let _ = bus.send(
+                            EventEnvelope::new(
+                                EventType::ProgressUpdate,
+                                Some(serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "progress_pct": 52,
+                                    "message": "[Étape: garde-fou lecture] Plusieurs tours d’affilée n’ont utilisé que des outils d’exploration — appliquez une modification concrète (write_file / search_replace / edit_file) ou indiquez le blocage exact."
+                                })),
+                            )
+                            .with_correlation(timeline_correlation),
+                        );
+                        studio_readonly_nudge = Some(format!(
+                            "[STUDIO_READ_ONLY_STREAK]\nThe last {} model rounds only invoked read-only survey tools (read_file, list_dir, grep_content, search_files, file_diff, git status/log/diff). The user request requires repository changes. Emit at least one write-like TOOL line in this turn (write_file, search_replace, edit_file, apply_patch) OR answer in plain text with the precise blocking reason (e.g. tool policy forbids writes). Do not repeat another exploratory-only round.",
+                            max_streak
+                        ));
+                    }
+                }
                 last_tool_results_blob = Some(results_blob.clone());
                 if results_blob.contains("[browser] Snapshot") {
                     social_snapshot_seen = true;
@@ -10080,6 +10200,9 @@ pub(crate) async fn run_message_via_llm(
                     user_message, response, results_blob
                 )
                 };
+                if let Some(nudge) = studio_readonly_nudge {
+                    current_prompt = format!("{nudge}\n\n{current_prompt}");
+                }
                 if round >= max_tool_rounds {
                     let response_for_user = response
                         .lines()
@@ -10456,6 +10579,120 @@ pub(crate) async fn run_message_via_llm(
         }
         if studio_verify_error.is_none() && studio_autofix_applied {
             reply_text.push_str("\n\n_(Compilation du projet Code Studio corrigée automatiquement après échec du build.)_");
+        }
+        if studio_verify_error.is_none() {
+            if let Some(ref pay) = embedded_studio_acceptance {
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 57,
+                            "message": "[Étape: critères d'acceptation] Vérification fichiers / commandes configurées…"
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
+                );
+                let tmo = crate::api_studio::studio_project_verify_timeout_sec(
+                    tool_disk_workspace_root.as_path(),
+                );
+                let mech = crate::api_studio::run_mechanical_acceptance_checks(
+                    tool_disk_workspace_root.as_path(),
+                    pay,
+                    tmo,
+                )
+                .await;
+                if !mech.is_empty() {
+                    studio_verify_error = Some(format!(
+                        "Échec critères d'acceptation (vérification automatique) :\n{}",
+                        mech.join("\n")
+                    ));
+                } else {
+                    let manual_lines: Vec<String> = pay
+                        .criteria
+                        .iter()
+                        .filter(|c| matches!(c.kind, crate::api_studio::StudioCriterionKind::Manual))
+                        .map(|c| {
+                            let id = if c.id.is_empty() { "-" } else { c.id.as_str() };
+                            format!("{id}: {}", c.text)
+                        })
+                        .collect();
+                    if !manual_lines.is_empty() {
+                        let _ = bus.send(
+                            EventEnvelope::new(
+                                EventType::ProgressUpdate,
+                                Some(serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "progress_pct": 59,
+                                    "message": "[Étape: contrôle critères] Analyse des critères manuels (après build)…"
+                                })),
+                            )
+                            .with_correlation(timeline_correlation),
+                        );
+                        let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_path());
+                        let diff_summary: String = {
+                            let snap_path = data_dir
+                                .join("studio-task-snapshots")
+                                .join(format!("{task_id}.json"));
+                            let snap_json = std::fs::read_to_string(&snap_path).unwrap_or_default();
+                            if snap_json.is_empty() {
+                                String::new()
+                            } else if let Ok(snap) = serde_json::from_str::<
+                                crate::studio_task_snapshot::StudioTaskSnapshot,
+                            >(&snap_json)
+                            {
+                                match tokio::task::spawn_blocking(move || {
+                                    crate::studio_task_snapshot::compute_studio_task_diff_from_snapshot(
+                                        snap,
+                                    )
+                                })
+                                .await
+                                {
+                                    Ok(Ok(entries)) => {
+                                        let mut parts = Vec::new();
+                                        for e in entries.iter().take(24) {
+                                            parts.push(format!(
+                                                "{} [{}]: {}",
+                                                e.path,
+                                                e.status,
+                                                e.diff.chars().take(900).collect::<String>()
+                                            ));
+                                        }
+                                        parts.join("\n")
+                                    }
+                                    _ => String::new(),
+                                }
+                            } else {
+                                String::new()
+                            }
+                        };
+                        if let Some(missing) = studio_semantic_acceptance_review(
+                            &llm_router,
+                            &manual_lines,
+                            &diff_summary,
+                            clean_message,
+                            &reply_text,
+                        )
+                        .await
+                        {
+                            if !missing.is_empty() {
+                                reply_text.push_str(
+                                    "\n\n---\n**Revue critères (non bloquant)** — à vérifier manuellement :\n- ",
+                                );
+                                reply_text.push_str(&missing.join("\n- "));
+                                if let Ok(store_ev) = TaskStore::open(&store_path) {
+                                    let _ = store_ev.insert_event(
+                                        task_id,
+                                        "studio_acceptance_review",
+                                        Some(&serde_json::json!({ "missing": missing })),
+                                        &chrono::Utc::now().to_rfc3339(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     if !first_meaningful_progress_sent && !reply_text.trim().is_empty() {
@@ -12660,6 +12897,23 @@ pub async fn handle_api(
             .and_then(|v| v.get("studio_design_doc").and_then(|x| x.as_str()))
             .map(|s| s.to_string())
             .filter(|s| !s.trim().is_empty());
+        let studio_acceptance_parsed: Option<crate::api_studio::StudioAcceptancePayload> =
+            match body_json
+                .as_ref()
+                .and_then(|v| v.get("studio_acceptance_criteria"))
+            {
+                Some(v) => match crate::api_studio::parse_api_acceptance_field(v) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let body = serde_json::json!({
+                            "error": "invalid_studio_acceptance_criteria",
+                            "detail": e
+                        });
+                        return json_response("400 Bad Request", &body.to_string());
+                    }
+                },
+                None => None,
+            };
         let studio_delegate_single_level = body_json
             .as_ref()
             .and_then(|v| v.get("studio_delegate_single_level").and_then(|x| x.as_bool()))
@@ -12879,6 +13133,17 @@ pub async fn handle_api(
                         "[Préférence d’implémentation (sélection UI Code Studio) : `{pref}` — en déléguant via `delegate_to_agent`, oriente les sous-tâches vers le spécialiste le plus adapté (ex. studio_frontend, studio_backend, studio_fullstack, studio_scaffold, qa).]\n\n{}",
                         message_for_llm
                     );
+                }
+            }
+            if let Some(ref pay) = studio_acceptance_parsed {
+                let prefix = crate::api_studio::format_acceptance_prefix_for_llm(pay);
+                if !prefix.is_empty() {
+                    message_for_llm = format!("{prefix}{message_for_llm}");
+                }
+                if let Ok(embed) = serde_json::to_string(pay) {
+                    message_for_llm.push_str(crate::api_studio::STUDIO_ACCEPTANCE_JSON_BEGIN);
+                    message_for_llm.push_str(&embed);
+                    message_for_llm.push_str(crate::api_studio::STUDIO_ACCEPTANCE_JSON_END);
                 }
             }
         }
@@ -14826,11 +15091,34 @@ fn code_studio_suggested_actions(
     status: &TaskStatus,
     failure_detail: Option<&str>,
     last_progress: Option<&ProgressEntry>,
+    acceptance_review: Option<&serde_json::Value>,
 ) -> Vec<serde_json::Value> {
     use TaskStatus::*;
     let mut v = Vec::new();
     match status {
         Completed => {
+            if let Some(payload) = acceptance_review {
+                if let Some(arr) = payload.get("missing").and_then(|m| m.as_array()) {
+                    if !arr.is_empty() {
+                        let joined = arr
+                            .iter()
+                            .filter_map(|x| x.as_str())
+                            .take(12)
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        if !joined.is_empty() {
+                            v.push(serde_json::json!({
+                                "id": "acceptance_review_followup",
+                                "label": "Compléter les critères signalés",
+                                "kind": "message",
+                                "message": format!(
+                                    "La tâche est terminée mais la revue des critères a signalé des points à clarifier ou compléter : {joined}\n\nPropose des changements concrets (fichiers + étapes) pour les traiter."
+                                )
+                            }));
+                        }
+                    }
+                }
+            }
             v.push(serde_json::json!({
                 "id": "refresh_files",
                 "label": "Rafraîchir la liste des fichiers",
@@ -15019,7 +15307,18 @@ async fn get_task_status(
         None
     };
     let last_for_suggest = progress_list.last().cloned();
-    let suggested = code_studio_suggested_actions(&task.status, failure_detail.as_deref(), last_for_suggest.as_ref());
+    let acceptance_review = store.get_events(id).ok().and_then(|evs| {
+        evs.iter()
+            .rev()
+            .find(|e| e.event_type == "studio_acceptance_review")
+            .and_then(|e| e.payload.clone())
+    });
+    let suggested = code_studio_suggested_actions(
+        &task.status,
+        failure_detail.as_deref(),
+        last_for_suggest.as_ref(),
+        acceptance_review.as_ref(),
+    );
     // Dernière ligne de progression par sous-tâche pour le détail Studio (dédoublonnage côté client par task_id).
     if let Ok(children) = store.get_children(id) {
         if !children.is_empty() {
@@ -15065,6 +15364,9 @@ async fn get_task_status(
     }
     if let Some(fd) = failure_detail {
         body["failure_detail"] = serde_json::Value::String(fd);
+    }
+    if let Some(ref ar) = acceptance_review {
+        body["acceptance_review"] = ar.clone();
     }
     json_response("200 OK", &body.to_string())
 }
