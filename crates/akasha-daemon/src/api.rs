@@ -6695,6 +6695,83 @@ fn looks_like_manual_file_patch_reply(text: &str) -> bool {
 /// even though write tools are available. This catches replies like "ce qui manque...",
 /// "recommandations pour avancer", or "je ne peux pas modifier les fichiers" instead of
 /// applying changes with `TOOL:` lines.
+/// True when the model answered with a short "I'll start by examining / diagnostic / implement…"
+/// prose block but emitted **no** `TOOL:` lines yet — common failure mode where the task then completes.
+/// Stricter than [`looks_like_code_studio_prose_only_implementation_reply`] (audit/refusal/plan).
+fn looks_like_code_studio_promise_before_any_tools(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return false;
+    }
+    // Avoid blocking long legitimate prose answers (e.g. planner) without tools.
+    const MAX_CHARS: usize = 1600;
+    if t.chars().count() > MAX_CHARS {
+        return false;
+    }
+    if t.contains("```") && t.len() > 120 {
+        return false;
+    }
+    let lower = t.to_lowercase();
+    let intent_future = [
+        "je vais ",
+        "j'ai l'intention",
+        "i will ",
+        "i'll ",
+        "i'm going to",
+        "i am going to",
+        "nous allons",
+        "we will ",
+        "commençons",
+        "let's ",
+        "let us ",
+        "pour commencer",
+        "to begin",
+        "d'abord ",
+        "first, ",
+        "first i'll",
+        "first i will",
+        "start by",
+        "starting with",
+    ]
+    .iter()
+    .any(|p| lower.contains(p));
+    if !intent_future {
+        return false;
+    }
+    [
+        "diagnostic",
+        "examiner",
+        "examine ",
+        "examiner l'",
+        "examiner la",
+        "explorer",
+        "explore ",
+        "état actuel",
+        "current state",
+        "look at the",
+        "look at this",
+        "regarder",
+        "implémenter",
+        "implement ",
+        "planifier",
+        "corriger",
+        "fix the",
+        "faire échouer",
+        "build",
+        "compilation",
+        "étape suivante",
+        "next step",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+}
+
+/// Agents whose first reply may legitimately be prose-only (high-level plan) without tools.
+fn code_studio_skip_zero_tool_mandatory_retry(agent: &str) -> bool {
+    let a = agent.trim().to_ascii_lowercase();
+    matches!(a.as_str(), "studio_planner" | "conversation")
+}
+
 fn looks_like_code_studio_prose_only_implementation_reply(text: &str) -> bool {
     let lower = text.trim().to_lowercase();
     if lower.is_empty() {
@@ -8855,6 +8932,7 @@ pub(crate) async fn run_message_via_llm(
         // when write tools are available but unused.
         let mut studio_manual_patch_nags = 0u32;
         let mut studio_prose_only_write_nags = 0u32;
+        let mut studio_zero_tool_promise_nags = 0u32;
         let mut last_captured_image_base64: Option<String> = None;
 
         let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
@@ -9188,6 +9266,47 @@ pub(crate) async fn run_message_via_llm(
                     );
                     continue;
                 }
+            }
+
+            // Code Studio: first model turn often returns only "Je vais examiner / diagnostic…" with zero TOOL lines, then the task ends.
+            const MAX_STUDIO_ZERO_TOOL_PROMISE_NAGS: u32 = 3;
+            let tool_history_empty = tool_loop_history_by_agent
+                .get(&loop_agent_key)
+                .map(|v| v.is_empty())
+                .unwrap_or(true);
+            if code_studio_disk_task
+                && tools_executor_snapshot.is_some()
+                && no_parseable_tools_this_round
+                && tool_history_empty
+                && !code_studio_skip_zero_tool_mandatory_retry(assigned_agent.as_str())
+                && studio_zero_tool_promise_nags < MAX_STUDIO_ZERO_TOOL_PROMISE_NAGS
+                && looks_like_code_studio_promise_before_any_tools(&response_plain)
+            {
+                studio_zero_tool_promise_nags += 1;
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 48,
+                            "message": "Relance Code Studio : la réponse ne contenait aucune ligne TOOL: — exécution d’outils requise (lecture, délégation ou écriture)."
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
+                );
+                let pm_delegate = if assigned_agent.eq_ignore_ascii_case("studio_project_manager")
+                {
+                    " If you are the project manager, you may start with `TOOL: delegate_to_agent <agent> <message>` to a worker, or `TOOL: read_file` / `TOOL: run_command` yourself — but you must output at least one `TOOL:` line this turn, not only a plan in prose."
+                } else {
+                    ""
+                };
+                current_prompt = format!(
+                    "User request: {}\n\nYour previous reply (rejected — no tools ran):\n{}\n\n[Code Studio — TOOL required this turn]\nYou started with a conversational plan but emitted no `TOOL:` line, so nothing ran on the repository. The task must not end here.\nReply THIS turn with one or more lines starting with `TOOL:` only (then optional brief prose after tool lines if needed). Examples:\n- `TOOL: read_file workspace:/package.json`\n- `TOOL: run_command --cwd workspace:/ npm run build`\n- `TOOL: grep_content workspace:/src pattern`\nDo not reply with only promises like \"I will examine…\" — execute at least one tool call now.{}",
+                    user_message,
+                    response_plain,
+                    pm_delegate
+                );
+                continue;
             }
 
             if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls)
@@ -10624,10 +10743,19 @@ pub(crate) async fn run_message_via_llm(
                 })
                 .unwrap_or_default();
             let response_clean = ensure_no_open_code_block(&response_for_user);
+            let studio_no_tool_warning = if code_studio_disk_task
+                && tool_loop_history.is_empty()
+                && !code_studio_skip_zero_tool_mandatory_retry(assigned_agent.as_str())
+                && looks_like_code_studio_promise_before_any_tools(&response_for_user)
+            {
+                "\n\n— *Akasha (Code Studio)* : aucune ligne `TOOL:` n’a été exécutée ; le dépôt n’a probablement pas été modifié. Relancez la tâche ou vérifiez le fournisseur LLM."
+            } else {
+                ""
+            };
             reply_text = if response_for_user.is_empty() {
                 format!("{}{}", response, image_md)
             } else {
-                format!("{}{}", response_clean, image_md)
+                format!("{}{}{}", response_clean, studio_no_tool_warning, image_md)
             };
             break;
         }
@@ -16141,7 +16269,9 @@ mod tests {
         agent_role_system_prompt, build_image_markdown, build_session_recap_reply,
         canonicalize_tool_name, classify_small_talk_message, detect_session_recall_intent,
         ensure_no_open_code_block, extract_how_to_call_from_message, is_pausable, is_resumable,
-        looks_like_meta_agent_response, memory_profile_for_task, message_suggests_tool_only_action,
+        code_studio_skip_zero_tool_mandatory_retry,
+        looks_like_code_studio_promise_before_any_tools, looks_like_meta_agent_response,
+        memory_profile_for_task, message_suggests_tool_only_action,
         normalize_tool_path_hint, packaged_spec_check_ok, parse_content_length,
         parse_device_invoke_params, parse_generate_image_tool_args,
         parse_memory_store_explicit_links, parse_plugin_reputation_reset_body, parse_run_command_args,
@@ -16641,6 +16771,24 @@ mod tests {
         assert!(!looks_like_meta_agent_response(
             "Voici le rapport demandé et le fichier a été écrit dans workspace:/analyze/comparatif.md."
         ));
+    }
+
+    #[test]
+    fn promise_before_tools_detects_diagnostic_preamble_fr() {
+        let s = "Salut Loïc ! Je vais d'abord examiner l'état actuel du projet pour comprendre ce qui est déjà en place et ce qui fait échouer le build, puis je planifierai et implémenterai les fonctionnalités manquantes. Commençons par un diagnostic.";
+        assert!(looks_like_code_studio_promise_before_any_tools(s));
+    }
+
+    #[test]
+    fn promise_before_tools_false_when_long_prose() {
+        let s = "Je vais ".to_string() + &"x".repeat(1700);
+        assert!(!looks_like_code_studio_promise_before_any_tools(&s));
+    }
+
+    #[test]
+    fn skip_zero_tool_retry_for_planner_only() {
+        assert!(code_studio_skip_zero_tool_mandatory_retry("studio_planner"));
+        assert!(!code_studio_skip_zero_tool_mandatory_retry("studio_project_manager"));
     }
 
     // Headings with textual content before `TOOL:` are not treated as tool calls.
