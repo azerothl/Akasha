@@ -179,7 +179,7 @@ pub async fn run_mechanical_acceptance_checks(
                             .take(800)
                             .collect();
                         errs.push(format!(
-                            "[{}] command_ok échoc (code {:?}): {}\n{}",
+                            "[{}] command_ok échoue (code {:?}): {}\n{}",
                             if c.id.is_empty() { "?" } else { &c.id },
                             code,
                             c.text,
@@ -244,7 +244,7 @@ pub fn parse_api_acceptance_field(
         let p: StudioAcceptancePayload = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
         return Ok(if p.criteria.is_empty() { None } else { Some(p) });
     }
-    Err("studio_acceptance_criteria must be string, object, or null".into())
+    Err("studio_acceptance_criteria must be string, object, array, or null".into())
 }
 
 #[cfg(test)]

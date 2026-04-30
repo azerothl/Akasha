@@ -9431,7 +9431,12 @@ pub(crate) async fn run_message_via_llm(
                                         ),
                                         decision_note: None,
                                     };
-                                    let _ = crate::permissions_queue::upsert_request(data_dir, queue_req);
+                                    if let Err(err) = crate::permissions_queue::upsert_request(data_dir, queue_req) {
+                                        eprintln!(
+                                            "failed to persist permission queue request {} for task {} (tool {}): {}",
+                                            approval_request_id, task_id, actual_tool, err
+                                        );
+                                    }
                                     let (tx, rx) = tokio::sync::oneshot::channel();
                                     let pending = PendingHumanInput {
                                         question: question.clone(),
@@ -9515,12 +9520,17 @@ pub(crate) async fn run_message_via_llm(
                                     } else {
                                         crate::permissions_queue::QueueStatus::Denied
                                     };
-                                    let _ = crate::permissions_queue::update_status(
+                                    if let Err(err) = crate::permissions_queue::update_status(
                                         data_dir,
                                         &approval_request_id,
                                         queue_status,
                                         Some(answer.clone()),
-                                    );
+                                    ) {
+                                        eprintln!(
+                                            "failed to update permission queue status for {} (task {}): {}",
+                                            approval_request_id, task_id, err
+                                        );
+                                    }
                                     if answer.eq_ignore_ascii_case("Toujours autoriser") {
                                         let mut state = crate::permissions_center::load(data_dir);
                                         state.decisions.retain(|d| {

@@ -1354,6 +1354,15 @@ pub async fn handle_studio_route(
         if !root.is_dir() {
             return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
         }
+        let _permit = match studio_ops_semaphore().acquire().await {
+            Ok(p) => p,
+            Err(_) => {
+                return Some(json_response(
+                    "503 Service Unavailable",
+                    r#"{"error":"studio_ops_semaphore_closed"}"#,
+                ));
+            }
+        };
         let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
             Some(v) => v,
             None => return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#)),
