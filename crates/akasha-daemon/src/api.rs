@@ -7599,6 +7599,20 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
             read_only_round_streak = 0;
         }
         if read_only_round_streak >= 2 {
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::ProgressUpdate,
+                    Some(serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "progress_pct": 59,
+                        "message": format!(
+                            "[Étape: garde-fou autofix] {} round(s) lecture-only détecté(s) — correction d'écriture forcée (search_replace/edit_file/write_file).",
+                            read_only_round_streak
+                        )
+                    })),
+                )
+                .with_correlation(timeline_correlation),
+            );
             let not_module_paths = extract_ts2306_not_module_paths(verify_log, 6);
             let focus = if not_module_paths.is_empty() {
                 "No TS2306 path parsed from compiler output.".to_string()
@@ -7614,6 +7628,17 @@ If a file is empty and TS2306 says 'is not a module', add at least `export {{}}`
             ));
         }
         if read_only_round_streak >= 4 {
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::ProgressUpdate,
+                    Some(serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "progress_pct": 60,
+                        "message": "[Étape: arrêt anti-boucle] Trop de rounds lecture-only successifs en autofix — arrêt de la boucle pour éviter l'exploration infinie."
+                    })),
+                )
+                .with_correlation(timeline_correlation),
+            );
             tracing::warn!(
                 task_id = %task_id,
                 round = round + 1,
