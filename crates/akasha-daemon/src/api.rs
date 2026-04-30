@@ -7189,6 +7189,53 @@ fn parse_read_file_tool_path(args: &[String]) -> Option<String> {
     Some(path_str)
 }
 
+/// Remove model reasoning wrappers that occasionally leak in plain text responses.
+fn strip_reasoning_wrappers(input: &str) -> String {
+    let mut out = input.to_string();
+    // Fast path: nothing to strip.
+    if !out.contains("<think>") && !out.contains("</think>") {
+        return out;
+    }
+    loop {
+        let Some(start) = out.find("<think>") else {
+            break;
+        };
+        if let Some(end_rel) = out[start..].find("</think>") {
+            let end = start + end_rel + "</think>".len();
+            out.replace_range(start..end, "");
+        } else {
+            // Unclosed tag: remove tail from opening marker.
+            out.truncate(start);
+            break;
+        }
+    }
+    out.replace("</think>", "").replace("<think>", "")
+}
+
+fn extract_ts2306_not_module_paths(verify_log: &str, cap: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in verify_log.lines() {
+        if !line.contains("error TS2306") || !line.contains("is not a module") {
+            continue;
+        }
+        let Some((_, after)) = line.split_once("File '") else {
+            continue;
+        };
+        let Some((path, _)) = after.split_once("' is not a module") else {
+            continue;
+        };
+        let p = path.trim().replace('\\', "/");
+        if p.is_empty() || out.iter().any(|x| x == &p) {
+            continue;
+        }
+        out.push(p);
+        if out.len() >= cap {
+            break;
+        }
+    }
+    out
+}
+
 /// Après un log d’échec de compilation, enchaîne quelques tours LLM + exécution d’outils pour corriger les sources.
 /// Retourne `true` si au moins un outil d’écriture a réussi au moins une fois.
 async fn studio_verify_run_llm_autofix_rounds(
@@ -7321,6 +7368,45 @@ KNOWN_TS_ERRORS:\n{}\n",
     };
     let mut prev_round_tool_fp: Option<String> = None;
     let mut pending_stall: Option<String> = None;
+    let mut read_only_round_streak: u32 = 0;
+
+    // Deterministic first-aid: TS2306 "is not a module" often comes from an empty .ts file.
+    // Patch those files immediately so subsequent LLM rounds can focus on remaining errors.
+    {
+        let not_module_paths = extract_ts2306_not_module_paths(verify_log, 12);
+        for p in &not_module_paths {
+            let as_path = std::path::Path::new(p);
+            if !as_path.starts_with(tool_disk_root) {
+                continue;
+            }
+            if !as_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("ts"))
+            {
+                continue;
+            }
+            let content = std::fs::read_to_string(as_path).unwrap_or_default();
+            if content.trim().is_empty() {
+                if std::fs::write(as_path, "export {}\n").is_ok() {
+                    any_write_success = true;
+                    writes_ok_count = writes_ok_count.saturating_add(1);
+                    let _ = bus.send(
+                        EventEnvelope::new(
+                            EventType::ProgressUpdate,
+                            Some(serde_json::json!({
+                                "task_id": task_id.to_string(),
+                                "progress_pct": 57,
+                                "message": format!("Correctif auto TS2306: `{}` était vide, ajout de `export {{}}`.", p)
+                            })),
+                        )
+                        .with_correlation(timeline_correlation),
+                    );
+                }
+            }
+        }
+    }
+
     for round in 0..max_llm_rounds {
         let state_snapshot = format!(
             "STATE SNAPSHOT:\n\
@@ -7371,7 +7457,7 @@ LAST_FAILED_FILES: {}\n",
         )
         .await
         {
-            Ok(Ok(r)) => r.text,
+            Ok(Ok(r)) => strip_reasoning_wrappers(&r.text),
             Ok(Err(e)) => {
                 tracing::warn!(task_id = %task_id, error = %e, "studio verify autofix: LLM complete failed");
                 break;
@@ -7420,6 +7506,8 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
         }
         short_or_no_tool_retries = 0;
         let mut round_results: Vec<String> = Vec::new();
+        let mut round_read_success = false;
+        let mut round_write_like_success = false;
         let lanes = akasha_tools::schedule_tool_calls(&calls);
         for (_lane, lane_calls) in lanes {
             for (name, args) in &lane_calls {
@@ -7485,10 +7573,12 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
                 );
                 if success && write_like {
                     any_write_success = true;
+                    round_write_like_success = true;
                     writes_ok_count = writes_ok_count.saturating_add(1);
                     last_read_file_path = None;
                     consecutive_same_file_reads = 0;
                 } else if success && actual_tool.as_str() == "read_file" {
+                    round_read_success = true;
                     if let Some(path_key) = parse_read_file_tool_path(args) {
                         if last_read_file_path.as_ref() == Some(&path_key) {
                             consecutive_same_file_reads =
@@ -7503,6 +7593,34 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
             }
         }
         follow_up = round_results.join("\n");
+        if round_read_success && !round_write_like_success {
+            read_only_round_streak = read_only_round_streak.saturating_add(1);
+        } else {
+            read_only_round_streak = 0;
+        }
+        if read_only_round_streak >= 2 {
+            let not_module_paths = extract_ts2306_not_module_paths(verify_log, 6);
+            let focus = if not_module_paths.is_empty() {
+                "No TS2306 path parsed from compiler output.".to_string()
+            } else {
+                format!("TS2306 focus files: {}", not_module_paths.join(", "))
+            };
+            follow_up.push_str(&format!(
+                "\n\n[HARD GUARD — READ-ONLY ROUNDS]\n\
+You just completed {read_only_round_streak} round(s) with successful reads but no successful write tool.\n\
+Stop broad exploration. Apply one concrete fix NOW with search_replace/edit_file/write_file.\n\
+If a file is empty and TS2306 says 'is not a module', add at least `export {{}}` first, then continue with proper exported types.\n\
+{focus}\n"
+            ));
+        }
+        if read_only_round_streak >= 4 {
+            tracing::warn!(
+                task_id = %task_id,
+                round = round + 1,
+                "studio verify autofix: aborting due to repeated read-only rounds"
+            );
+            break;
+        }
         if consecutive_same_file_reads >= SAME_FILE_READ_THRESHOLD {
             let path_disp = last_read_file_path
                 .as_deref()
