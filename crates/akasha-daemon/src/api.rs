@@ -118,8 +118,8 @@ fn tool_scope_key(tool: &str, tool_args: &[String]) -> String {
             .join(" ")
             .trim()
             .to_string(),
-        "write_file" => {
-            // write_file may receive a JSON payload with a `path` key, or plain args[0]
+        "write_file" | "write_code" => {
+            // write_file / write_code may receive a JSON payload with a `path` key, or plain args[0]
             if let Some(path_from_json) = parse_write_file_request(tool_args)
                 .map(|(p, _)| p)
                 .filter(|p| !p.is_empty())
@@ -415,6 +415,25 @@ fn strip_markdown_fences_from_write_content(content: &str) -> String {
         break;
     }
     s
+}
+
+/// Relative path for [`crate::api_studio::path_has_agent_code_extension`] (strips `workspace:` prefix).
+fn path_for_agent_write_extension_check(path_str: &str) -> PathBuf {
+    let normalized = normalize_tool_path_hint(path_str.trim());
+    let rel = normalized
+        .strip_prefix("workspace:/")
+        .or_else(|| normalized.strip_prefix("workspace:"))
+        .map(|s| s.trim_start_matches(|c| c == '/' || c == '\\'))
+        .unwrap_or(normalized.as_str());
+    PathBuf::from(rel)
+}
+
+fn policy_allows_primary_disk_write(policy: &akasha_tools::ToolsPolicy) -> bool {
+    policy.can_use_tool("write_file")
+        || policy.can_use_tool("write_code")
+        || policy.can_use_tool("edit_file")
+        || policy.can_use_tool("search_replace")
+        || policy.can_use_tool("apply_patch")
 }
 
 /// Parse `memory_store` optional `link_to:` / `link_kind:` into `(target_uuid, relation_kind)` pairs.
@@ -1554,6 +1573,7 @@ pub fn new_human_input_store() -> HumanInputStore {
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_file", "read_file <path> [--full] [<offset_ligne> <nb_lignes>] — lire un fichier texte. Par défaut : **500 premières lignes** seulement (évite de saturer le contexte). `TOOL: read_file <chemin> --full` pour tout le fichier (plafond octets côté daemon si très gros). Fenêtre explicite : `read_file workspace:/fichier.ts 1 200`. PDF : texte extrait automatiquement. Path réel ou workspace:/<path>."),
     ("write_file", "write_file <path> puis contenu sur les lignes suivantes — écrire un fichier complet (création/remplacement). Format préféré : première ligne `TOOL: write_file workspace:/fichier`, puis le corps du fichier seul sur les lignes suivantes. Ne pas compresser un fichier entier sur la même ligne que le header. Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace."),
+    ("write_code", "write_code <path> puis contenu — comme write_file mais **uniquement** pour fichiers source (.ts, .tsx, .js, .jsx, .rs, .py, …). Le daemon rejette markdown parasite / lignes TOOL dans le corps. Pour CODE_STUDIO_PLAN.md, DESIGN.md, JSON, YAML : utiliser write_file."),
     ("delete_file", "delete_file <path> — supprimer un fichier (pas un répertoire). Chemin workspace:/ ou disque autorisé par tools_policy (mêmes règles que write_file). Code Studio : préférer workspace:/chemin/relatif."),
     ("rename_path", "rename_path <from> <to> — renommer ou déplacer un fichier ou un répertoire (rename atomique si possible ; copie+suppression pour un fichier en cross-device). La destination ne doit pas exister. Deux arguments : le chemin source est le premier token ; tout le reste forme le chemin cible (espaces dans <to> OK). Pas d’espaces dans <from> sans utiliser workspace:/…"),
     ("move_tree", "move_tree <from_dir> <to_dir> — déplacer un répertoire et son contenu (rename atomique si possible, sinon copie récursive + suppression). La destination ne doit pas exister. Même convention d’arguments que rename_path (cible = args après le premier token)."),
@@ -1629,6 +1649,7 @@ fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, assigned_agent
     const STUDIO: &[&str] = &[
         "read_file",
         "write_file",
+        "write_code",
         "delete_file",
         "rename_path",
         "move_tree",
@@ -1676,7 +1697,7 @@ fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, assigned_agent
     };
     if out.is_empty() {
         out.extend(
-            ["read_file", "write_file", "grep_content", "run_command", "ask_user"]
+            ["read_file", "write_file", "write_code", "grep_content", "run_command", "ask_user"]
                 .iter()
                 .map(|s| (*s).to_string()),
         );
@@ -3235,9 +3256,9 @@ const STUDIO_AGENT_QUALITY_REMINDER: &str = concat!(
     "  Suivi des lots : ajouter une **ligne datée courte** dans `## Informations complémentaires` ou `## Demandes d'évolutions utilisateur par phase` plutôt que de réécrire l'ensemble du plan.\n",
     "  Si le fichier est absent (import), le créer avec ce gabarit en synthétisant le dépôt. Remplacement complet réservé à une demande **explicite** de réinitialisation du plan (bouton ou consigne utilisateur).\n",
     "- Premier lot d'un projet Code Studio : après avoir créé ou mis à jour `CODE_STUDIO_PLAN.md`, créer `workspace:/DESIGN.md` **avant** les développements applicatifs si le fichier est absent. `DESIGN.md` doit fixer le contrat design (front matter YAML + sections markdown) à partir de la demande, de la stack et du plan ; ensuite seulement générer/modifier `src/`, configs, tests, etc.\n",
-    "- **Corrections sur le disque (obligatoire quand les outils le permettent)** : pour corriger du code (imports, erreurs TS/build, etc.), utiliser des lignes `TOOL:` — `search_replace` pour des changements localisés, `edit_file` pour un intervalle de lignes, `write_file` seulement si un remplacement de fichier entier est justifié, `apply_patch` si adapté. ",
+    "- **Corrections sur le disque (obligatoire quand les outils le permettent)** : pour corriger du code (imports, erreurs TS/build, etc.), utiliser des lignes `TOOL:` — `search_replace` pour des changements localisés, `edit_file` pour un intervalle de lignes, `write_code` pour créer ou remplacer un **fichier source** entier (.ts, .tsx, .rs, …), `write_file` pour plans Markdown / JSON / config, `apply_patch` si adapté. ",
     "Ne pas faire du **chat** le canal principal de livraison : éviter « voici le fichier corrigé à coller dans workspace:/… », les longs blocs de remplacement manuel ou les résumés à la place d’écritures réelles tant que la politique d’outils autorise les écritures.\n",
-    "- **Si une écriture est impossible** (outil refusé, erreur explicite de `write_file` / `search_replace` / etc., chemin hors périmètre) : indiquer **pourquoi** tu ne peux pas appliquer la correction toi-même (citer le message d’erreur ou la contrainte), puis seulement proposer un secours (diff, extrait à copier).\n\n",
+    "- **Si une écriture est impossible** (outil refusé, erreur explicite de `write_file` / `write_code` / `search_replace` / etc., chemin hors périmètre) : indiquer **pourquoi** tu ne peux pas appliquer la correction toi-même (citer le message d’erreur ou la contrainte), puis seulement proposer un secours (diff, extrait à copier).\n\n",
 );
 
 /// Contexte système court pour les tâches dont le disque outil est sous `studio-projects/` (Code Studio).
@@ -3246,13 +3267,13 @@ const CODE_STUDIO_APP_CONTEXT: &str = concat!(
     "[Code Studio — contexte]\n",
     "Tu travailles sur le dépôt du projet ouvert dans Akasha Code Studio. ",
     "Chemins : préfère `workspace:/…` (racine virtuelle de la tâche) ; les fichiers sont synchronisés sur le disque du projet studio.\n",
-    "Outils usuels : read_file, write_file, delete_file, rename_path, move_tree (si autorisés), search_replace, edit_file, apply_patch, run_command (avec `--cwd workspace:/` pour builds/tests), git_* si exposés, ask_user pour une question bloquante dans la même tâche.\n",
+    "Outils usuels : read_file, write_file, write_code (fichiers source uniquement), delete_file, rename_path, move_tree (si autorisés), search_replace, edit_file, apply_patch, run_command (avec `--cwd workspace:/` pour builds/tests), git_* si exposés, ask_user pour une question bloquante dans la même tâche.\n",
     "Concentre-toi sur le code et la documentation de ce dépôt — pas sur l’interface générale d’Akasha (TUI, onglets, skills hors projet, caméra, météo). ",
     "Si une capacité externe est indispensable, indique brièvement ce qu’il faudrait côté utilisateur (clé, politique d’outils).\n",
     "Réponds dans la même langue que le dernier message utilisateur. ",
     "Avant d’éditer : lire les fichiers concernés ; ne pas inventer de dépendances — vérifier le manifeste (package.json, Cargo.toml, etc.).\n",
     "Sur le premier lot d’un projet : stabiliser d’abord `CODE_STUDIO_PLAN.md`, puis créer `workspace:/DESIGN.md` avant de commencer le développement applicatif si ce fichier est absent.\n",
-    "Corrections : appliquer les changements sur le dépôt avec les outils (`search_replace`, `edit_file`, `write_file`, `apply_patch`, chemins `workspace:/…`) — ne pas se contenter de décrire ou coller un fichier entier pour que l’utilisateur le fasse à ta place. ",
+    "Corrections : appliquer les changements sur le dépôt avec les outils (`search_replace`, `edit_file`, `write_code` pour le code source, `write_file` pour markdown/json/config, `apply_patch`, chemins `workspace:/…`) — ne pas se contenter de décrire ou coller un fichier entier pour que l’utilisateur le fasse à ta place. ",
     "Si un outil d’écriture échoue ou est interdit, expliquer clairement la raison avant toute solution de secours.\n\n",
 );
 
@@ -3328,7 +3349,7 @@ Langue : aligne-toi sur le dernier message utilisateur."),
         "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. When a [Stack technique du projet] block is present in the user message, obey it for UI libraries, bundler, CSS approach, and TypeScript/JavaScript choice. Verify dependencies exist in package.json before importing. Use read_file before editing. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Run build/lint/typecheck via run_command --cwd workspace:/ when policy allows, and fix issues you introduced. End with a clear user-facing summary of changes and how to preview or test — not only \"Done\"."),
         "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Before declaring completion: run tests or at least start/build checks when feasible; summarize APIs and behavior for the user in accessible terms."),
         "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If prose was accidentally inserted in a source file, remove it and keep only valid syntax for that file type. Verify end-to-end coherence; run combined build/test when policy allows. Close with a plain-language recap of what changed and how to run the app."),
-        "studio_planner" => Some("You are the Code Studio planning agent. READ-ONLY on application source: do NOT write_file, edit_file, delete_file, rename_path, move_tree, search_replace, or apply_patch to any path except workspace:/CODE_STUDIO_PLAN.md. Do NOT run_command except read-only diagnostics (git status, git log, git diff, ls, cat, npm/yarn/pnpm only if the user explicitly asked for a read-only check). You MAY update workspace:/CODE_STUDIO_PLAN.md by sections to capture the plan. Explore with read_file, list_dir, grep_content. Deliver a clear implementation plan, critical files, and risks; end with next steps for a human or for an implement agent."),
+        "studio_planner" => Some("You are the Code Studio planning agent. READ-ONLY on application source: do NOT write_file, write_code, edit_file, delete_file, rename_path, move_tree, search_replace, or apply_patch to any path except workspace:/CODE_STUDIO_PLAN.md. Do NOT run_command except read-only diagnostics (git status, git log, git diff, ls, cat, npm/yarn/pnpm only if the user explicitly asked for a read-only check). You MAY update workspace:/CODE_STUDIO_PLAN.md by sections to capture the plan. Explore with read_file, list_dir, grep_content. Deliver a clear implementation plan, critical files, and risks; end with next steps for a human or for an implement agent."),
         _ => None,
     }
 }
@@ -3337,6 +3358,7 @@ Langue : aligne-toi sur le dernier message utilisateur."),
 async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: &str) {
     const WRITE_TOOLS: &[&str] = &[
         "write_file",
+        "write_code",
         "delete_file",
         "rename_path",
         "move_tree",
@@ -4987,11 +5009,27 @@ pub(crate) async fn execute_tool_call_impl(
                 Err(e) => (false, format!("[grep_content] failed: {}", e), None),
             }
         }
-        "write_file" => {
+        "write_file" | "write_code" => {
+            let code_only = matches!(tool_name, "write_code");
+            let usage_tag = if code_only { "write_code" } else { "write_file" };
             let Some((path_str, content)) = parse_write_file_request(args) else {
-                return (false, "[write_file] usage: write_file <path> then file content on following lines".to_string(), None);
+                return (
+                    false,
+                    format!(
+                        "[{usage_tag}] usage: {usage_tag} <path> then file content on following lines"
+                    ),
+                    None,
+                );
             };
             let content = strip_markdown_fences_from_write_content(&content);
+            let ext_check_path = path_for_agent_write_extension_check(&path_str);
+            if code_only && !crate::api_studio::path_has_agent_code_extension(&ext_check_path) {
+                return (
+                    false,
+                    "[write_code] path must use a source-code extension (e.g. .ts, .tsx, .rs, .py); use write_file for markdown, JSON, or config files.".to_string(),
+                    None,
+                );
+            }
             if is_workspace_virtual_path(&path_str) {
                 match workspace_store {
                     Some(ws) => {
@@ -5035,43 +5073,70 @@ pub(crate) async fn execute_tool_call_impl(
                                 if let Some(parent) = disk_path.parent() {
                                     let _ = tokio::fs::create_dir_all(parent).await;
                                 }
-                                if let Some(r) = workspace_root {
-                                    if crate::studio::is_strictly_under_studio_root(&disk_path, r) {
-                                        if let Some(msg) =
-                                            crate::api_studio::studio_reject_polluted_code_content(&disk_path, &effective_content)
-                                        {
-                                            return (false, format!("[write_file] {}", msg), None);
-                                        }
+                                let run_pollution_check = code_only
+                                    || workspace_root
+                                        .map(|r| {
+                                            crate::studio::is_strictly_under_studio_root(&disk_path, r)
+                                        })
+                                        .unwrap_or(false);
+                                if run_pollution_check {
+                                    if let Some(msg) =
+                                        crate::api_studio::studio_reject_polluted_code_content(
+                                            &disk_path,
+                                            &effective_content,
+                                        )
+                                    {
+                                        return (false, format!("[{usage_tag}] {}", msg), None);
                                     }
                                 }
                                 if tokio::fs::write(&disk_path, &effective_content).await.is_ok() {
-                                    return (true, format!("[write_file workspace:{}] saved (disk).", key), None);
+                                    return (
+                                        true,
+                                        format!("[{usage_tag} workspace:{}] saved (disk).", key),
+                                        None,
+                                    );
                                 }
                             }
                         }
-                        return (true, format!("[write_file workspace:{}] saved.", key), None);
+                        return (
+                            true,
+                            format!("[{usage_tag} workspace:{}] saved.", key),
+                            None,
+                        );
                     }
-                    None => return (false, "[write_file] workspace paths require a workspace store.".to_string(), None),
+                    None => {
+                        return (
+                            false,
+                            format!(
+                                "[{usage_tag}] workspace paths require a workspace store."
+                            ),
+                            None,
+                        );
+                    }
                 }
             }
             let disk_path = resolve_tool_disk_path(path_str.trim(), workspace_root);
-            if let Some(root) = workspace_root {
-                if crate::studio::is_strictly_under_studio_root(&disk_path, root) {
-                    if let Some(msg) = crate::api_studio::studio_reject_polluted_code_content(&disk_path, &content) {
-                        return (false, format!("[write_file] {}", msg), None);
-                    }
+            let run_pollution_check = code_only
+                || workspace_root
+                    .map(|root| crate::studio::is_strictly_under_studio_root(&disk_path, root))
+                    .unwrap_or(false);
+            if run_pollution_check {
+                if let Some(msg) =
+                    crate::api_studio::studio_reject_polluted_code_content(&disk_path, &content)
+                {
+                    return (false, format!("[{usage_tag}] {}", msg), None);
                 }
             }
             match executor.write_file(&disk_path, &content).await {
                 Ok(res) => {
                     let msg = if res.success {
-                        format!("[write_file {}] {}", disk_path.display(), res.summary)
+                        format!("[{usage_tag} {}] {}", disk_path.display(), res.summary)
                     } else {
-                        format!("[write_file] {}", res.summary)
+                        format!("[{usage_tag}] {}", res.summary)
                     };
                     (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[write_file] error: {}", e), None),
+                Err(e) => (false, format!("[{usage_tag}] error: {}", e), None),
             }
         }
         "delete_file" => {
@@ -6741,6 +6806,7 @@ const STUDIO_VERIFY_AUTOFIX_TOOLS: &[&str] = &[
     "search_replace",
     "edit_file",
     "write_file",
+    "write_code",
     "apply_patch",
     "file_diff",
     "delete_file",
@@ -7513,8 +7579,8 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
                 .await;
                 let write_like = matches!(
                     actual_tool.as_str(),
-                    "write_file" | "search_replace" | "edit_file" | "apply_patch" | "delete_file"
-                        | "rename_path" | "move_tree"
+                    "write_file" | "write_code" | "search_replace" | "edit_file" | "apply_patch"
+                        | "delete_file" | "rename_path" | "move_tree"
                 );
                 if success && write_like {
                     any_write_success = true;
@@ -7551,7 +7617,7 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
                         "task_id": task_id.to_string(),
                         "progress_pct": 59,
                         "message": format!(
-                            "[Étape: garde-fou autofix] {} round(s) lecture-only détecté(s) — correction d'écriture forcée (search_replace/edit_file/write_file).",
+                            "[Étape: garde-fou autofix] {} round(s) lecture-only détecté(s) — correction d'écriture forcée (search_replace/edit_file/write_code/write_file).",
                             read_only_round_streak
                         )
                     })),
@@ -7708,8 +7774,8 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                                 let actual_tool = canonicalize_tool_name(name);
                                 if !matches!(
                                     actual_tool.as_str(),
-                                    "search_replace" | "edit_file" | "write_file" | "apply_patch" | "file_diff" | "delete_file"
-                                        | "rename_path" | "move_tree"
+                                    "search_replace" | "edit_file" | "write_file" | "write_code" | "apply_patch"
+                                        | "file_diff" | "delete_file" | "rename_path" | "move_tree"
                                 ) {
                                     continue;
                                 }
@@ -7733,8 +7799,8 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                                 if success
                                     && matches!(
                                         actual_tool.as_str(),
-                                        "search_replace" | "edit_file" | "write_file" | "apply_patch" | "delete_file"
-                                            | "rename_path" | "move_tree"
+                                        "search_replace" | "edit_file" | "write_file" | "write_code" | "apply_patch"
+                                            | "delete_file" | "rename_path" | "move_tree"
                                     )
                                 {
                                     any_write_success = true;
@@ -8041,11 +8107,11 @@ pub(crate) async fn run_message_via_llm(
         }
         if orch_disk_deliverables {
             if let Some(ref list) = allowed_tools {
-                if !list.iter().any(|t| t == "write_file") {
+                if !list.iter().any(|t| t == "write_file" || t == "write_code") {
                     tracing::warn!(
                         task_id = %task_id,
-                        "Orchestrated deliverables: tools_policy default_profile omits write_file; \
-                         workspace file tools will NOT be advertised to the model — add write_file \
+                        "Orchestrated deliverables: tools_policy default_profile omits write_file/write_code; \
+                         workspace file tools will NOT be advertised to the model — add write_file or write_code \
                          (and other file tools) to the profile to enable disk deliverables."
                     );
                 }
@@ -9115,12 +9181,7 @@ pub(crate) async fn run_message_via_llm(
 
             let policy_allows_write = tools_executor_snapshot
                 .as_ref()
-                .map(|e| {
-                    e.policy.can_use_tool("write_file")
-                        || e.policy.can_use_tool("edit_file")
-                        || e.policy.can_use_tool("search_replace")
-                        || e.policy.can_use_tool("apply_patch")
-                })
+                .map(|e| policy_allows_primary_disk_write(&e.policy))
                 .unwrap_or(false);
 
             let prose_path_base = code_studio_disk_task
@@ -9398,7 +9459,7 @@ pub(crate) async fn run_message_via_llm(
                                     const MAX_APPROVAL_ARG_LEN: usize = 80;
                                     let args_preview: String = if matches!(
                                         actual_tool.as_str(),
-                                        "apply_patch" | "edit_file" | "write_file" | "delete_file"
+                                        "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file"
                                     ) {
                                         "[redacted]".to_string()
                                     } else {
@@ -10141,7 +10202,7 @@ pub(crate) async fn run_message_via_llm(
                         // Redact or truncate args in the event to avoid leaking large blobs or secrets.
                         let redacted_args: Vec<String> = if matches!(
                             actual_tool.as_str(),
-                            "apply_patch" | "edit_file" | "write_file" | "delete_file"
+                            "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file"
                         ) {
                             vec!["[redacted for write-like tool]".to_string()]
                         } else {
@@ -10219,6 +10280,7 @@ pub(crate) async fn run_message_via_llm(
                                 && matches!(
                                     actual_tool.as_str(),
                                     "write_file"
+                                        | "write_code"
                                         | "delete_file"
                                         | "rename_path"
                                         | "move_tree"
@@ -10282,13 +10344,13 @@ pub(crate) async fn run_message_via_llm(
                                 Some(serde_json::json!({
                                     "task_id": task_id.to_string(),
                                     "progress_pct": 52,
-                                    "message": "[Étape: garde-fou lecture] Plusieurs tours d’affilée n’ont utilisé que des outils d’exploration — appliquez une modification concrète (write_file / search_replace / edit_file) ou indiquez le blocage exact."
+                                    "message": "[Étape: garde-fou lecture] Plusieurs tours d’affilée n’ont utilisé que des outils d’exploration — appliquez une modification concrète (write_code / write_file / search_replace / edit_file) ou indiquez le blocage exact."
                                 })),
                             )
                             .with_correlation(timeline_correlation),
                         );
                         studio_readonly_nudge = Some(format!(
-                            "[STUDIO_READ_ONLY_STREAK]\nThe last {} model rounds only invoked read-only survey tools (read_file, list_dir, grep_content, search_files, file_diff, git status/log/diff). The user request requires repository changes. Emit at least one write-like TOOL line in this turn (write_file, search_replace, edit_file, apply_patch) OR answer in plain text with the precise blocking reason (e.g. tool policy forbids writes). Do not repeat another exploratory-only round.",
+                            "[STUDIO_READ_ONLY_STREAK]\nThe last {} model rounds only invoked read-only survey tools (read_file, list_dir, grep_content, search_files, file_diff, git status/log/diff). The user request requires repository changes. Emit at least one write-like TOOL line in this turn (write_code, write_file, search_replace, edit_file, apply_patch) OR answer in plain text with the precise blocking reason (e.g. tool policy forbids writes). Do not repeat another exploratory-only round.",
                             max_streak
                         ));
                     }
@@ -10525,7 +10587,7 @@ pub(crate) async fn run_message_via_llm(
             {
                 let policy_allows_write = tools_executor_snapshot
                     .as_ref()
-                    .map(|e| e.policy.can_use_tool("write_file"))
+                    .map(|e| policy_allows_primary_disk_write(&e.policy))
                     .unwrap_or(false);
                 if policy_allows_write {
                     let tool_loop_history = tool_loop_history_by_agent
@@ -10535,13 +10597,13 @@ pub(crate) async fn run_message_via_llm(
                     let disk_write_attempted = tool_loop_history.iter().any(|(t, _)| {
                         matches!(
                             t.as_str(),
-                            "write_file" | "edit_file" | "search_replace" | "apply_patch"
+                            "write_file" | "write_code" | "edit_file" | "search_replace" | "apply_patch"
                         )
                     });
                     if !disk_write_attempted && orch_disk_write_nags < MAX_ORCH_DISK_WRITE_NAGS {
                         orch_disk_write_nags += 1;
                         current_prompt = format!(
-                        "{}\n\n[Orchestrator — disk deliverables] Your last assistant message did not include any executable TOOL: lines (or they were not parsed). This step MUST call tools: use TOOL: read_file on the shared plan trace if needed, then TOOL: write_file / edit_file / search_replace for every mandatory workspace path and update the plan sections **Fait (agent)** / **Reste (agent)**. Do not finish with prose-only or ```json``` — emit TOOL lines now.",
+                        "{}\n\n[Orchestrator — disk deliverables] Your last assistant message did not include any executable TOOL: lines (or they were not parsed). This step MUST call tools: use TOOL: read_file on the shared plan trace if needed, then TOOL: write_code / write_file / edit_file / search_replace for every mandatory workspace path and update the plan sections **Fait (agent)** / **Reste (agent)**. Do not finish with prose-only or ```json``` — emit TOOL lines now.",
                         current_prompt
                     );
                         continue;
@@ -10568,14 +10630,11 @@ pub(crate) async fn run_message_via_llm(
                             .get(&loop_agent_key)
                             .map(|v| v.as_slice())
                             .unwrap_or(&[]);
-                        let allows = e.policy.can_use_tool("write_file")
-                            || e.policy.can_use_tool("edit_file")
-                            || e.policy.can_use_tool("search_replace")
-                            || e.policy.can_use_tool("apply_patch");
+                        let allows = policy_allows_primary_disk_write(&e.policy);
                         let seen = tool_loop_history.iter().any(|(t, _)| {
                             matches!(
                                 t.as_str(),
-                                "write_file" | "edit_file" | "search_replace" | "apply_patch"
+                                "write_file" | "write_code" | "edit_file" | "search_replace" | "apply_patch"
                             )
                         });
                         (allows, seen)

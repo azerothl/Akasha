@@ -1,5 +1,6 @@
 //! HTTP handlers for `/api/studio/*` (Code Studio).
 mod acceptance;
+mod code_extensions;
 mod guardrails;
 mod response_auditor;
 pub(crate) use acceptance::{
@@ -7,6 +8,7 @@ pub(crate) use acceptance::{
     strip_embedded_acceptance_json, studio_survey_tool, StudioAcceptancePayload, StudioCriterionKind,
     STUDIO_ACCEPTANCE_JSON_BEGIN, STUDIO_ACCEPTANCE_JSON_END,
 };
+pub(crate) use code_extensions::{is_agent_code_file_extension, path_has_agent_code_extension};
 pub(crate) use guardrails::{
     code_studio_skip_zero_tool_mandatory_retry, looks_like_code_studio_promise_before_any_tools,
     looks_like_code_studio_prose_only_implementation_reply,
@@ -1158,10 +1160,7 @@ pub fn studio_reject_polluted_code_content(disk_path: &Path, content: &str) -> O
     }
 
     let ext = disk_path.extension()?.to_string_lossy().to_lowercase();
-    let code_ext = matches!(
-        ext.as_str(),
-        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "rs" | "py" | "go" | "java" | "kt" | "swift" | "vue" | "svelte"
-    );
+    let code_ext = is_agent_code_file_extension(ext.as_str());
     if !code_ext {
         return None;
     }
@@ -1175,7 +1174,9 @@ pub fn studio_reject_polluted_code_content(disk_path: &Path, content: &str) -> O
     if content.lines().any(|l| {
         let s = l.trim();
         s.starts_with("TOOL: write_file")
-            || (s.starts_with("TOOL: ") && (s.contains("write_file") || s.contains("apply_patch")))
+            || s.starts_with("TOOL: write_code")
+            || (s.starts_with("TOOL: ")
+                && (s.contains("write_file") || s.contains("write_code") || s.contains("apply_patch")))
     }) {
         return Some(
             "rejected: le fichier contient des lignes de protocole d’outil — le contenu doit être uniquement du code source."

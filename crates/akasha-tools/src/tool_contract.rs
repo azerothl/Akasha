@@ -72,7 +72,7 @@ mod tests {
         let calls = vec![
             ("read_file".to_string(), vec!["a.md".to_string()]),
             ("search_files".to_string(), vec!["src".to_string()]),
-            ("write_file".to_string(), vec!["a.md".to_string(), "x".to_string()]),
+            ("write_code".to_string(), vec!["a.ts".to_string(), "x".to_string()]),
             ("read_file".to_string(), vec!["b.md".to_string()]),
         ];
         let lanes = schedule_tool_calls(&calls);

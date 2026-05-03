@@ -2,6 +2,8 @@
 # Fichier absent ou vide = tout refusé. Pour autoriser lecture/écriture de fichiers, ajoutez
 # des préfixes de chemins (répertoires ou fichiers) sous allowed_read_paths / allowed_write_paths.
 # L'agent peut alors utiliser read_file / write_file pour les chemins sous ces préfixes.
+# L'outil write_code (fichiers source .ts, .rs, etc.) hérite des mêmes droits que write_file
+# dans default_profile (pas besoin d'ajouter write_code si write_file est déjà listé).
 #
 # Projets longs (roman, BD, projet de code) : pour isoler le projet du reste du système, créez
 # un répertoire dédié par projet et listez-le SEUL ici. N'utilisez pas "." ou un répertoire parent
@@ -67,6 +69,7 @@ command_timeout_secs: 60
 #   dev_sandbox:
 #     - read_file
 #     - write_file
+#     # write_code : optionnel — autorisé automatiquement si write_file est présent (même profil)
 #     - delete_file
 #     - search_files
 #     - grep_content
