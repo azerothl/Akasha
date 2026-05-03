@@ -41,6 +41,23 @@ Chaque ligne ou frame :
 - `kind` : reprendre les chaînes **`EventType::as_str()`** (`snake_case`) pour éviter la duplication de vocabulaire.
 - `payload` : identique aux payloads déjà publiés sur le bus (où applicable).
 
+## Profil live retenu (SSE + fallback polling)
+
+Pour les clients UI/CLI, le mode live recommandé est:
+
+1. **SSE prioritaire** sur `GET /api/events` (bus global).
+2. Filtrage client par `correlation_id == <task_id>`.
+3. **Fallback polling** sur `GET /api/tasks/:id/events` quand SSE n'est pas disponible (proxy, navigateur ancien, coupure réseau, etc.).
+
+Contraintes client:
+
+- L'ordre d'affichage est trié sur `at`/`timestamp` croissant.
+- Les `kind` inconnus sont ignorés sans erreur.
+- La reconnexion SSE ne doit pas supprimer l'historique déjà reçu pour la tâche.
+- Le polling fallback doit être borné (intervalle >= 800 ms recommandé) et doit reprendre le flux sans doublons visuels.
+
+Ce profil garantit une UX live proche d'un `run.stream()` tout en restant compatible avec l'API HTTP existante.
+
 ## Files « steering » / « follow-up » (extension)
 
 Lorsque l’API file d’attente (voir [pi_mono_alignment_priorities.md](../roadmap/pi_mono_alignment_priorities.md)) sera en place, ajouter des kinds **client-visibles** :

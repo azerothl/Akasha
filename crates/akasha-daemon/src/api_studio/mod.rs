@@ -1,4 +1,22 @@
 //! HTTP handlers for `/api/studio/*` (Code Studio).
+mod acceptance;
+mod code_extensions;
+mod guardrails;
+mod response_auditor;
+pub(crate) use acceptance::{
+    format_acceptance_prefix_for_llm, parse_api_acceptance_field, run_mechanical_acceptance_checks,
+    strip_embedded_acceptance_json, studio_survey_tool, StudioAcceptancePayload, StudioCriterionKind,
+    STUDIO_ACCEPTANCE_JSON_BEGIN, STUDIO_ACCEPTANCE_JSON_END,
+};
+pub(crate) use code_extensions::{is_agent_code_file_extension, path_has_agent_code_extension};
+pub(crate) use guardrails::{
+    code_studio_skip_zero_tool_mandatory_retry, looks_like_code_studio_promise_before_any_tools,
+    looks_like_code_studio_prose_only_implementation_reply,
+};
+pub(crate) use response_auditor::{
+    studio_llm_audit_code_studio_turn, studio_llm_response_auditor_enabled, StudioLlmAuditParams,
+};
+
 use crate::api_http::json_response;
 use crate::studio::{is_strictly_under_studio_root, resolve_studio_project_dir, studio_projects_base};
 use regex::Regex;
@@ -26,10 +44,18 @@ const PREVIEW_PORT_MIN: u16 = 5180;
 const PREVIEW_PORT_MAX: u16 = 5279;
 /// Ring buffer for dev-server stdout/stderr (preview process).
 const MAX_PREVIEW_LOG_BYTES: usize = 256 * 1024;
+const PREVIEW_PROXY_TOKEN_TTL_SEC: i64 = 180;
 
 struct StudioPreviewProcess {
     child: tokio::process::Child,
     log: Arc<Mutex<String>>,
+}
+
+#[derive(Debug, Clone)]
+struct PreviewProxyTicket {
+    project_id: String,
+    port: u16,
+    expires_unix: i64,
 }
 
 /// Append to `log`, keeping only the last `MAX_PREVIEW_LOG_BYTES` UTF-8 bytes (best-effort).
@@ -71,6 +97,131 @@ async fn studio_pump_preview_stream<R: tokio::io::AsyncRead + Unpin>(
 fn studio_preview_registry() -> &'static Mutex<HashMap<String, StudioPreviewProcess>> {
     static REG: OnceLock<Mutex<HashMap<String, StudioPreviewProcess>>> = OnceLock::new();
     REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn preview_proxy_registry() -> &'static Mutex<HashMap<String, PreviewProxyTicket>> {
+    static REG: OnceLock<Mutex<HashMap<String, PreviewProxyTicket>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn issue_preview_proxy_token(project_id: &str, port: u16) -> String {
+    let token = format!("ppx_{}", uuid::Uuid::new_v4().simple());
+    let now = chrono::Utc::now().timestamp();
+    let expires_unix = now + PREVIEW_PROXY_TOKEN_TTL_SEC;
+    let mut reg = preview_proxy_registry().lock().await;
+    reg.retain(|_, t| t.expires_unix > now);
+    reg.insert(
+        token.clone(),
+        PreviewProxyTicket {
+            project_id: project_id.to_string(),
+            port,
+            expires_unix,
+        },
+    );
+    token
+}
+
+async fn validate_preview_proxy_token(project_id: &str, token: &str) -> Result<u16, String> {
+    let now = chrono::Utc::now().timestamp();
+    let mut reg = preview_proxy_registry().lock().await;
+    reg.retain(|_, t| t.expires_unix > now);
+    let Some(ticket) = reg.get(token) else {
+        return Err("invalid_token".to_string());
+    };
+    if ticket.project_id != project_id {
+        return Err("project_scope_mismatch".to_string());
+    }
+    if ticket.expires_unix <= now {
+        return Err("token_expired".to_string());
+    }
+    Ok(ticket.port)
+}
+
+fn command_in_container_image(argv: &[String]) -> &'static str {
+    if argv.first().is_some_and(|c| c == "cargo" || c == "cargo.exe") {
+        "rust:1"
+    } else {
+        "node:20"
+    }
+}
+
+async fn run_build_in_container(
+    project_root: &Path,
+    argv: &[String],
+    timeout_sec: u64,
+) -> Result<(Option<i32>, String, String), String> {
+    if argv.is_empty() {
+        return Err("argv_required".to_string());
+    }
+    let root_s = project_root
+        .to_str()
+        .ok_or_else(|| "invalid_project_path".to_string())?;
+    let image = command_in_container_image(argv);
+    let mut docker_argv = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "-v".to_string(),
+        format!("{root_s}:/workspace"),
+        "-w".to_string(),
+        "/workspace".to_string(),
+        image.to_string(),
+    ];
+    docker_argv.extend_from_slice(argv);
+    let mut cmd = Command::new("docker");
+    cmd.args(&docker_argv);
+    cmd.kill_on_drop(true);
+    let run = async move {
+        let mut child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let read_stdout = async move {
+            let mut out = String::new();
+            if let Some(s) = stdout {
+                let mut r = BufReader::new(s);
+                let mut buf = vec![0u8; 8192];
+                loop {
+                    let n = r.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    if out.len() < MAX_BUILD_OUTPUT_BYTES {
+                        let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(out.len()));
+                        out.push_str(&String::from_utf8_lossy(&buf[..take]));
+                    }
+                }
+            }
+            Ok::<_, std::io::Error>(out)
+        };
+        let read_stderr = async move {
+            let mut err = String::new();
+            if let Some(s) = stderr {
+                let mut r = BufReader::new(s);
+                let mut buf = vec![0u8; 8192];
+                loop {
+                    let n = r.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    if err.len() < MAX_BUILD_OUTPUT_BYTES {
+                        let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(err.len()));
+                        err.push_str(&String::from_utf8_lossy(&buf[..take]));
+                    }
+                }
+            }
+            Ok::<_, std::io::Error>(err)
+        };
+        let (out, err) = tokio::try_join!(read_stdout, read_stderr).map_err(|e| e.to_string())?;
+        let status = child.wait().await.map_err(|e| e.to_string())?;
+        Ok::<_, String>((status.code(), truncate_output(&out), truncate_output(&err)))
+    };
+    match timeout(Duration::from_secs(timeout_sec), run).await {
+        Ok(v) => v,
+        Err(_) => Err(format!("timeout after {}s", timeout_sec)),
+    }
 }
 
 /// Pick a TCP port on 127.0.0.1 (best-effort; released before the dev server binds).
@@ -1009,10 +1160,7 @@ pub fn studio_reject_polluted_code_content(disk_path: &Path, content: &str) -> O
     }
 
     let ext = disk_path.extension()?.to_string_lossy().to_lowercase();
-    let code_ext = matches!(
-        ext.as_str(),
-        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "rs" | "py" | "go" | "java" | "kt" | "swift" | "vue" | "svelte"
-    );
+    let code_ext = is_agent_code_file_extension(ext.as_str());
     if !code_ext {
         return None;
     }
@@ -1026,7 +1174,9 @@ pub fn studio_reject_polluted_code_content(disk_path: &Path, content: &str) -> O
     if content.lines().any(|l| {
         let s = l.trim();
         s.starts_with("TOOL: write_file")
-            || (s.starts_with("TOOL: ") && (s.contains("write_file") || s.contains("apply_patch")))
+            || s.starts_with("TOOL: write_code")
+            || (s.starts_with("TOOL: ")
+                && (s.contains("write_file") || s.contains("write_code") || s.contains("apply_patch")))
     }) {
         return Some(
             "rejected: le fichier contient des lignes de protocole d’outil — le contenu doit être uniquement du code source."
@@ -1040,6 +1190,15 @@ pub fn studio_reject_polluted_code_content(disk_path: &Path, content: &str) -> O
         );
     }
     None
+}
+
+/// Timeout (secondes) pour `command_ok` dans les critères d'acceptation — aligné sur `verify_timeout_sec` / build studio.
+pub(crate) fn studio_project_verify_timeout_sec(project_root: &Path) -> u64 {
+    load_studio_meta(project_root)
+        .and_then(|m| m.verify_timeout_sec)
+        .unwrap_or(DEFAULT_BUILD_TIMEOUT_SEC)
+        .min(3600)
+        .max(1)
 }
 
 /// After an agent task on a studio disk, run build/check when possible. Err = verify failed (task should fail).
@@ -1293,6 +1452,66 @@ async fn git_output(project_root: &Path, args: &[&str]) -> Result<std::process::
     let mut c = Command::new("git");
     c.args(args).current_dir(project_root).kill_on_drop(true);
     c.output().await.map_err(|e| e.to_string())
+}
+
+async fn git_current_branch(project_root: &Path) -> Result<String, String> {
+    let o = git_output(project_root, &["symbolic-ref", "--short", "HEAD"]).await?;
+    if !o.status.success() {
+        return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+async fn git_has_pending_changes(project_root: &Path) -> Result<bool, String> {
+    let o = git_output(project_root, &["status", "--porcelain"]).await?;
+    if !o.status.success() {
+        return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
+    }
+    Ok(!String::from_utf8_lossy(&o.stdout).trim().is_empty())
+}
+
+/// Before merging an evolution branch, persist pending local edits on that branch.
+/// Returns `Ok(true)` when an auto-commit was created.
+async fn ensure_evolution_branch_committed_before_merge(
+    project_root: &Path,
+    evolution_branch: &str,
+) -> Result<bool, String> {
+    let current = git_current_branch(project_root).await?;
+    let has_pending = git_has_pending_changes(project_root).await?;
+    if !has_pending {
+        return Ok(false);
+    }
+    if current != evolution_branch {
+        return Err(format!(
+            "pending_local_changes_on_branch:{current}; expected:{evolution_branch}"
+        ));
+    }
+    let add = git_output(project_root, &["add", "-A"]).await?;
+    if !add.status.success() {
+        return Err(format!(
+            "git_add_failed: {}",
+            String::from_utf8_lossy(&add.stderr).trim()
+        ));
+    }
+    let commit = git_output(
+        project_root,
+        &[
+            "commit",
+            "-m",
+            "Akasha Code Studio: save pending evolution changes",
+        ],
+    )
+    .await?;
+    if !commit.status.success() {
+        let err = String::from_utf8_lossy(&commit.stderr).trim().to_string();
+        let out = String::from_utf8_lossy(&commit.stdout).trim().to_string();
+        // If nothing actually changed after `add -A`, treat as non-fatal.
+        if err.contains("nothing to commit") || out.contains("nothing to commit") {
+            return Ok(false);
+        }
+        return Err(format!("git_commit_failed: {err}"));
+    }
+    Ok(true)
 }
 
 async fn is_git_repo(project_root: &Path) -> bool {
@@ -1659,6 +1878,88 @@ Try `npm i --save-dev @types/jest`";
         assert!(head.status.success());
         let branch = String::from_utf8_lossy(&head.stdout).trim().to_string();
         assert_eq!(branch, "main");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn ensure_evolution_branch_committed_before_merge_auto_commits_pending_changes() {
+        use std::process::Command;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let git_available = Command::new("git")
+            .arg("--version")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !git_available {
+            return;
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "akasha_studio_evo_commit_{stamp}_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let init = Command::new("git").arg("init").current_dir(&dir).status().unwrap();
+        assert!(init.success());
+        let _ = Command::new("git")
+            .args(["config", "user.name", "Akasha Test"])
+            .current_dir(&dir)
+            .status();
+        let _ = Command::new("git")
+            .args(["config", "user.email", "akasha-test@example.com"])
+            .current_dir(&dir)
+            .status();
+
+        std::fs::write(dir.join("README.md"), "hello\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+
+        assert!(Command::new("git")
+            .args(["checkout", "-b", "studio/e2e"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(dir.join("README.md"), "hello\nchanges\n").unwrap();
+
+        let committed = super::ensure_evolution_branch_committed_before_merge(&dir, "studio/e2e")
+            .await
+            .expect("auto-commit should succeed");
+        assert!(committed);
+
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        assert!(String::from_utf8_lossy(&status.stdout).trim().is_empty());
+
+        let log = Command::new("git")
+            .args(["log", "-1", "--pretty=%s"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(log.status.success());
+        let msg = String::from_utf8_lossy(&log.stdout);
+        assert!(msg.contains("Akasha Code Studio: save pending evolution changes"));
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -5,6 +5,7 @@ import RelationGraph from "relation-graph/react";
 import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
 import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
 import { preprocessMessagePaths } from "./preprocessMessagePaths";
+import { collapseStreamedProgressEvents } from "./taskEvents";
 import { getCached, setCached } from "./useTabCache";
 import { useI18n } from "./useI18n";
 import { GeoMapView } from "./GeoMapView";
@@ -294,7 +295,9 @@ function asRecord(v: unknown): Record<string, unknown> | null {
 }
 
 /** GET /api/tasks/:id/events → { task_id, events } — tolerate alternate key casings after IPC. */
-function normalizeTaskEventsInvokeResponse(data: unknown): Array<{ event_type?: string; payload?: unknown; at?: string; task_id?: string }> {
+function normalizeTaskEventsInvokeResponse(
+  data: unknown,
+): Array<{ schema_version?: number; kind?: string; event_type?: string; payload?: unknown; at?: string; task_id?: string }> {
   if (data == null || typeof data !== "object") return [];
   const o = data as Record<string, unknown>;
   const raw = o.events ?? o.Events;
@@ -302,8 +305,12 @@ function normalizeTaskEventsInvokeResponse(data: unknown): Array<{ event_type?: 
   return raw.map((e) => {
     if (e && typeof e === "object") {
       const ev = e as Record<string, unknown>;
+      const kind = (ev.kind ?? ev.Kind) as string | undefined;
+      const eventType = (ev.event_type ?? ev.EventType ?? ev.eventType ?? kind) as string | undefined;
       return {
-        event_type: (ev.event_type ?? ev.EventType ?? ev.eventType) as string | undefined,
+        schema_version: (ev.schema_version ?? ev.schemaVersion ?? ev.SchemaVersion) as number | undefined,
+        kind,
+        event_type: eventType,
         payload: ev.payload ?? ev.Payload,
         at: (ev.at ?? ev.created_at ?? ev.At) as string | undefined,
         task_id: (ev.task_id ?? ev.taskId) as string | undefined,
@@ -2979,9 +2986,10 @@ function App() {
   }, [taskTreeData, collapsedTaskBranches]);
 
   const visibleTaskEvents = useMemo(() => {
-    if (!isSimpleMode) return tasksEvents;
-    return [...tasksEvents].slice(-8).reverse();
-  }, [isSimpleMode, tasksEvents]);
+    const compact = collapseStreamedProgressEvents(tasksEvents, selectedTask?.id ?? "root");
+    if (!isSimpleMode) return compact;
+    return [...compact].slice(-8).reverse();
+  }, [isSimpleMode, tasksEvents, selectedTask]);
 
   const selectedTaskHierarchy = useMemo(() => {
     if (!selectedTask) return [] as TaskListItem[];
@@ -5725,7 +5733,7 @@ function App() {
                                           {tid === rootTaskId ? `${t("chat.root_task")}${tid.slice(-8)}` : `${t("chat.sub_task")}${tid.slice(-8)}`}
                                         </div>
                                         <ul className="chat-subagents-events">
-                                          {evs.map((ev, idx) => (
+                                          {collapseStreamedProgressEvents(evs, tid).map((ev, idx) => (
                                             <li key={`${tid}-${idx}`} className="chat-subagents-event" data-type={ev.event_type} data-event-kind={classifyEventKind(ev.event_type)}>
                                               <span className="chat-subagents-event-dot" aria-hidden />
                                               <div className="chat-subagents-event-body">

@@ -75,6 +75,42 @@ En résumé : **court terme** et **long terme** sont implémentés. Le modèle d
 
 ---
 
+## Maintenance opportuniste post-retrieval (phase cible)
+
+Objectif: améliorer la qualité mémoire sans ajouter de latence visible côté réponse utilisateur.
+
+Principe:
+
+1. Le pipeline principal récupère et injecte les mémoires pertinentes.
+2. Une fois la réponse envoyée, un worker asynchrone exécute une maintenance bornée.
+3. Les résultats de maintenance sont persistés avec budget strict (temps et volume).
+
+Tâches de maintenance prévues:
+
+- **Confidence boost**: renforcer les entrées effectivement utiles (retrouvées puis utilisées).
+- **Confidence decay**: diminuer légèrement les entrées retrouvées mais répétitivement non utilisées.
+- **Renforcement de liens**: créer/renforcer des relations entre mémoires co-utilisées.
+- **Gap markers**: enregistrer les contextes avec faible rappel utile pour alimenter les extractions futures.
+
+Contraintes:
+
+- Exécution non bloquante (aucune dépendance dans le chemin critique de réponse).
+- Budget par tour (nombre max d’entrées traitées, temps max).
+- Backoff automatique en charge élevée du daemon.
+
+Métriques associées (observabilité):
+
+- `memory_retrieval_candidates_total`
+- `memory_retrieval_used_total`
+- `memory_confidence_boost_total`
+- `memory_confidence_decay_total`
+- `memory_gap_markers_total`
+- `memory_retrieval_usefulness_ratio` (dérivée)
+
+Référence d’architecture: `spec/dev/roadmap/jcode_inspired_integration_rfc.md`.
+
+---
+
 ## Mémoire long terme sur Windows
 
 Le backend d’embeddings utilise **fastembed** (ONNX Runtime). Sous Windows, les binaires précompilés d’ONNX peuvent provoquer des **erreurs de liaison** (symboles `__std_*` non résolus) à cause d’un décalage d’ABI entre la toolchain MSVC de Rust et celle avec laquelle ONNX a été compilé.

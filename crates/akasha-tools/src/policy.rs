@@ -102,9 +102,21 @@ fn default_browser_session_timeout_secs() -> u64 {
 
 impl ToolsPolicy {
     /// Returns true if the given tool name is in the require_approval list (case-insensitive).
+    /// `write_code` inherits approval rules from `write_file` when the latter is listed.
     pub fn requires_approval(&self, tool_name: &str) -> bool {
         let name = tool_name.trim().to_lowercase();
-        self.require_approval.iter().any(|a| a.trim().to_lowercase() == name)
+        if self
+            .require_approval
+            .iter()
+            .any(|a| a.trim().to_lowercase() == name)
+        {
+            return true;
+        }
+        name == "write_code"
+            && self
+                .require_approval
+                .iter()
+                .any(|a| a.trim().to_lowercase() == "write_file")
     }
 
     /// Load policy from a YAML file. Missing file or empty content returns default (deny-all).
@@ -291,10 +303,20 @@ impl ToolsPolicy {
             Some(profile) => self
                 .tool_profiles
                 .get(profile)
-                .map(|list| list.iter().any(|t| t == tool_name))
+                .map(|list| Self::tool_matches_profile_list(list, tool_name))
                 .unwrap_or(false),
             None => true,
         }
+    }
+
+    /// Profile entry match: exact name, or `write_code` allowed when `write_file` is listed.
+    fn tool_matches_profile_list(list: &[String], tool_name: &str) -> bool {
+        list.iter().any(|t| {
+            if t == tool_name {
+                return true;
+            }
+            tool_name.eq_ignore_ascii_case("write_code") && t.eq_ignore_ascii_case("write_file")
+        })
     }
 
     /// When default_profile is set, returns the list of allowed tool names for that profile. None = no profile filter (all tools allowed).
@@ -843,5 +865,44 @@ mod tests {
             "path inside workspace_root must be allowed");
         assert!(p.can_write(Path::new("/home/app/workspace/out.txt")),
             "write inside workspace_root must be allowed");
+    }
+
+    // --- write_code aliases write_file in profiles / approval ---
+
+    #[test]
+    fn write_code_allowed_when_profile_lists_only_write_file() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "coders".to_string(),
+            vec!["read_file".to_string(), "write_file".to_string()],
+        );
+        let p = ToolsPolicy {
+            default_profile: Some("coders".to_string()),
+            tool_profiles: profiles,
+            ..Default::default()
+        };
+        assert!(p.can_use_tool("write_code"));
+        assert!(p.can_use_tool("write_file"));
+    }
+
+    #[test]
+    fn requires_approval_write_code_inherits_write_file() {
+        let p = ToolsPolicy {
+            require_approval: vec!["write_file".to_string()],
+            ..Default::default()
+        };
+        assert!(p.requires_approval("write_code"));
+        assert!(p.requires_approval("write_file"));
+        assert!(!p.requires_approval("read_file"));
+    }
+
+    #[test]
+    fn requires_approval_write_code_explicit() {
+        let p = ToolsPolicy {
+            require_approval: vec!["write_code".to_string()],
+            ..Default::default()
+        };
+        assert!(p.requires_approval("write_code"));
+        assert!(!p.requires_approval("write_file"));
     }
 }

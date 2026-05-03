@@ -956,6 +956,43 @@ pub async fn handle_studio_route(
         ));
     }
 
+    // GET /api/studio/projects/:id/preview/proxy?token=... — signed short-lived redirect to dev preview.
+    if method == "GET" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/preview/proxy") {
+        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+        let id = rest.strip_suffix("/preview/proxy").unwrap_or(rest).trim_end_matches('/');
+        let id = id.split('/').next().unwrap_or("");
+        if id.is_empty() {
+            return Some(json_response("400 Bad Request", r#"{"error":"invalid path"}"#));
+        }
+        let token = query_param(query_str, "token")
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        if token.trim().is_empty() {
+            return Some(json_response("401 Unauthorized", r#"{"error":"token_required"}"#));
+        }
+        let port = match validate_preview_proxy_token(id, token.trim()).await {
+            Ok(p) => p,
+            Err(e) => {
+                return Some(json_response(
+                    "401 Unauthorized",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        };
+        let location = format!("http://127.0.0.1:{port}");
+        let body = serde_json::json!({
+            "ok": true,
+            "proxy": true,
+            "redirect_to": location
+        })
+        .to_string();
+        return Some(format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nLocation: {location}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.as_bytes().len(),
+            body
+        ));
+    }
+
     // POST /api/studio/projects/:id/preview/install — npm install uniquement (pas de serveur dev).
     if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/preview/install") {
         let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
@@ -1165,11 +1202,13 @@ pub async fn handle_studio_route(
                     tokio::spawn(studio_pump_preview_stream(s, log_err, "stderr"));
                 }
                 map.insert(id.to_string(), StudioPreviewProcess { child, log });
-                let url = format!("http://127.0.0.1:{port}");
+                let token = issue_preview_proxy_token(id, port).await;
+                let url = format!("/api/studio/projects/{id}/preview/proxy?token={token}");
                 let mut body = serde_json::json!({
                     "ok": true,
                     "url": url,
                     "port": port,
+                    "proxy_signed": true,
                 });
                 if let Some(ib) = install_block {
                     body["installed"] = serde_json::Value::Bool(true);
@@ -1249,83 +1288,195 @@ pub async fn handle_studio_route(
                 ));
             }
         };
-        let mut cmd = studio_command_from_argv(&argv);
-        cmd.current_dir(&root).kill_on_drop(true);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.as_std_mut().creation_flags(CREATE_NO_WINDOW);
-        }
-        let run = async move {
-            let mut child = cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn()?;
-            let stdout = child.stdout.take();
-            let stderr = child.stderr.take();
-
-            let read_stdout = async move {
-                let mut out = String::new();
-                if let Some(s) = stdout {
-                    let mut r = BufReader::new(s);
-                    let mut buf = vec![0u8; 8192];
-                    loop {
-                        let n = r.read(&mut buf).await?;
-                        if n == 0 {
-                            break;
+        let containerized = body_v
+            .get("containerized")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(true);
+        let allow_host_fallback = body_v
+            .get("allow_host_fallback")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        let result = if containerized {
+            match run_build_in_container(&root, &argv, timeout_sec).await {
+                Ok(v) => Ok((v.0, v.1, v.2, "container")),
+                Err(container_err) => {
+                    if allow_host_fallback {
+                        match studio_run_command_capture(&root, &argv, timeout_sec).await {
+                            Ok((code, out, err)) => Ok((code, out, err, "host_fallback")),
+                            Err(host_err) => Err(format!("container: {container_err}; host_fallback: {host_err}")),
                         }
-                        if out.len() < MAX_BUILD_OUTPUT_BYTES {
-                            let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(out.len()));
-                            out.push_str(&String::from_utf8_lossy(&buf[..take]));
-                        }
+                    } else {
+                        Err(format!("containerized_build_failed: {container_err}"))
                     }
                 }
-                Ok::<_, std::io::Error>(out)
-            };
-
-            let read_stderr = async move {
-                let mut err = String::new();
-                if let Some(s) = stderr {
-                    let mut r = BufReader::new(s);
-                    let mut buf = vec![0u8; 8192];
-                    loop {
-                        let n = r.read(&mut buf).await?;
-                        if n == 0 {
-                            break;
-                        }
-                        if err.len() < MAX_BUILD_OUTPUT_BYTES {
-                            let take = n.min(MAX_BUILD_OUTPUT_BYTES.saturating_sub(err.len()));
-                            err.push_str(&String::from_utf8_lossy(&buf[..take]));
-                        }
-                    }
-                }
-                Ok::<_, std::io::Error>(err)
-            };
-
-            let (out, err) = tokio::try_join!(read_stdout, read_stderr)?;
-            let status = child.wait().await?;
-            Ok::<_, std::io::Error>((status, out, err))
+            }
+        } else {
+            match studio_run_command_capture(&root, &argv, timeout_sec).await {
+                Ok((code, out, err)) => Ok((code, out, err, "host")),
+                Err(e) => Err(e),
+            }
         };
-        let result = timeout(Duration::from_secs(timeout_sec), run).await;
         let (http_status, body) = match result {
-            Ok(Ok((status, stdout, stderr))) => {
+            Ok((exit_code, stdout, stderr, execution_mode)) => {
                 let body = serde_json::json!({
-                    "exit_code": status.code(),
-                    "stdout": truncate_output(&stdout),
-                    "stderr": truncate_output(&stderr),
+                    "exit_code": exit_code,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "execution_mode": execution_mode
                 })
                 .to_string();
-                let http_status = if status.success() { "200 OK" } else { "500 Internal Server Error" };
+                let ok = exit_code == Some(0);
+                let http_status = if ok { "200 OK" } else { "500 Internal Server Error" };
                 (http_status, body)
             }
-            Ok(Err(e)) => (
+            Err(e) => (
                 "500 Internal Server Error",
-                serde_json::json!({ "error": e.to_string(), "exit_code": -1 }).to_string(),
-            ),
-            Err(_) => (
-                "504 Gateway Timeout",
-                serde_json::json!({ "error": "timeout", "timeout_sec": timeout_sec }).to_string(),
+                serde_json::json!({ "error": e, "exit_code": -1 }).to_string(),
             ),
         };
         return Some(json_response(http_status, &body));
+    }
+
+    // POST /api/studio/projects/:id/patch/hunks — apply selected unified-diff hunks under studio root.
+    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/patch/hunks") {
+        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+        let id = rest.strip_suffix("/patch/hunks").unwrap_or(rest).trim_end_matches('/');
+        let id = id.split('/').next().unwrap_or("");
+        let root = match resolve_studio_project_dir(data_dir, id) {
+            Ok(d) => d,
+            Err(e) => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        };
+        if !root.is_dir() {
+            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+        }
+        let _permit = match studio_ops_semaphore().acquire().await {
+            Ok(p) => p,
+            Err(_) => {
+                return Some(json_response(
+                    "503 Service Unavailable",
+                    r#"{"error":"studio_ops_semaphore_closed"}"#,
+                ));
+            }
+        };
+        let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+            Some(v) => v,
+            None => return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#)),
+        };
+        let dry_run = body_v.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+        let patches: Vec<String> = body_v
+            .get("patches")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        if patches.is_empty() {
+            return Some(json_response("400 Bad Request", r#"{"error":"patches_required"}"#));
+        }
+        fn invalid_patch_path(path: &str) -> bool {
+            if path.is_empty() || path == "/dev/null" {
+                return false;
+            }
+            if path.starts_with('/') || path.starts_with('\\') {
+                return true;
+            }
+            if path.len() >= 3 {
+                let b = path.as_bytes();
+                if b[1] == b':' && (b[2] == b'\\' || b[2] == b'/') && b[0].is_ascii_alphabetic() {
+                    return true;
+                }
+            }
+            path.split(&['/', '\\'][..]).any(|part| part == "..")
+        }
+        fn patch_has_invalid_paths(patch: &str) -> bool {
+            for line in patch.lines() {
+                if let Some(rest) = line.strip_prefix("diff --git ") {
+                    let mut parts = rest.split_whitespace();
+                    let left = match parts.next() {
+                        Some(v) => v,
+                        None => return true,
+                    };
+                    let right = match parts.next() {
+                        Some(v) => v,
+                        None => return true,
+                    };
+                    let left = match left.strip_prefix("a/") {
+                        Some(v) => v,
+                        None => return true,
+                    };
+                    let right = match right.strip_prefix("b/") {
+                        Some(v) => v,
+                        None => return true,
+                    };
+                    if invalid_patch_path(left) || invalid_patch_path(right) {
+                        return true;
+                    }
+                } else if let Some(path) = line.strip_prefix("--- ") {
+                    if path != "/dev/null" {
+                        let path = match path.strip_prefix("a/") {
+                            Some(v) => v,
+                            None => return true,
+                        };
+                        if invalid_patch_path(path) {
+                            return true;
+                        }
+                    }
+                } else if let Some(path) = line.strip_prefix("+++ ") {
+                    if path != "/dev/null" {
+                        let path = match path.strip_prefix("b/") {
+                            Some(v) => v,
+                            None => return true,
+                        };
+                        if invalid_patch_path(path) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        for p in &patches {
+            if !p.contains("diff --git a/") || p.contains("..\\") || p.contains("../") || patch_has_invalid_paths(p) {
+                return Some(json_response("400 Bad Request", r#"{"error":"invalid_patch_content"}"#));
+            }
+        }
+        let mut applied = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+        for (idx, patch) in patches.iter().enumerate() {
+            let patch_file = root.join(format!(".akasha-hunk-{idx}.patch"));
+            if let Err(e) = fs::write(&patch_file, patch) {
+                errors.push(format!("write_patch_{idx}: {e}"));
+                continue;
+            }
+            let argv = if dry_run {
+                vec!["git".to_string(), "apply".to_string(), "--check".to_string(), patch_file.display().to_string()]
+            } else {
+                vec!["git".to_string(), "apply".to_string(), "--whitespace=nowarn".to_string(), patch_file.display().to_string()]
+            };
+            match studio_run_command_capture(&root, &argv, 90).await {
+                Ok((Some(0), _, _)) => {
+                    applied += 1;
+                }
+                Ok((code, out, err)) => {
+                    errors.push(format!("patch_{idx}_failed code={code:?} stdout={out} stderr={err}"));
+                }
+                Err(e) => errors.push(format!("patch_{idx}_error: {e}")),
+            }
+            let _ = fs::remove_file(&patch_file);
+        }
+        let status = if errors.is_empty() { "200 OK" } else { "207 Multi-Status" };
+        let body = serde_json::json!({
+            "ok": errors.is_empty(),
+            "dry_run": dry_run,
+            "requested": patches.len(),
+            "applied": applied,
+            "errors": errors,
+        })
+        .to_string();
+        return Some(json_response(status, &body));
     }
 
     // GET /api/studio/projects/:id/evolutions
@@ -1500,6 +1651,15 @@ pub async fn handle_studio_route(
                     ));
                 }
                 let _permit = studio_ops_semaphore().acquire().await.ok();
+                match ensure_evolution_branch_committed_before_merge(&root, &branch).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        return Some(json_response(
+                            "409 Conflict",
+                            &serde_json::json!({ "error": "pre_merge_commit_failed", "detail": e }).to_string(),
+                        ));
+                    }
+                }
                 if ensure_main_or_master_branch(&root).await.is_err() {
                     return Some(json_response(
                         "500 Internal Server Error",

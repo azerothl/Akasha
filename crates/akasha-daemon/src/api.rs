@@ -118,8 +118,8 @@ fn tool_scope_key(tool: &str, tool_args: &[String]) -> String {
             .join(" ")
             .trim()
             .to_string(),
-        "write_file" => {
-            // write_file may receive a JSON payload with a `path` key, or plain args[0]
+        "write_file" | "write_code" => {
+            // write_file / write_code may receive a JSON payload with a `path` key, or plain args[0]
             if let Some(path_from_json) = parse_write_file_request(tool_args)
                 .map(|(p, _)| p)
                 .filter(|p| !p.is_empty())
@@ -262,16 +262,21 @@ fn parse_generate_image_tool_args(args: &[String]) -> (String, Option<String>) {
     (args.join(" "), None)
 }
 
+/// Code Studio prepends retrieved index chunks to the user message unless explicitly disabled.
+/// `AKASHA_STUDIO_CODE_RAG_DISABLED=1|true|yes|on` turns that prefix off; unset or other values keep RAG on.
 fn studio_code_rag_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("AKASHA_STUDIO_CODE_RAG_ENABLED")
+        std::env::var("AKASHA_STUDIO_CODE_RAG_DISABLED")
             .ok()
             .map(|v| {
                 let t = v.trim().to_ascii_lowercase();
-                matches!(t.as_str(), "1" | "true" | "yes" | "on")
+                if t.is_empty() {
+                    return true;
+                }
+                !matches!(t.as_str(), "1" | "true" | "yes" | "on")
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
@@ -410,6 +415,25 @@ fn strip_markdown_fences_from_write_content(content: &str) -> String {
         break;
     }
     s
+}
+
+/// Relative path for [`crate::api_studio::path_has_agent_code_extension`] (strips `workspace:` prefix).
+fn path_for_agent_write_extension_check(path_str: &str) -> PathBuf {
+    let normalized = normalize_tool_path_hint(path_str.trim());
+    let rel = normalized
+        .strip_prefix("workspace:/")
+        .or_else(|| normalized.strip_prefix("workspace:"))
+        .map(|s| s.trim_start_matches(|c| c == '/' || c == '\\'))
+        .unwrap_or(normalized.as_str());
+    PathBuf::from(rel)
+}
+
+fn policy_allows_primary_disk_write(policy: &akasha_tools::ToolsPolicy) -> bool {
+    policy.can_use_tool("write_file")
+        || policy.can_use_tool("write_code")
+        || policy.can_use_tool("edit_file")
+        || policy.can_use_tool("search_replace")
+        || policy.can_use_tool("apply_patch")
 }
 
 /// Parse `memory_store` optional `link_to:` / `link_kind:` into `(target_uuid, relation_kind)` pairs.
@@ -743,6 +767,8 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
             Ok(store) => {
                 if let Ok(persisted) = store.get_events(id) {
                     root_events.extend(persisted.into_iter().map(|e| TaskEventEntry {
+                        schema_version: 1,
+                        kind: e.event_type.clone(),
                         event_type: e.event_type,
                         payload: e.payload,
                         at: e.at,
@@ -805,6 +831,8 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
             {
                 if let Ok(persisted) = store.get_events(child_id) {
                     list.extend(persisted.into_iter().map(|e| TaskEventEntry {
+                        schema_version: 1,
+                        kind: e.event_type.clone(),
                         event_type: e.event_type,
                         payload: e.payload,
                         at: e.at,
@@ -831,8 +859,194 @@ async fn get_task_events(store_path: &Path, events: &EventsCache, id: Uuid) -> S
         );
         seen.insert(key)
     });
+
+    // Studio swarm MVP: synthesize worker lifecycle events from existing delegation/task events.
+    // This keeps backward compatibility while exposing stable status nodes to Code Studio Cockpit.
+    let mut synthetic: Vec<TaskEventEntry> = Vec::new();
+    let mut spawned_workers: Vec<String> = Vec::new();
+    let mut saw_failed = false;
+    for entry in &list {
+        if entry.event_type == "sub_agent_spawned" {
+            let worker_task_id = entry
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("task_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let assigned_agent = entry
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("agent"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            synthetic.push(TaskEventEntry {
+                schema_version: 1,
+                kind: "studio_worker_state_changed".to_string(),
+                event_type: "studio_worker_state_changed".to_string(),
+                payload: Some(serde_json::json!({
+                    "state": "spawned",
+                    "worker_task_id": worker_task_id.clone(),
+                    "assigned_agent": assigned_agent.clone(),
+                })),
+                at: entry.at.clone(),
+                task_id: entry.task_id.clone(),
+            });
+            synthetic.push(TaskEventEntry {
+                schema_version: 1,
+                kind: "studio_worker_state_changed".to_string(),
+                event_type: "studio_worker_state_changed".to_string(),
+                payload: Some(serde_json::json!({
+                    "state": "running",
+                    "worker_task_id": worker_task_id.clone(),
+                    "assigned_agent": assigned_agent,
+                })),
+                at: entry.at.clone(),
+                task_id: entry.task_id.clone(),
+            });
+            if let Some(w) = worker_task_id {
+                spawned_workers.push(w);
+            }
+        } else if entry.event_type == "task_completed" {
+            synthetic.push(TaskEventEntry {
+                schema_version: 1,
+                kind: "studio_worker_state_changed".to_string(),
+                event_type: "studio_worker_state_changed".to_string(),
+                payload: Some(serde_json::json!({
+                    "state": "completed",
+                    "worker_task_id": entry.task_id.clone(),
+                })),
+                at: entry.at.clone(),
+                task_id: entry.task_id.clone(),
+            });
+        } else if entry.event_type == "task_failed" {
+            saw_failed = true;
+            synthetic.push(TaskEventEntry {
+                schema_version: 1,
+                kind: "studio_worker_state_changed".to_string(),
+                event_type: "studio_worker_state_changed".to_string(),
+                payload: Some(serde_json::json!({
+                    "state": "failed",
+                    "worker_task_id": entry.task_id.clone(),
+                })),
+                at: entry.at.clone(),
+                task_id: entry.task_id.clone(),
+            });
+        }
+    }
+    if saw_failed && spawned_workers.len() > 1 {
+        synthetic.push(TaskEventEntry {
+            schema_version: 1,
+            kind: "studio_conflict_notice".to_string(),
+            event_type: "studio_conflict_notice".to_string(),
+            payload: Some(serde_json::json!({
+                "reason": "Concurrent workers ended in failure; review potential file touch conflicts.",
+                "workers": spawned_workers,
+            })),
+            at: chrono::Utc::now().to_rfc3339(),
+            task_id: Some(id.to_string()),
+        });
+    }
+    list.extend(synthetic);
+
     list.sort_by(|a, b| a.at.cmp(&b.at));
     let body = serde_json::json!({ "task_id": id.to_string(), "events": list });
+    json_response("200 OK", &body.to_string())
+}
+
+async fn get_task_report(store_path: &Path, events: &EventsCache, id: Uuid) -> String {
+    let store = match TaskStore::open(store_path) {
+        Ok(s) => s,
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let task = match store.get(id) {
+        Ok(Some(t)) => t,
+        Ok(None) => return json_response("404 Not Found", r#"{"error":"task_not_found"}"#),
+        Err(_) => return json_response("500 Internal Server Error", r#"{"error":"store"}"#),
+    };
+    let persisted_progress = store.get_progress(id).unwrap_or_default();
+    let mut done: Vec<String> = persisted_progress
+        .iter()
+        .filter(|(pct, msg)| *pct >= 100 && !task_progress_is_chat_stub(msg))
+        .map(|(_, msg)| msg.clone())
+        .collect();
+    done.truncate(5);
+
+    let mut failed: Vec<String> = Vec::new();
+    if matches!(task.status, TaskStatus::Failed | TaskStatus::Cancelled) {
+        if let Some((_, msg)) = persisted_progress
+            .iter()
+            .rev()
+            .find(|(_, msg)| !task_progress_is_chat_stub(msg))
+        {
+            failed.push(msg.chars().take(1200).collect());
+        } else {
+            failed.push("La tâche a échoué sans détail explicite.".to_string());
+        }
+    }
+
+    let mut needs_review: Vec<String> = Vec::new();
+    let mut saw_approval_request = store
+        .get_events(id)
+        .unwrap_or_default()
+        .iter()
+        .any(|e| e.event_type == "tool_approval_request");
+    if !saw_approval_request {
+        let g = events.read().await;
+        saw_approval_request = g
+            .get(&id)
+            .map(|q| q.iter().any(|e| e.event_type == "tool_approval_request"))
+            .unwrap_or(false);
+    }
+    if saw_approval_request {
+        needs_review.push("Une ou plusieurs actions sensibles ont demandé validation.".to_string());
+    }
+    let pending_queue = store_path
+        .parent()
+        .map(crate::permissions_queue::load)
+        .map(|q| {
+            q.requests
+                .into_iter()
+                .filter(|r| r.task_id == id.to_string() && r.status == crate::permissions_queue::QueueStatus::Pending)
+                .count()
+        })
+        .unwrap_or(0);
+    if pending_queue > 0 {
+        needs_review.push(format!("{pending_queue} demande(s) d'approbation en attente."));
+    }
+
+    let mut next_steps: Vec<String> = match task.status {
+        TaskStatus::Completed => vec![
+            "Relire le diff studio et exécuter une vérification locale.".to_string(),
+            "Si résultat valide, poursuivre avec la prochaine sous-tâche planifiée.".to_string(),
+        ],
+        TaskStatus::WaitingUserInput => vec![
+            "Répondre à la demande d'approbation ou d'information de l'agent.".to_string(),
+        ],
+        TaskStatus::Failed | TaskStatus::Cancelled => vec![
+            "Analyser la cause d'échec puis relancer avec une consigne ciblée.".to_string(),
+        ],
+        _ => vec!["Attendre la fin de la tâche puis relire le rapport.".to_string()],
+    };
+    next_steps.truncate(5);
+
+    let transcript_path = store_path
+        .parent()
+        .map(|d| d.join("transcripts").join(format!("{id}.json")));
+    let transcript = transcript_path
+        .as_ref()
+        .filter(|p| p.is_file())
+        .map(|p| p.to_string_lossy().to_string());
+
+    let body = serde_json::json!({
+        "task_id": id.to_string(),
+        "status": task.status.as_str(),
+        "done": done,
+        "needs_review": needs_review,
+        "failed": failed,
+        "next_steps": next_steps,
+        "transcript_path": transcript
+    });
     json_response("200 OK", &body.to_string())
 }
 
@@ -907,6 +1121,10 @@ pub type ProgressCache = Arc<RwLock<std::collections::HashMap<Uuid, VecDeque<Pro
 
 #[derive(Clone, serde::Serialize)]
 pub struct TaskEventEntry {
+    /// Contract version for client event envelopes.
+    pub schema_version: u8,
+    /// Normalized event kind for clients (kept in sync with event_type).
+    pub kind: String,
     pub event_type: String,
     pub payload: Option<serde_json::Value>,
     pub at: String,
@@ -985,18 +1203,31 @@ pub type TaskCompletionRegistry =
 pub struct TaskUsageStore {
     by_task: RwLock<std::collections::HashMap<Uuid, (u64, f64)>>,
     by_session: RwLock<std::collections::HashMap<String, (u64, f64)>>,
+    by_task_last_turn: RwLock<std::collections::HashMap<Uuid, (u64, u64, f64)>>,
 }
 
 impl TaskUsageStore {
     pub fn new() -> Self {
         Self::default()
     }
-    pub async fn add(&self, task_id: Uuid, session_id: &str, tokens: u64, cost_usd: f64) {
+    pub async fn add(
+        &self,
+        task_id: Uuid,
+        session_id: &str,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        cost_usd: f64,
+    ) {
+        let tokens = prompt_tokens.saturating_add(completion_tokens);
         {
             let mut g = self.by_task.write().await;
             let e = g.entry(task_id).or_insert((0, 0.0));
             e.0 += tokens;
             e.1 += cost_usd;
+        }
+        {
+            let mut g = self.by_task_last_turn.write().await;
+            g.insert(task_id, (prompt_tokens, completion_tokens, cost_usd));
         }
         if !session_id.is_empty() {
             let mut g = self.by_session.write().await;
@@ -1010,6 +1241,9 @@ impl TaskUsageStore {
     }
     pub async fn get_session(&self, session_id: &str) -> Option<(u64, f64)> {
         self.by_session.read().await.get(session_id).copied()
+    }
+    pub async fn get_last_turn(&self, task_id: Uuid) -> Option<(u64, u64, f64)> {
+        self.by_task_last_turn.read().await.get(&task_id).copied()
     }
     pub async fn reset_session(&self, session_id: &str) {
         self.by_session.write().await.remove(session_id);
@@ -1339,6 +1573,7 @@ pub fn new_human_input_store() -> HumanInputStore {
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("read_file", "read_file <path> [--full] [<offset_ligne> <nb_lignes>] — lire un fichier texte. Par défaut : **500 premières lignes** seulement (évite de saturer le contexte). `TOOL: read_file <chemin> --full` pour tout le fichier (plafond octets côté daemon si très gros). Fenêtre explicite : `read_file workspace:/fichier.ts 1 200`. PDF : texte extrait automatiquement. Path réel ou workspace:/<path>."),
     ("write_file", "write_file <path> puis contenu sur les lignes suivantes — écrire un fichier complet (création/remplacement). Format préféré : première ligne `TOOL: write_file workspace:/fichier`, puis le corps du fichier seul sur les lignes suivantes. Ne pas compresser un fichier entier sur la même ligne que le header. Préférer workspace:/<fichier> si l'utilisateur n'a pas donné de chemin. Si le fichier existe déjà et qu'il faut modifier une partie, préférer edit_file ou search_replace."),
+    ("write_code", "write_code <path> puis contenu — comme write_file mais **uniquement** pour fichiers source (.ts, .tsx, .js, .jsx, .rs, .py, …). Le daemon rejette markdown parasite / lignes TOOL dans le corps. Pour CODE_STUDIO_PLAN.md, DESIGN.md, JSON, YAML : utiliser write_file."),
     ("delete_file", "delete_file <path> — supprimer un fichier (pas un répertoire). Chemin workspace:/ ou disque autorisé par tools_policy (mêmes règles que write_file). Code Studio : préférer workspace:/chemin/relatif."),
     ("rename_path", "rename_path <from> <to> — renommer ou déplacer un fichier ou un répertoire (rename atomique si possible ; copie+suppression pour un fichier en cross-device). La destination ne doit pas exister. Deux arguments : le chemin source est le premier token ; tout le reste forme le chemin cible (espaces dans <to> OK). Pas d’espaces dans <from> sans utiliser workspace:/…"),
     ("move_tree", "move_tree <from_dir> <to_dir> — déplacer un répertoire et son contenu (rename atomique si possible, sinon copie récursive + suppression). La destination ne doit pas exister. Même convention d’arguments que rename_path (cible = args après le premier token)."),
@@ -1414,6 +1649,7 @@ fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, assigned_agent
     const STUDIO: &[&str] = &[
         "read_file",
         "write_file",
+        "write_code",
         "delete_file",
         "rename_path",
         "move_tree",
@@ -1461,7 +1697,7 @@ fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, assigned_agent
     };
     if out.is_empty() {
         out.extend(
-            ["read_file", "write_file", "grep_content", "run_command", "ask_user"]
+            ["read_file", "write_file", "write_code", "grep_content", "run_command", "ask_user"]
                 .iter()
                 .map(|s| (*s).to_string()),
         );
@@ -3020,9 +3256,9 @@ const STUDIO_AGENT_QUALITY_REMINDER: &str = concat!(
     "  Suivi des lots : ajouter une **ligne datée courte** dans `## Informations complémentaires` ou `## Demandes d'évolutions utilisateur par phase` plutôt que de réécrire l'ensemble du plan.\n",
     "  Si le fichier est absent (import), le créer avec ce gabarit en synthétisant le dépôt. Remplacement complet réservé à une demande **explicite** de réinitialisation du plan (bouton ou consigne utilisateur).\n",
     "- Premier lot d'un projet Code Studio : après avoir créé ou mis à jour `CODE_STUDIO_PLAN.md`, créer `workspace:/DESIGN.md` **avant** les développements applicatifs si le fichier est absent. `DESIGN.md` doit fixer le contrat design (front matter YAML + sections markdown) à partir de la demande, de la stack et du plan ; ensuite seulement générer/modifier `src/`, configs, tests, etc.\n",
-    "- **Corrections sur le disque (obligatoire quand les outils le permettent)** : pour corriger du code (imports, erreurs TS/build, etc.), utiliser des lignes `TOOL:` — `search_replace` pour des changements localisés, `edit_file` pour un intervalle de lignes, `write_file` seulement si un remplacement de fichier entier est justifié, `apply_patch` si adapté. ",
+    "- **Corrections sur le disque (obligatoire quand les outils le permettent)** : pour corriger du code (imports, erreurs TS/build, etc.), utiliser des lignes `TOOL:` — `search_replace` pour des changements localisés, `edit_file` pour un intervalle de lignes, `write_code` pour créer ou remplacer un **fichier source** entier (.ts, .tsx, .rs, …), `write_file` pour plans Markdown / JSON / config, `apply_patch` si adapté. ",
     "Ne pas faire du **chat** le canal principal de livraison : éviter « voici le fichier corrigé à coller dans workspace:/… », les longs blocs de remplacement manuel ou les résumés à la place d’écritures réelles tant que la politique d’outils autorise les écritures.\n",
-    "- **Si une écriture est impossible** (outil refusé, erreur explicite de `write_file` / `search_replace` / etc., chemin hors périmètre) : indiquer **pourquoi** tu ne peux pas appliquer la correction toi-même (citer le message d’erreur ou la contrainte), puis seulement proposer un secours (diff, extrait à copier).\n\n",
+    "- **Si une écriture est impossible** (outil refusé, erreur explicite de `write_file` / `write_code` / `search_replace` / etc., chemin hors périmètre) : indiquer **pourquoi** tu ne peux pas appliquer la correction toi-même (citer le message d’erreur ou la contrainte), puis seulement proposer un secours (diff, extrait à copier).\n\n",
 );
 
 /// Contexte système court pour les tâches dont le disque outil est sous `studio-projects/` (Code Studio).
@@ -3031,13 +3267,13 @@ const CODE_STUDIO_APP_CONTEXT: &str = concat!(
     "[Code Studio — contexte]\n",
     "Tu travailles sur le dépôt du projet ouvert dans Akasha Code Studio. ",
     "Chemins : préfère `workspace:/…` (racine virtuelle de la tâche) ; les fichiers sont synchronisés sur le disque du projet studio.\n",
-    "Outils usuels : read_file, write_file, delete_file, rename_path, move_tree (si autorisés), search_replace, edit_file, apply_patch, run_command (avec `--cwd workspace:/` pour builds/tests), git_* si exposés, ask_user pour une question bloquante dans la même tâche.\n",
+    "Outils usuels : read_file, write_file, write_code (fichiers source uniquement), delete_file, rename_path, move_tree (si autorisés), search_replace, edit_file, apply_patch, run_command (avec `--cwd workspace:/` pour builds/tests), git_* si exposés, ask_user pour une question bloquante dans la même tâche.\n",
     "Concentre-toi sur le code et la documentation de ce dépôt — pas sur l’interface générale d’Akasha (TUI, onglets, skills hors projet, caméra, météo). ",
     "Si une capacité externe est indispensable, indique brièvement ce qu’il faudrait côté utilisateur (clé, politique d’outils).\n",
     "Réponds dans la même langue que le dernier message utilisateur. ",
     "Avant d’éditer : lire les fichiers concernés ; ne pas inventer de dépendances — vérifier le manifeste (package.json, Cargo.toml, etc.).\n",
     "Sur le premier lot d’un projet : stabiliser d’abord `CODE_STUDIO_PLAN.md`, puis créer `workspace:/DESIGN.md` avant de commencer le développement applicatif si ce fichier est absent.\n",
-    "Corrections : appliquer les changements sur le dépôt avec les outils (`search_replace`, `edit_file`, `write_file`, `apply_patch`, chemins `workspace:/…`) — ne pas se contenter de décrire ou coller un fichier entier pour que l’utilisateur le fasse à ta place. ",
+    "Corrections : appliquer les changements sur le dépôt avec les outils (`search_replace`, `edit_file`, `write_code` pour le code source, `write_file` pour markdown/json/config, `apply_patch`, chemins `workspace:/…`) — ne pas se contenter de décrire ou coller un fichier entier pour que l’utilisateur le fasse à ta place. ",
     "Si un outil d’écriture échoue ou est interdit, expliquer clairement la raison avant toute solution de secours.\n\n",
 );
 
@@ -3113,7 +3349,7 @@ Langue : aligne-toi sur le dernier message utilisateur."),
         "studio_frontend" => Some("You are the Code Studio frontend agent. Build UI components, routing, and styles with accessibility in mind. Prefer workspace:/ paths. When a [Stack technique du projet] block is present in the user message, obey it for UI libraries, bundler, CSS approach, and TypeScript/JavaScript choice. Verify dependencies exist in package.json before importing. Use read_file before editing. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Run build/lint/typecheck via run_command --cwd workspace:/ when policy allows, and fix issues you introduced. End with a clear user-facing summary of changes and how to preview or test — not only \"Done\"."),
         "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Before declaring completion: run tests or at least start/build checks when feasible; summarize APIs and behavior for the user in accessible terms."),
         "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If prose was accidentally inserted in a source file, remove it and keep only valid syntax for that file type. Verify end-to-end coherence; run combined build/test when policy allows. Close with a plain-language recap of what changed and how to run the app."),
-        "studio_planner" => Some("You are the Code Studio planning agent. READ-ONLY on application source: do NOT write_file, edit_file, delete_file, rename_path, move_tree, search_replace, or apply_patch to any path except workspace:/CODE_STUDIO_PLAN.md. Do NOT run_command except read-only diagnostics (git status, git log, git diff, ls, cat, npm/yarn/pnpm only if the user explicitly asked for a read-only check). You MAY update workspace:/CODE_STUDIO_PLAN.md by sections to capture the plan. Explore with read_file, list_dir, grep_content. Deliver a clear implementation plan, critical files, and risks; end with next steps for a human or for an implement agent."),
+        "studio_planner" => Some("You are the Code Studio planning agent. READ-ONLY on application source: do NOT write_file, write_code, edit_file, delete_file, rename_path, move_tree, search_replace, or apply_patch to any path except workspace:/CODE_STUDIO_PLAN.md. Do NOT run_command except read-only diagnostics (git status, git log, git diff, ls, cat, npm/yarn/pnpm only if the user explicitly asked for a read-only check). You MAY update workspace:/CODE_STUDIO_PLAN.md by sections to capture the plan. Explore with read_file, list_dir, grep_content. Deliver a clear implementation plan, critical files, and risks; end with next steps for a human or for an implement agent."),
         _ => None,
     }
 }
@@ -3122,6 +3358,7 @@ Langue : aligne-toi sur le dernier message utilisateur."),
 async fn log_tool_journal_if_write(tool: &str, args: &[String], result_preview: &str) {
     const WRITE_TOOLS: &[&str] = &[
         "write_file",
+        "write_code",
         "delete_file",
         "rename_path",
         "move_tree",
@@ -4772,11 +5009,27 @@ pub(crate) async fn execute_tool_call_impl(
                 Err(e) => (false, format!("[grep_content] failed: {}", e), None),
             }
         }
-        "write_file" => {
+        "write_file" | "write_code" => {
+            let code_only = matches!(tool_name, "write_code");
+            let usage_tag = if code_only { "write_code" } else { "write_file" };
             let Some((path_str, content)) = parse_write_file_request(args) else {
-                return (false, "[write_file] usage: write_file <path> then file content on following lines".to_string(), None);
+                return (
+                    false,
+                    format!(
+                        "[{usage_tag}] usage: {usage_tag} <path> then file content on following lines"
+                    ),
+                    None,
+                );
             };
             let content = strip_markdown_fences_from_write_content(&content);
+            let ext_check_path = path_for_agent_write_extension_check(&path_str);
+            if code_only && !crate::api_studio::path_has_agent_code_extension(&ext_check_path) {
+                return (
+                    false,
+                    "[write_code] path must use a source-code extension (e.g. .ts, .tsx, .rs, .py); use write_file for markdown, JSON, or config files.".to_string(),
+                    None,
+                );
+            }
             if is_workspace_virtual_path(&path_str) {
                 match workspace_store {
                     Some(ws) => {
@@ -4820,43 +5073,70 @@ pub(crate) async fn execute_tool_call_impl(
                                 if let Some(parent) = disk_path.parent() {
                                     let _ = tokio::fs::create_dir_all(parent).await;
                                 }
-                                if let Some(r) = workspace_root {
-                                    if crate::studio::is_strictly_under_studio_root(&disk_path, r) {
-                                        if let Some(msg) =
-                                            crate::api_studio::studio_reject_polluted_code_content(&disk_path, &effective_content)
-                                        {
-                                            return (false, format!("[write_file] {}", msg), None);
-                                        }
+                                let run_pollution_check = code_only
+                                    || workspace_root
+                                        .map(|r| {
+                                            crate::studio::is_strictly_under_studio_root(&disk_path, r)
+                                        })
+                                        .unwrap_or(false);
+                                if run_pollution_check {
+                                    if let Some(msg) =
+                                        crate::api_studio::studio_reject_polluted_code_content(
+                                            &disk_path,
+                                            &effective_content,
+                                        )
+                                    {
+                                        return (false, format!("[{usage_tag}] {}", msg), None);
                                     }
                                 }
                                 if tokio::fs::write(&disk_path, &effective_content).await.is_ok() {
-                                    return (true, format!("[write_file workspace:{}] saved (disk).", key), None);
+                                    return (
+                                        true,
+                                        format!("[{usage_tag} workspace:{}] saved (disk).", key),
+                                        None,
+                                    );
                                 }
                             }
                         }
-                        return (true, format!("[write_file workspace:{}] saved.", key), None);
+                        return (
+                            true,
+                            format!("[{usage_tag} workspace:{}] saved.", key),
+                            None,
+                        );
                     }
-                    None => return (false, "[write_file] workspace paths require a workspace store.".to_string(), None),
+                    None => {
+                        return (
+                            false,
+                            format!(
+                                "[{usage_tag}] workspace paths require a workspace store."
+                            ),
+                            None,
+                        );
+                    }
                 }
             }
             let disk_path = resolve_tool_disk_path(path_str.trim(), workspace_root);
-            if let Some(root) = workspace_root {
-                if crate::studio::is_strictly_under_studio_root(&disk_path, root) {
-                    if let Some(msg) = crate::api_studio::studio_reject_polluted_code_content(&disk_path, &content) {
-                        return (false, format!("[write_file] {}", msg), None);
-                    }
+            let run_pollution_check = code_only
+                || workspace_root
+                    .map(|root| crate::studio::is_strictly_under_studio_root(&disk_path, root))
+                    .unwrap_or(false);
+            if run_pollution_check {
+                if let Some(msg) =
+                    crate::api_studio::studio_reject_polluted_code_content(&disk_path, &content)
+                {
+                    return (false, format!("[{usage_tag}] {}", msg), None);
                 }
             }
             match executor.write_file(&disk_path, &content).await {
                 Ok(res) => {
                     let msg = if res.success {
-                        format!("[write_file {}] {}", disk_path.display(), res.summary)
+                        format!("[{usage_tag} {}] {}", disk_path.display(), res.summary)
                     } else {
-                        format!("[write_file] {}", res.summary)
+                        format!("[{usage_tag}] {}", res.summary)
                     };
                     (res.success, msg, None)
                 }
-                Err(e) => (false, format!("[write_file] error: {}", e), None),
+                Err(e) => (false, format!("[{usage_tag}] error: {}", e), None),
             }
         }
         "delete_file" => {
@@ -6476,61 +6756,6 @@ fn looks_like_manual_file_patch_reply(text: &str) -> bool {
     cues.iter().any(|c| lower.contains(c))
 }
 
-/// Returns true when a Code Studio implementation task received a prose-only audit/plan
-/// even though write tools are available. This catches replies like "ce qui manque...",
-/// "recommandations pour avancer", or "je ne peux pas modifier les fichiers" instead of
-/// applying changes with `TOOL:` lines.
-fn looks_like_code_studio_prose_only_implementation_reply(text: &str) -> bool {
-    let lower = text.trim().to_lowercase();
-    if lower.is_empty() {
-        return false;
-    }
-    let refusal_or_meta = [
-        "je ne peux pas modifier les fichiers",
-        "je ne peux pas modifier",
-        "i cannot modify files",
-        "i can't modify files",
-        "restriction « no tool lines »",
-        "restriction \"no tool lines\"",
-        "no tool lines",
-        "dans ce tour",
-        "in this turn",
-    ]
-    .iter()
-    .any(|p| lower.contains(p));
-    let plan_without_action = [
-        "ce qui manque",
-        "recommandations pour avancer",
-        "il faudrait",
-        "il faut ",
-        "prochaine étape",
-        "next steps",
-        "recommendations",
-        "should implement",
-        "should add",
-        "à mettre en place",
-        "mettre en place",
-    ]
-    .iter()
-    .any(|p| lower.contains(p));
-    let implementation_surface = [
-        "eslint",
-        "prettier",
-        "src/",
-        "package.json",
-        "composant",
-        "component",
-        "hook",
-        "tests",
-        "build",
-        "fichier",
-        "file",
-    ]
-    .iter()
-    .any(|p| lower.contains(p));
-    refusal_or_meta || (plan_without_action && implementation_surface)
-}
-
 fn looks_like_meta_agent_response(text: &str) -> bool {
     let lower = text.trim().to_lowercase();
     if lower.is_empty() {
@@ -6581,6 +6806,7 @@ const STUDIO_VERIFY_AUTOFIX_TOOLS: &[&str] = &[
     "search_replace",
     "edit_file",
     "write_file",
+    "write_code",
     "apply_patch",
     "file_diff",
     "delete_file",
@@ -6765,6 +6991,85 @@ fn studio_verify_summary_heading_markdown(lang: StudioVerifyUserLanguage) -> &'s
     }
 }
 
+/// Revue légère post-build : critères **manuel** vs résumé des changements (1 appel LLM, sans outils). `None` = rien à signaler.
+async fn studio_semantic_acceptance_review(
+    llm_router: &std::sync::Arc<akasha_llm::LLMRouter>,
+    manual_lines: &[String],
+    diff_summary: &str,
+    user_excerpt: &str,
+    assistant_excerpt: &str,
+) -> Option<Vec<String>> {
+    if manual_lines.is_empty() {
+        return None;
+    }
+    if std::env::var("AKASHA_STUDIO_SEMANTIC_VERIFY").ok().as_deref() == Some("0") {
+        return None;
+    }
+    let crit = manual_lines.join("\n- ");
+    let system = "You are a strict checklist reviewer for a software agent task. \
+You ONLY compare the manual acceptance criteria list to the evidence (file change summary + short user goal + short assistant reply). \
+Reply with a single JSON object and no markdown fences, no other text. Schema: {\"satisfied\":[\"...\"],\"missing\":[\"...\"]}. \
+Put in \"missing\" any manual criterion that is clearly not addressed or contradicted by the evidence. If uncertain, prefer putting a short note in \"missing\" rather than assuming success. \
+Use the same language as the criteria when writing strings.";
+    let user = format!(
+        "Manual criteria (each must be satisfied unless impossible and stated):\n- {crit}\n\n\
+Summarized file diffs / changes (truncated):\n{}\n\nUser goal (excerpt):\n{}\n\nAssistant reply (excerpt):\n{}\n\n\
+Output JSON only.",
+        diff_summary.chars().take(10_000).collect::<String>(),
+        user_excerpt.chars().take(1_800).collect::<String>(),
+        assistant_excerpt.chars().take(1_800).collect::<String>()
+    );
+    let req = CompletionRequest {
+        prompt: user,
+        max_tokens: Some(500),
+        temperature: Some(0.05),
+        top_p: None,
+        top_k: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        repeat_penalty: None,
+        num_ctx: None,
+        num_gpu: None,
+        thinking_level: None,
+        preferred_task_type: Some("conversation".to_string()),
+        system_prompt: Some(system.to_string()),
+        image_data_urls: None,
+    };
+    let raw = match tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        llm_router.complete(&req),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r.text,
+        _ => return None,
+    };
+    let trimmed = raw.trim();
+    let trimmed = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed)
+        .trim()
+        .trim_end_matches('`')
+        .trim();
+    let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let missing = v
+        .get("missing")
+        .and_then(|m| m.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if missing.is_empty() {
+        None
+    } else {
+        Some(missing)
+    }
+}
+
 /// Synthèse courte (LLM, sans outils) après échec de `studio_verify_after_agent_task`, pour l’utilisateur final.
 async fn studio_verify_explain_failure_to_user(
     llm_router: &std::sync::Arc<akasha_llm::LLMRouter>,
@@ -6893,6 +7198,53 @@ fn parse_read_file_tool_path(args: &[String]) -> Option<String> {
         return None;
     }
     Some(path_str)
+}
+
+/// Remove model reasoning wrappers that occasionally leak in plain text responses.
+fn strip_reasoning_wrappers(input: &str) -> String {
+    let mut out = input.to_string();
+    // Fast path: nothing to strip.
+    if !out.contains("<think>") && !out.contains("</think>") {
+        return out;
+    }
+    loop {
+        let Some(start) = out.find("<think>") else {
+            break;
+        };
+        if let Some(end_rel) = out[start..].find("</think>") {
+            let end = start + end_rel + "</think>".len();
+            out.replace_range(start..end, "");
+        } else {
+            // Unclosed tag: remove tail from opening marker.
+            out.truncate(start);
+            break;
+        }
+    }
+    out.replace("</think>", "").replace("<think>", "")
+}
+
+fn extract_ts2306_not_module_paths(verify_log: &str, cap: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in verify_log.lines() {
+        if !line.contains("error TS2306") || !line.contains("is not a module") {
+            continue;
+        }
+        let Some((_, after)) = line.split_once("File '") else {
+            continue;
+        };
+        let Some((path, _)) = after.split_once("' is not a module") else {
+            continue;
+        };
+        let p = path.trim().replace('\\', "/");
+        if p.is_empty() || out.iter().any(|x| x == &p) {
+            continue;
+        }
+        out.push(p);
+        if out.len() >= cap {
+            break;
+        }
+    }
+    out
 }
 
 /// Après un log d’échec de compilation, enchaîne quelques tours LLM + exécution d’outils pour corriger les sources.
@@ -7027,6 +7379,53 @@ KNOWN_TS_ERRORS:\n{}\n",
     };
     let mut prev_round_tool_fp: Option<String> = None;
     let mut pending_stall: Option<String> = None;
+    let mut read_only_round_streak: u32 = 0;
+
+    // Deterministic first-aid: TS2306 "is not a module" often comes from an empty .ts file.
+    // Patch those files immediately so subsequent LLM rounds can focus on remaining errors.
+    // Gated on tools_policy write permission; uses non-blocking I/O.
+    if policy_allows_primary_disk_write(&exec.policy) {
+        let not_module_paths = extract_ts2306_not_module_paths(verify_log, 12);
+        for p in &not_module_paths {
+            let as_path = std::path::Path::new(p);
+            if !as_path.starts_with(tool_disk_root) {
+                continue;
+            }
+            if !as_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("ts"))
+            {
+                continue;
+            }
+            let content = tokio::fs::read_to_string(as_path).await.unwrap_or_default();
+            if content.trim().is_empty() {
+                let new_content = "export {}\n";
+                // Pollution check — consistent with the write_file path
+                if crate::api_studio::studio_reject_polluted_code_content(as_path, new_content)
+                    .is_some()
+                {
+                    continue;
+                }
+                if tokio::fs::write(as_path, new_content.as_bytes()).await.is_ok() {
+                    any_write_success = true;
+                    writes_ok_count = writes_ok_count.saturating_add(1);
+                    let _ = bus.send(
+                        EventEnvelope::new(
+                            EventType::ProgressUpdate,
+                            Some(serde_json::json!({
+                                "task_id": task_id.to_string(),
+                                "progress_pct": 57,
+                                "message": format!("Correctif auto TS2306: `{}` était vide, ajout de `export {{}}`.", p)
+                            })),
+                        )
+                        .with_correlation(timeline_correlation),
+                    );
+                }
+            }
+        }
+    }
+
     for round in 0..max_llm_rounds {
         let state_snapshot = format!(
             "STATE SNAPSHOT:\n\
@@ -7077,7 +7476,7 @@ LAST_FAILED_FILES: {}\n",
         )
         .await
         {
-            Ok(Ok(r)) => r.text,
+            Ok(Ok(r)) => strip_reasoning_wrappers(&r.text),
             Ok(Err(e)) => {
                 tracing::warn!(task_id = %task_id, error = %e, "studio verify autofix: LLM complete failed");
                 break;
@@ -7126,6 +7525,8 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
         }
         short_or_no_tool_retries = 0;
         let mut round_results: Vec<String> = Vec::new();
+        let mut round_read_success = false;
+        let mut round_write_like_success = false;
         let lanes = akasha_tools::schedule_tool_calls(&calls);
         for (_lane, lane_calls) in lanes {
             for (name, args) in &lane_calls {
@@ -7186,15 +7587,17 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
                 .await;
                 let write_like = matches!(
                     actual_tool.as_str(),
-                    "write_file" | "search_replace" | "edit_file" | "apply_patch" | "delete_file"
-                        | "rename_path" | "move_tree"
+                    "write_file" | "write_code" | "search_replace" | "edit_file" | "apply_patch"
+                        | "delete_file" | "rename_path" | "move_tree"
                 );
                 if success && write_like {
                     any_write_success = true;
+                    round_write_like_success = true;
                     writes_ok_count = writes_ok_count.saturating_add(1);
                     last_read_file_path = None;
                     consecutive_same_file_reads = 0;
                 } else if success && actual_tool.as_str() == "read_file" {
+                    round_read_success = true;
                     if let Some(path_key) = parse_read_file_tool_path(args) {
                         if last_read_file_path.as_ref() == Some(&path_key) {
                             consecutive_same_file_reads =
@@ -7209,6 +7612,59 @@ Retry now. Return only TOOL: lines; if FILES_WITH_ERRORS is set, prefer one read
             }
         }
         follow_up = round_results.join("\n");
+        if round_read_success && !round_write_like_success {
+            read_only_round_streak = read_only_round_streak.saturating_add(1);
+        } else {
+            read_only_round_streak = 0;
+        }
+        if read_only_round_streak >= 2 {
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::ProgressUpdate,
+                    Some(serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "progress_pct": 59,
+                        "message": format!(
+                            "[Étape: garde-fou autofix] {} round(s) lecture-only détecté(s) — correction d'écriture forcée (search_replace/edit_file/write_code/write_file).",
+                            read_only_round_streak
+                        )
+                    })),
+                )
+                .with_correlation(timeline_correlation),
+            );
+            let not_module_paths = extract_ts2306_not_module_paths(verify_log, 6);
+            let focus = if not_module_paths.is_empty() {
+                "No TS2306 path parsed from compiler output.".to_string()
+            } else {
+                format!("TS2306 focus files: {}", not_module_paths.join(", "))
+            };
+            follow_up.push_str(&format!(
+                "\n\n[HARD GUARD — READ-ONLY ROUNDS]\n\
+You just completed {read_only_round_streak} round(s) with successful reads but no successful write tool.\n\
+Stop broad exploration. Apply one concrete fix NOW with search_replace/edit_file/write_file.\n\
+If a file is empty and TS2306 says 'is not a module', add at least `export {{}}` first, then continue with proper exported types.\n\
+{focus}\n"
+            ));
+        }
+        if read_only_round_streak >= 4 {
+            let _ = bus.send(
+                EventEnvelope::new(
+                    EventType::ProgressUpdate,
+                    Some(serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "progress_pct": 60,
+                        "message": "[Étape: arrêt anti-boucle] Trop de rounds lecture-only successifs en autofix — arrêt de la boucle pour éviter l'exploration infinie."
+                    })),
+                )
+                .with_correlation(timeline_correlation),
+            );
+            tracing::warn!(
+                task_id = %task_id,
+                round = round + 1,
+                "studio verify autofix: aborting due to repeated read-only rounds"
+            );
+            break;
+        }
         if consecutive_same_file_reads >= SAME_FILE_READ_THRESHOLD {
             let path_disp = last_read_file_path
                 .as_deref()
@@ -7326,8 +7782,8 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                                 let actual_tool = canonicalize_tool_name(name);
                                 if !matches!(
                                     actual_tool.as_str(),
-                                    "search_replace" | "edit_file" | "write_file" | "apply_patch" | "file_diff" | "delete_file"
-                                        | "rename_path" | "move_tree"
+                                    "search_replace" | "edit_file" | "write_file" | "write_code" | "apply_patch"
+                                        | "file_diff" | "delete_file" | "rename_path" | "move_tree"
                                 ) {
                                     continue;
                                 }
@@ -7351,8 +7807,8 @@ Do not use bare relative paths (`src/...`, `.`) and do not use `tool(...)` JSON-
                                 if success
                                     && matches!(
                                         actual_tool.as_str(),
-                                        "search_replace" | "edit_file" | "write_file" | "apply_patch" | "delete_file"
-                                            | "rename_path" | "move_tree"
+                                        "search_replace" | "edit_file" | "write_file" | "write_code" | "apply_patch"
+                                            | "delete_file" | "rename_path" | "move_tree"
                                     )
                                 {
                                     any_write_success = true;
@@ -7414,6 +7870,8 @@ pub(crate) async fn run_message_via_llm(
         }
     };
     let _ = store.update_status(task_id, TaskStatus::Running);
+    let (message, embedded_studio_acceptance) =
+        crate::api_studio::strip_embedded_acceptance_json(&message);
     let lineage_for_studio = workspace_lineage_root_task_id(task_id, Some(store_path.as_path()));
     let tool_disk_workspace_root: std::path::PathBuf = {
         let reg = studio_disk_registry.read().await;
@@ -7657,11 +8115,11 @@ pub(crate) async fn run_message_via_llm(
         }
         if orch_disk_deliverables {
             if let Some(ref list) = allowed_tools {
-                if !list.iter().any(|t| t == "write_file") {
+                if !list.iter().any(|t| t == "write_file" || t == "write_code") {
                     tracing::warn!(
                         task_id = %task_id,
-                        "Orchestrated deliverables: tools_policy default_profile omits write_file; \
-                         workspace file tools will NOT be advertised to the model — add write_file \
+                        "Orchestrated deliverables: tools_policy default_profile omits write_file/write_code; \
+                         workspace file tools will NOT be advertised to the model — add write_file or write_code \
                          (and other file tools) to the profile to enable disk deliverables."
                     );
                 }
@@ -8390,6 +8848,8 @@ pub(crate) async fn run_message_via_llm(
             }
         }
         let mut round = 0u32;
+        // Tours d'affilée avec uniquement des outils d'exploration (Code Studio).
+        let mut studio_read_only_streak_rounds: u32 = 0;
         let mut social_snapshot_seen = false;
         // Loop detection history is tracked per "agent key".
         // For now, agent key = current task_id (sub-agent tasks each have their own task_id).
@@ -8414,6 +8874,7 @@ pub(crate) async fn run_message_via_llm(
         // when write tools are available but unused.
         let mut studio_manual_patch_nags = 0u32;
         let mut studio_prose_only_write_nags = 0u32;
+        let mut studio_zero_tool_promise_nags = 0u32;
         let mut last_captured_image_base64: Option<String> = None;
 
         let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
@@ -8614,13 +9075,23 @@ pub(crate) async fn run_message_via_llm(
                     Ok(Ok(Ok(resp))) => {
                         last_llm_model_used = Some(resp.model_used.clone());
                         if let Some(ref store) = task_usage_store {
-                            let tokens = resp
+                            let prompt_tokens =
+                                resp.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0);
+                            let completion_tokens = resp
                                 .usage
                                 .as_ref()
-                                .map(|u| u.prompt_tokens + u.completion_tokens)
+                                .map(|u| u.completion_tokens)
                                 .unwrap_or(0);
                             let cost = resp.cost_usd.unwrap_or(0.0);
-                            store.add(task_id, &session_id, tokens, cost).await;
+                            store
+                                .add(
+                                    task_id,
+                                    &session_id,
+                                    prompt_tokens,
+                                    completion_tokens,
+                                    cost,
+                                )
+                                .await;
                         }
                         resp.text.trim().to_string()
                     }
@@ -8714,29 +9185,104 @@ pub(crate) async fn run_message_via_llm(
             }
 
             const MAX_STUDIO_PROSE_ONLY_WRITE_NAGS: u32 = 4;
-            if code_studio_disk_task
+            const MAX_STUDIO_ZERO_TOOL_PROMISE_NAGS: u32 = 3;
+
+            let policy_allows_write = tools_executor_snapshot
+                .as_ref()
+                .map(|e| policy_allows_primary_disk_write(&e.policy))
+                .unwrap_or(false);
+
+            let prose_path_base = code_studio_disk_task
                 && no_parseable_tools_this_round
-                && studio_prose_only_write_nags < MAX_STUDIO_PROSE_ONLY_WRITE_NAGS
-                && looks_like_code_studio_prose_only_implementation_reply(&response_plain)
+                && studio_prose_only_write_nags < MAX_STUDIO_PROSE_ONLY_WRITE_NAGS;
+            let prose_heuristic = prose_path_base
+                && policy_allows_write
+                && crate::api_studio::looks_like_code_studio_prose_only_implementation_reply(
+                    &response_plain,
+                );
+
+            // Code Studio: first model turn often returns only "Je vais examiner / diagnostic…" with zero TOOL lines, then the task ends.
+            let tool_history_empty = tool_loop_history_by_agent
+                .get(&loop_agent_key)
+                .map(|v| v.is_empty())
+                .unwrap_or(true);
+            let enforce_pm_zero_tool_guard = code_studio_disk_task
+                || assigned_agent.eq_ignore_ascii_case("studio_project_manager");
+            let promise_path_base = enforce_pm_zero_tool_guard
+                && tools_executor_snapshot.is_some()
+                && no_parseable_tools_this_round
+                && tool_history_empty
+                && !crate::api_studio::code_studio_skip_zero_tool_mandatory_retry(
+                    assigned_agent.as_str(),
+                )
+                && studio_zero_tool_promise_nags < MAX_STUDIO_ZERO_TOOL_PROMISE_NAGS;
+            let promise_heuristic = promise_path_base
+                && crate::api_studio::looks_like_code_studio_promise_before_any_tools(&response_plain);
+
+            let mut prose_fire = prose_heuristic;
+            let mut promise_fire = promise_heuristic;
+            if crate::api_studio::studio_llm_response_auditor_enabled()
+                && (prose_heuristic || promise_heuristic)
             {
-                let policy_allows_write = tools_executor_snapshot
-                    .as_ref()
-                    .map(|e| {
-                        e.policy.can_use_tool("write_file")
-                            || e.policy.can_use_tool("edit_file")
-                            || e.policy.can_use_tool("search_replace")
-                            || e.policy.can_use_tool("apply_patch")
-                    })
-                    .unwrap_or(false);
-                if policy_allows_write {
-                    studio_prose_only_write_nags += 1;
-                    current_prompt = format!(
-                        "User request: {}\n\nYour previous reply:\n{}\n\n[Code Studio — mandatory execution guard]\nThe user asked you to implement changes in the repository. Your previous reply was an audit/plan/refusal instead of executing available write tools. You DO have write tools in this task. Emit only executable TOOL lines now.\n\nRequired format examples:\nTOOL: write_file workspace:/path/to/file.ts\n<complete file content on following lines>\n\nTOOL: search_replace workspace:/path/to/file.ts old snippet | new snippet\n\nDo not say \"I cannot modify files\", \"No TOOL lines\", or ask where to start. Apply the requested changes on disk with `write_file`, `edit_file`, `search_replace`, or `apply_patch`.",
-                        user_message,
-                        response_plain
-                    );
-                    continue;
+                if let Some(audit) = crate::api_studio::studio_llm_audit_code_studio_turn(
+                    &llm_router,
+                    crate::api_studio::StudioLlmAuditParams {
+                        user_excerpt: user_message.as_str(),
+                        assistant_plain: &response_plain,
+                        assigned_agent: assigned_agent.as_str(),
+                        policy_allows_write,
+                        tool_history_empty,
+                        consider_prose: prose_heuristic,
+                        consider_promise: promise_heuristic,
+                    },
+                )
+                .await
+                {
+                    if prose_heuristic {
+                        prose_fire = audit.prose_only_implementation;
+                    }
+                    if promise_heuristic {
+                        promise_fire = audit.promise_without_tools;
+                    }
                 }
+            }
+
+            if prose_fire {
+                studio_prose_only_write_nags += 1;
+                current_prompt = format!(
+                    "User request: {}\n\nYour previous reply:\n{}\n\n[Code Studio — mandatory execution guard]\nThe user asked you to implement changes in the repository. Your previous reply was an audit/plan/refusal instead of executing available write tools. You DO have write tools in this task. Emit only executable TOOL lines now.\n\nRequired format examples:\nTOOL: write_file workspace:/path/to/file.ts\n<complete file content on following lines>\n\nTOOL: search_replace workspace:/path/to/file.ts old snippet | new snippet\n\nDo not say \"I cannot modify files\", \"No TOOL lines\", or ask where to start. Apply the requested changes on disk with `write_file`, `edit_file`, `search_replace`, or `apply_patch`.",
+                    user_message,
+                    response_plain
+                );
+                continue;
+            }
+
+            if promise_fire {
+                studio_zero_tool_promise_nags += 1;
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 48,
+                            "message": "Relance Code Studio : la réponse ne contenait aucune ligne TOOL: — exécution d’outils requise (lecture, délégation ou écriture)."
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
+                );
+                let pm_delegate = if assigned_agent.eq_ignore_ascii_case("studio_project_manager")
+                {
+                    " If you are the project manager, you may start with `TOOL: delegate_to_agent <agent> <message>` to a worker, or `TOOL: read_file` / `TOOL: run_command` yourself — but you must output at least one `TOOL:` line this turn, not only a plan in prose."
+                } else {
+                    ""
+                };
+                current_prompt = format!(
+                    "User request: {}\n\nYour previous reply (rejected — no tools ran):\n{}\n\n[Code Studio — TOOL required this turn]\nYou started with a conversational plan but emitted no `TOOL:` line, so nothing ran on the repository. The task must not end here.\nReply THIS turn with one or more lines starting with `TOOL:` only (then optional brief prose after tool lines if needed). Examples:\n- `TOOL: read_file workspace:/package.json`\n- `TOOL: run_command --cwd workspace:/ npm run build`\n- `TOOL: grep_content workspace:/src pattern`\nDo not reply with only promises like \"I will examine…\" — execute at least one tool call now.{}",
+                    user_message,
+                    response_plain,
+                    pm_delegate
+                );
+                continue;
             }
 
             if let (Some(exec), Some(calls)) = (tools_executor_snapshot.as_ref(), parsed_tool_calls)
@@ -8921,7 +9467,7 @@ pub(crate) async fn run_message_via_llm(
                                     const MAX_APPROVAL_ARG_LEN: usize = 80;
                                     let args_preview: String = if matches!(
                                         actual_tool.as_str(),
-                                        "apply_patch" | "edit_file" | "write_file" | "delete_file"
+                                        "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file"
                                     ) {
                                         "[redacted]".to_string()
                                     } else {
@@ -8957,6 +9503,35 @@ pub(crate) async fn run_message_via_llm(
                                         "Toujours autoriser".to_string(),
                                         "Refuser".to_string(),
                                     ];
+                                    let approval_request_id = Uuid::new_v4().to_string();
+                                    let now = chrono::Utc::now();
+                                    let queue_req = crate::permissions_queue::PermissionQueueRequest {
+                                        id: approval_request_id.clone(),
+                                        task_id: task_id.to_string(),
+                                        tool: actual_tool.clone(),
+                                        scope: scope_key.clone(),
+                                        action: actual_tool.clone(),
+                                        description: format!("{} {}", actual_tool, args_preview),
+                                        rationale: format!(
+                                            "Outil sensible (confirmation requise) pour la tâche {}",
+                                            task_id
+                                        ),
+                                        urgency: "normal".to_string(),
+                                        status: crate::permissions_queue::QueueStatus::Pending,
+                                        created_at: now.to_rfc3339(),
+                                        updated_at: now.to_rfc3339(),
+                                        expires_at: Some(
+                                            (now + chrono::Duration::seconds(APPROVAL_TIMEOUT_SECS as i64))
+                                                .to_rfc3339(),
+                                        ),
+                                        decision_note: None,
+                                    };
+                                    if let Err(err) = crate::permissions_queue::upsert_request(data_dir, queue_req) {
+                                        eprintln!(
+                                            "failed to persist permission queue request {} for task {} (tool {}): {}",
+                                            approval_request_id, task_id, actual_tool, err
+                                        );
+                                    }
                                     let (tx, rx) = tokio::sync::oneshot::channel();
                                     let pending = PendingHumanInput {
                                         question: question.clone(),
@@ -8973,6 +9548,7 @@ pub(crate) async fn run_message_via_llm(
                                     }
                                     let payload = serde_json::json!({
                                         "task_id": task_id.to_string(),
+                                        "request_id": approval_request_id.clone(),
                                         "question": question,
                                         "context": format!("Outil : {}", actual_tool),
                                         "choices": choices,
@@ -8988,7 +9564,8 @@ pub(crate) async fn run_message_via_llm(
                                     let approval_payload = serde_json::json!({
                                         "tool": actual_tool,
                                         "args_redacted": args_preview,
-                                        "task_id": task_id.to_string()
+                                        "task_id": task_id.to_string(),
+                                        "request_id": approval_request_id.clone()
                                     });
                                     let _ = bus.send(
                                         EventEnvelope::new(
@@ -9013,7 +9590,14 @@ pub(crate) async fn run_message_via_llm(
                                             let expired_payload = serde_json::json!({
                                                 "task_id": task_id.to_string(),
                                                 "tool": actual_tool,
+                                                "request_id": approval_request_id.clone(),
                                             });
+                                            let _ = crate::permissions_queue::update_status(
+                                                data_dir,
+                                                &approval_request_id,
+                                                crate::permissions_queue::QueueStatus::Expired,
+                                                Some("timeout".to_string()),
+                                            );
                                             let _ = bus.send(
                                                 EventEnvelope::new(
                                                     EventType::ToolApprovalExpired,
@@ -9026,6 +9610,22 @@ pub(crate) async fn run_message_via_llm(
                                     };
                                     let granted = answer.eq_ignore_ascii_case("Approuver")
                                         || answer.eq_ignore_ascii_case("Toujours autoriser");
+                                    let queue_status = if granted {
+                                        crate::permissions_queue::QueueStatus::Approved
+                                    } else {
+                                        crate::permissions_queue::QueueStatus::Denied
+                                    };
+                                    if let Err(err) = crate::permissions_queue::update_status(
+                                        data_dir,
+                                        &approval_request_id,
+                                        queue_status,
+                                        Some(answer.clone()),
+                                    ) {
+                                        eprintln!(
+                                            "failed to update permission queue status for {} (task {}): {}",
+                                            approval_request_id, task_id, err
+                                        );
+                                    }
                                     if answer.eq_ignore_ascii_case("Toujours autoriser") {
                                         let mut state = crate::permissions_center::load(data_dir);
                                         state.decisions.retain(|d| {
@@ -9610,7 +10210,7 @@ pub(crate) async fn run_message_via_llm(
                         // Redact or truncate args in the event to avoid leaking large blobs or secrets.
                         let redacted_args: Vec<String> = if matches!(
                             actual_tool.as_str(),
-                            "apply_patch" | "edit_file" | "write_file" | "delete_file"
+                            "apply_patch" | "edit_file" | "write_file" | "write_code" | "delete_file"
                         ) {
                             vec!["[redacted for write-like tool]".to_string()]
                         } else {
@@ -9688,6 +10288,7 @@ pub(crate) async fn run_message_via_llm(
                                 && matches!(
                                     actual_tool.as_str(),
                                     "write_file"
+                                        | "write_code"
                                         | "delete_file"
                                         | "rename_path"
                                         | "move_tree"
@@ -9725,6 +10326,43 @@ pub(crate) async fn run_message_via_llm(
                     }
                 }
                 let results_blob = tool_results.join("\n");
+                let mut studio_readonly_nudge: Option<String> = None;
+                if code_studio_disk_task && !calls.is_empty() {
+                    let only_survey = calls.iter().all(|(name, _)| {
+                        let c = canonicalize_tool_name(&name.trim().to_string());
+                        crate::api_studio::studio_survey_tool(&c)
+                    });
+                    if only_survey {
+                        studio_read_only_streak_rounds =
+                            studio_read_only_streak_rounds.saturating_add(1);
+                    } else {
+                        studio_read_only_streak_rounds = 0;
+                    }
+                    let max_streak = std::env::var("AKASHA_STUDIO_READ_ONLY_STREAK_MAX")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(4)
+                        .max(2)
+                        .min(20);
+                    if studio_read_only_streak_rounds >= max_streak {
+                        studio_read_only_streak_rounds = 0;
+                        let _ = bus.send(
+                            EventEnvelope::new(
+                                EventType::ProgressUpdate,
+                                Some(serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "progress_pct": 52,
+                                    "message": "[Étape: garde-fou lecture] Plusieurs tours d’affilée n’ont utilisé que des outils d’exploration — appliquez une modification concrète (write_code / write_file / search_replace / edit_file) ou indiquez le blocage exact."
+                                })),
+                            )
+                            .with_correlation(timeline_correlation),
+                        );
+                        studio_readonly_nudge = Some(format!(
+                            "[STUDIO_READ_ONLY_STREAK]\nThe last {} model rounds only invoked read-only survey tools (read_file, list_dir, grep_content, search_files, file_diff, git status/log/diff). The user request requires repository changes. Emit at least one write-like TOOL line in this turn (write_code, write_file, search_replace, edit_file, apply_patch) OR answer in plain text with the precise blocking reason (e.g. tool policy forbids writes). Do not repeat another exploratory-only round.",
+                            max_streak
+                        ));
+                    }
+                }
                 last_tool_results_blob = Some(results_blob.clone());
                 if results_blob.contains("[browser] Snapshot") {
                     social_snapshot_seen = true;
@@ -9811,6 +10449,9 @@ pub(crate) async fn run_message_via_llm(
                     user_message, response, results_blob
                 )
                 };
+                if let Some(nudge) = studio_readonly_nudge {
+                    current_prompt = format!("{nudge}\n\n{current_prompt}");
+                }
                 if round >= max_tool_rounds {
                     let response_for_user = response
                         .lines()
@@ -9954,7 +10595,7 @@ pub(crate) async fn run_message_via_llm(
             {
                 let policy_allows_write = tools_executor_snapshot
                     .as_ref()
-                    .map(|e| e.policy.can_use_tool("write_file"))
+                    .map(|e| policy_allows_primary_disk_write(&e.policy))
                     .unwrap_or(false);
                 if policy_allows_write {
                     let tool_loop_history = tool_loop_history_by_agent
@@ -9964,13 +10605,13 @@ pub(crate) async fn run_message_via_llm(
                     let disk_write_attempted = tool_loop_history.iter().any(|(t, _)| {
                         matches!(
                             t.as_str(),
-                            "write_file" | "edit_file" | "search_replace" | "apply_patch"
+                            "write_file" | "write_code" | "edit_file" | "search_replace" | "apply_patch"
                         )
                     });
                     if !disk_write_attempted && orch_disk_write_nags < MAX_ORCH_DISK_WRITE_NAGS {
                         orch_disk_write_nags += 1;
                         current_prompt = format!(
-                        "{}\n\n[Orchestrator — disk deliverables] Your last assistant message did not include any executable TOOL: lines (or they were not parsed). This step MUST call tools: use TOOL: read_file on the shared plan trace if needed, then TOOL: write_file / edit_file / search_replace for every mandatory workspace path and update the plan sections **Fait (agent)** / **Reste (agent)**. Do not finish with prose-only or ```json``` — emit TOOL lines now.",
+                        "{}\n\n[Orchestrator — disk deliverables] Your last assistant message did not include any executable TOOL: lines (or they were not parsed). This step MUST call tools: use TOOL: read_file on the shared plan trace if needed, then TOOL: write_code / write_file / edit_file / search_replace for every mandatory workspace path and update the plan sections **Fait (agent)** / **Reste (agent)**. Do not finish with prose-only or ```json``` — emit TOOL lines now.",
                         current_prompt
                     );
                         continue;
@@ -9997,14 +10638,11 @@ pub(crate) async fn run_message_via_llm(
                             .get(&loop_agent_key)
                             .map(|v| v.as_slice())
                             .unwrap_or(&[]);
-                        let allows = e.policy.can_use_tool("write_file")
-                            || e.policy.can_use_tool("edit_file")
-                            || e.policy.can_use_tool("search_replace")
-                            || e.policy.can_use_tool("apply_patch");
+                        let allows = policy_allows_primary_disk_write(&e.policy);
                         let seen = tool_loop_history.iter().any(|(t, _)| {
                             matches!(
                                 t.as_str(),
-                                "write_file" | "edit_file" | "search_replace" | "apply_patch"
+                                "write_file" | "write_code" | "edit_file" | "search_replace" | "apply_patch"
                             )
                         });
                         (allows, seen)
@@ -10079,10 +10717,47 @@ pub(crate) async fn run_message_via_llm(
                 })
                 .unwrap_or_default();
             let response_clean = ensure_no_open_code_block(&response_for_user);
+            let enforce_pm_zero_tool_warning = code_studio_disk_task
+                || assigned_agent.eq_ignore_ascii_case("studio_project_manager");
+            let warn_zero_tools_heuristic = enforce_pm_zero_tool_warning
+                && tool_loop_history.is_empty()
+                && !crate::api_studio::code_studio_skip_zero_tool_mandatory_retry(
+                    assigned_agent.as_str(),
+                )
+                && crate::api_studio::looks_like_code_studio_promise_before_any_tools(
+                    &response_for_user,
+                );
+            let mut warn_zero_tools_fire = warn_zero_tools_heuristic;
+            if warn_zero_tools_heuristic && crate::api_studio::studio_llm_response_auditor_enabled()
+            {
+                let user_ex: String = user_message.chars().take(2200).collect();
+                let assist_ex: String = response_for_user.chars().take(3200).collect();
+                if let Some(audit) = crate::api_studio::studio_llm_audit_code_studio_turn(
+                    &llm_router,
+                    crate::api_studio::StudioLlmAuditParams {
+                        user_excerpt: user_ex.as_str(),
+                        assistant_plain: assist_ex.as_str(),
+                        assigned_agent: assigned_agent.as_str(),
+                        policy_allows_write: false,
+                        tool_history_empty: true,
+                        consider_prose: false,
+                        consider_promise: true,
+                    },
+                )
+                .await
+                {
+                    warn_zero_tools_fire = audit.promise_without_tools;
+                }
+            }
+            let studio_no_tool_warning = if warn_zero_tools_fire {
+                "\n\n— *Akasha (Code Studio)* : aucune ligne `TOOL:` n’a été exécutée ; le dépôt n’a probablement pas été modifié. Relancez la tâche ou vérifiez le fournisseur LLM."
+            } else {
+                ""
+            };
             reply_text = if response_for_user.is_empty() {
                 format!("{}{}", response, image_md)
             } else {
-                format!("{}{}", response_clean, image_md)
+                format!("{}{}{}", response_clean, studio_no_tool_warning, image_md)
             };
             break;
         }
@@ -10187,6 +10862,120 @@ pub(crate) async fn run_message_via_llm(
         }
         if studio_verify_error.is_none() && studio_autofix_applied {
             reply_text.push_str("\n\n_(Compilation du projet Code Studio corrigée automatiquement après échec du build.)_");
+        }
+        if studio_verify_error.is_none() {
+            if let Some(ref pay) = embedded_studio_acceptance {
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 57,
+                            "message": "[Étape: critères d'acceptation] Vérification fichiers / commandes configurées…"
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
+                );
+                let tmo = crate::api_studio::studio_project_verify_timeout_sec(
+                    tool_disk_workspace_root.as_path(),
+                );
+                let mech = crate::api_studio::run_mechanical_acceptance_checks(
+                    tool_disk_workspace_root.as_path(),
+                    pay,
+                    tmo,
+                )
+                .await;
+                if !mech.is_empty() {
+                    studio_verify_error = Some(format!(
+                        "Échec critères d'acceptation (vérification automatique) :\n{}",
+                        mech.join("\n")
+                    ));
+                } else {
+                    let manual_lines: Vec<String> = pay
+                        .criteria
+                        .iter()
+                        .filter(|c| matches!(c.kind, crate::api_studio::StudioCriterionKind::Manual))
+                        .map(|c| {
+                            let id = if c.id.is_empty() { "-" } else { c.id.as_str() };
+                            format!("{id}: {}", c.text)
+                        })
+                        .collect();
+                    if !manual_lines.is_empty() {
+                        let _ = bus.send(
+                            EventEnvelope::new(
+                                EventType::ProgressUpdate,
+                                Some(serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "progress_pct": 59,
+                                    "message": "[Étape: contrôle critères] Analyse des critères manuels (après build)…"
+                                })),
+                            )
+                            .with_correlation(timeline_correlation),
+                        );
+                        let data_dir = store_path.parent().unwrap_or_else(|| store_path.as_path());
+                        let diff_summary: String = {
+                            let snap_path = data_dir
+                                .join("studio-task-snapshots")
+                                .join(format!("{task_id}.json"));
+                            let snap_json = std::fs::read_to_string(&snap_path).unwrap_or_default();
+                            if snap_json.is_empty() {
+                                String::new()
+                            } else if let Ok(snap) = serde_json::from_str::<
+                                crate::studio_task_snapshot::StudioTaskSnapshot,
+                            >(&snap_json)
+                            {
+                                match tokio::task::spawn_blocking(move || {
+                                    crate::studio_task_snapshot::compute_studio_task_diff_from_snapshot(
+                                        snap,
+                                    )
+                                })
+                                .await
+                                {
+                                    Ok(Ok(entries)) => {
+                                        let mut parts = Vec::new();
+                                        for e in entries.iter().take(24) {
+                                            parts.push(format!(
+                                                "{} [{}]: {}",
+                                                e.path,
+                                                e.status,
+                                                e.diff.chars().take(900).collect::<String>()
+                                            ));
+                                        }
+                                        parts.join("\n")
+                                    }
+                                    _ => String::new(),
+                                }
+                            } else {
+                                String::new()
+                            }
+                        };
+                        if let Some(missing) = studio_semantic_acceptance_review(
+                            &llm_router,
+                            &manual_lines,
+                            &diff_summary,
+                            clean_message,
+                            &reply_text,
+                        )
+                        .await
+                        {
+                            if !missing.is_empty() {
+                                reply_text.push_str(
+                                    "\n\n---\n**Revue critères (non bloquant)** — à vérifier manuellement :\n- ",
+                                );
+                                reply_text.push_str(&missing.join("\n- "));
+                                if let Ok(store_ev) = TaskStore::open(&store_path) {
+                                    let _ = store_ev.insert_event(
+                                        task_id,
+                                        "studio_acceptance_review",
+                                        Some(&serde_json::json!({ "missing": missing })),
+                                        &chrono::Utc::now().to_rfc3339(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     if !first_meaningful_progress_sent && !reply_text.trim().is_empty() {
@@ -12295,7 +13084,7 @@ pub async fn handle_api(
             }
         };
         // Session: "new_session" => new UUID; else provided non-empty session_id; else day-YYYY-MM-DD (short-term = current day, survives UI restart).
-        let session_id = {
+        let mut session_id = {
             let new_session = body_json
                 .as_ref()
                 .and_then(|v| v.get("new_session"))
@@ -12371,6 +13160,11 @@ pub async fn handle_api(
             .and_then(|v| v.get("studio_code_mode").and_then(|x| x.as_str()))
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty());
+        let message_delivery_mode = body_json
+            .as_ref()
+            .and_then(|v| v.get("message_delivery_mode").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
         let studio_policy_hint = body_json
             .as_ref()
             .and_then(|v| v.get("studio_policy_hint").and_then(|x| x.as_str()))
@@ -12386,6 +13180,23 @@ pub async fn handle_api(
             .and_then(|v| v.get("studio_design_doc").and_then(|x| x.as_str()))
             .map(|s| s.to_string())
             .filter(|s| !s.trim().is_empty());
+        let studio_acceptance_parsed: Option<crate::api_studio::StudioAcceptancePayload> =
+            match body_json
+                .as_ref()
+                .and_then(|v| v.get("studio_acceptance_criteria"))
+            {
+                Some(v) => match crate::api_studio::parse_api_acceptance_field(v) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let body = serde_json::json!({
+                            "error": "invalid_studio_acceptance_criteria",
+                            "detail": e
+                        });
+                        return json_response("400 Bad Request", &body.to_string());
+                    }
+                },
+                None => None,
+            };
         let studio_delegate_single_level = body_json
             .as_ref()
             .and_then(|v| v.get("studio_delegate_single_level").and_then(|x| x.as_bool()))
@@ -12395,6 +13206,62 @@ pub async fn handle_api(
             .and_then(|v| v.get("studio_project_id").and_then(|x| x.as_str()))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        let fork_from_task_id: Option<Uuid> = {
+            let raw = body_json
+                .as_ref()
+                .and_then(|v| v.get("fork_from_task_id").and_then(|x| x.as_str()))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            match raw {
+                None => None,
+                Some(s) => match Uuid::parse_str(&s) {
+                    Ok(id) => Some(id),
+                    Err(_) => {
+                        let body = serde_json::json!({ "error": "invalid_fork_from_task_id", "detail": "fork_from_task_id must be a valid UUID" });
+                        return json_response("400 Bad Request", &body.to_string());
+                    }
+                },
+            }
+        };
+        let fork_after_message_index = body_json
+            .as_ref()
+            .and_then(|v| v.get("fork_after_message_index").and_then(|x| x.as_i64()))
+            .filter(|n| *n >= 0)
+            .map(|n| n as u64);
+        let mut fork_meta_for_task: Option<serde_json::Value> = None;
+        if let Some(parent_task_id) = fork_from_task_id.as_ref() {
+            let parent_session_id = session_id.clone();
+            let fork_session_id = format!("fork-{}", Uuid::new_v4().simple());
+            if let Some(st) = short_term.as_ref() {
+                let parent_turns = st.get_turns(&parent_session_id).await;
+                let keep = fork_after_message_index
+                    .map(|n| (n as usize).saturating_add(1))
+                    .unwrap_or(parent_turns.len())
+                    .min(parent_turns.len());
+                for turn in parent_turns.into_iter().take(keep) {
+                    st.append(&fork_session_id, &turn.role, turn.content).await;
+                }
+                fork_meta_for_task = Some(serde_json::json!({
+                    "fork_parent_task_id": parent_task_id.to_string(),
+                    "fork_parent_session_id": parent_session_id,
+                    "fork_session_id": fork_session_id,
+                    "fork_cut_index": fork_after_message_index,
+                    "fork_cut_turns": keep,
+                    "schema_version": 1
+                }));
+            } else {
+                fork_meta_for_task = Some(serde_json::json!({
+                    "fork_parent_task_id": parent_task_id.to_string(),
+                    "fork_parent_session_id": parent_session_id,
+                    "fork_session_id": fork_session_id,
+                    "fork_cut_index": fork_after_message_index,
+                    "fork_cut_turns": 0usize,
+                    "schema_version": 1,
+                    "note": "short_term_store_unavailable"
+                }));
+            }
+            session_id = fork_session_id;
+        }
         let studio_disk_root = if let Some(pid) = studio_project_id.as_deref()
         {
             match crate::studio::resolve_studio_project_dir(data_dir, pid.trim()) {
@@ -12442,6 +13309,23 @@ pub async fn handle_api(
         // Capture the raw user message for code-RAG retrieval before any prefixes are injected.
         let raw_user_message = message.clone();
         let mut message_for_llm = message;
+        if let Some(mode) = message_delivery_mode.as_deref() {
+            if mode == "steering" || mode == "follow_up" {
+                message_for_llm = format!(
+                    "[Delivery mode hint: `{mode}`. Prefer coherent continuation with the current session state.]\n\n{}",
+                    message_for_llm
+                );
+            }
+        }
+        if let Some(parent_task_id) = fork_from_task_id.as_ref() {
+            let cut = fork_after_message_index
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            message_for_llm = format!(
+                "[Session fork context] Parent task: {parent_task_id}; cut index: {cut}. Continue from this branch only.\n\n{}",
+                message_for_llm
+            );
+        }
         if let Some(ref root) = studio_disk_root {
             if let Some(plan) = crate::api_studio::studio_code_plan_message_prefix(root) {
                 message_for_llm = format!("{plan}{message_for_llm}");
@@ -12534,6 +13418,17 @@ pub async fn handle_api(
                     );
                 }
             }
+            if let Some(ref pay) = studio_acceptance_parsed {
+                let prefix = crate::api_studio::format_acceptance_prefix_for_llm(pay);
+                if !prefix.is_empty() {
+                    message_for_llm = format!("{prefix}{message_for_llm}");
+                }
+                if let Ok(embed) = serde_json::to_string(pay) {
+                    message_for_llm.push_str(crate::api_studio::STUDIO_ACCEPTANCE_JSON_BEGIN);
+                    message_for_llm.push_str(&embed);
+                    message_for_llm.push_str(crate::api_studio::STUDIO_ACCEPTANCE_JSON_END);
+                }
+            }
         }
         let mut envelope = crate::gateway::MessageEnvelope::api(
             session_id.clone(),
@@ -12546,6 +13441,16 @@ pub async fn handle_api(
         envelope.studio_evolution_branch = studio_evolution_branch;
         match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
             Ok(task_id) => {
+                if let Some(meta) = fork_meta_for_task {
+                    if let Ok(task_store) = TaskStore::open(store_path) {
+                        let _ = task_store.insert_event(
+                            task_id,
+                            "session_fork_created",
+                            Some(&meta),
+                            &chrono::Utc::now().to_rfc3339(),
+                        );
+                    }
+                }
                 let body = serde_json::json!({
                     "ack": true,
                     "task_id": task_id.to_string(),
@@ -12611,6 +13516,9 @@ pub async fn handle_api(
                 }
                 if method == "GET" && parts.get(1) == Some(&"events") {
                     return get_task_events(store_path, events, id).await;
+                }
+                if method == "GET" && parts.get(1) == Some(&"report") {
+                    return get_task_report(store_path, events, id).await;
                 }
                 if method == "GET" && parts.get(1) == Some(&"studio-diff") {
                     return get_task_studio_diff(store_path, id).await;
@@ -13393,6 +14301,135 @@ pub async fn handle_api(
         let state = crate::permissions_center::load(data_dir);
         let body = serde_json::json!({ "decisions": state.decisions });
         return json_response("200 OK", &body.to_string());
+    }
+    if method == "GET" && path_only == "/api/permissions/queue" {
+        let status_filter = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| q.split('&').find(|p| p.starts_with("status=")))
+            .and_then(|p| p.split_once('=').map(|(_, v)| decode_url_component(v)))
+            .and_then(|v| crate::permissions_queue::QueueStatus::parse(&v));
+        let limit = path
+            .split('?')
+            .nth(1)
+            .and_then(|q| q.split('&').find(|p| p.starts_with("limit=")))
+            .and_then(|p| p.split_once('=').map(|(_, v)| v.to_string()))
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(100)
+            .clamp(1, 500);
+        let mut items = crate::permissions_queue::load(data_dir).requests;
+        if let Some(status) = status_filter {
+            items.retain(|i| i.status == status);
+        }
+        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.truncate(limit);
+        let body = serde_json::json!({ "items": items });
+        return json_response("200 OK", &body.to_string());
+    }
+    if method == "GET" && path_only.starts_with("/api/permissions/queue/") {
+        let id = path_only.trim_start_matches("/api/permissions/queue/").trim();
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
+        }
+        if let Some(item) = crate::permissions_queue::get_request(data_dir, id) {
+            return json_response(
+                "200 OK",
+                &serde_json::json!({ "item": item }).to_string(),
+            );
+        }
+        return json_response("404 Not Found", r#"{"error":"request_not_found"}"#);
+    }
+    if method == "POST"
+        && (path_only.starts_with("/api/permissions/queue/") && path_only.ends_with("/approve"))
+    {
+        let id = path_only
+            .trim_start_matches("/api/permissions/queue/")
+            .trim_end_matches("/approve")
+            .trim_matches('/');
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
+        }
+        let note = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+            .and_then(|v| v.get("note").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        match crate::permissions_queue::update_status(
+            data_dir,
+            id,
+            crate::permissions_queue::QueueStatus::Approved,
+            note,
+        ) {
+            Ok(Some(item)) => {
+                if let (Some(store), Ok(task_id)) =
+                    (human_input_store.as_ref(), Uuid::parse_str(&item.task_id))
+                {
+                    let pending = {
+                        let mut g = store.write().await;
+                        g.remove(&task_id)
+                    };
+                    if let Some(pending) = pending {
+                        let _ = pending.response_tx.send("Approuver".to_string());
+                    }
+                }
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "item": item }).to_string(),
+                );
+            }
+            Ok(None) => return json_response("404 Not Found", r#"{"error":"request_not_found"}"#),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
+    }
+    if method == "POST"
+        && (path_only.starts_with("/api/permissions/queue/") && path_only.ends_with("/deny"))
+    {
+        let id = path_only
+            .trim_start_matches("/api/permissions/queue/")
+            .trim_end_matches("/deny")
+            .trim_matches('/');
+        if id.is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
+        }
+        let note = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+            .and_then(|v| v.get("note").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        match crate::permissions_queue::update_status(
+            data_dir,
+            id,
+            crate::permissions_queue::QueueStatus::Denied,
+            note,
+        ) {
+            Ok(Some(item)) => {
+                if let (Some(store), Ok(task_id)) =
+                    (human_input_store.as_ref(), Uuid::parse_str(&item.task_id))
+                {
+                    let pending = {
+                        let mut g = store.write().await;
+                        g.remove(&task_id)
+                    };
+                    if let Some(pending) = pending {
+                        let _ = pending.response_tx.send("Refuser".to_string());
+                    }
+                }
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "ok": true, "item": item }).to_string(),
+                );
+            }
+            Ok(None) => return json_response("404 Not Found", r#"{"error":"request_not_found"}"#),
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error":"save_failed", "detail": e.to_string() }).to_string(),
+                )
+            }
+        }
     }
     if method == "POST" && path_only == "/api/permissions/decisions" {
         let body_json = body
@@ -14337,11 +15374,34 @@ fn code_studio_suggested_actions(
     status: &TaskStatus,
     failure_detail: Option<&str>,
     last_progress: Option<&ProgressEntry>,
+    acceptance_review: Option<&serde_json::Value>,
 ) -> Vec<serde_json::Value> {
     use TaskStatus::*;
     let mut v = Vec::new();
     match status {
         Completed => {
+            if let Some(payload) = acceptance_review {
+                if let Some(arr) = payload.get("missing").and_then(|m| m.as_array()) {
+                    if !arr.is_empty() {
+                        let joined = arr
+                            .iter()
+                            .filter_map(|x| x.as_str())
+                            .take(12)
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        if !joined.is_empty() {
+                            v.push(serde_json::json!({
+                                "id": "acceptance_review_followup",
+                                "label": "Compléter les critères signalés",
+                                "kind": "message",
+                                "message": format!(
+                                    "La tâche est terminée mais la revue des critères a signalé des points à clarifier ou compléter : {joined}\n\nPropose des changements concrets (fichiers + étapes) pour les traiter."
+                                )
+                            }));
+                        }
+                    }
+                }
+            }
             v.push(serde_json::json!({
                 "id": "refresh_files",
                 "label": "Rafraîchir la liste des fichiers",
@@ -14502,6 +15562,8 @@ async fn get_task_status(
         }
     }
     let (tokens_used, cost_usd) = task_usage_store.get_task(id).await.unwrap_or((0, 0.0));
+    let (last_turn_tokens_in, last_turn_tokens_out, last_turn_cost_usd) =
+        task_usage_store.get_last_turn(id).await.unwrap_or((0, 0, 0.0));
     let (todos, todos_updated_at) = store
         .get_todos_with_updated_at(id)
         .unwrap_or_else(|_| (Vec::new(), None));
@@ -14528,7 +15590,18 @@ async fn get_task_status(
         None
     };
     let last_for_suggest = progress_list.last().cloned();
-    let suggested = code_studio_suggested_actions(&task.status, failure_detail.as_deref(), last_for_suggest.as_ref());
+    let acceptance_review = store.get_events(id).ok().and_then(|evs| {
+        evs.iter()
+            .rev()
+            .find(|e| e.event_type == "studio_acceptance_review")
+            .and_then(|e| e.payload.clone())
+    });
+    let suggested = code_studio_suggested_actions(
+        &task.status,
+        failure_detail.as_deref(),
+        last_for_suggest.as_ref(),
+        acceptance_review.as_ref(),
+    );
     // Dernière ligne de progression par sous-tâche pour le détail Studio (dédoublonnage côté client par task_id).
     if let Ok(children) = store.get_children(id) {
         if !children.is_empty() {
@@ -14563,6 +15636,9 @@ async fn get_task_status(
         "progress": progress_list,
         "tokens_used": tokens_used,
         "cost_usd": cost_usd,
+        "last_turn_tokens_in": last_turn_tokens_in,
+        "last_turn_tokens_out": last_turn_tokens_out,
+        "last_turn_cost_usd": last_turn_cost_usd,
         "todos": todos_json,
         "suggested_actions": suggested
     });
@@ -14571,6 +15647,9 @@ async fn get_task_status(
     }
     if let Some(fd) = failure_detail {
         body["failure_detail"] = serde_json::Value::String(fd);
+    }
+    if let Some(ref ar) = acceptance_review {
+        body["acceptance_review"] = ar.clone();
     }
     json_response("200 OK", &body.to_string())
 }
@@ -15691,6 +16770,34 @@ mod tests {
         ));
         assert!(!looks_like_meta_agent_response(
             "Voici le rapport demandé et le fichier a été écrit dans workspace:/analyze/comparatif.md."
+        ));
+    }
+
+    #[test]
+    fn promise_before_tools_detects_diagnostic_preamble_fr() {
+        let s = "Salut Loïc ! Je vais d'abord examiner l'état actuel du projet pour comprendre ce qui est déjà en place et ce qui fait échouer le build, puis je planifierai et implémenterai les fonctionnalités manquantes. Commençons par un diagnostic.";
+        assert!(crate::api_studio::looks_like_code_studio_promise_before_any_tools(s));
+    }
+
+    #[test]
+    fn promise_before_tools_detects_inspect_and_delegate_wording() {
+        let s = "Je vais d'abord inspecter l'état actuel du projet pour identifier précisément ce qui manque, puis planifier et déléguer l'implémentation.";
+        assert!(crate::api_studio::looks_like_code_studio_promise_before_any_tools(s));
+    }
+
+    #[test]
+    fn promise_before_tools_false_when_long_prose() {
+        let s = "Je vais ".to_string() + &"x".repeat(1700);
+        assert!(!crate::api_studio::looks_like_code_studio_promise_before_any_tools(&s));
+    }
+
+    #[test]
+    fn skip_zero_tool_retry_for_planner_only() {
+        assert!(crate::api_studio::code_studio_skip_zero_tool_mandatory_retry(
+            "studio_planner"
+        ));
+        assert!(!crate::api_studio::code_studio_skip_zero_tool_mandatory_retry(
+            "studio_project_manager"
         ));
     }
 

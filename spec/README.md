@@ -134,6 +134,7 @@ La documentation utilisateur finale est maintenue dans `docs/`.
 - [dev/roadmap/hermes-integration-remainder.md](dev/roadmap/hermes-integration-remainder.md)
 - [dev/roadmap/hermes-partial-domains-roadmap.md](dev/roadmap/hermes-partial-domains-roadmap.md)
 - [dev/roadmap/docs_spec_migration_map.md](dev/roadmap/docs_spec_migration_map.md)
+- [dev/roadmap/jcode_inspired_integration_rfc.md](dev/roadmap/jcode_inspired_integration_rfc.md)
 
 ## Conventions de rangement
 

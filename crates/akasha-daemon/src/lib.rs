@@ -6,6 +6,7 @@ pub mod agents;
 pub mod gateway;
 pub mod personality;
 pub mod permissions_center;
+pub mod permissions_queue;
 pub mod policy_engine;
 pub mod protocol_adapter;
 pub mod agent_contracts;
