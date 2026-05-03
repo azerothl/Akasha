@@ -34,7 +34,9 @@ impl PluginStateStore {
     }
 
     fn save(&self) -> std::io::Result<()> {
-        let data = self.data.read().map_err(|_| std::io::ErrorKind::Other)?;
+        let data = self.data.read().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::Other, "plugins state lock poisoned")
+        })?;
         let s = serde_json::to_string_pretty(&*data)?;
         drop(data);
         let tmp_path = self.path.with_extension("json.tmp");
