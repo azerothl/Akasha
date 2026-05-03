@@ -1,7 +1,7 @@
-//! MCP stdio transport — probe handshake (`initialize` + optional `tools/list`) for Hermes parity / compatibility tests.
+//! MCP stdio transport — probe handshake (`initialize` + optional `tools/list`) for compatibility tests.
 //!
 //! Uses the standard `Content-Length`-framed transport as specified by the MCP stdio protocol
-//! (identical to Language Server Protocol framing), which is required by Cursor / VS Code-style servers.
+//! (identical to Language Server Protocol framing), which is required by common IDE MCP servers.
 //!
 //! See `docs/mcp-runtime.md` and `docs/mcp-mvp.md`.
 

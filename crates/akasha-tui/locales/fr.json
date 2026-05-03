@@ -91,7 +91,7 @@
   "tui.router_latency": "Latence ms",
   "tui.router_tokens": "Tokens",
   "tui.router_fallbacks": "Fallbacks",
-  "tui.router_hermes_title": " Aperçu opérateur Hermes (PgHaut/PgBas, R: rafraîchir) ",
+  "tui.router_operator_title": " Aperçu opérateur (PgHaut/PgBas, R: rafraîchir) ",
   "tui.tasks_list_header": " Date       │ Statut    │ Agent  │ Parent  │ ID (extrait) ",
   "tui.tasks_discussions": " Discussions (racines) [d=toutes] ",
   "tui.tasks_list_all": " Liste des tâches [d=racines] ",

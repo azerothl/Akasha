@@ -1,4 +1,4 @@
-//! MCP stdio long-lived attach (Hermes tranche) + runtime summary for operators.
+//! MCP stdio long-lived attach + runtime summary for operators.
 //! HTTP/SSE and in-product OAuth remain roadmap; see `docs/mcp-runtime.md`, `docs/mcp-oauth.md`.
 
 use serde_json::{json, Value};

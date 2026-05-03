@@ -328,7 +328,7 @@
   "settings.system_health_resume": "Reprise de session",
   "settings.system_health_tools": "Outils disponibles",
   "settings.system_health_no_session": "(Pas de session active — ouvrez ou sélectionnez une discussion pour afficher le résumé de session.)",
-  "settings.system_health_doc_matrix": "Matrice de compatibilité (GitHub)",
+  "settings.system_health_doc_matrix": "Matrice de parité fonctionnelle (GitHub)",
   "settings.system_health_doc_webhooks": "Webhooks d'automatisation",
   "settings.system_health_doc_mcp": "Runtime MCP",
   "settings.system_health_load_error": "Échec de la requête",

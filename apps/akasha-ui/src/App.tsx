@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, lazy, Suspense, useMemo, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
-import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary } from "./claudeStyleChat";
+import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary } from "./chatTranscriptExport";
 import { invoke } from "@tauri-apps/api/core";
 import RelationGraph from "relation-graph/react";
 import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
@@ -1711,7 +1711,7 @@ function App() {
   const [humanInputFreeText, setHumanInputFreeText] = useState("");
   /** Reply text for the inline ask_user form in the chat (when modal is not used). */
   const [inlineHumanReplyText, setInlineHumanReplyText] = useState("");
-  /** Fil d'activité des agents : ouvert par défaut pour suivre les étapes (style ChatGPT / Cursor). */
+  /** Fil d'activité des agents : ouvert par défaut pour suivre les étapes (assistant conversationnel). */
   const [subAgentPanelCollapsed, setSubAgentPanelCollapsed] = useState(false);
   /** Per-root task: whether the discussion block is collapsed in the sub-agent panel (true = collapsed). */
   const [collapsedRootTasks, setCollapsedRootTasks] = useState<Record<string, boolean>>({});

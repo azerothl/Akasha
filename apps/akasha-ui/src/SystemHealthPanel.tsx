@@ -217,7 +217,7 @@ function HealthCard({
       {expert ? (
         <details className="health-card-details">
           <summary className="health-card-details-summary">{detailsLabel}</summary>
-          <pre className="operator-hermes-pre health-card-pre" tabIndex={0}>
+          <pre className="operator-insights-pre health-card-pre" tabIndex={0}>
             {raw || "…"}
           </pre>
         </details>
@@ -328,10 +328,10 @@ export function SystemHealthPanel({ sessionId, fetchEndpoint, expert, locale, la
   const resumeLines = useMemo(() => summarizeResume(resumeJson, labels.noSession, locale), [resumeJson, labels.noSession, locale]);
 
   return (
-    <div className="operator-hermes-insights system-health-panel">
+    <div className="operator-insights-panel system-health-panel">
       <h3 className="settings-subtitle">{labels.title}</h3>
       <p className="settings-doc muted">
-        <a href="https://github.com/azerothl/Akasha/blob/main/spec/dev/roadmap/hermes-akasha-parity-matrix.md" target="_blank" rel="noopener noreferrer">
+        <a href="https://github.com/azerothl/Akasha/blob/main/spec/dev/roadmap/reference-products-parity-matrix.md" target="_blank" rel="noopener noreferrer">
           {labels.docsMatrix}
         </a>
         {" · "}

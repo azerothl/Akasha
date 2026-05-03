@@ -251,10 +251,10 @@ struct App {
     pending_human_input: Option<(String, String, String, Option<Vec<String>>)>,
     /// All tasks currently waiting for user input (from GET /api/pending-human-input), so we can show them after relaunch or when user was away.
     pending_human_input_list: Vec<(String, String, String, Option<Vec<String>>)>,
-    /// Hermes-style operator snapshot (schedules, task_runs, process watch, terminal, tools, recall, MCP, lifecycle hooks).
-    hermes_ops_text: String,
-    /// Vertical scroll for the Hermes snapshot block on the Router tab.
-    hermes_ops_scroll: usize,
+    /// Operator snapshot (schedules, task_runs, process watch, terminal, tools, recall, MCP, lifecycle hooks).
+    operator_ops_text: String,
+    /// Vertical scroll for the operator snapshot block on the Router tab.
+    operator_ops_scroll: usize,
 }
 
 fn trim_tui(s: &str, max: usize) -> String {
@@ -413,8 +413,8 @@ impl App {
             chat_history_loaded: false,
             pending_human_input: None,
             pending_human_input_list: Vec::new(),
-            hermes_ops_text: String::new(),
-            hermes_ops_scroll: 0,
+            operator_ops_text: String::new(),
+            operator_ops_scroll: 0,
         }
     }
 
@@ -531,8 +531,8 @@ impl App {
     fn trigger_mode_entered(&mut self) {
         if self.mode == Mode::Router {
             self.fetch_metrics();
-            self.fetch_hermes_ops_snapshot();
-            self.hermes_ops_scroll = 0;
+            self.fetch_operator_ops_snapshot();
+            self.operator_ops_scroll = 0;
         }
         if self.mode == Mode::Doc && self.doc_content.is_empty() {
             self.fetch_doc();
@@ -1142,8 +1142,8 @@ impl App {
         }
     }
 
-    /// Fetch operator HTTP endpoints (Hermes parity cockpit) for display under router metrics.
-    fn fetch_hermes_ops_snapshot(&mut self) {
+    /// Fetch operator HTTP endpoints for display under router metrics (daemon cockpit).
+    fn fetch_operator_ops_snapshot(&mut self) {
         let base = daemon_base_url(self.port);
         let client = match reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(8))
@@ -1151,7 +1151,7 @@ impl App {
         {
             Ok(c) => c,
             Err(_) => {
-                self.hermes_ops_text = "(client HTTP)".to_string();
+                self.operator_ops_text = "(client HTTP)".to_string();
                 return;
             }
         };
@@ -1185,7 +1185,7 @@ impl App {
         }
         let mut out = vec![format!("Cockpit health: {ok}/{} endpoints OK", parts.len())];
         out.extend(parts);
-        self.hermes_ops_text = out.join("\n---\n");
+        self.operator_ops_text = out.join("\n---\n");
     }
 
     /// Non-blocking: POST /api/message, send ack via tx, then poll and send final reply (FR-025).
@@ -2361,23 +2361,23 @@ fn ui(f: &mut Frame, app: &mut App) {
                     .border_style(theme.block_border()),
             );
             f.render_widget(table, split[0]);
-            let hermes_h = split[1].height.saturating_sub(2).max(1) as usize;
-            let hermes_lines = app.hermes_ops_text.lines().count().max(1);
-            let hermes_max = hermes_lines.saturating_sub(hermes_h);
-            if app.hermes_ops_scroll > hermes_max {
-                app.hermes_ops_scroll = hermes_max;
+            let snap_h = split[1].height.saturating_sub(2).max(1) as usize;
+            let snap_lines = app.operator_ops_text.lines().count().max(1);
+            let snap_max = snap_lines.saturating_sub(snap_h);
+            if app.operator_ops_scroll > snap_max {
+                app.operator_ops_scroll = snap_max;
             }
-            let hermes_para = Paragraph::new(app.hermes_ops_text.clone())
+            let snap_para = Paragraph::new(app.operator_ops_text.clone())
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(app.i18n.t("tui.router_hermes_title"))
+                        .title(app.i18n.t("tui.router_operator_title"))
                         .border_style(theme.block_border()),
                 )
                 .style(Style::default().fg(theme.palette().muted))
                 .wrap(Wrap { trim: false })
-                .scroll((app.hermes_ops_scroll as u16, 0));
-            f.render_widget(hermes_para, split[1]);
+                .scroll((app.operator_ops_scroll as u16, 0));
+            f.render_widget(snap_para, split[1]);
         }
         Mode::Doc => {
             let content_width = content_area.width as usize;
@@ -2914,8 +2914,8 @@ fn run_app(
             if app.metrics.is_empty() {
                 app.fetch_metrics();
             }
-            if app.hermes_ops_text.is_empty() {
-                app.fetch_hermes_ops_snapshot();
+            if app.operator_ops_text.is_empty() {
+                app.fetch_operator_ops_snapshot();
             }
         }
         while let Ok((task_id, pct)) = progress_rx.try_recv() {
@@ -3261,13 +3261,13 @@ fn run_app(
                     }
                     (Mode::Router, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_metrics();
-                        app.fetch_hermes_ops_snapshot();
+                        app.fetch_operator_ops_snapshot();
                     }
                     (Mode::Router, KeyCode::PageUp, _) => {
-                        app.hermes_ops_scroll = app.hermes_ops_scroll.saturating_sub(8);
+                        app.operator_ops_scroll = app.operator_ops_scroll.saturating_sub(8);
                     }
                     (Mode::Router, KeyCode::PageDown, _) => {
-                        app.hermes_ops_scroll = app.hermes_ops_scroll.saturating_add(8);
+                        app.operator_ops_scroll = app.operator_ops_scroll.saturating_add(8);
                     }
                     (Mode::ScheduleReports, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_schedule_reports();

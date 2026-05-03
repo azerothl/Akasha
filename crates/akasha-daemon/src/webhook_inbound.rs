@@ -1,4 +1,4 @@
-//! Inbound automation webhooks: HMAC-SHA256, idempotency key (TTL), simple rate limit (Hermes parity).
+//! Inbound automation webhooks: HMAC-SHA256, idempotency key (TTL), simple rate limit.
 //!
 //! Used by `POST /api/automation/webhook` when `AKASHA_AUTOMATION_WEBHOOK_SECRET` is set.
 //! **Direct delivery** (no LLM): `POST /api/automation/webhook/direct` returns the JSON in
@@ -94,7 +94,7 @@ pub fn automation_gate() -> Arc<IdempotencyAndRateLimit> {
 }
 
 /// SQLite path for webhook idempotency. Override with `AKASHA_WEBHOOK_IDEM_SQLITE` so several
-/// daemon instances can share one file (e.g. NFS-mounted data dir) for Hermes-style distribution.
+/// daemon instances can share one file (e.g. NFS-mounted data dir) for coordinated distribution.
 pub fn webhook_idempotency_db_path(data_dir: &Path) -> std::path::PathBuf {
     std::env::var_os("AKASHA_WEBHOOK_IDEM_SQLITE")
         .map(std::path::PathBuf::from)

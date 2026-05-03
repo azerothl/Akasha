@@ -87,7 +87,7 @@ enum Commands {
         #[command(subcommand)]
         sub: ServicesSub,
     },
-    /// Tool profiles + effective tool gates (operator / Hermes-style toolsets)
+    /// Tool profiles + effective tool gates (operator toolsets)
     Toolset {
         #[command(subcommand)]
         sub: ToolsetSub,
@@ -97,7 +97,7 @@ enum Commands {
         #[command(subcommand)]
         sub: WorktreeSub,
     },
-    /// MCP: validate config JSON, optional stdio probe (Hermes parity)
+    /// MCP: validate config JSON, optional stdio probe (operator compatibility)
     Mcp {
         #[command(subcommand)]
         sub: McpSub,
@@ -226,7 +226,7 @@ enum ToolsetSub {
 
 #[derive(Subcommand)]
 enum McpSub {
-    /// Validate a JSON file with top-level `mcpServers` (Cursor / VS Code style)
+    /// Validate a JSON file with top-level `mcpServers` (IDE-style MCP JSON)
     Validate {
         /// Path to mcp.json or similar
         config: PathBuf,
@@ -3990,7 +3990,7 @@ fn cmd_doctor(json: bool, advice: bool, fix: bool) -> anyhow::Result<()> {
     // Config file checks (existence + valid format)
     checks.extend(run_config_checks(&data_dir));
 
-    // Auto-triage (Hermes-like): when daemon is up, sample LLM router summary + task queue depth.
+    // Auto-triage: when daemon is up, sample LLM router summary + task queue depth.
     if daemon_healthy {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(5))

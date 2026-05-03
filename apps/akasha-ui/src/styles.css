@@ -2972,12 +2972,12 @@ a.settings-link-btn.refresh-btn {
   font-size: 1rem;
 }
 
-.operator-hermes-insights {
+.operator-insights-panel {
   margin-top: 0.5rem;
   max-width: 52rem;
 }
 
-.operator-hermes-pre {
+.operator-insights-pre {
   margin: 0.35rem 0 0;
   padding: 0.65rem 0.75rem;
   max-height: 14rem;

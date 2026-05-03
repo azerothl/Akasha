@@ -2,7 +2,7 @@
 
 Status: Draft  
 Owner: Akasha core team  
-Scope: `akasha-daemon`, `akasha-ui`, `akasha-tui`, `akasha-code-studio`, `Akasha_app`
+Scope: `akasha-daemon`, `akasha-ui`, `akasha-tui`, `akasha-code-studio`, `Akasha_app` — suivi produit croisé : colonne **jcode (RFC)** dans [`reference-products-parity-matrix.md`](./reference-products-parity-matrix.md).
 
 ## 1. Goals
 

@@ -4,13 +4,13 @@
 
 **Still roadmap / deeper work:** plugin-level WASM hook **delivery** complète (événements côté host sur tout le catalogue), cache GET élargi à plus d’endpoints métiers, et industrialisation trust automation bout-en-bout côté `Akasha_plugins`.
 
-Track in the issue tracker and in **`hermes-akasha-parity-matrix.md`**. For remaining “Partiel” domains (worktree/browser/crawl/migration), see **`hermes-partial-domains-roadmap.md`**. Satellite repos: incremental PRs per repo as priorities allow (see README / `docs/HERMES_COCKPIT.md` / `EVALS_AND_VERSIONING.md` stubs).
+Track in the issue tracker and in **`reference-products-parity-matrix.md`** (alias historique : `hermes-akasha-parity-matrix.md`). For remaining “Partiel” domains (worktree/browser/crawl/migration), see **`hermes-partial-domains-roadmap.md`**. Satellite repos: incremental PRs per repo as priorities allow (see README / `docs/OPERATOR_COCKPIT.md` / `EVALS_AND_VERSIONING.md` stubs).
 
 ## Definition of Done — PR « analyse Hermes → écosystème »
 
 Pour qu’une évolution de parité Hermes soit **consommable** au-delà du monorepo :
 
-1. **Matrice** : mettre à jour la version et le changelog dans [`hermes-akasha-parity-matrix.md`](./hermes-akasha-parity-matrix.md) si le statut d’une ligne change (ou ajouter une note en « ○ » dans le tableau propriétaire).
+1. **Matrice** : mettre à jour la version et le changelog dans [`reference-products-parity-matrix.md`](./reference-products-parity-matrix.md) si le statut d’une ligne change (ou ajouter une note en « ○ » dans le tableau propriétaire).
 2. **Au moins un satellite** parmi :
    - **`Akasha_app`** : section doc ou page compare (guides opérateur, liens vers les `.md` du repo Akasha sur GitHub) ;
    - **`Akasha_skills`** / **`Akasha_plugins`** : métadonnées catalogue (version, compat, hash) ou CI de validation ;

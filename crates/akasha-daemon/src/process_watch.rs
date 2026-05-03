@@ -1,4 +1,4 @@
-//! Ring buffer of recent background `run_command_background` completions (Hermes-style process watch / notifications baseline).
+//! Ring buffer of recent background `run_command_background` completions (process watch / notifications baseline).
 
 use serde::Serialize;
 use std::collections::VecDeque;

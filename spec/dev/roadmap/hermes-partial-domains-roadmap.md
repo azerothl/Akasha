@@ -1,6 +1,6 @@
-# Hermes partial domains roadmap (Phase 4)
+# Partial domains roadmap — operator parity (Phase 4)
 
-This file tracks domains that remain **Partiel** in the parity matrix and gives an operator-focused closure path.
+This file tracks domains that remain **Partiel** in [`reference-products-parity-matrix.md`](./reference-products-parity-matrix.md) and gives an operator-focused closure path.
 
 ## 1) Git worktree
 

@@ -40,4 +40,4 @@ Hermes-style **plug-and-play MCP**: declare servers in JSON, validate before ena
 2. Map MCP tools into Akasha tool namespace with policy gates (`tools_policy.yaml`).
 3. Smoke tests against a reference stdio server (filesystem or echo).
 
-See also `../roadmap/hermes-akasha-parity-matrix.md` and `../../16_plugin_architecture.md`.
+See also `../roadmap/reference-products-parity-matrix.md` and `../../16_plugin_architecture.md`.

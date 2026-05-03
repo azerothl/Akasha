@@ -17,7 +17,7 @@ Référence : analyse des dossiers `buddy`, `services`, `commands` sous le dép�
 ## 2. Export et nom de fichier (spec)
 
 - **Format** : texte brut, blocs `User:` / `Assistant:` / `System:` (lignes simples).
-- **Nom de fichier** : `akasha-chat-YYYY-MM-DD-HHMMSS.txt` ou, si premier message utilisateur disponible, préfixe dérivé (sanitisation alphanum + tirets, max ~50 caractères) — implémenté dans `claudeStyleChat.ts`.
+- **Nom de fichier** : `akasha-chat-YYYY-MM-DD-HHMMSS.txt` ou, si premier message utilisateur disponible, préfixe dérivé (sanitisation alphanum + tirets, max ~50 caractères) — implémenté dans `chatTranscriptExport.ts`.
 - **Markdown** : option documentée ; l’export actuel reste **.txt** pour simplicité et lisibilité hors ligne.
 
 ## 3. Résumé court après outils (spec)

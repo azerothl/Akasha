@@ -1,6 +1,6 @@
 # SLO / SLA internes Akasha (draft opérateur)
 
-**Hermes / perf transversal :** la matrice [`hermes-akasha-parity-matrix.md`](../roadmap/hermes-akasha-parity-matrix.md) (ligne Perf / SLO) pointe vers ce runbook et vers les benches **Rbitnet** pour les déploiements self-hosted.
+**Perf transversal :** la matrice [`reference-products-parity-matrix.md`](../roadmap/reference-products-parity-matrix.md) (ligne Perf / SLO) pointe vers ce runbook et vers les benches **Rbitnet** pour les déploiements self-hosted.
 
 ## Latence conversation (daemon → premier token stream)
 

@@ -328,7 +328,7 @@
   "settings.system_health_resume": "Session resume",
   "settings.system_health_tools": "Available tools",
   "settings.system_health_no_session": "(No active session — open or select a chat thread to show session resume.)",
-  "settings.system_health_doc_matrix": "Compatibility matrix (GitHub)",
+  "settings.system_health_doc_matrix": "Feature parity matrix (GitHub)",
   "settings.system_health_doc_webhooks": "Automation webhooks",
   "settings.system_health_doc_mcp": "MCP runtime",
   "settings.system_health_load_error": "Request failed",

@@ -1,4 +1,4 @@
-//! Optional shell hooks for automation (Hermes-style gateway hooks — phase 1: schedule fire only).
+//! Optional shell hooks for automation (gateway-style hooks — phase 1: schedule fire only).
 //!
 //! Config: `data_dir/lifecycle_hooks.json`
 //! ```json

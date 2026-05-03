@@ -130,7 +130,7 @@ La documentation utilisateur finale est maintenue dans `docs/`.
 #### Releases et roadmap
 
 - [dev/releases/internal_release_0.8.md](dev/releases/internal_release_0.8.md)
-- [dev/roadmap/hermes-akasha-parity-matrix.md](dev/roadmap/hermes-akasha-parity-matrix.md)
+- [dev/roadmap/reference-products-parity-matrix.md](dev/roadmap/reference-products-parity-matrix.md) (alias : [`hermes-akasha-parity-matrix.md`](dev/roadmap/hermes-akasha-parity-matrix.md))
 - [dev/roadmap/hermes-integration-remainder.md](dev/roadmap/hermes-integration-remainder.md)
 - [dev/roadmap/hermes-partial-domains-roadmap.md](dev/roadmap/hermes-partial-domains-roadmap.md)
 - [dev/roadmap/docs_spec_migration_map.md](dev/roadmap/docs_spec_migration_map.md)

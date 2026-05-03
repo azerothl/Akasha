@@ -81,7 +81,7 @@ impl ShortTermStore {
         Self::estimate_tokens_calibrated("default", "default", s)
     }
 
-    /// Heuristic chars-per-token by provider/model family (spec Hermes parity: better than chars/4 alone).
+    /// Heuristic chars-per-token by provider/model family (calibrated heuristic; better than chars/4 alone).
     pub fn chars_per_token_hint(provider: &str, model: &str) -> f64 {
         let p = provider.to_ascii_lowercase();
         let m = model.to_ascii_lowercase();

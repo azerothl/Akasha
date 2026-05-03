@@ -1,4 +1,4 @@
-//! Operator metrics for WASM plugin load cycles (Hermes parity / observability).
+//! Operator metrics for WASM plugin load cycles (observability).
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};

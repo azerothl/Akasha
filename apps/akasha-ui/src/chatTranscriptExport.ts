@@ -1,4 +1,4 @@
-/** Helpers inspired by Claude Code UX (export transcript, filename from first prompt) — no proprietary code. */
+/** Plain-text chat export helpers (transcript download, basename from first user line). */
 
 export type ExportableMessage = { role: "user" | "assistant" | "system"; text: string };
 

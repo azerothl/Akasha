@@ -1,4 +1,4 @@
-//! Interactive PTY sessions (Hermes tranche 1). See `spec/43_session_terminal.md`.
+//! Interactive PTY sessions. See `spec/43_session_terminal.md`.
 //!
 //! HTTP surface: `/api/terminal/pty/sessions` (wired in `api.rs`).
 

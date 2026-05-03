@@ -11778,7 +11778,7 @@ pub async fn handle_api(
         );
     }
 
-    // GET /api/session/resume-brief?session_id=… — Hermes-like resume UX: structured state + short-term size.
+    // GET /api/session/resume-brief?session_id=… — structured session state + short-term size for resume UX.
     if method == "GET" && path.starts_with("/api/session/resume-brief") {
         let session_id = path
             .split('?')
@@ -13581,7 +13581,7 @@ pub async fn handle_api(
             }
         }
     }
-    // POST /api/schedules/{id}/pause|resume|run_now — Hermes-like job ops (enabled flag + manual fire).
+    // POST /api/schedules/{id}/pause|resume|run_now — scheduled job ops (enabled flag + manual fire).
     if method == "POST" && path.starts_with("/api/schedules/") {
         let rest = path.trim_start_matches("/api/schedules/");
         let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
@@ -14044,7 +14044,7 @@ pub async fn handle_api(
         return json_response("200 OK", &body);
     }
 
-    // Effective tool policy (Hermes-like toolsets visibility): allowed / approval / rule sources.
+    // Effective tool policy (toolset visibility): allowed / approval / rule sources.
     if method == "GET" && path_only == "/api/tools/effective" {
         match tools_executor {
             Some(ex_arc) => {

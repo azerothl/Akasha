@@ -20,7 +20,8 @@ Ce document trace le refactor de séparation documentaire:
 | `docs/terminal-backends-roadmap.md` | `spec/dev/runtime/terminal-backends-roadmap.md` | Runtime |
 | `docs/bench_prompt_results.md` | `spec/dev/quality/bench_prompt_results.md` | Qualite |
 | `docs/tests_and_benchmarks.md` | `spec/dev/quality/tests_and_benchmarks.md` | Qualite |
-| `docs/hermes-akasha-parity-matrix.md` | `spec/dev/roadmap/hermes-akasha-parity-matrix.md` | Roadmap |
+| `docs/hermes-akasha-parity-matrix.md` | `spec/dev/roadmap/hermes-akasha-parity-matrix.md` (stub → `reference-products-parity-matrix.md`) | Roadmap |
+| — | `spec/dev/roadmap/reference-products-parity-matrix.md` | Matrice multi-produits (source) |
 | `docs/hermes-integration-remainder.md` | `spec/dev/roadmap/hermes-integration-remainder.md` | Roadmap |
 | `docs/hermes-partial-domains-roadmap.md` | `spec/dev/roadmap/hermes-partial-domains-roadmap.md` | Roadmap |
 | `docs/internal_release_0.8.md` | `spec/dev/releases/internal_release_0.8.md` | Releases |

@@ -25,7 +25,7 @@ pub fn validate_mcp_server_entry(entry: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate a top-level config object with `mcpServers` map (Cursor / VS Code style).
+/// Validate a top-level config object with `mcpServers` map (IDE-style MCP JSON).
 pub fn validate_mcp_config_json(root: &Value) -> Result<(), String> {
     let servers = root
         .get("mcpServers")
