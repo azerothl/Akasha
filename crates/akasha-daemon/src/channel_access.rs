@@ -52,6 +52,8 @@ pub fn save(data_dir: &Path, state: &TelegramAccessState) -> anyhow::Result<()> 
     let contents = serde_json::to_string_pretty(state)?;
     let tmp_path = path.with_extension("json.tmp");
     std::fs::write(&tmp_path, contents.as_bytes())?;
+    #[cfg(windows)]
+    let _ = std::fs::remove_file(&path);
     std::fs::rename(&tmp_path, &path)?;
     Ok(())
 }

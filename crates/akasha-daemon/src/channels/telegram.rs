@@ -312,6 +312,11 @@ pub async fn run_telegram_bot(
                     Err(_) => "budget unavailable".to_string(),
                 }
             } else if command == "/permissions" {
+                if from_user_id == 0 || !crate::channel_access::is_admin(&access, from_user_id) {
+                    let msg = "Permission denied: /permissions requires an approved admin.";
+                    let _ = send_telegram(&client, &send_message_url, chat_id, msg).await;
+                    continue;
+                }
                 let mode = if rest.eq_ignore_ascii_case("allow_all") {
                     "allow_all"
                 } else if rest.eq_ignore_ascii_case("ask_me") {
