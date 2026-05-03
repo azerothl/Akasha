@@ -690,8 +690,8 @@ fn cmd_task(sub: TaskSub) -> anyhow::Result<()> {
                     String::from("null")
                 } else {
                     let raw = payload.to_string();
-                    if raw.len() > 220 {
-                        format!("{}…", &raw[..220])
+                    if raw.chars().count() > 220 {
+                        format!("{}…", raw.chars().take(220).collect::<String>())
                     } else {
                         raw
                     }

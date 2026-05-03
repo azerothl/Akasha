@@ -7383,7 +7383,8 @@ KNOWN_TS_ERRORS:\n{}\n",
 
     // Deterministic first-aid: TS2306 "is not a module" often comes from an empty .ts file.
     // Patch those files immediately so subsequent LLM rounds can focus on remaining errors.
-    {
+    // Gated on tools_policy write permission; uses non-blocking I/O.
+    if policy_allows_primary_disk_write(&exec.policy) {
         let not_module_paths = extract_ts2306_not_module_paths(verify_log, 12);
         for p in &not_module_paths {
             let as_path = std::path::Path::new(p);
@@ -7397,9 +7398,16 @@ KNOWN_TS_ERRORS:\n{}\n",
             {
                 continue;
             }
-            let content = std::fs::read_to_string(as_path).unwrap_or_default();
+            let content = tokio::fs::read_to_string(as_path).await.unwrap_or_default();
             if content.trim().is_empty() {
-                if std::fs::write(as_path, "export {}\n").is_ok() {
+                let new_content = "export {}\n";
+                // Pollution check — consistent with the write_file path
+                if crate::api_studio::studio_reject_polluted_code_content(as_path, new_content)
+                    .is_some()
+                {
+                    continue;
+                }
+                if tokio::fs::write(as_path, new_content.as_bytes()).await.is_ok() {
                     any_write_success = true;
                     writes_ok_count = writes_ok_count.saturating_add(1);
                     let _ = bus.send(
