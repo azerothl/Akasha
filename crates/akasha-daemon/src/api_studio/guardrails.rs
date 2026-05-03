@@ -72,18 +72,30 @@ pub fn looks_like_code_studio_promise_before_any_tools(text: &str) -> bool {
         return false;
     }
     let lower = t.to_lowercase();
+    // Future or present-tense “about to work” phrasing (models often say « Je regarde… » not « Je vais… »).
     let intent_future = [
         "je vais ",
         "j'ai l'intention",
+        "je regarde ",
+        "je regarde ce",
+        "j'analyse ",
+        "j'examine ",
+        "je commence ",
+        "je commence par",
+        "commençons par",
         "i will ",
         "i'll ",
         "i'm going to",
         "i am going to",
+        "i'm looking",
+        "i'm checking",
+        "i'm investigating",
+        "let me ",
+        "let us ",
         "nous allons",
         "we will ",
         "commençons",
         "let's ",
-        "let us ",
         "pour commencer",
         "to begin",
         "d'abord ",
@@ -117,11 +129,22 @@ pub fn looks_like_code_studio_promise_before_any_tools(text: &str) -> bool {
         "implémenter",
         "implement ",
         "planifier",
+        "planif",
+        "déléguer",
+        "delegate",
         "corriger",
+        "correction",
         "fix the",
+        "fix ",
         "faire échouer",
         "build",
         "compilation",
+        "fichiers d'entrée",
+        "invalid_token",
+        "invalid token",
+        "token",
+        "erreur",
+        "error",
         "étape suivante",
         "next step",
     ]
@@ -158,6 +181,12 @@ mod tests {
     #[test]
     fn promise_before_tools_detects_inspect_and_delegate_wording() {
         let s = "Je vais d'abord inspecter l'état actuel du projet pour identifier précisément ce qui manque, puis planifier et déléguer l'implémentation.";
+        assert!(looks_like_code_studio_promise_before_any_tools(s));
+    }
+
+    #[test]
+    fn promise_before_tools_detects_je_regarde_invalid_token() {
+        let s = "Salut Loïc ! Je regarde ce qui cause cette erreur `invalid_token` à l'affichage. Je commence par inspecter les fichiers d'entrée et le build.";
         assert!(looks_like_code_studio_promise_before_any_tools(s));
     }
 

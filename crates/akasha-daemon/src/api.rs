@@ -9111,53 +9111,84 @@ pub(crate) async fn run_message_via_llm(
             }
 
             const MAX_STUDIO_PROSE_ONLY_WRITE_NAGS: u32 = 4;
-            if code_studio_disk_task
+            const MAX_STUDIO_ZERO_TOOL_PROMISE_NAGS: u32 = 3;
+
+            let policy_allows_write = tools_executor_snapshot
+                .as_ref()
+                .map(|e| {
+                    e.policy.can_use_tool("write_file")
+                        || e.policy.can_use_tool("edit_file")
+                        || e.policy.can_use_tool("search_replace")
+                        || e.policy.can_use_tool("apply_patch")
+                })
+                .unwrap_or(false);
+
+            let prose_path_base = code_studio_disk_task
                 && no_parseable_tools_this_round
-                && studio_prose_only_write_nags < MAX_STUDIO_PROSE_ONLY_WRITE_NAGS
+                && studio_prose_only_write_nags < MAX_STUDIO_PROSE_ONLY_WRITE_NAGS;
+            let prose_heuristic = prose_path_base
+                && policy_allows_write
                 && crate::api_studio::looks_like_code_studio_prose_only_implementation_reply(
                     &response_plain,
-                )
-            {
-                let policy_allows_write = tools_executor_snapshot
-                    .as_ref()
-                    .map(|e| {
-                        e.policy.can_use_tool("write_file")
-                            || e.policy.can_use_tool("edit_file")
-                            || e.policy.can_use_tool("search_replace")
-                            || e.policy.can_use_tool("apply_patch")
-                    })
-                    .unwrap_or(false);
-                if policy_allows_write {
-                    studio_prose_only_write_nags += 1;
-                    current_prompt = format!(
-                        "User request: {}\n\nYour previous reply:\n{}\n\n[Code Studio — mandatory execution guard]\nThe user asked you to implement changes in the repository. Your previous reply was an audit/plan/refusal instead of executing available write tools. You DO have write tools in this task. Emit only executable TOOL lines now.\n\nRequired format examples:\nTOOL: write_file workspace:/path/to/file.ts\n<complete file content on following lines>\n\nTOOL: search_replace workspace:/path/to/file.ts old snippet | new snippet\n\nDo not say \"I cannot modify files\", \"No TOOL lines\", or ask where to start. Apply the requested changes on disk with `write_file`, `edit_file`, `search_replace`, or `apply_patch`.",
-                        user_message,
-                        response_plain
-                    );
-                    continue;
-                }
-            }
+                );
 
             // Code Studio: first model turn often returns only "Je vais examiner / diagnostic…" with zero TOOL lines, then the task ends.
-            const MAX_STUDIO_ZERO_TOOL_PROMISE_NAGS: u32 = 3;
             let tool_history_empty = tool_loop_history_by_agent
                 .get(&loop_agent_key)
                 .map(|v| v.is_empty())
                 .unwrap_or(true);
             let enforce_pm_zero_tool_guard = code_studio_disk_task
                 || assigned_agent.eq_ignore_ascii_case("studio_project_manager");
-            if enforce_pm_zero_tool_guard
+            let promise_path_base = enforce_pm_zero_tool_guard
                 && tools_executor_snapshot.is_some()
                 && no_parseable_tools_this_round
                 && tool_history_empty
                 && !crate::api_studio::code_studio_skip_zero_tool_mandatory_retry(
                     assigned_agent.as_str(),
                 )
-                && studio_zero_tool_promise_nags < MAX_STUDIO_ZERO_TOOL_PROMISE_NAGS
-                && crate::api_studio::looks_like_code_studio_promise_before_any_tools(
-                    &response_plain,
-                )
+                && studio_zero_tool_promise_nags < MAX_STUDIO_ZERO_TOOL_PROMISE_NAGS;
+            let promise_heuristic = promise_path_base
+                && crate::api_studio::looks_like_code_studio_promise_before_any_tools(&response_plain);
+
+            let mut prose_fire = prose_heuristic;
+            let mut promise_fire = promise_heuristic;
+            if crate::api_studio::studio_llm_response_auditor_enabled()
+                && (prose_heuristic || promise_heuristic)
             {
+                if let Some(audit) = crate::api_studio::studio_llm_audit_code_studio_turn(
+                    &llm_router,
+                    crate::api_studio::StudioLlmAuditParams {
+                        user_excerpt: user_message.as_str(),
+                        assistant_plain: &response_plain,
+                        assigned_agent: assigned_agent.as_str(),
+                        policy_allows_write,
+                        tool_history_empty,
+                        consider_prose: prose_heuristic,
+                        consider_promise: promise_heuristic,
+                    },
+                )
+                .await
+                {
+                    if prose_heuristic {
+                        prose_fire = audit.prose_only_implementation;
+                    }
+                    if promise_heuristic {
+                        promise_fire = audit.promise_without_tools;
+                    }
+                }
+            }
+
+            if prose_fire {
+                studio_prose_only_write_nags += 1;
+                current_prompt = format!(
+                    "User request: {}\n\nYour previous reply:\n{}\n\n[Code Studio — mandatory execution guard]\nThe user asked you to implement changes in the repository. Your previous reply was an audit/plan/refusal instead of executing available write tools. You DO have write tools in this task. Emit only executable TOOL lines now.\n\nRequired format examples:\nTOOL: write_file workspace:/path/to/file.ts\n<complete file content on following lines>\n\nTOOL: search_replace workspace:/path/to/file.ts old snippet | new snippet\n\nDo not say \"I cannot modify files\", \"No TOOL lines\", or ask where to start. Apply the requested changes on disk with `write_file`, `edit_file`, `search_replace`, or `apply_patch`.",
+                    user_message,
+                    response_plain
+                );
+                continue;
+            }
+
+            if promise_fire {
                 studio_zero_tool_promise_nags += 1;
                 let _ = bus.send(
                     EventEnvelope::new(
@@ -10621,15 +10652,37 @@ pub(crate) async fn run_message_via_llm(
             let response_clean = ensure_no_open_code_block(&response_for_user);
             let enforce_pm_zero_tool_warning = code_studio_disk_task
                 || assigned_agent.eq_ignore_ascii_case("studio_project_manager");
-            let studio_no_tool_warning = if enforce_pm_zero_tool_warning
+            let warn_zero_tools_heuristic = enforce_pm_zero_tool_warning
                 && tool_loop_history.is_empty()
                 && !crate::api_studio::code_studio_skip_zero_tool_mandatory_retry(
                     assigned_agent.as_str(),
                 )
                 && crate::api_studio::looks_like_code_studio_promise_before_any_tools(
                     &response_for_user,
-                )
+                );
+            let mut warn_zero_tools_fire = warn_zero_tools_heuristic;
+            if warn_zero_tools_heuristic && crate::api_studio::studio_llm_response_auditor_enabled()
             {
+                let user_ex: String = user_message.chars().take(2200).collect();
+                let assist_ex: String = response_for_user.chars().take(3200).collect();
+                if let Some(audit) = crate::api_studio::studio_llm_audit_code_studio_turn(
+                    &llm_router,
+                    crate::api_studio::StudioLlmAuditParams {
+                        user_excerpt: user_ex.as_str(),
+                        assistant_plain: assist_ex.as_str(),
+                        assigned_agent: assigned_agent.as_str(),
+                        policy_allows_write: false,
+                        tool_history_empty: true,
+                        consider_prose: false,
+                        consider_promise: true,
+                    },
+                )
+                .await
+                {
+                    warn_zero_tools_fire = audit.promise_without_tools;
+                }
+            }
+            let studio_no_tool_warning = if warn_zero_tools_fire {
                 "\n\n— *Akasha (Code Studio)* : aucune ligne `TOOL:` n’a été exécutée ; le dépôt n’a probablement pas été modifié. Relancez la tâche ou vérifiez le fournisseur LLM."
             } else {
                 ""
