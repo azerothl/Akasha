@@ -1,4 +1,4 @@
-# Suivi d'evolution des fonctionnalites
+# Suivi d'évolution des fonctionnalités
 
 Ce registre est la source de verite sur l'etat de couverture des fonctionnalites et options Akasha.
 

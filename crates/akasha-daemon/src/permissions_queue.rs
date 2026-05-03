@@ -79,8 +79,11 @@ pub fn save(data_dir: &Path, state: &PermissionQueueState) -> anyhow::Result<()>
     let raw = serde_json::to_string_pretty(state)?;
     let tmp_path = path.with_extension("json.tmp");
     std::fs::write(&tmp_path, raw.as_bytes())?;
-    // std::fs::rename fails on Windows when the destination already exists;
-    // remove it first to ensure a cross-platform atomic replace.
+    // On Windows rename fails when the destination already exists; remove it
+    // first. On POSIX, rename atomically replaces the destination without a
+    // removal step, so we skip it to avoid a brief window where the file is
+    // absent.
+    #[cfg(windows)]
     match std::fs::remove_file(&path) {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}

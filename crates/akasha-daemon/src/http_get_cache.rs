@@ -1,4 +1,4 @@
-//! Small LRU cache for safe GET responses (see `docs/cache-strategy.md`).
+//! Small LRU cache for safe GET responses (see `spec/dev/runtime/cache-strategy.md`).
 //! Enabled when `AKASHA_HTTP_CACHE_TTL_SECS` is a positive integer (seconds).
 
 use lru::LruCache;

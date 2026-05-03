@@ -255,6 +255,8 @@ struct App {
     operator_ops_text: String,
     /// Vertical scroll for the operator snapshot block on the Router tab.
     operator_ops_scroll: usize,
+    /// Background receiver for operator snapshot (set while a fetch is in flight).
+    operator_ops_rx: Option<mpsc::Receiver<String>>,
 }
 
 fn trim_tui(s: &str, max: usize) -> String {
@@ -415,6 +417,7 @@ impl App {
             pending_human_input_list: Vec::new(),
             operator_ops_text: String::new(),
             operator_ops_scroll: 0,
+            operator_ops_rx: None,
         }
     }
 
@@ -531,6 +534,8 @@ impl App {
     fn trigger_mode_entered(&mut self) {
         if self.mode == Mode::Router {
             self.fetch_metrics();
+            self.operator_ops_text = String::new();
+            self.operator_ops_rx = None;
             self.fetch_operator_ops_snapshot();
             self.operator_ops_scroll = 0;
         }
@@ -1143,49 +1148,56 @@ impl App {
     }
 
     /// Fetch operator HTTP endpoints for display under router metrics (daemon cockpit).
+    /// Spawns a background thread so the TUI event loop is not blocked by slow endpoints.
     fn fetch_operator_ops_snapshot(&mut self) {
+        // Mark as loading immediately to prevent re-triggering while in flight.
+        self.operator_ops_text = "(chargement…)".to_string();
         let base = daemon_base_url(self.port);
-        let client = match reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(8))
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => {
-                self.operator_ops_text = "(client HTTP)".to_string();
-                return;
-            }
-        };
-        let paths: [(&str, &str); 9] = [
-            ("schedules", "/api/schedules"),
-            ("task_runs", "/api/task_runs"),
-            ("process_watch", "/api/process/watch/recent?limit=12"),
-            ("terminal", "/api/terminal/capabilities"),
-            ("tools", "/api/tools/effective"),
-            ("recall", "/api/memory/recall-metrics"),
-            ("mcp", "/api/mcp/status"),
-            ("mcp_runtime", "/api/mcp/runtime"),
-            ("lifecycle", "/api/lifecycle/hooks"),
-        ];
-        let mut parts: Vec<String> = Vec::new();
-        let mut ok = 0usize;
-        for (label, path) in paths {
-            let url = format!("{base}{path}");
-            let line = match client.get(&url).send() {
-                Ok(r) => {
-                    let status = r.status();
-                    if status.is_success() {
-                        ok += 1;
-                    }
-                    let body = r.text().unwrap_or_default();
-                    format!("{label} {path} → {status}\n{}", trim_tui(&body, 1400))
+        let (tx, rx) = mpsc::channel::<String>();
+        self.operator_ops_rx = Some(rx);
+        thread::spawn(move || {
+            let client = match reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(8))
+                .build()
+            {
+                Ok(c) => c,
+                Err(_) => {
+                    let _ = tx.send("(client HTTP)".to_string());
+                    return;
                 }
-                Err(e) => format!("{label} {path} → (error: {e})"),
             };
-            parts.push(line);
-        }
-        let mut out = vec![format!("Cockpit health: {ok}/{} endpoints OK", parts.len())];
-        out.extend(parts);
-        self.operator_ops_text = out.join("\n---\n");
+            let paths: [(&str, &str); 9] = [
+                ("schedules", "/api/schedules"),
+                ("task_runs", "/api/task_runs"),
+                ("process_watch", "/api/process/watch/recent?limit=12"),
+                ("terminal", "/api/terminal/capabilities"),
+                ("tools", "/api/tools/effective"),
+                ("recall", "/api/memory/recall-metrics"),
+                ("mcp", "/api/mcp/status"),
+                ("mcp_runtime", "/api/mcp/runtime"),
+                ("lifecycle", "/api/lifecycle/hooks"),
+            ];
+            let mut parts: Vec<String> = Vec::new();
+            let mut ok = 0usize;
+            for (label, path) in paths {
+                let url = format!("{base}{path}");
+                let line = match client.get(&url).send() {
+                    Ok(r) => {
+                        let status = r.status();
+                        if status.is_success() {
+                            ok += 1;
+                        }
+                        let body = r.text().unwrap_or_default();
+                        format!("{label} {path} → {status}\n{}", trim_tui(&body, 1400))
+                    }
+                    Err(e) => format!("{label} {path} → (error: {e})"),
+                };
+                parts.push(line);
+            }
+            let mut out = vec![format!("Cockpit health: {ok}/{} endpoints OK", parts.len())];
+            out.extend(parts);
+            let _ = tx.send(out.join("\n---\n"));
+        });
     }
 
     /// Non-blocking: POST /api/message, send ack via tx, then poll and send final reply (FR-025).
@@ -2914,8 +2926,15 @@ fn run_app(
             if app.metrics.is_empty() {
                 app.fetch_metrics();
             }
-            if app.operator_ops_text.is_empty() {
+            if app.operator_ops_text.is_empty() && app.operator_ops_rx.is_none() {
                 app.fetch_operator_ops_snapshot();
+            }
+        }
+        // Drain background operator-snapshot result if ready.
+        if let Some(rx) = &app.operator_ops_rx {
+            if let Ok(text) = rx.try_recv() {
+                app.operator_ops_text = text;
+                app.operator_ops_rx = None;
             }
         }
         while let Ok((task_id, pct)) = progress_rx.try_recv() {
@@ -3261,6 +3280,8 @@ fn run_app(
                     }
                     (Mode::Router, KeyCode::Char('r') | KeyCode::Char('R'), _) => {
                         app.fetch_metrics();
+                        app.operator_ops_text = String::new();
+                        app.operator_ops_rx = None;
                         app.fetch_operator_ops_snapshot();
                     }
                     (Mode::Router, KeyCode::PageUp, _) => {

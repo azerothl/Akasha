@@ -3,7 +3,7 @@
 //! Uses the standard `Content-Length`-framed transport as specified by the MCP stdio protocol
 //! (identical to Language Server Protocol framing), which is required by common IDE MCP servers.
 //!
-//! See `docs/mcp-runtime.md` and `docs/mcp-mvp.md`.
+//! See `spec/dev/integrations/mcp-runtime.md` and `spec/dev/integrations/mcp-mvp.md`.
 
 use serde_json::{json, Value};
 use std::time::Duration;

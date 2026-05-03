@@ -1061,9 +1061,10 @@ impl Daemon {
                         if notify_chat_id.is_some() {
                             info!("Telegram startup notification enabled (NOTIFY_CHAT_ID set)");
                         }
+                        let telegram_data_dir = self.data_dir.clone();
                         tokio::spawn(async move {
                             if let Err(e) =
-                                crate::channels::telegram::run_telegram_bot(token, daemon_url, notify_chat_id).await
+                                crate::channels::telegram::run_telegram_bot(token, daemon_url, notify_chat_id, telegram_data_dir).await
                             {
                                 warn!(error = %e, "Telegram bot failed");
                             }
