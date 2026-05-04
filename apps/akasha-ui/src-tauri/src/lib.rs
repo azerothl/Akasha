@@ -620,6 +620,10 @@ async fn daemon_get_text(path: String, port: Option<u16>) -> Result<serde_json::
     if !p.starts_with('/') || (!p.starts_with("/api/") && p != "/") {
         return Err("invalid_path".to_string());
     }
+    // Reject path traversal, backslashes, control characters, and overly long paths.
+    if p.contains("..") || p.contains('\\') || p.len() > 2048 || p.chars().any(|c| c.is_control()) {
+        return Err("invalid_path".to_string());
+    }
     let url = format!("{}{}", daemon_base_url(port), p);
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -663,6 +667,10 @@ async fn set_plugin_enabled(plugin_id: String, enabled: bool, port: Option<u16>)
     let id = plugin_id.trim();
     if id.is_empty() {
         return Err("plugin_id required".to_string());
+    }
+    // Validate plugin_id: allow only safe filename characters to prevent path injection.
+    if !id.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '_' || c == '-') {
+        return Err("invalid plugin_id".to_string());
     }
     let action = if enabled { "enable" } else { "disable" };
     let url = format!("{}/api/plugins/{}/{}", daemon_base_url(port), id, action);

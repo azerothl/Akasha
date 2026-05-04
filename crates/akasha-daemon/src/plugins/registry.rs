@@ -134,59 +134,65 @@ impl PluginRegistry {
                 for name in &["manifest.toml", "manifest.json"] {
                     let manifest_path = path.join(name);
                         if manifest_path.exists() {
-                            if let Ok(manifest) = PluginManifest::load_from_path(&manifest_path) {
-                            if self.state.is_disabled(&manifest.id) {
-                                info!(id = %manifest.id, "Plugin disabled (user), skipping");
-                                continue;
-                            }
-                            if self.reputation.is_disabled(&manifest.id) {
-                                info!(id = %manifest.id, "Plugin disabled (reputation), skipping");
-                                continue;
-                            }
-                            let wasm_path = manifest.wasm_path.as_ref().map(|p| path.join(p)).unwrap_or_else(|| path.join("plugin.wasm"));
-                            if let Some(ref store) = self.trust_store {
-                                if store.requires_signing() {
-                                    let wasm_bytes = match std::fs::read(&wasm_path) {
-                                        Ok(b) => b,
-                                        Err(_) => {
-                                            warn!(id = %manifest.id, path = ?wasm_path, "Failed to read WASM for signature check");
-                                            continue;
-                                        }
-                                    };
-                                    let sig_path = wasm_path.with_extension("wasm.sig");
-                                    let sig_path = if sig_path.exists() { sig_path } else { wasm_path.with_extension("sig") };
-                                    let sig = match std::fs::read(&sig_path) {
-                                        Ok(s) if s.len() == 64 => s,
-                                        Ok(_) => {
-                                            warn!(id = %manifest.id, "Plugin signature file invalid length (expected 64 bytes), skipping");
-                                            continue;
-                                        }
-                                        Err(_) => {
-                                            warn!(id = %manifest.id, "Plugin unsigned (no .sig file) and trust store requires signing, skipping");
-                                            continue;
-                                        }
-                                    };
-                                    if store.verify_plugin(&wasm_bytes, &sig).is_err() {
-                                        warn!(id = %manifest.id, "Plugin signature verification failed, skipping");
+                            match PluginManifest::load_from_path(&manifest_path) {
+                                Ok(manifest) => {
+                                    if self.state.is_disabled(&manifest.id) {
+                                        info!(id = %manifest.id, "Plugin disabled (user), skipping");
                                         continue;
                                     }
+                                    if self.reputation.is_disabled(&manifest.id) {
+                                        info!(id = %manifest.id, "Plugin disabled (reputation), skipping");
+                                        continue;
+                                    }
+                                    let wasm_path = manifest.wasm_path.as_ref().map(|p| path.join(p)).unwrap_or_else(|| path.join("plugin.wasm"));
+                                    if let Some(ref store) = self.trust_store {
+                                        if store.requires_signing() {
+                                            let wasm_bytes = match std::fs::read(&wasm_path) {
+                                                Ok(b) => b,
+                                                Err(_) => {
+                                                    warn!(id = %manifest.id, path = ?wasm_path, "Failed to read WASM for signature check");
+                                                    continue;
+                                                }
+                                            };
+                                            let sig_path = wasm_path.with_extension("wasm.sig");
+                                            let sig_path = if sig_path.exists() { sig_path } else { wasm_path.with_extension("sig") };
+                                            let sig = match std::fs::read(&sig_path) {
+                                                Ok(s) if s.len() == 64 => s,
+                                                Ok(_) => {
+                                                    warn!(id = %manifest.id, "Plugin signature file invalid length (expected 64 bytes), skipping");
+                                                    continue;
+                                                }
+                                                Err(_) => {
+                                                    warn!(id = %manifest.id, "Plugin unsigned (no .sig file) and trust store requires signing, skipping");
+                                                    continue;
+                                                }
+                                            };
+                                            if store.verify_plugin(&wasm_bytes, &sig).is_err() {
+                                                warn!(id = %manifest.id, "Plugin signature verification failed, skipping");
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    if let Ok(wasm) = WasmPlugin::load(&wasm_path) {
+                                        let loaded = LoadedPlugin {
+                                            manifest: manifest.clone(),
+                                            wasm: wasm.with_manifest(manifest.clone()),
+                                        };
+                                        plugins.insert(manifest.id.clone(), loaded);
+                                        loaded_ok += 1;
+                                        info!(id = %manifest.id, kind = ?manifest.kind, "Plugin loaded");
+                                    } else {
+                                        load_errors += 1;
+                                        warn!(id = %manifest.id, path = ?wasm_path, "Failed to load WASM");
+                                    }
+                                    break;
+                                }
+                                Err(e) => {
+                                    warn!(path = ?manifest_path, error = %e, "Failed to parse plugin manifest");
+                                    load_errors += 1;
                                 }
                             }
-                            if let Ok(wasm) = WasmPlugin::load(&wasm_path) {
-                                let loaded = LoadedPlugin {
-                                    manifest: manifest.clone(),
-                                    wasm: wasm.with_manifest(manifest.clone()),
-                                };
-                                plugins.insert(manifest.id.clone(), loaded);
-                                loaded_ok += 1;
-                                info!(id = %manifest.id, kind = ?manifest.kind, "Plugin loaded");
-                            } else {
-                                load_errors += 1;
-                                warn!(id = %manifest.id, path = ?wasm_path, "Failed to load WASM");
-                            }
                         }
-                        break;
-                    }
                 }
             }
         }

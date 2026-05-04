@@ -377,7 +377,7 @@ pub async fn run_telegram_bot(
                 }
                 continue;
             }
-            if from_user_id != 0 && !crate::channel_access::is_approved_user(&access, from_user_id) {
+            if from_user_id == 0 || !crate::channel_access::is_approved_user(&access, from_user_id) {
                 let _ = send_telegram(
                     &client,
                     &send_message_url,

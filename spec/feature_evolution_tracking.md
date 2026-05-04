@@ -1,13 +1,13 @@
 # Suivi d'évolution des fonctionnalités
 
-Ce registre est la source de verite sur l'etat de couverture des fonctionnalites et options Akasha.
+Ce registre est la source de vérité sur l'état de couverture des fonctionnalités et options Akasha.
 
-## Legende des statuts
+## Légende des statuts
 
-- `Implemented`: implemente et documente cote dev + user
-- `Partially documented`: implemente mais documentation incomplete
-- `Planned`: prevu, non implemente
-- `In progress`: implementation en cours
+- `Implemented`: implémenté et documenté côté dev + user
+- `Partially documented`: implémenté mais documentation incomplète
+- `Planned`: prévu, non implémenté
+- `In progress`: implémentation en cours
 
 ## Registre (vue fonctionnelle)
 
@@ -26,15 +26,15 @@ Ce registre est la source de verite sur l'etat de couverture des fonctionnalites
 | Channels | Telegram / Slack / Discord / WhatsApp | Implemented (partiel selon canal) | OK | OK | `../docs/user_guide_final.md`, `22_multichannel_architecture.md`, `44_whatsapp.md` |
 | Mission autonome | Heartbeats, roles, events API | Implemented | OK | Partially documented | `../docs/user_guide_final.md`, `plan_avancement.md` |
 
-## Liste prioritaire "A documenter"
+## Liste prioritaire "À documenter"
 
-1. Couverture utilisateur des details plugin avance (reseau host, schemas map view).
-2. Clarification user des limites runtime terminal/PTY et prerequis.
-3. Synthese utilisateur des options securite/politique d'outils avancees.
-4. Completer la section dev de la mission autonome (cycle, contracts, observabilite).
+1. Couverture utilisateur des détails plugin avancé (réseau host, schémas map view).
+2. Clarification user des limites runtime terminal/PTY et prérequis.
+3. Synthèse utilisateur des options sécurité/politique d'outils avancées.
+4. Compléter la section dev de la mission autonome (cycle, contracts, observabilité).
 
-## Process de mise a jour
+## Process de mise à jour
 
-1. Toute nouvelle feature ou option modifiee met a jour ce fichier.
-2. La PR reference les sections user (`docs/`) et dev (`spec/`) impactees.
-3. Un statut `Partially documented` ne peut rester au dela d'une release mineure sans ticket associe.
+1. Toute nouvelle feature ou option modifiée met à jour ce fichier.
+2. La PR référence les sections user (`docs/`) et dev (`spec/`) impactées.
+3. Un statut `Partially documented` ne peut rester au-delà d'une release mineure sans ticket associé.

@@ -50,7 +50,7 @@ impl PluginStateStore {
     }
 
     pub fn is_disabled(&self, plugin_id: &str) -> bool {
-        let guard = self.data.read().unwrap();
+        let guard = self.data.read().unwrap_or_else(|e| e.into_inner());
         guard
             .disabled
             .get(plugin_id)
@@ -59,7 +59,9 @@ impl PluginStateStore {
     }
 
     pub fn set_disabled(&self, plugin_id: &str, disabled: bool) -> std::io::Result<()> {
-        let mut guard = self.data.write().unwrap();
+        let mut guard = self.data.write().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::Other, "plugins state lock poisoned")
+        })?;
         if disabled {
             guard.disabled.insert(plugin_id.to_string(), true);
         } else {
@@ -70,7 +72,9 @@ impl PluginStateStore {
     }
 
     pub fn remove(&self, plugin_id: &str) -> std::io::Result<()> {
-        let mut guard = self.data.write().unwrap();
+        let mut guard = self.data.write().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::Other, "plugins state lock poisoned")
+        })?;
         guard.disabled.remove(plugin_id);
         drop(guard);
         self.save()

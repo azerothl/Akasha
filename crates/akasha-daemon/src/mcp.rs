@@ -1,6 +1,6 @@
 //! MCP (Model Context Protocol) — MVP helpers: validate local server definitions before wiring a transport.
 //!
-//! Stdio probe: [`crate::mcp_stdio`]. OAuth hardening: **`docs/mcp-oauth.md`**. See also **`docs/mcp-mvp.md`**, **`docs/mcp-runtime.md`**.
+//! Stdio probe: [`crate::mcp_stdio`]. OAuth hardening: **`spec/dev/integrations/mcp-oauth.md`**. See also **`spec/dev/integrations/mcp-mvp.md`**, **`spec/dev/integrations/mcp-runtime.md`**.
 
 pub use crate::mcp_stdio::{probe_stdio_mcp, McpProbeResult};
 
@@ -53,7 +53,7 @@ pub fn mcp_operator_status(data_dir: &Path) -> Value {
         "runtime": "stdio_probe_validate_and_optional_long_lived",
         "oauth": {
             "mode": "documented_vault_reserved",
-            "see": "docs/mcp-oauth.md"
+            "see": "spec/dev/integrations/mcp-oauth.md"
         },
         "mcp_runtime_http": {
             "GET /api/mcp/runtime": "attached stdio server + transport roadmap",

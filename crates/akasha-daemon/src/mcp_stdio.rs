@@ -49,7 +49,9 @@ async fn mcp_read_framed<R: tokio::io::AsyncRead + Unpin>(
         if trimmed.is_empty() {
             break;
         }
-        if let Some(val) = trimmed.strip_prefix("Content-Length:") {
+        if let Some(val) = trimmed.split_once(':').and_then(|(k, v)| {
+            if k.trim().eq_ignore_ascii_case("Content-Length") { Some(v) } else { None }
+        }) {
             content_length = val.trim().parse().ok();
         }
     }
