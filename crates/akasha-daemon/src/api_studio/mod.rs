@@ -12,6 +12,7 @@ pub(crate) use code_extensions::{is_agent_code_file_extension, path_has_agent_co
 pub(crate) use guardrails::{
     code_studio_skip_zero_tool_mandatory_retry, looks_like_code_studio_promise_before_any_tools,
     looks_like_code_studio_prose_only_implementation_reply,
+    looks_like_code_studio_tool_marker_but_unparsed,
 };
 pub(crate) use response_auditor::{
     studio_llm_audit_code_studio_turn, studio_llm_response_auditor_enabled, StudioLlmAuditParams,

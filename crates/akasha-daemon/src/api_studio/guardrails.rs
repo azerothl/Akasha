@@ -1,5 +1,15 @@
 //! Code Studio guardrails for prose-only model replies.
 
+/// Long assistant dumps (e.g. Kimi) often contain the substring `TOOL:` in prose or broken syntax.
+/// If nothing parses as an executable tool line, the task must not silently finish — retry with stricter format hints.
+pub fn looks_like_code_studio_tool_marker_but_unparsed(response: &str) -> bool {
+    const MIN_CHARS: usize = 200;
+    if response.chars().count() < MIN_CHARS || !response.contains("TOOL:") {
+        return false;
+    }
+    crate::api_tool_parser::parse_tool_calls(response).is_empty()
+}
+
 /// Returns true when a Code Studio implementation task received a prose-only audit/plan
 /// even though write tools are available. This catches replies like "ce qui manque...",
 /// "recommandations pour avancer", or "je ne peux pas modifier les fichiers" instead of
@@ -169,6 +179,7 @@ mod tests {
         code_studio_skip_zero_tool_mandatory_retry,
         looks_like_code_studio_promise_before_any_tools,
         looks_like_code_studio_prose_only_implementation_reply,
+        looks_like_code_studio_tool_marker_but_unparsed,
     };
 
     #[test]
@@ -216,5 +227,18 @@ mod tests {
         assert!(!code_studio_skip_zero_tool_mandatory_retry(
             "studio_project_manager"
         ));
+    }
+
+    #[test]
+    fn tool_marker_unparsed_kimi_dump_not_parseable() {
+        // Contains "TOOL:" but no executable tool line (empty payload after TOOL:).
+        let s = format!("{}TOOL:\n", "x".repeat(250));
+        assert!(looks_like_code_studio_tool_marker_but_unparsed(&s));
+    }
+
+    #[test]
+    fn tool_marker_unparsed_false_when_short() {
+        let s = "TOOL: x";
+        assert!(!looks_like_code_studio_tool_marker_but_unparsed(s));
     }
 }

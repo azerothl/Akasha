@@ -214,7 +214,7 @@ pub(crate) fn line_rest_after_leading_tool_at_start(line: &str) -> Option<&str> 
 pub(crate) fn tool_supports_multiline_body(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "apply_patch" | "edit_file" | "write_file" | "ask_user"
+        "apply_patch" | "edit_file" | "write_file" | "ask_user" | "search_replace"
     )
 }
 
@@ -786,7 +786,26 @@ pub(crate) fn parse_tool_calls_strict(response: &str) -> Vec<(String, Vec<String
                         body_end -= 1;
                     }
                     if body_end > body_start {
-                        args.push(lines[body_start..body_end].join("\n"));
+                        let body = lines[body_start..body_end].join("\n");
+                        if tool_name_lc == "search_replace" {
+                            // search_replace: path on first line; old/new often span lines — merge head tokens + body.
+                            if args.len() <= 1 {
+                                args.push(body);
+                            } else {
+                                let head = args[1..].join(" ");
+                                args.truncate(1);
+                                let merged = if head.is_empty() {
+                                    body
+                                } else if body.is_empty() {
+                                    head
+                                } else {
+                                    format!("{}\n{}", head, body)
+                                };
+                                args.push(merged);
+                            }
+                        } else {
+                            args.push(body);
+                        }
                     }
                     out.push((name.clone(), args));
                     continue;

@@ -8875,6 +8875,7 @@ pub(crate) async fn run_message_via_llm(
         let mut studio_manual_patch_nags = 0u32;
         let mut studio_prose_only_write_nags = 0u32;
         let mut studio_zero_tool_promise_nags = 0u32;
+        let mut studio_unparsed_tool_marker_nags = 0u32;
         let mut last_captured_image_base64: Option<String> = None;
 
         let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
@@ -9186,6 +9187,7 @@ pub(crate) async fn run_message_via_llm(
 
             const MAX_STUDIO_PROSE_ONLY_WRITE_NAGS: u32 = 4;
             const MAX_STUDIO_ZERO_TOOL_PROMISE_NAGS: u32 = 3;
+            const MAX_STUDIO_UNPARSED_TOOL_MARKER_NAGS: u32 = 4;
 
             let policy_allows_write = tools_executor_snapshot
                 .as_ref()
@@ -9281,6 +9283,38 @@ pub(crate) async fn run_message_via_llm(
                     user_message,
                     response_plain,
                     pm_delegate
+                );
+                continue;
+            }
+
+            // Kimi-scale dumps: prose + inlined `TOOL:` tokens that do not survive normalization → zero parseable tools.
+            let unparsed_marker_base = code_studio_disk_task
+                && tools_executor_snapshot.is_some()
+                && no_parseable_tools_this_round
+                && policy_allows_write
+                && studio_unparsed_tool_marker_nags < MAX_STUDIO_UNPARSED_TOOL_MARKER_NAGS
+                && crate::api_studio::looks_like_code_studio_tool_marker_but_unparsed(&response);
+            if unparsed_marker_base {
+                studio_unparsed_tool_marker_nags += 1;
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 49,
+                            "message": "Relance Code Studio : « TOOL: » détecté mais aucun appel exécutable — format strict requis."
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
+                );
+                current_prompt = format!(
+                    "{}\n\n[Code Studio — unparsed TOOL lines]\nYour last message mentioned TOOL: but nothing parsed as executable tool calls (often: multiline search_replace / write_file shape, or TOOL: embedded in prose). Emit **valid** calls only:\n\
+                    - One tool per line starting with `TOOL:` at the beginning of the line (after optional list/markdown noise normalized by the runtime).\n\
+                    - `TOOL: search_replace workspace:/path/to/file.ext` then on the **next lines** the full OLD block, a line with only ` | ` (space-pipe-space), then the NEW block — OR keep old|new on one line after the path.\n\
+                    - `TOOL: write_file workspace:/path` then the **entire file body** on following lines until the next `TOOL:`.\n\
+                    - Prefer `TOOL: run_command --cwd workspace:/ …` for npm/create-vite instead of pasting fake command transcripts.\n\
+                    Reply now with working TOOL lines only (brief summary after is OK).",
+                    current_prompt
                 );
                 continue;
             }
@@ -16633,6 +16667,20 @@ mod tests {
         assert_eq!(c[1].1, vec!["workspace:/package.json"]);
         assert_eq!(c[2].0, "read_file");
         assert_eq!(c[2].1, vec!["workspace:/vite.config.ts"]);
+    }
+
+    #[test]
+    fn parse_tool_calls_search_replace_multiline_body_after_path_only() {
+        let s = r#"TOOL: search_replace workspace:/CODE_STUDIO_PLAN.md
+## Old section
+line two | ## New section
+line two new"#;
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1, "{:?}", c);
+        assert_eq!(c[0].0, "search_replace");
+        assert_eq!(c[0].1.len(), 2);
+        assert_eq!(c[0].1[0], "workspace:/CODE_STUDIO_PLAN.md");
+        assert!(c[0].1[1].contains(" | "), "{:?}", c[0].1[1]);
     }
 
     #[test]
