@@ -440,6 +440,212 @@ pub(crate) fn dsml_fragment_invokes_to_tool_lines(
     lines
 }
 
+/// Variante LongCat / pseudo-XML (`<longcat_tool_call>read_file …</longcat_tool_call>`) utilisée par certains
+/// modèles (ex. via OpenRouter). Sans normalisation, aucune ligne `TOOL:` n’est détectée et l’orchestrateur
+/// termine sans exécution d’outils — ou boucle sur des `read_file` mal dédupliqués.
+pub(crate) fn normalize_longcat_tool_calls(response: &str) -> String {
+    let lower = response.to_ascii_lowercase();
+    if !lower.contains("longcat_tool_call") {
+        return response.to_string();
+    }
+    static LONGCAT_BLOCK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static LONGCAT_KV_PAIRED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static LONGCAT_KV_SHORTHAND: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let block_re = LONGCAT_BLOCK.get_or_init(|| {
+        regex::Regex::new(
+            r"(?is)<longcat_tool_call[^>]*>\s*([\s\S]*?)\s*</longcat_tool_call\s*>",
+        )
+        .expect("longcat block regex")
+    });
+    // Full pairing: `<longcat_arg_key>path</longcat_arg_key><longcat_arg_value>…`
+    let kv_paired = LONGCAT_KV_PAIRED.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?is)<longcat_arg_key>\s*([^<]+?)\s*</longcat_arg_key>\s*<longcat_arg_value>\s*([\s\S]*?)\s*</longcat_arg_value>"#,
+        )
+        .expect("longcat arg kv paired regex")
+    });
+    // Shorthand (OpenRouter / owl-alpha): `<longcat_arg_key>path <longcat_arg_value>…` sans `</longcat_arg_key>`,
+    // et souvent sans `</longcat_arg_value>` avant `</longcat_tool_call>`.
+    let kv_shorthand = LONGCAT_KV_SHORTHAND.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?is)<longcat_arg_key>\s*(\S+)\s*<longcat_arg_value>\s*(.*)\s*\z"#,
+        )
+        .expect("longcat arg kv shorthand regex")
+    });
+
+    block_re
+        .replace_all(response, |caps: &regex::Captures| {
+            let inner = caps.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+            longcat_inner_to_tool_line(inner, kv_paired, kv_shorthand).unwrap_or_else(|| {
+                caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default()
+            })
+        })
+        .into_owned()
+}
+
+fn longcat_collect_kv_pairs(
+    inner: &str,
+    kv_paired: &regex::Regex,
+    kv_shorthand: &regex::Regex,
+) -> Vec<(String, String)> {
+    let mut params: Vec<(String, String)> = Vec::new();
+    for c in kv_paired.captures_iter(inner) {
+        let k = c
+            .get(1)
+            .map(|m| m.as_str().trim().to_string())
+            .filter(|s| !s.is_empty());
+        let v = c
+            .get(2)
+            .map(|m| dsml_simple_entity_decode(m.as_str().trim()));
+        if let (Some(k), Some(v)) = (k, v) {
+            params.push((k, v));
+        }
+    }
+    if params.is_empty() {
+        for c in kv_shorthand.captures_iter(inner) {
+            let k = c
+                .get(1)
+                .map(|m| m.as_str().trim().to_string())
+                .filter(|s| !s.is_empty());
+            let v_raw = c.get(2).map(|m| m.as_str().trim());
+            let v = v_raw.map(|s| {
+                let t = if let Some(i) = s.find("</longcat_arg_value>") {
+                    s[..i].trim()
+                } else {
+                    s
+                };
+                dsml_simple_entity_decode(t)
+            });
+            if let (Some(k), Some(v)) = (k, v) {
+                params.push((k, v));
+            }
+        }
+    }
+    params
+}
+
+fn longcat_inner_to_tool_line(
+    inner: &str,
+    kv_paired: &regex::Regex,
+    kv_shorthand: &regex::Regex,
+) -> Option<String> {
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return None;
+    }
+    // Tool name is the first token when present before any tag (usual LongCat shape).
+    let (tool_name, rest_for_kv) = if inner.starts_with('<') {
+        return None;
+    } else {
+        let first_end = inner
+            .find(|c: char| c.is_whitespace() || c == '<')
+            .unwrap_or(inner.len());
+        let tool = inner[..first_end].trim();
+        if tool.is_empty() || !tool_name_is_safe_identifier(&tool.to_lowercase()) {
+            return None;
+        }
+        let rest = inner[first_end..].trim_start();
+        (tool, rest)
+    };
+
+    let mut params = longcat_collect_kv_pairs(rest_for_kv, kv_paired, kv_shorthand);
+    if params.is_empty() {
+        params = longcat_collect_kv_pairs(inner, kv_paired, kv_shorthand);
+    }
+    if params.is_empty() {
+        return None;
+    }
+
+    let args = dsml_params_to_tool_args(tool_name, &params);
+    // Leading/trailing newlines so `TOOL:` is on its own line even when LongCat is glued to prose.
+    Some(format!(
+        "\nTOOL: {} {}\n",
+        tool_name,
+        args.join(" ")
+    ))
+}
+
+/// Découpe une ligne `… prose … TOOL: … TOOL: …` en segments (sans regex look-around : non supporté par le moteur `regex`).
+fn split_inline_tool_segments(line: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut s = line;
+    loop {
+        let pos_space = s.find(" TOOL:");
+        let pos_tab = s.find("\tTOOL:");
+        let pos = match (pos_space, pos_tab) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        match pos {
+            Some(p) => {
+                let head = s[..p].trim_end();
+                if !head.is_empty() {
+                    out.push(head.to_string());
+                }
+                s = s.get(p + 1..).unwrap_or("");
+            }
+            None => {
+                let t = s.trim();
+                if !t.is_empty() {
+                    out.push(t.to_string());
+                }
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Modèles (p.ex. Kimi) qui mettent la sortie outil sur la **même ligne** que la prose :
+/// `…scaffold. TOOL: search_files … TOOL: read_file …` — `parse_tool_calls_strict` ne voit
+/// qu’une seule « ligne » qui ne commence pas par `TOOL:`, donc zéro exécution d’outils.
+/// Découpe en **une ligne par `TOOL:`** (hors blocs de code ```).
+pub(crate) fn normalize_inline_adjacent_tool_calls(response: &str) -> String {
+    if !response.contains("TOOL:") {
+        return response.to_string();
+    }
+    let mut in_fence = false;
+    let mut out_lines: Vec<String> = Vec::new();
+    for line in response.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            out_lines.push(line.to_string());
+            continue;
+        }
+        if in_fence {
+            out_lines.push(line.to_string());
+            continue;
+        }
+        for part in split_inline_tool_segments(line) {
+            out_lines.push(part);
+        }
+    }
+    out_lines.join("\n")
+}
+
+/// Retire les blocs `<think>…</think>` (modèles « reasoning ») pour que
+/// le parseur d’outils et l’UI ne voient pas la chaîne de pensée comme du corps de réponse.
+pub(crate) fn strip_redacted_reasoning_blocks(response: &str) -> String {
+    static REDACTED_BLOCK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = REDACTED_BLOCK.get_or_init(|| {
+        regex::Regex::new(r"(?is)<think>.*?</think>")
+            .expect("redacted_thinking block regex")
+    });
+    let mut s = re.replace_all(response, "").to_string();
+    if s.contains("<think>") {
+        static OPEN_ONLY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let open = OPEN_ONLY.get_or_init(|| {
+            regex::Regex::new(r"(?is)<think>").expect("redacted open regex")
+        });
+        s = open.replace_all(&s, "").to_string();
+    }
+    // Fermetures orphelines après découpe ou flux incomplet.
+    s.replace("</think>", "")
+}
+
 /// Certains modèles enveloppent les appels outils en XML (`<tool_call>read_file …</tool_call>`)
 /// ou enchaînent avec `<tool_call>…<tool_call>…` sans fermeture. Convertir en lignes `TOOL:` pour `parse_tool_calls`.
 pub(crate) fn normalize_xml_tool_call_wrappers(response: &str) -> String {
@@ -536,9 +742,12 @@ pub(crate) fn normalize_response_tool_prefixes(response: &str) -> String {
 
 /// Parse tool calls from LLM response: lines "TOOL: tool_name arg1 arg2 ...".
 pub(crate) fn parse_tool_calls(response: &str) -> Vec<(String, Vec<String>)> {
-    let dsml_norm = normalize_dsml_tool_calls(response);
-    let xml_norm = normalize_xml_tool_call_wrappers(&dsml_norm);
-    let normalized = normalize_response_tool_prefixes(&xml_norm);
+    let stripped = strip_redacted_reasoning_blocks(response);
+    let dsml_norm = normalize_dsml_tool_calls(&stripped);
+    let longcat_norm = normalize_longcat_tool_calls(&dsml_norm);
+    let xml_norm = normalize_xml_tool_call_wrappers(&longcat_norm);
+    let inline_norm = normalize_inline_adjacent_tool_calls(&xml_norm);
+    let normalized = normalize_response_tool_prefixes(&inline_norm);
     parse_tool_calls_strict(&normalized)
 }
 

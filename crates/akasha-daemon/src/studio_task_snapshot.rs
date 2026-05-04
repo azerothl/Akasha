@@ -191,8 +191,11 @@ pub fn capture_task_snapshot(data_dir: &Path, task_id: Uuid, project_root: &Path
     Ok(())
 }
 
-fn unified_diff_label(path: &str) -> String {
-    format!("workspace:/{path}")
+#[derive(Clone, Copy)]
+enum GitUnifiedDiffMode {
+    Modified,
+    Added,
+    Deleted,
 }
 
 /// Compare le snapshot à l’état actuel du répertoire `project_root` du snapshot.
@@ -213,7 +216,7 @@ pub fn compute_studio_task_diff_from_snapshot(snap: StudioTaskSnapshot) -> anyho
     for (path, old_f) in &snap.files {
         match current.get(path) {
             None => {
-                let diff = build_unified_diff(&unified_diff_label(path), "/dev/null", &old_f.content, "");
+                let diff = build_unified_diff(path, &old_f.content, "", GitUnifiedDiffMode::Deleted);
                 let long = diff.chars().count() > MAX_DIFF_OUTPUT_CHARS_PER_FILE;
                 out.push(StudioFileDiffEntry {
                     path: path.clone(),
@@ -223,12 +226,7 @@ pub fn compute_studio_task_diff_from_snapshot(snap: StudioTaskSnapshot) -> anyho
                 });
             }
             Some(new_c) if new_c != &old_f.content => {
-                let diff = build_unified_diff(
-                    &unified_diff_label(path),
-                    &unified_diff_label(path),
-                    &old_f.content,
-                    new_c,
-                );
+                let diff = build_unified_diff(path, &old_f.content, new_c, GitUnifiedDiffMode::Modified);
                 let long = diff.chars().count() > MAX_DIFF_OUTPUT_CHARS_PER_FILE;
                 out.push(StudioFileDiffEntry {
                     path: path.clone(),
@@ -244,7 +242,7 @@ pub fn compute_studio_task_diff_from_snapshot(snap: StudioTaskSnapshot) -> anyho
         if snap.files.contains_key(path) {
             continue;
         }
-        let diff = build_unified_diff("/dev/null", &unified_diff_label(path), "", new_c);
+        let diff = build_unified_diff(path, "", new_c, GitUnifiedDiffMode::Added);
         let long = diff.chars().count() > MAX_DIFF_OUTPUT_CHARS_PER_FILE;
         out.push(StudioFileDiffEntry {
             path: path.clone(),
@@ -258,13 +256,28 @@ pub fn compute_studio_task_diff_from_snapshot(snap: StudioTaskSnapshot) -> anyho
     Ok(out)
 }
 
-fn build_unified_diff(old_label: &str, new_label: &str, old_content: &str, new_content: &str) -> String {
+fn build_unified_diff(
+    rel_path: &str,
+    old_content: &str,
+    new_content: &str,
+    mode: GitUnifiedDiffMode,
+) -> String {
+    // Aligné sur `git diff` / validation `patch/hunks` : `diff --git a/… b/…`, `--- a/…`, `+++ b/…`.
+    // Les libellés `workspace:/…` (sans préfixe a/b) font échouer `invalid_patch_content` et `git apply`.
+    let (old_h, new_h) = match mode {
+        GitUnifiedDiffMode::Modified => {
+            (format!("a/{rel_path}"), format!("b/{rel_path}"))
+        }
+        GitUnifiedDiffMode::Added => ("/dev/null".to_string(), format!("b/{rel_path}")),
+        GitUnifiedDiffMode::Deleted => (format!("a/{rel_path}"), "/dev/null".to_string()),
+    };
     let diff = similar::TextDiff::from_lines(old_content, new_content);
     let mut s = format!(
-        "{}",
+        "diff --git a/{rel_path} b/{rel_path}\n{}",
         diff.unified_diff()
             .context_radius(3)
-            .header(old_label, new_label)
+            .header(old_h.as_str(), new_h.as_str()),
+        rel_path = rel_path
     );
     if !s.ends_with('\n') {
         s.push('\n');

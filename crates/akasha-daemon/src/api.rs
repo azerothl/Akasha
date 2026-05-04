@@ -13330,6 +13330,9 @@ pub async fn handle_api(
             if let Some(plan) = crate::api_studio::studio_code_plan_message_prefix(root) {
                 message_for_llm = format!("{plan}{message_for_llm}");
             }
+            if let Some(s) = crate::api_studio::studio_project_summary_prefix(root) {
+                message_for_llm = format!("{s}{message_for_llm}");
+            }
             let (evol_prefix, policy_prefix, tech_prefix) =
                 crate::api_studio::studio_meta_prefixes(root);
             if let Some(p) = evol_prefix {
@@ -16576,6 +16579,68 @@ mod tests {
         assert_eq!(c.len(), 2, "{:?}", c);
         assert_eq!(c[0].0, "read_file");
         assert_eq!(c[1].0, "read_file");
+    }
+
+    /// OpenRouter / modèles qui émettent `<longcat_tool_call>…</longcat_tool_call>` au lieu de `TOOL:`.
+    #[test]
+    fn parse_tool_calls_longcat_read_file_inline() {
+        let s = "Intro prose.<longcat_tool_call>read_file <longcat_arg_key>path <longcat_arg_value>workspace:/CODE_STUDIO_PLAN.md </longcat_tool_call>";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1, "{:?}", c);
+        assert_eq!(c[0].0, "read_file");
+        assert_eq!(c[0].1[0], "workspace:/CODE_STUDIO_PLAN.md");
+    }
+
+    #[test]
+    fn parse_tool_calls_longcat_read_file_multiline() {
+        let s = r#"Salut !
+<longcat_tool_call>read_file
+<longcat_arg_key>path
+<longcat_arg_value>workspace:/package.json
+</longcat_tool_call>"#;
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1, "{:?}", c);
+        assert_eq!(c[0].0, "read_file");
+        assert_eq!(c[0].1[0], "workspace:/package.json");
+    }
+
+    #[test]
+    fn parse_tool_calls_longcat_three_parallel_reads() {
+        let s = r#"Plan.<longcat_tool_call>read_file <longcat_arg_key>path <longcat_arg_value>workspace:/CODE_STUDIO_PLAN.md </longcat_tool_call> <longcat_tool_call>read_file <longcat_arg_key>path <longcat_arg_value>workspace:/DESIGN.md </longcat_tool_call> <longcat_tool_call>read_file <longcat_arg_key>path <longcat_arg_value>workspace:/package.json </longcat_tool_call>"#;
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 3, "{:?}", c);
+        assert_eq!(c[0].1[0], "workspace:/CODE_STUDIO_PLAN.md");
+        assert_eq!(c[1].1[0], "workspace:/DESIGN.md");
+        assert_eq!(c[2].1[0], "workspace:/package.json");
+    }
+
+    /// Kimi / modèles qui mettent toute la phrase + plusieurs `TOOL:` sur **une** ligne.
+    #[test]
+    fn parse_tool_calls_prose_inline_multiple_tool_on_one_line() {
+        let s = "Je vérifie. TOOL: search_files workspace:/ * --no-ignore TOOL: read_file workspace:/package.json TOOL: read_file workspace:/vite.config.ts";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 3, "{:?}", c);
+        assert_eq!(c[0].0, "search_files");
+        assert_eq!(
+            c[0].1,
+            vec![
+                "workspace:/".to_string(),
+                "*".to_string(),
+                "--no-ignore".to_string()
+            ]
+        );
+        assert_eq!(c[1].0, "read_file");
+        assert_eq!(c[1].1, vec!["workspace:/package.json"]);
+        assert_eq!(c[2].0, "read_file");
+        assert_eq!(c[2].1, vec!["workspace:/vite.config.ts"]);
+    }
+
+    #[test]
+    fn parse_tool_calls_strips_redacted_thinking_then_finds_tools() {
+        let s = "<think>plan</think>OK. TOOL: read_file workspace:/a.ts";
+        let c = parse_tool_calls(s);
+        assert_eq!(c.len(), 1, "{:?}", c);
+        assert_eq!(c[0].0, "read_file");
     }
 
     /// DeepSeek-style `<｜DSML｜…>` (U+FF5C fullwidth vertical line).

@@ -71,6 +71,19 @@ pub async fn handle_studio_route(
                 }
             }),
         };
+        let project_summary: Option<String> =
+            match body_v.as_ref().and_then(|v| v.get("project_summary")) {
+                None => None,
+                Some(v) if v.is_null() => None,
+                Some(v) => v.as_str().and_then(|s| {
+                    let t = s.trim();
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t.chars().take(MAX_PROJECT_SUMMARY_CHARS).collect::<String>())
+                    }
+                }),
+            };
         let meta = StudioMeta {
             id: id.clone(),
             name: name.unwrap_or_else(|| "Untitled".to_string()),
@@ -82,9 +95,16 @@ pub async fn handle_studio_route(
             verify_timeout_sec: None,
             evolution_summary: None,
             policy_notes: None,
+            project_summary,
         };
         let _ = save_studio_meta(&dir, &meta);
-        let _ = write_initial_code_studio_plan(&dir, &meta.name, meta.tech_stack.as_deref());
+        let _ = write_initial_code_studio_plan(
+            &dir,
+            &meta.name,
+            meta.tech_stack.as_deref(),
+            meta.project_summary.as_deref(),
+        );
+        let _ = write_initial_design_md(&dir, &meta.name, meta.project_summary.as_deref());
         let specs_dir = dir.join("specs");
         if let Err(e) = fs::create_dir_all(&specs_dir) {
             tracing::warn!(
@@ -108,10 +128,16 @@ pub async fn handle_studio_route(
                     }
                 }
             };
-            if init_ok {
-                if let Err(e) = ensure_main_or_master_branch(&dir).await {
-                    tracing::warn!(error = %e, path = %dir.display(), "failed to ensure main/master after git init");
-                }
+            if !init_ok {
+                tracing::warn!(path = %dir.display(), "git init did not succeed for new studio project");
+            }
+        }
+        if dir.join(".git").exists() {
+            if let Err(e) = ensure_main_or_master_branch(&dir).await {
+                tracing::warn!(error = %e, path = %dir.display(), "failed to ensure main/master for new studio project");
+            }
+            if let Err(e) = ensure_studio_initial_commit(&dir).await {
+                tracing::warn!(error = %e, path = %dir.display(), "failed initial git commit for new studio project");
             }
         }
         schedule_studio_code_rag_index(data_dir, &id, &dir, false);
@@ -123,6 +149,25 @@ pub async fn handle_studio_route(
     if method == "GET" {
         if let Some(rest) = strip_studio_projects_prefix(path_only) {
             let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+            // GET /api/studio/projects/:id/delete-check
+            if segments.len() == 2 && segments[1] == "delete-check" {
+                let id = segments[0];
+                let root = match resolve_studio_project_dir(data_dir, id) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return Some(json_response(
+                            "400 Bad Request",
+                            &serde_json::json!({ "error": e }).to_string(),
+                        ));
+                    }
+                };
+                if !root.is_dir() {
+                    return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                }
+                let report = studio_delete_precheck(&root).await;
+                let body = serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string());
+                return Some(json_response("200 OK", &body));
+            }
             if segments.len() == 1 {
                 let id = segments[0];
                 let root = match resolve_studio_project_dir(data_dir, id) {
@@ -151,6 +196,7 @@ pub async fn handle_studio_route(
                     verify_timeout_sec: None,
                     evolution_summary: None,
                     policy_notes: None,
+                    project_summary: None,
                 });
                 let mut body = serde_json::to_value(&meta).unwrap_or_else(|_| serde_json::json!({}));
                 if let Some(obj) = body.as_object_mut() {
@@ -275,6 +321,7 @@ pub async fn handle_studio_route(
                 let has_verify_timeout = body_v.get("verify_timeout_sec").is_some();
                 let has_evolution_summary = body_v.get("evolution_summary").is_some();
                 let has_policy_notes = body_v.get("policy_notes").is_some();
+                let has_project_summary = body_v.get("project_summary").is_some();
                 if !has_name
                     && !has_stack
                     && !has_verify_skip
@@ -282,10 +329,11 @@ pub async fn handle_studio_route(
                     && !has_verify_timeout
                     && !has_evolution_summary
                     && !has_policy_notes
+                    && !has_project_summary
                 {
                     return Some(json_response(
                         "400 Bad Request",
-                        r#"{"error":"provide at least one of: name, tech_stack, verify_skip, verify_argv, verify_timeout_sec, evolution_summary, policy_notes"}"#,
+                        r#"{"error":"provide at least one of: name, tech_stack, verify_skip, verify_argv, verify_timeout_sec, evolution_summary, policy_notes, project_summary"}"#,
                     ));
                 }
                 let mut meta = load_studio_meta(&root).unwrap_or(StudioMeta {
@@ -299,6 +347,7 @@ pub async fn handle_studio_route(
                     verify_timeout_sec: None,
                     evolution_summary: None,
                     policy_notes: None,
+                    project_summary: None,
                 });
                 if has_name {
                     let new_name = match body_v.get("name").and_then(|x| x.as_str()).map(str::trim) {
@@ -461,6 +510,38 @@ pub async fn handle_studio_route(
                         None => {}
                     }
                 }
+                if has_project_summary {
+                    match body_v.get("project_summary") {
+                        Some(v) if v.is_null() => {
+                            meta.project_summary = None;
+                        }
+                        Some(v) => {
+                            let s = match v.as_str() {
+                                Some(t) => t,
+                                None => {
+                                    return Some(json_response(
+                                        "400 Bad Request",
+                                        r#"{"error":"project_summary must be string or null"}"#,
+                                    ));
+                                }
+                            };
+                            if s.chars().count() > MAX_PROJECT_SUMMARY_CHARS {
+                                return Some(json_response(
+                                    "400 Bad Request",
+                                    &serde_json::json!({ "error": "project_summary too long", "max": MAX_PROJECT_SUMMARY_CHARS })
+                                        .to_string(),
+                                ));
+                            }
+                            let t = s.trim();
+                            meta.project_summary = if t.is_empty() {
+                                None
+                            } else {
+                                Some(t.to_string())
+                            };
+                        }
+                        None => {}
+                    }
+                }
                 if let Err(e) = save_studio_meta(&root, &meta) {
                     return Some(json_response(
                         "500 Internal Server Error",
@@ -477,6 +558,7 @@ pub async fn handle_studio_route(
                     "verify_timeout_sec": meta.verify_timeout_sec,
                     "evolution_summary": meta.evolution_summary,
                     "policy_notes": meta.policy_notes,
+                    "project_summary": meta.project_summary,
                 })
                 .to_string();
                 return Some(json_response("200 OK", &body));
@@ -1506,6 +1588,7 @@ pub async fn handle_studio_route(
                 verify_timeout_sec: None,
                 evolution_summary: None,
                 policy_notes: None,
+                project_summary: None,
             });
             let body = serde_json::json!({ "evolutions": meta.evolutions }).to_string();
             return Some(json_response("200 OK", &body));
@@ -1589,6 +1672,7 @@ pub async fn handle_studio_route(
                 verify_timeout_sec: None,
                 evolution_summary: None,
                 policy_notes: None,
+                project_summary: None,
             });
             meta.evolutions.push(StudioEvolution {
                 id: evo_id.clone(),
@@ -1810,6 +1894,85 @@ pub async fn handle_studio_route(
                 }
                 let _ = save_studio_meta(&root, &meta);
                 return Some(json_response("200 OK", r#"{"ok":true,"message":"abandoned"}"#));
+            }
+        }
+    }
+
+    // DELETE /api/studio/projects/:id — supprime le dossier projet ; `force` via query `?force=1` ou JSON `{"force":true}`.
+    if method == "DELETE" {
+        if let Some(rest) = strip_studio_projects_prefix(path_only) {
+            let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+            if segments.len() == 1 {
+                let id = segments[0];
+                let root = match resolve_studio_project_dir(data_dir, id) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return Some(json_response(
+                            "400 Bad Request",
+                            &serde_json::json!({ "error": e }).to_string(),
+                        ));
+                    }
+                };
+                if !root.is_dir() {
+                    return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+                }
+                let force_query = query_param(query_str, "force")
+                    .map(|c| c == "1" || c.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let force_body = body
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+                    .and_then(|v| v.get("force").and_then(|x| x.as_bool()))
+                    .unwrap_or(false);
+                let force = force_query || force_body;
+                if !force {
+                    let pre = studio_delete_precheck(&root).await;
+                    if pre.requires_force {
+                        let body = serde_json::json!({
+                            "error": "delete_requires_force",
+                            "precheck": pre,
+                        })
+                        .to_string();
+                        return Some(json_response("409 Conflict", &body));
+                    }
+                }
+                {
+                    let mut map = studio_preview_registry().lock().await;
+                    if let Some(mut prev) = map.remove(id) {
+                        let _ = prev.child.kill().await;
+                    }
+                }
+                let id_owned = id.to_string();
+                let data_dir_owned = data_dir.to_path_buf();
+                let root_owned = root.clone();
+                let rm = tokio::task::spawn_blocking(move || {
+                    let store = crate::code_rag::CodeRagStore::new(&data_dir_owned);
+                    let _ = store.remove_project_index(&id_owned);
+                    if root_owned.is_dir() {
+                        fs::remove_dir_all(&root_owned)?;
+                    }
+                    Ok::<(), std::io::Error>(())
+                })
+                .await;
+                match rm {
+                    Ok(Ok(())) => {
+                        return Some(json_response(
+                            "200 OK",
+                            r#"{"ok":true,"deleted":true}"#,
+                        ));
+                    }
+                    Ok(Err(e)) => {
+                        return Some(json_response(
+                            "500 Internal Server Error",
+                            &serde_json::json!({ "error": e.to_string() }).to_string(),
+                        ));
+                    }
+                    Err(e) => {
+                        return Some(json_response(
+                            "500 Internal Server Error",
+                            &serde_json::json!({ "error": e.to_string() }).to_string(),
+                        ));
+                    }
+                }
             }
         }
     }

@@ -403,6 +403,9 @@ struct StudioMeta {
     /// Notes de politique outils / périmètre (réinjectées ; complètent tools_policy côté humain).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     policy_notes: Option<String>,
+    /// Résumé produit / intention à la création (préfixe agent + graine plan & DESIGN.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project_summary: Option<String>,
 }
 
 const MAX_TECH_STACK_CHARS: usize = 4000;
@@ -410,6 +413,7 @@ const MAX_TECH_STACK_CHARS: usize = 4000;
 const MAX_CODE_STUDIO_PLAN_INJECT_CHARS: usize = 4000;
 const MAX_EVOLUTION_SUMMARY_CHARS: usize = 6000;
 const MAX_POLICY_NOTES_CHARS: usize = 4000;
+const MAX_PROJECT_SUMMARY_CHARS: usize = 6000;
 const MAX_DESIGN_HINT_CHARS: usize = 4000;
 const MAX_DESIGN_DOC_CHARS: usize = 12000;
 
@@ -484,6 +488,17 @@ fn policy_notes_prefix_from_meta(meta: &StudioMeta) -> Option<String> {
     ))
 }
 
+/// Résumé produit saisi à la création ( borne identique à `evolution_summary` ).
+fn project_summary_prefix_from_meta(meta: &StudioMeta) -> Option<String> {
+    let t = sanitize_for_prompt(meta.project_summary.as_deref()?, MAX_PROJECT_SUMMARY_CHARS);
+    if t.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[Résumé produit — intention initiale (à conserver pour le plan et le périmètre ; mettre à jour le fichier si le produit change) :\n{t}\n]\n\n"
+    ))
+}
+
 /// Load `.akasha-studio.json` once and return `(evolution_summary, policy_notes, tech_stack)` prefixes.
 /// Avoids redundant disk I/O when the caller needs all three in the same request.
 pub fn studio_meta_prefixes(project_root: &Path) -> (Option<String>, Option<String>, Option<String>) {
@@ -513,6 +528,12 @@ pub fn studio_evolution_summary_prefix(project_root: &Path) -> Option<String> {
 pub fn studio_policy_notes_prefix(project_root: &Path) -> Option<String> {
     let meta = load_studio_meta(project_root)?;
     policy_notes_prefix_from_meta(&meta)
+}
+
+/// Résumé produit enregistré dans `.akasha-studio.json` à la création (ou via PATCH).
+pub fn studio_project_summary_prefix(project_root: &Path) -> Option<String> {
+    let meta = load_studio_meta(project_root)?;
+    project_summary_prefix_from_meta(&meta)
 }
 
 /// Préfixe utilisateur / UI : `plan`, `implement`, `build`, `free` (aucun préfixe).
@@ -1358,7 +1379,12 @@ pub async fn studio_verify_after_agent_task(project_root: &Path) -> Result<(), S
     }
 }
 
-fn write_initial_code_studio_plan(project_root: &Path, name: &str, tech_stack: Option<&str>) -> Result<(), String> {
+fn write_initial_code_studio_plan(
+    project_root: &Path,
+    name: &str,
+    tech_stack: Option<&str>,
+    project_summary: Option<&str>,
+) -> Result<(), String> {
     let plan_path = project_root.join("CODE_STUDIO_PLAN.md");
     if plan_path.exists() {
         return Ok(());
@@ -1368,12 +1394,17 @@ fn write_initial_code_studio_plan(project_root: &Path, name: &str, tech_stack: O
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "(À compléter — stack enregistrée dans `.akasha-studio.json` ou déduite du manifeste.)".to_string());
+    let description_body = project_summary
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "(Brève description du produit et de l’usage attendu.)".to_string());
     let body = format!(
         r#"# Titre : {name}
 
 ## Description
 
-(Brève description du produit et de l’usage attendu.)
+{description_body}
 
 ## Scope
 
@@ -1419,9 +1450,157 @@ fn write_initial_code_studio_plan(project_root: &Path, name: &str, tech_stack: O
 _Gabarit Code Studio (Akasha) : **conserver ces titres de section** (`## …`). Pour une modification mineure, **ne pas** réécrire tout le fichier : éditer uniquement les sections concernées et ajouter des **lignes datées** dans *Informations complémentaires* ou *Demandes d'évolutions utilisateur par phase* pour l’historique des lots._
 "#,
         name = name,
+        description_body = description_body,
         stack_body = stack_body,
     );
     fs::write(&plan_path, body).map_err(|e| e.to_string())
+}
+
+fn yaml_double_quoted_scalar(s: &str) -> String {
+    let t = s.trim();
+    let t = if t.is_empty() { "App" } else { t };
+    let mut out = String::new();
+    for ch in t.chars().take(120) {
+        match ch {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            '\n' | '\r' => out.push(' '),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Gabarit minimal `DESIGN.md` (front matter + sections) pour que l’agent et l’UI partent d’une base valide.
+fn write_initial_design_md(
+    project_root: &Path,
+    name: &str,
+    project_summary: Option<&str>,
+) -> Result<(), String> {
+    let path = project_root.join("DESIGN.md");
+    if path.exists() {
+        return Ok(());
+    }
+    let safe_name = yaml_double_quoted_scalar(name);
+    let overview = match project_summary.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => format!(
+            "{s}\n\n_(Résumé fourni à la création du projet — affiner avec le design et le code.)_"
+        ),
+        None => "(À compléter — identité visuelle, références, mood, public cible.)".to_string(),
+    };
+    let c_primary = "#6366F1";
+    let c_surface = "#0F172A";
+    let c_text = "#F8FAFC";
+    let c_muted = "#94A3B8";
+    let body = format!(
+        r#"---
+version: alpha
+name: "{safe_name}"
+description: "Initial design scaffold — refine with implementation."
+colors:
+  primary: "{c_primary}"
+  surface: "{c_surface}"
+  text: "{c_text}"
+  muted: "{c_muted}"
+typography:
+  body-md:
+    fontFamily: system-ui
+    fontSize: 16px
+    fontWeight: "400"
+    lineHeight: "1.5"
+  display-lg:
+    fontFamily: system-ui
+    fontSize: 32px
+    fontWeight: "600"
+    lineHeight: "1.2"
+rounded:
+  sm: "4px"
+  md: "8px"
+spacing:
+  xs: "4px"
+  sm: "8px"
+components: {{}}
+
+---
+
+## Brand & Style
+
+{overview}
+
+## Colors
+
+Palette de départ — à aligner sur la marque et le code livré.
+
+## Typography
+
+Hiérarchie de base — ajuster selon le produit.
+
+## Layout & Spacing
+
+Grille et gouttières — à définir (mobile d’abord recommandé).
+
+## Elevation & depth
+
+Ombres et profondeur — à préciser.
+
+## Shapes
+
+Rayons et formes (cartes, boutons).
+
+## Components
+
+_Principaux blocs UI — détailler en `###` au fil de l’implémentation._
+"#,
+        safe_name = safe_name,
+        c_primary = c_primary,
+        c_surface = c_surface,
+        c_text = c_text,
+        c_muted = c_muted,
+        overview = overview,
+    );
+    fs::write(&path, body).map_err(|e| e.to_string())
+}
+
+/// Premier commit sur la branche courante si le dépôt n’en a pas encore (évite `HEAD` ambigu / detached sur certains clients).
+pub(super) async fn ensure_studio_initial_commit(project_root: &Path) -> Result<(), String> {
+    if !is_git_repo(project_root).await {
+        return Ok(());
+    }
+    let head_ok = git_output(project_root, &["rev-parse", "--verify", "HEAD"])
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if head_ok {
+        return Ok(());
+    }
+    let add = git_output(project_root, &["add", "-A"]).await?;
+    if !add.status.success() {
+        return Err(format!(
+            "git add failed: {}",
+            String::from_utf8_lossy(&add.stderr).trim()
+        ));
+    }
+    let commit = git_output(
+        project_root,
+        &[
+            "commit",
+            "-m",
+            "chore: initial Code Studio project",
+            "--no-verify",
+        ],
+    )
+    .await?;
+    if !commit.status.success() {
+        let msg = String::from_utf8_lossy(&commit.stderr).trim().to_string();
+        let out = String::from_utf8_lossy(&commit.stdout).trim().to_string();
+        if msg.contains("nothing to commit") || out.contains("nothing to commit") {
+            return Ok(());
+        }
+        return Err(format!("git commit failed: {msg}"));
+    }
+    Ok(())
 }
 
 /// Schedule Code Studio code-RAG indexing without blocking the UI / tool call.
@@ -1614,6 +1793,72 @@ pub fn evolution_branch_for_id(data_dir: &Path, project_id: &str, evolution_id: 
         .iter()
         .find(|e| e.id == evolution_id && e.status == "open")
         .map(|e| e.branch.clone())
+}
+
+/// Règles anti-suppression : worktree non propre, ou commits non poussés (branche de suivi connue).
+#[derive(Debug, Clone, Serialize)]
+pub struct StudioDeletePrecheck {
+    pub has_git: bool,
+    pub worktree_dirty: bool,
+    pub has_upstream: bool,
+    /// Nombre de commits locaux en avance sur `@{u}` ; `None` si pas de suivi amont.
+    pub commits_ahead_of_upstream: Option<u32>,
+    /// `true` → le client doit envoyer `force` (ou l’utilisateur confirmer explicitement).
+    pub requires_force: bool,
+    /// Dépôt Git avec historique local mais sans `@{u}` (impossible de vérifier le push).
+    pub note_no_upstream: bool,
+}
+
+/// Analyse Git avant suppression (avertir commit / push).
+pub async fn studio_delete_precheck(project_root: &Path) -> StudioDeletePrecheck {
+    if !is_git_repo(project_root).await {
+        return StudioDeletePrecheck {
+            has_git: false,
+            worktree_dirty: false,
+            has_upstream: false,
+            commits_ahead_of_upstream: None,
+            requires_force: false,
+            note_no_upstream: false,
+        };
+    }
+    let worktree_dirty = git_has_pending_changes(project_root).await.unwrap_or(false);
+    let has_upstream = git_output(project_root, &["rev-parse", "@{u}"])
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let commits_ahead_of_upstream = if has_upstream {
+        match git_output(project_root, &["rev-list", "--count", "@{u}..HEAD"]).await {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().parse().ok(),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let ahead = commits_ahead_of_upstream.unwrap_or(0);
+    let requires_force = worktree_dirty || (has_upstream && ahead > 0);
+    let note_no_upstream = !has_upstream
+        && git_rev_count(project_root, &["HEAD"])
+            .await
+            .unwrap_or(0)
+            > 0;
+    StudioDeletePrecheck {
+        has_git: true,
+        worktree_dirty,
+        has_upstream,
+        commits_ahead_of_upstream,
+        requires_force,
+        note_no_upstream,
+    }
+}
+
+async fn git_rev_count(project_root: &Path, rev: &[&str]) -> Option<u32> {
+    let mut args: Vec<&str> = vec!["rev-list", "--count"];
+    args.extend_from_slice(rev);
+    let o = git_output(project_root, &args).await.ok()?;
+    if !o.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&o.stdout).trim().parse().ok()
 }
 
 
