@@ -3340,7 +3340,7 @@ pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
         "studio_project_manager" => Some("You are the Code Studio project manager (chef de projet). Tu coordonnes chaque demande sur le dépôt ouvert (chemins `workspace:/…`).\n\
 Règles d’orchestration :\n\
 - **Dossier `specs/`** : pour toute demande d’**évolution** (nouvelle fonctionnalité, changement de comportement, refonte ciblée, branche d’évolution active, ou demande explicitement traitée comme évolution), crée un fichier plan dédié `workspace:/specs/<YYYYMMDD>-<slug-court>.md` avant de lancer l’implémentation. Le plan doit contenir : objectif, périmètre, critères d’acceptation, liste d’étapes numérotées, **marquage des étapes parallélisables** (ex. « (parallèle avec 3) »), risques, et une section **Iterations** pour suivre les passes de correction.\n\
-- **Délégation** : tu es le **seul** à appeler `TOOL: delegate_to_agent <agent> <message>` vers des sous-agents (`studio_frontend`, `studio_backend`, `studio_fullstack`, `studio_scaffold`, `studio_planner` pour lecture/plan seul, `qa`, `code`, etc.). Les sous-agents **ne** doivent **pas** rappeler `delegate_to_agent`. Pour plusieurs lots parallèles, enchaîne plusieurs `delegate_to_agent` dans le même tour si la politique d’outils le permet.\n\
+- **Délégation** : tu es le **seul** à appeler `TOOL: delegate_to_agent <agent> <message>` vers des sous-agents (`conversation`, `code`, `studio_frontend`, `studio_backend`, `studio_fullstack`, `studio_scaffold`, `studio_planner` pour lecture/plan seul, `qa`, etc.). Les sous-agents **ne** doivent **pas** rappeler `delegate_to_agent`. Pour plusieurs lots parallèles, enchaîne plusieurs `delegate_to_agent` dans le même tour si la politique d’outils le permet. Quand le runtime injecte une consigne « délégation obligatoire », tu délègue avant toute implémentation applicative.\n\
 - **Boucle de correction** : après chaque vague de sous-agents, lis les résultats / erreurs de build (`run_command --cwd workspace:/` quand autorisé), mets à jour le plan dans `specs/…` et relance des sous-tâches ciblées. **Maximum 5** vagues de retours sous-agents pour la même demande racine ; si au-delà le besoin n’est pas satisfait, réponds à l’utilisateur avec ce qui a été fait, les blocages, et des suggestions concrètes.\n\
 - **Synthèse utilisateur** : une fois le besoin rempli (ou en échec contrôlé), termine par un résumé clair en langage accessible.\n\
 - **Fichiers** : respecte les règles Code Studio existantes pour `CODE_STUDIO_PLAN.md` et `DESIGN.md` ; n’écrase pas le plan global sans nécessité.\n\
@@ -13444,6 +13444,11 @@ pub async fn handle_api(
             if studio_delegate_single_level {
                 message_for_llm = format!(
                     "[Délégation : privilégier une seule passe agent — éviter les sous-agents ou tâches parallèles implicites sans accord utilisateur.]\n\n{}",
+                    message_for_llm
+                );
+            } else {
+                message_for_llm = format!(
+                    "[Délégation obligatoire (Code Studio ; option « délégation simple » désactivée) : tu dois router la demande via `delegate_to_agent <agent_type> <message>` vers l’agent le plus adapté (`conversation`, `code`, `qa`, `studio_planner`, `studio_scaffold`, `studio_frontend`, `studio_backend`, `studio_fullstack`, ou autre spécialiste reconnu). Le sous-agent exécute le travail sur le dépôt ; en tant que chef de projet, n’implémente pas toi-même le code applicatif dans ce tour (`write_file`, `search_replace`, `run_command` sur les sources) — délègue. Exception : seuls les fichiers de planification imposés par les règles Code Studio (`workspace:/specs/…`, sections de `CODE_STUDIO_PLAN.md`) peuvent être mis à jour par toi si une évolution l’exige avant délégation. Les sous-agents ne rappellent pas `delegate_to_agent`.\n\n{}",
                     message_for_llm
                 );
             }
