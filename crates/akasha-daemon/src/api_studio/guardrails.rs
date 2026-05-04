@@ -75,6 +75,7 @@ pub fn looks_like_code_studio_promise_before_any_tools(text: &str) -> bool {
     // Future or present-tense “about to work” phrasing (models often say « Je regarde… » not « Je vais… »).
     let intent_future = [
         "je vais ",
+        "je reprends ",
         "j'ai l'intention",
         "je regarde ",
         "je regarde ce",
@@ -122,6 +123,10 @@ pub fn looks_like_code_studio_promise_before_any_tools(text: &str) -> bool {
         "explorer",
         "explore ",
         "état actuel",
+        "état des lieux",
+        "état du workspace",
+        "mise en place",
+        "mettre à jour le plan",
         "current state",
         "look at the",
         "look at this",
@@ -188,6 +193,15 @@ mod tests {
     fn promise_before_tools_detects_je_regarde_invalid_token() {
         let s = "Salut Loïc ! Je regarde ce qui cause cette erreur `invalid_token` à l'affichage. Je commence par inspecter les fichiers d'entrée et le build.";
         assert!(looks_like_code_studio_promise_before_any_tools(s));
+    }
+
+    #[test]
+    fn promise_before_tools_detects_etat_des_lieux_kimi_intro() {
+        let s = "Salut Loïc ! Je reprends le projet Fasst PR. Je vais d'abord faire l'état des lieux du workspace, puis mettre à jour le plan et lancer la mise en place de l'application.";
+        assert!(
+            looks_like_code_studio_promise_before_any_tools(s),
+            "Kimi-style intros use « état des lieux » / « mise en place », not only « diagnostic » / « état actuel »."
+        );
     }
 
     #[test]

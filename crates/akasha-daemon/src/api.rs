@@ -9220,7 +9220,7 @@ pub(crate) async fn run_message_via_llm(
                 && crate::api_studio::looks_like_code_studio_promise_before_any_tools(&response_plain);
 
             let mut prose_fire = prose_heuristic;
-            let mut promise_fire = promise_heuristic;
+            let promise_fire = promise_heuristic;
             if crate::api_studio::studio_llm_response_auditor_enabled()
                 && (prose_heuristic || promise_heuristic)
             {
@@ -9241,9 +9241,9 @@ pub(crate) async fn run_message_via_llm(
                     if prose_heuristic {
                         prose_fire = audit.prose_only_implementation;
                     }
-                    if promise_heuristic {
-                        promise_fire = audit.promise_without_tools;
-                    }
+                    // Promise-without-tools: keep heuristic result. The optional auditor often answers
+                    // false on French intros (« état des lieux », « mise en place »), which would skip
+                    // mandatory TOOL retries and leave Code Studio tasks « completed » with zero tools.
                 }
             }
 
