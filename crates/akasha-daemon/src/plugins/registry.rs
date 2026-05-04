@@ -190,6 +190,7 @@ impl PluginRegistry {
                                 Err(e) => {
                                     warn!(path = ?manifest_path, error = %e, "Failed to parse plugin manifest");
                                     load_errors += 1;
+                                    break;
                                 }
                             }
                         }
