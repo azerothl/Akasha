@@ -131,7 +131,7 @@ async function handleFill(params) {
     const sel = (params && params.selector) || '';
     const value = (params && params.value) != null ? String(params.value) : '';
     if (!sel) {
-      send({ ok: false, error: 'fill requires params.selector and params.value' });
+      send({ ok: false, error: 'fill requires params.selector' });
       return;
     }
     const timeout = (params.timeout_secs || 30) * 1000;

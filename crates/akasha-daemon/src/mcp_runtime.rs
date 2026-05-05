@@ -1,5 +1,5 @@
 //! MCP stdio long-lived attach + runtime summary for operators.
-//! HTTP/SSE and in-product OAuth remain roadmap; see `docs/mcp-runtime.md`, `docs/mcp-oauth.md`.
+//! HTTP/SSE and in-product OAuth remain roadmap; see `spec/dev/integrations/mcp-runtime.md`, `spec/dev/integrations/mcp-oauth.md`.
 
 use serde_json::{json, Value};
 use std::path::Path;
@@ -68,7 +68,7 @@ pub async fn summary() -> Value {
         "stdio_server": g.as_ref().map(|s| s.server.as_str()),
         "oauth": {
             "mode": "documented_vault_reserved",
-            "see": "docs/mcp-oauth.md"
+            "see": "spec/dev/integrations/mcp-oauth.md"
         },
         "transports": {
             "stdio_long_lived": "POST /api/mcp/runtime/stdio/start { \"server\": \"name\" }",
