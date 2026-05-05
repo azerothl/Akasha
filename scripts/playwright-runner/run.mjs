@@ -62,7 +62,7 @@ async function handleNavigate(params) {
       send({ ok: false, error: 'Only http and https URLs are allowed.' });
       return;
     }
-    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: (params.timeout_secs || 30) * 1000 });
+    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: (params.timeout_secs ?? 30) * 1000 });
     const title = await page.title();
     const status = response ? response.status() : 0;
     send({ ok: true, result: { title, status: status, url: page.url() } });
@@ -114,7 +114,7 @@ async function handleClick(params) {
       send({ ok: false, error: 'click requires params.selector (CSS selector)' });
       return;
     }
-    const timeout = (params.timeout_secs || 30) * 1000;
+    const timeout = (params.timeout_secs ?? 30) * 1000;
     await page.click(sel, { timeout });
     send({ ok: true, result: { clicked: true, selector: sel } });
   } catch (e) {
@@ -134,7 +134,7 @@ async function handleFill(params) {
       send({ ok: false, error: 'fill requires params.selector' });
       return;
     }
-    const timeout = (params.timeout_secs || 30) * 1000;
+    const timeout = (params.timeout_secs ?? 30) * 1000;
     await page.fill(sel, value, { timeout });
     send({ ok: true, result: { filled: true, selector: sel } });
   } catch (e) {
@@ -160,7 +160,7 @@ async function handleWait(params) {
       send({ ok: false, error: 'wait requires params.selector (string) or params.milliseconds (number)' });
       return;
     }
-    const timeout = (params.timeout_secs || 30) * 1000;
+    const timeout = (params.timeout_secs ?? 30) * 1000;
     await page.waitForSelector(sel, { timeout });
     send({ ok: true, result: { waited: true, selector: sel } });
   } catch (e) {

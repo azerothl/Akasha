@@ -49,6 +49,7 @@ pub fn load(data_dir: &Path) -> TelegramAccessState {
 
 pub fn save(data_dir: &Path, state: &TelegramAccessState) -> anyhow::Result<()> {
     let path = state_path(data_dir);
+    std::fs::create_dir_all(data_dir)?;
     let contents = serde_json::to_string_pretty(state)?;
     let tmp_path = path.with_extension("json.tmp");
     std::fs::write(&tmp_path, contents.as_bytes())?;

@@ -28,6 +28,7 @@ pub fn built_in_tool_capabilities(tool_name: &str) -> ToolCapabilities {
     match name.as_str() {
         "read_file" | "search_files" | "grep_content" | "file_diff" | "diff_unified" | "dir_compare"
         | "git_status" | "git_diff" | "git_log" | "git_rev_parse" | "web_search" | "web_fetch"
+        | "web_crawl" | "web_crawl_status"
         | "read_todos" | "memory_search" | "memory_stats" | "workspace_graph_search" => {
             ToolCapabilities {
                 name: "read_only",

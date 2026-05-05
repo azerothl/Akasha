@@ -112,9 +112,15 @@ fn put(key: &str, body: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialize tests that mutate the process-wide env var to avoid flakiness when Rust runs
+    // tests in parallel.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn put_get_invalidate() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("AKASHA_HTTP_CACHE_TTL_SECS", "60");
         let s = r#"{"providers":{}}"#.to_string();
         cache_put_router_models(&s);

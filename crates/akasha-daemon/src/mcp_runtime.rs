@@ -106,7 +106,10 @@ pub async fn oauth_put(data_dir: &Path, provider: String, status: String) -> Res
     tokio::fs::write(&tmp, raw)
         .await
         .map_err(|e| format!("write {}: {}", tmp.display(), e))?;
-    // std::fs::rename on Windows fails when the destination already exists — remove it first.
+    // On Windows, rename fails when the destination exists — remove it first.
+    // On POSIX the rename is atomic and the pre-remove step is not needed (and would create a
+    // window where the file is absent), so this is cfg-gated.
+    #[cfg(windows)]
     let _ = tokio::fs::remove_file(&p).await;
     tokio::fs::rename(&tmp, &p)
         .await

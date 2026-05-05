@@ -1157,7 +1157,7 @@ impl App {
         self.operator_ops_rx = Some(rx);
         thread::spawn(move || {
             let client = match reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(8))
+                .timeout(Duration::from_secs(5))
                 .build()
             {
                 Ok(c) => c,
@@ -1177,23 +1177,32 @@ impl App {
                 ("mcp_runtime", "/api/mcp/runtime"),
                 ("lifecycle", "/api/lifecycle/hooks"),
             ];
-            let mut parts: Vec<String> = Vec::new();
-            let mut ok = 0usize;
-            for (label, path) in paths {
-                let url = format!("{base}{path}");
-                let line = match client.get(&url).send() {
-                    Ok(r) => {
-                        let status = r.status();
-                        if status.is_success() {
-                            ok += 1;
-                        }
-                        let body = r.text().unwrap_or_default();
-                        format!("{label} {path} → {status}\n{}", trim_tui(&body, 1400))
-                    }
-                    Err(e) => format!("{label} {path} → (error: {e})"),
-                };
-                parts.push(line);
-            }
+            // Fetch all endpoints concurrently to keep total wall time bounded.
+            let mut indexed_results: Vec<(usize, String)> = std::thread::scope(|s| {
+                let handles: Vec<_> = paths
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (label, path))| {
+                        let client = &client;
+                        let url = format!("{base}{path}");
+                        s.spawn(move || {
+                            let line = match client.get(&url).send() {
+                                Ok(r) => {
+                                    let status = r.status();
+                                    let body = r.text().unwrap_or_default();
+                                    format!("{label} {path} → {status}\n{}", trim_tui(&body, 1400))
+                                }
+                                Err(e) => format!("{label} {path} → (error: {e})"),
+                            };
+                            (i, line)
+                        })
+                    })
+                    .collect();
+                handles.into_iter().filter_map(|h| h.join().ok()).collect()
+            });
+            indexed_results.sort_by_key(|(i, _)| *i);
+            let parts: Vec<String> = indexed_results.into_iter().map(|(_, s)| s).collect();
+            let ok = parts.iter().filter(|s| s.contains('→') && !s.contains("error")).count();
             let mut out = vec![format!("Cockpit health: {ok}/{} endpoints OK", parts.len())];
             out.extend(parts);
             let _ = tx.send(out.join("\n---\n"));
