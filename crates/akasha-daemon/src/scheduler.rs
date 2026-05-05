@@ -124,27 +124,31 @@ async fn tick(
                         Ok(v) => {
                             // If the JSON value is itself a plain string, use it directly.
                             if let Some(s) = v.as_str() {
-                                if !s.trim().is_empty() {
-                                    message = s.trim().to_string();
+                                let s = s.trim();
+                                if !s.is_empty() {
+                                    message = s.to_string();
                                 }
                             } else {
                                 // JSON object: prefer explicit `message` field.
                                 if let Some(m) = v.get("message").and_then(|s| s.as_str()) {
-                                    if !m.trim().is_empty() {
-                                        message = m.trim().to_string();
+                                    let m = m.trim();
+                                    if !m.is_empty() {
+                                        message = m.to_string();
                                     }
                                 }
                                 if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
-                                    if !sid.trim().is_empty() {
-                                        session_id = sid.trim().to_string();
+                                    let sid = sid.trim();
+                                    if !sid.is_empty() {
+                                        session_id = sid.to_string();
                                     }
                                 }
                             }
                         }
                         Err(_) => {
                             // Not JSON: use the raw channel_context as the message.
-                            if !ctx.trim().is_empty() {
-                                message = ctx.trim().to_string();
+                            let ctx = ctx.trim();
+                            if !ctx.is_empty() {
+                                message = ctx.to_string();
                             }
                         }
                     }
