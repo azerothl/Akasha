@@ -3356,7 +3356,7 @@ pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
         "studio_project_manager" => Some("You are the Code Studio project manager (chef de projet). Tu coordonnes chaque demande sur le dépôt ouvert (chemins `workspace:/…`).\n\
 Règles d’orchestration :\n\
 - **Dossier `specs/`** : pour toute demande d’**évolution** (nouvelle fonctionnalité, changement de comportement, refonte ciblée, branche d’évolution active, ou demande explicitement traitée comme évolution), crée un fichier plan dédié `workspace:/specs/<YYYYMMDD>-<slug-court>.md` avant de lancer l’implémentation. Le plan doit contenir : objectif, périmètre, critères d’acceptation, liste d’étapes numérotées, **marquage des étapes parallélisables** (ex. « (parallèle avec 3) »), risques, et une section **Iterations** pour suivre les passes de correction.\n\
-- **Délégation** : tu es le **seul** à appeler `TOOL: delegate_to_agent <agent> <message>` vers des sous-agents (`conversation`, `code`, `studio_frontend`, `studio_backend`, `studio_fullstack`, `studio_scaffold`, `studio_planner` pour lecture/plan seul, `qa`, etc.). Les sous-agents **ne** doivent **pas** rappeler `delegate_to_agent`. Pour plusieurs lots parallèles, enchaîne plusieurs `delegate_to_agent` dans le même tour si la politique d’outils le permet. Quand le runtime injecte une consigne « délégation obligatoire », tu délègue avant toute implémentation applicative.\n\
+- **Délégation** : tu es le **seul** à appeler `TOOL: delegate_to_agent <agent> <message>` vers des sous-agents (`conversation`, `code`, `studio_frontend`, `studio_backend`, `studio_fullstack`, `studio_scaffold`, `studio_planner` pour lecture/plan seul, `qa`, etc.). Les sous-agents **ne** doivent **pas** rappeler `delegate_to_agent`. **Mode anti-conflit Code Studio** : exécute une délégation **séquentielle** (un seul `delegate_to_agent` à la fois), attends le résultat, relis les fichiers impactés, puis lance le suivant. Quand le runtime injecte une consigne « délégation obligatoire », tu délègue avant toute implémentation applicative.\n\
 - **Boucle de correction** : après chaque vague de sous-agents, lis les résultats / erreurs de build (`run_command --cwd workspace:/` quand autorisé), mets à jour le plan dans `specs/…` et relance des sous-tâches ciblées. **Maximum 5** vagues de retours sous-agents pour la même demande racine ; si au-delà le besoin n’est pas satisfait, réponds à l’utilisateur avec ce qui a été fait, les blocages, et des suggestions concrètes.\n\
 - **Synthèse utilisateur** : une fois le besoin rempli (ou en échec contrôlé), termine par un résumé clair en langage accessible.\n\
 - **Fichiers** : respecte les règles Code Studio existantes pour `CODE_STUDIO_PLAN.md` et `DESIGN.md` ; n’écrase pas le plan global sans nécessité.\n\
@@ -9185,6 +9185,39 @@ pub(crate) async fn run_message_via_llm(
                     Some(calls)
                 }
             });
+            if code_studio_disk_task && assigned_agent.eq_ignore_ascii_case("studio_project_manager")
+            {
+                if let Some(calls) = parsed_tool_calls.as_ref() {
+                    let delegate_calls = calls
+                        .iter()
+                        .filter(|(name, _)| name.eq_ignore_ascii_case("delegate_to_agent"))
+                        .count();
+                    if delegate_calls > 1 {
+                        let _ = bus.send(
+                        EventEnvelope::new(
+                                EventType::ProgressUpdate,
+                                Some(serde_json::json!({
+                                    "task_id": task_id.to_string(),
+                                    "progress_pct": 47,
+                                    "message": format!(
+                                        "Conflit d'orchestration détecté: {} délégations dans le même tour (anti-collision activé).",
+                                        delegate_calls
+                                    ),
+                                    "studio_notice_type": "studio_conflict_notice",
+                                    "reason": "Plusieurs délégations sous-agents dans le même tour (risque d'écrasement croisé).",
+                                    "delegate_calls": delegate_calls
+                                })),
+                            )
+                            .with_correlation(timeline_correlation),
+                        );
+                        current_prompt = format!(
+                            "User request: {}\n\nYour previous reply tried {} delegate_to_agent calls in a single turn.\n\n[Code Studio — anti-conflict delegation]\nUse exactly ONE `TOOL: delegate_to_agent <agent> <message>` per turn. Wait for its completion, then read impacted files and continue with the next delegation in a later turn.\nDo not run parallel delegation batches in the same answer.",
+                            user_message, delegate_calls
+                        );
+                        continue;
+                    }
+                }
+            }
             let no_parseable_tools_this_round = parsed_tool_calls.is_none();
             let response_plain = response
                 .lines()
