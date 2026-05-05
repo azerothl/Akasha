@@ -2054,6 +2054,24 @@ fn english_session_recap_word(lower: &str) -> bool {
         .any(|w| w == "recap")
 }
 
+/// French tokens suggesting « remind me / session recap ».
+/// Uses whole-token matching so phrases like « ne **rappellent** pas » do not false-positive
+/// on substring `rappel` (regression: mandatory delegation prefix + session recap fast path).
+fn french_session_recall_word_tokens(lower: &str) -> bool {
+    const TOKENS: &[&str] = &[
+        "rappel",
+        "rappeler",
+        "rappelle",
+        "rappelles",
+        "rappelez",
+        "rappelons",
+    ];
+    lower
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '\'')
+        .filter(|t| !t.is_empty())
+        .any(|w| TOKENS.contains(&w))
+}
+
 fn detect_session_recall_intent(message: &str) -> Option<SessionRecallIntent> {
     let lower = message
         .trim()
@@ -2064,9 +2082,6 @@ fn detect_session_recall_intent(message: &str) -> Option<SessionRecallIntent> {
         return None;
     }
     let asks_recall = [
-        "rappeler",
-        "rappelle",
-        "rappel",
         "ce qu'on a fait",
         "ce qu on a fait",
         "on a fait",
@@ -2077,6 +2092,7 @@ fn detect_session_recall_intent(message: &str) -> Option<SessionRecallIntent> {
     ]
     .iter()
     .any(|k| lower.contains(k))
+        || french_session_recall_word_tokens(&lower)
         || english_session_recap_word(&lower);
     if !asks_recall {
         return None;
@@ -7979,7 +7995,13 @@ pub(crate) async fn run_message_via_llm(
     } else {
         classify_small_talk_message(clean_message)
     };
-    let session_recall_intent = detect_session_recall_intent(clean_message);
+    // Never treat Code Studio disk tasks as « session recap » — injected prefixes can contain
+    // words like « rappellent » (substring « rappel » used to trigger the recap fast path).
+    let session_recall_intent = if code_studio_disk_task {
+        None
+    } else {
+        detect_session_recall_intent(clean_message)
+    };
     tracing::debug!(
         ?session_recall_intent,
         "[RECALL_DEBUG] session_recall_intent"
@@ -8876,6 +8898,7 @@ pub(crate) async fn run_message_via_llm(
         let mut studio_prose_only_write_nags = 0u32;
         let mut studio_zero_tool_promise_nags = 0u32;
         let mut studio_unparsed_tool_marker_nags = 0u32;
+        let mut studio_pm_mandatory_delegate_nags = 0u32;
         let mut last_captured_image_base64: Option<String> = None;
 
         let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
@@ -9170,6 +9193,45 @@ pub(crate) async fn run_message_via_llm(
                 .join("\n")
                 .trim()
                 .to_string();
+
+            // Code Studio PM mode with explicit mandatory delegation prefix:
+            // do not allow the root PM to finish in prose after only read-only checks.
+            let studio_delegate_mandatory =
+                code_studio_disk_task && message.contains("[Délégation obligatoire (Code Studio");
+            let pm_delegate_required = studio_delegate_mandatory
+                && assigned_agent.eq_ignore_ascii_case("studio_project_manager");
+            let pm_has_delegated = tool_loop_history_by_agent
+                .get(&loop_agent_key)
+                .map(|v| {
+                    v.iter()
+                        .any(|(tool, _)| tool.eq_ignore_ascii_case("delegate_to_agent"))
+                })
+                .unwrap_or(false);
+            const MAX_STUDIO_PM_MANDATORY_DELEGATE_NAGS: u32 = 4;
+            if pm_delegate_required
+                && !pm_has_delegated
+                && no_parseable_tools_this_round
+                && studio_pm_mandatory_delegate_nags < MAX_STUDIO_PM_MANDATORY_DELEGATE_NAGS
+            {
+                studio_pm_mandatory_delegate_nags += 1;
+                let _ = bus.send(
+                    EventEnvelope::new(
+                        EventType::ProgressUpdate,
+                        Some(serde_json::json!({
+                            "task_id": task_id.to_string(),
+                            "progress_pct": 47,
+                            "message": "Relance PM Code Studio : délégation obligatoire non exécutée (`delegate_to_agent` requis)."
+                        })),
+                    )
+                    .with_correlation(timeline_correlation),
+                );
+                current_prompt = format!(
+                    "User request: {}\n\nYour previous reply:\n{}\n\n[Code Studio — mandatory PM delegation gate]\nYou are `studio_project_manager` and the task is configured with mandatory delegation. You must execute at least one `TOOL: delegate_to_agent <agent_type> <message>` now before any final synthesis. Do not end with prose only.\n\nValid first step examples:\n- TOOL: delegate_to_agent studio_scaffold <task>\n- TOOL: delegate_to_agent studio_frontend <task>\n- TOOL: delegate_to_agent studio_backend <task>\n- TOOL: delegate_to_agent studio_fullstack <task>\n- TOOL: delegate_to_agent code <task>\n- TOOL: delegate_to_agent qa <task>\n",
+                    user_message,
+                    response_plain
+                );
+                continue;
+            }
 
             if no_parseable_tools_this_round
                 && meta_response_retry_count < 2
@@ -16558,6 +16620,17 @@ mod tests {
             .expect("recap request");
         assert_eq!(intent.range, SessionRecallRange::CurrentDay);
         assert_eq!(intent.language, SmallTalkLanguage::English);
+    }
+
+    #[test]
+    fn detect_session_recall_no_false_positive_rappellent() {
+        assert!(
+            detect_session_recall_intent(
+                "[Délégation obligatoire] Les sous-agents ne rappellent pas delegate_to_agent.\n\nmet à jour CODE_STUDIO_PLAN.md"
+            )
+            .is_none(),
+            "« rappellent » must not false-positive via substring « rappel »"
+        );
     }
 
     #[test]
