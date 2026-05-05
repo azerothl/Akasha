@@ -1178,7 +1178,7 @@ impl App {
                 ("lifecycle", "/api/lifecycle/hooks"),
             ];
             // Fetch all endpoints concurrently to keep total wall time bounded.
-            let mut indexed_results: Vec<(usize, String, bool)> = std::thread::scope(|s| {
+            let results: Vec<(String, bool)> = std::thread::scope(|s| {
                 let handles: Vec<_> = paths
                     .iter()
                     .enumerate()
@@ -1186,7 +1186,7 @@ impl App {
                         let client = &client;
                         let url = format!("{base}{path}");
                         s.spawn(move || {
-                            let (line, success) = match client.get(&url).send() {
+                            match client.get(&url).send() {
                                 Ok(r) => {
                                     let status = r.status();
                                     let ok = status.is_success();
@@ -1194,19 +1194,22 @@ impl App {
                                     (format!("{label} {path} → {status}\n{}", trim_tui(&body, 1400)), ok)
                                 }
                                 Err(e) => (format!("{label} {path} → (error: {e})"), false),
-                            };
-                            (i, line, success)
+                            }
                         })
                     })
                     .collect();
+                // Joining in collection order preserves the original endpoint order.
                 handles
                     .into_iter()
-                    .map(|h| h.join().unwrap_or_else(|_| (usize::MAX, "(thread panicked)".to_string(), false)))
+                    .enumerate()
+                    .map(|(i, h)| h.join().unwrap_or_else(|_| {
+                        let (label, path) = paths[i];
+                        (format!("{label} {path} → (thread panicked)"), false)
+                    }))
                     .collect()
             });
-            indexed_results.sort_by_key(|(i, _, _)| *i);
-            let ok = indexed_results.iter().filter(|(_, _, s)| *s).count();
-            let parts: Vec<String> = indexed_results.into_iter().map(|(_, s, _)| s).collect();
+            let ok = results.iter().filter(|(_, s)| *s).count();
+            let parts: Vec<String> = results.into_iter().map(|(s, _)| s).collect();
             let mut out = vec![format!("Cockpit health: {ok}/{} endpoints OK", parts.len())];
             out.extend(parts);
             let _ = tx.send(out.join("\n---\n"));
