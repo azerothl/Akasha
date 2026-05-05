@@ -111,12 +111,49 @@ async fn tick(
                 }
                 let task_id = Uuid::new_v4();
                 let run_id = Uuid::new_v4();
-                let initial_message = schedule
-                    .channel_context
-                    .as_deref()
-                    .map(String::from)
-                    .or_else(|| Some(schedule.name.clone()))
-                    .filter(|s| !s.is_empty());
+                // Resolve the final message/session_id first so both `initial_message` (stored
+                // on the Task) and the orchestrator payload use the same human-readable string.
+                let mut message = if schedule.name.trim().is_empty() {
+                    "Exécution planifiée.".to_string()
+                } else {
+                    schedule.name.clone()
+                };
+                let mut session_id = format!("schedule:{}", schedule.id);
+                if let Some(ctx) = schedule.channel_context.as_deref() {
+                    match serde_json::from_str::<serde_json::Value>(ctx) {
+                        Ok(v) => {
+                            // If the JSON value is itself a plain string, use it directly.
+                            if let Some(s) = v.as_str() {
+                                let s = s.trim();
+                                if !s.is_empty() {
+                                    message = s.to_string();
+                                }
+                            } else {
+                                // JSON object: prefer explicit `message` field.
+                                if let Some(m) = v.get("message").and_then(|s| s.as_str()) {
+                                    let m = m.trim();
+                                    if !m.is_empty() {
+                                        message = m.to_string();
+                                    }
+                                }
+                                if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
+                                    let sid = sid.trim();
+                                    if !sid.is_empty() {
+                                        session_id = sid.to_string();
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Not JSON: use the raw channel_context as the message.
+                            let ctx = ctx.trim();
+                            if !ctx.is_empty() {
+                                message = ctx.to_string();
+                            }
+                        }
+                    }
+                }
+                let initial_message = Some(message.clone()).filter(|s| !s.is_empty());
                 let task = Task {
                     id: task_id,
                     parent_task_id: None,
@@ -156,38 +193,6 @@ async fn tick(
                     )
                     .with_correlation(task_id),
                 );
-                // Default: use schedule name; fall back to a fixed string if name is empty.
-                let mut message = if schedule.name.trim().is_empty() {
-                    "Exécution planifiée.".to_string()
-                } else {
-                    schedule.name.clone()
-                };
-                let mut session_id = format!("schedule:{}", schedule.id);
-                if let Some(ctx) = schedule.channel_context.as_deref() {
-                    match serde_json::from_str::<serde_json::Value>(ctx) {
-                        Ok(v) => {
-                            // JSON: use the message field when present and non-empty;
-                            // otherwise keep the default (schedule.name / fallback) so raw JSON
-                            // is never forwarded to the orchestrator.
-                            if let Some(m) = v.get("message").and_then(|s| s.as_str()) {
-                                if !m.trim().is_empty() {
-                                    message = m.trim().to_string();
-                                }
-                            }
-                            if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
-                                if !sid.trim().is_empty() {
-                                    session_id = sid.trim().to_string();
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            // Not JSON: use the raw channel_context as the message.
-                            if !ctx.trim().is_empty() {
-                                message = ctx.trim().to_string();
-                            }
-                        }
-                    }
-                }
                 pending.push((run_id, task_id, message, session_id));
             }
         }

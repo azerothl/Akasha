@@ -668,12 +668,12 @@ async fn set_plugin_enabled(plugin_id: String, enabled: bool, port: Option<u16>)
     if id.is_empty() {
         return Err("plugin_id required".to_string());
     }
-    // Validate plugin_id: allow only safe filename characters to prevent path injection.
-    if !id.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '_' || c == '-') {
+    // Validate plugin_id: match is_safe_plugin_id (alnum, '_', '-' only — no dots, no path chars).
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
         return Err("invalid plugin_id".to_string());
     }
     let action = if enabled { "enable" } else { "disable" };
-    let url = format!("{}/api/plugins/{}/{}", daemon_base_url(port), id, action);
+    let url = format!("{}/api/plugins/{}/{}", daemon_base_url(port), urlencoding::encode(id), action);
     let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
@@ -692,7 +692,11 @@ async fn uninstall_plugin(plugin_id: String, port: Option<u16>) -> Result<(), St
     if id.is_empty() {
         return Err("plugin_id required".to_string());
     }
-    let url = format!("{}/api/plugins/{}/uninstall", daemon_base_url(port), id);
+    // Validate plugin_id: match is_safe_plugin_id (alnum, '_', '-' only).
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Err("invalid plugin_id".to_string());
+    }
+    let url = format!("{}/api/plugins/{}/uninstall", daemon_base_url(port), urlencoding::encode(id));
     let client = http_client();
     let resp = client.post(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
