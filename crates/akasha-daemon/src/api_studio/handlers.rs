@@ -96,6 +96,7 @@ pub async fn handle_studio_route(
             evolution_summary: None,
             policy_notes: None,
             project_summary,
+            ticket_enforcement_mode: Some("off".to_string()),
         };
         let _ = save_studio_meta(&dir, &meta);
         let _ = write_initial_code_studio_plan(
@@ -197,6 +198,7 @@ pub async fn handle_studio_route(
                     evolution_summary: None,
                     policy_notes: None,
                     project_summary: None,
+                    ticket_enforcement_mode: Some("off".to_string()),
                 });
                 let mut body = serde_json::to_value(&meta).unwrap_or_else(|_| serde_json::json!({}));
                 if let Some(obj) = body.as_object_mut() {
@@ -322,6 +324,7 @@ pub async fn handle_studio_route(
                 let has_evolution_summary = body_v.get("evolution_summary").is_some();
                 let has_policy_notes = body_v.get("policy_notes").is_some();
                 let has_project_summary = body_v.get("project_summary").is_some();
+                let has_ticket_enforcement_mode = body_v.get("ticket_enforcement_mode").is_some();
                 if !has_name
                     && !has_stack
                     && !has_verify_skip
@@ -330,10 +333,11 @@ pub async fn handle_studio_route(
                     && !has_evolution_summary
                     && !has_policy_notes
                     && !has_project_summary
+                    && !has_ticket_enforcement_mode
                 {
                     return Some(json_response(
                         "400 Bad Request",
-                        r#"{"error":"provide at least one of: name, tech_stack, verify_skip, verify_argv, verify_timeout_sec, evolution_summary, policy_notes, project_summary"}"#,
+                        r#"{"error":"provide at least one of: name, tech_stack, verify_skip, verify_argv, verify_timeout_sec, evolution_summary, policy_notes, project_summary, ticket_enforcement_mode"}"#,
                     ));
                 }
                 let mut meta = load_studio_meta(&root).unwrap_or(StudioMeta {
@@ -348,6 +352,7 @@ pub async fn handle_studio_route(
                     evolution_summary: None,
                     policy_notes: None,
                     project_summary: None,
+                    ticket_enforcement_mode: Some("off".to_string()),
                 });
                 if has_name {
                     let new_name = match body_v.get("name").and_then(|x| x.as_str()).map(str::trim) {
@@ -542,6 +547,24 @@ pub async fn handle_studio_route(
                         None => {}
                     }
                 }
+                if has_ticket_enforcement_mode {
+                    match body_v.get("ticket_enforcement_mode") {
+                        Some(v) if v.is_null() => meta.ticket_enforcement_mode = Some("off".to_string()),
+                        Some(v) => {
+                            let mode = v.as_str().map(|s| s.trim().to_ascii_lowercase());
+                            match mode.as_deref() {
+                                Some("off" | "soft" | "strict") => meta.ticket_enforcement_mode = mode,
+                                _ => {
+                                    return Some(json_response(
+                                        "400 Bad Request",
+                                        r#"{"error":"ticket_enforcement_mode must be one of: off, soft, strict"}"#,
+                                    ));
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
                 if let Err(e) = save_studio_meta(&root, &meta) {
                     return Some(json_response(
                         "500 Internal Server Error",
@@ -559,10 +582,382 @@ pub async fn handle_studio_route(
                     "evolution_summary": meta.evolution_summary,
                     "policy_notes": meta.policy_notes,
                     "project_summary": meta.project_summary,
+                    "ticket_enforcement_mode": meta.ticket_enforcement_mode.as_deref().unwrap_or("off"),
                 })
                 .to_string();
                 return Some(json_response("200 OK", &body));
             }
+        }
+    }
+
+    // /api/studio/projects/:id/tickets*
+    if let Some(rest) = strip_studio_projects_prefix(path_only) {
+        let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+        // GET /api/studio/projects/:id/tickets
+        if method == "GET" && segments.len() == 2 && segments[1] == "tickets" {
+            let id = segments[0];
+            let root = match resolve_studio_project_dir(data_dir, id) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Some(json_response(
+                        "400 Bad Request",
+                        &serde_json::json!({ "error": e }).to_string(),
+                    ));
+                }
+            };
+            if !root.is_dir() {
+                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            }
+            let mut items = studio_list_tickets(&root);
+            if let Some(status) = query_param(query_str, "status") {
+                let s = status.trim().to_ascii_lowercase();
+                if !s.is_empty() {
+                    items.retain(|t| t.status == s);
+                }
+            }
+            if let Some(agent) = query_param(query_str, "assigned_agent") {
+                let a = agent.trim().to_ascii_lowercase();
+                if !a.is_empty() {
+                    items.retain(|t| t.assigned_agent.to_ascii_lowercase() == a);
+                }
+            }
+            if let Some(q) = query_param(query_str, "q") {
+                let needle = q.trim().to_ascii_lowercase();
+                if !needle.is_empty() {
+                    items.retain(|t| {
+                        t.title.to_ascii_lowercase().contains(&needle)
+                            || t.description.to_ascii_lowercase().contains(&needle)
+                    });
+                }
+            }
+            let body = serde_json::json!({ "items": items }).to_string();
+            return Some(json_response("200 OK", &body));
+        }
+
+        // POST /api/studio/projects/:id/tickets
+        if method == "POST" && segments.len() == 2 && segments[1] == "tickets" {
+            let id = segments[0];
+            let root = match resolve_studio_project_dir(data_dir, id) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Some(json_response(
+                        "400 Bad Request",
+                        &serde_json::json!({ "error": e }).to_string(),
+                    ));
+                }
+            };
+            if !root.is_dir() {
+                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            }
+            let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+                Some(v) => v,
+                None => {
+                    return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#));
+                }
+            };
+            let Some(title_raw) = body_v.get("title").and_then(|x| x.as_str()) else {
+                return Some(json_response("422 Unprocessable Entity", r#"{"error":"title_required"}"#));
+            };
+            let title = title_raw.trim();
+            if title.is_empty() || title.chars().count() > 200 {
+                return Some(json_response("422 Unprocessable Entity", r#"{"error":"title_invalid"}"#));
+            }
+            let description = body_v
+                .get("description")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let assigned_agent = body_v
+                .get("assigned_agent")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let Some(assigned_agent) = assigned_agent else {
+                return Some(json_response("422 Unprocessable Entity", r#"{"error":"assigned_agent_required"}"#));
+            };
+            let review_agent = body_v
+                .get("review_agent")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "studio_reviewer".to_string());
+            let requested_by = body_v
+                .get("requested_by")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "user".to_string());
+            let acceptance_criteria = body_v
+                .get("acceptance_criteria")
+                .cloned()
+                .and_then(|v| serde_json::from_value::<Vec<StudioTicketAcceptanceCriterion>>(v).ok())
+                .unwrap_or_default();
+
+            let now = chrono::Utc::now().to_rfc3339();
+            let ticket = StudioTicket {
+                id: uuid::Uuid::new_v4().to_string(),
+                project_id: id.to_string(),
+                title: title.to_string(),
+                description,
+                status: "todo".to_string(),
+                requested_by,
+                assigned_agent: assigned_agent.clone(),
+                review_agent: review_agent.clone(),
+                related_task_id: None,
+                acceptance_criteria,
+                evidence: StudioTicketEvidence::default(),
+                review_outcome: None,
+                review_notes: None,
+                corrective_steps: Vec::new(),
+                created_at: now.clone(),
+                updated_at: now,
+            };
+            if let Err(e) = studio_upsert_ticket(&root, ticket.clone()) {
+                return Some(json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+            let _ = studio_append_ticket_event(
+                &root,
+                &ticket.id,
+                "ticket_created",
+                "user",
+                Some(serde_json::json!({
+                    "assigned_agent": assigned_agent,
+                    "review_agent": review_agent
+                })),
+            );
+            let body = serde_json::json!({ "ticket": ticket }).to_string();
+            return Some(json_response("201 Created", &body));
+        }
+
+        // GET /api/studio/projects/:id/tickets/:ticket_id
+        if method == "GET" && segments.len() == 3 && segments[1] == "tickets" {
+            let id = segments[0];
+            let ticket_id = segments[2];
+            let root = match resolve_studio_project_dir(data_dir, id) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Some(json_response(
+                        "400 Bad Request",
+                        &serde_json::json!({ "error": e }).to_string(),
+                    ));
+                }
+            };
+            if !root.is_dir() {
+                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            }
+            let Some(ticket) = studio_get_ticket(&root, ticket_id) else {
+                return Some(json_response("404 Not Found", r#"{"error":"ticket_not_found"}"#));
+            };
+            let timeline = studio_list_ticket_events(&root, ticket_id);
+            let body = serde_json::json!({ "ticket": ticket, "timeline": timeline }).to_string();
+            return Some(json_response("200 OK", &body));
+        }
+
+        // PATCH /api/studio/projects/:id/tickets/:ticket_id
+        if method == "PATCH" && segments.len() == 3 && segments[1] == "tickets" {
+            let id = segments[0];
+            let ticket_id = segments[2];
+            let root = match resolve_studio_project_dir(data_dir, id) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Some(json_response(
+                        "400 Bad Request",
+                        &serde_json::json!({ "error": e }).to_string(),
+                    ));
+                }
+            };
+            if !root.is_dir() {
+                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            }
+            let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+                Some(v) => v,
+                None => {
+                    return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#));
+                }
+            };
+            let Some(mut ticket) = studio_get_ticket(&root, ticket_id) else {
+                return Some(json_response("404 Not Found", r#"{"error":"ticket_not_found"}"#));
+            };
+            if let Some(v) = body_v.get("title").and_then(|x| x.as_str()) {
+                let t = v.trim();
+                if t.is_empty() || t.chars().count() > 200 {
+                    return Some(json_response("422 Unprocessable Entity", r#"{"error":"title_invalid"}"#));
+                }
+                ticket.title = t.to_string();
+            }
+            if let Some(v) = body_v.get("description").and_then(|x| x.as_str()) {
+                ticket.description = v.trim().to_string();
+            }
+            if let Some(v) = body_v.get("assigned_agent").and_then(|x| x.as_str()) {
+                let a = v.trim();
+                if a.is_empty() {
+                    return Some(json_response("422 Unprocessable Entity", r#"{"error":"assigned_agent_required"}"#));
+                }
+                ticket.assigned_agent = a.to_string();
+            }
+            if let Some(v) = body_v.get("review_agent").and_then(|x| x.as_str()) {
+                let a = v.trim();
+                if a.is_empty() {
+                    return Some(json_response("422 Unprocessable Entity", r#"{"error":"review_agent_required"}"#));
+                }
+                ticket.review_agent = a.to_string();
+            }
+            if let Some(v) = body_v.get("acceptance_criteria") {
+                match serde_json::from_value::<Vec<StudioTicketAcceptanceCriterion>>(v.clone()) {
+                    Ok(criteria) => ticket.acceptance_criteria = criteria,
+                    Err(_) => {
+                        return Some(json_response(
+                            "422 Unprocessable Entity",
+                            r#"{"error":"acceptance_criteria_invalid"}"#,
+                        ));
+                    }
+                }
+            }
+            if let Some(v) = body_v.get("status").and_then(|x| x.as_str()) {
+                let next = v.trim().to_ascii_lowercase();
+                let valid = matches!(
+                    next.as_str(),
+                    "todo" | "in_progress" | "review" | "done" | "blocked"
+                );
+                if !valid {
+                    return Some(json_response("422 Unprocessable Entity", r#"{"error":"invalid_status"}"#));
+                }
+                let cur = ticket.status.as_str();
+                let transition_ok = match (cur, next.as_str()) {
+                    ("todo", "in_progress") => !ticket.assigned_agent.trim().is_empty(),
+                    ("in_progress", "review") => true,
+                    ("review", "done") => false,
+                    ("review", "in_progress") => !ticket.corrective_steps.is_empty(),
+                    (_, "blocked") => true,
+                    ("blocked", "in_progress") => true,
+                    (a, b) if a == b => true,
+                    _ => false,
+                };
+                if !transition_ok {
+                    return Some(json_response("409 Conflict", r#"{"error":"invalid_status_transition"}"#));
+                }
+                ticket.status = next;
+            }
+            ticket.updated_at = chrono::Utc::now().to_rfc3339();
+            if let Err(e) = studio_upsert_ticket(&root, ticket.clone()) {
+                return Some(json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+            let _ = studio_append_ticket_event(
+                &root,
+                &ticket.id,
+                "ticket_updated",
+                "user",
+                Some(serde_json::json!({ "status": ticket.status })),
+            );
+            let body = serde_json::json!({ "ticket": ticket }).to_string();
+            return Some(json_response("200 OK", &body));
+        }
+
+        // POST /api/studio/projects/:id/tickets/:ticket_id/review
+        if method == "POST" && segments.len() == 4 && segments[1] == "tickets" && segments[3] == "review" {
+            let id = segments[0];
+            let ticket_id = segments[2];
+            let root = match resolve_studio_project_dir(data_dir, id) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Some(json_response(
+                        "400 Bad Request",
+                        &serde_json::json!({ "error": e }).to_string(),
+                    ));
+                }
+            };
+            if !root.is_dir() {
+                return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+            }
+            let body_v = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+                Some(v) => v,
+                None => {
+                    return Some(json_response("400 Bad Request", r#"{"error":"json body required"}"#));
+                }
+            };
+            let Some(mut ticket) = studio_get_ticket(&root, ticket_id) else {
+                return Some(json_response("404 Not Found", r#"{"error":"ticket_not_found"}"#));
+            };
+            if ticket.status != "review" {
+                return Some(json_response("409 Conflict", r#"{"error":"ticket_not_in_review"}"#));
+            }
+            let reviewer = body_v
+                .get("reviewer_agent")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_default();
+            if reviewer.is_empty() || reviewer != ticket.review_agent {
+                return Some(json_response("403 Forbidden", r#"{"error":"reviewer_not_authorized"}"#));
+            }
+            let Some(outcome_raw) = body_v.get("outcome").and_then(|x| x.as_str()) else {
+                return Some(json_response("422 Unprocessable Entity", r#"{"error":"review_outcome_required"}"#));
+            };
+            let outcome = outcome_raw.trim().to_ascii_lowercase();
+            if !matches!(outcome.as_str(), "approved" | "changes_requested") {
+                return Some(json_response("422 Unprocessable Entity", r#"{"error":"review_outcome_invalid"}"#));
+            }
+            let review_notes = body_v
+                .get("review_notes")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let corrective_steps = body_v
+                .get("corrective_steps")
+                .and_then(|x| x.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default();
+            if outcome == "changes_requested" && corrective_steps.is_empty() {
+                return Some(json_response(
+                    "422 Unprocessable Entity",
+                    r#"{"error":"corrective_steps_required"}"#,
+                ));
+            }
+            ticket.review_outcome = Some(outcome.clone());
+            ticket.review_notes = review_notes.clone();
+            ticket.corrective_steps = corrective_steps.clone();
+            ticket.status = if outcome == "approved" {
+                "done".to_string()
+            } else {
+                "in_progress".to_string()
+            };
+            ticket.updated_at = chrono::Utc::now().to_rfc3339();
+            if let Err(e) = studio_upsert_ticket(&root, ticket.clone()) {
+                return Some(json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+            let event_type = if outcome == "approved" {
+                "ticket_review_approved"
+            } else {
+                "ticket_review_changes_requested"
+            };
+            let _ = studio_append_ticket_event(
+                &root,
+                &ticket.id,
+                event_type,
+                &reviewer,
+                Some(serde_json::json!({
+                    "review_notes": review_notes,
+                    "corrective_steps": corrective_steps
+                })),
+            );
+            let body = serde_json::json!({ "ticket": ticket }).to_string();
+            return Some(json_response("200 OK", &body));
         }
     }
 
@@ -1877,6 +2272,7 @@ pub async fn handle_studio_route(
                 evolution_summary: None,
                 policy_notes: None,
                 project_summary: None,
+                ticket_enforcement_mode: Some("off".to_string()),
             });
             let body = serde_json::json!({ "evolutions": meta.evolutions }).to_string();
             return Some(json_response("200 OK", &body));
@@ -1961,6 +2357,7 @@ pub async fn handle_studio_route(
                 evolution_summary: None,
                 policy_notes: None,
                 project_summary: None,
+                ticket_enforcement_mode: Some("off".to_string()),
             });
             meta.evolutions.push(StudioEvolution {
                 id: evo_id.clone(),

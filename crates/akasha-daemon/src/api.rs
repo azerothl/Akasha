@@ -11535,6 +11535,24 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             let _ = store.update_status(task_id, TaskStatus::Failed);
         } else {
             let _ = store.update_status(task_id, TaskStatus::Completed);
+            if let Ok(events) = store.get_events(task_id) {
+                if let Some(ticket_id) = events
+                    .iter()
+                    .rev()
+                    .find(|e| e.event_type == "studio_ticket_link")
+                    .and_then(|e| e.payload.as_ref())
+                    .and_then(|p| p.get("ticket_id").and_then(|x| x.as_str()))
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                {
+                    let _ = crate::api_studio::studio_mark_ticket_ready_for_review(
+                        &tool_disk_workspace_root,
+                        &ticket_id,
+                        &task_id.to_string(),
+                        "system",
+                    );
+                }
+            }
         }
         notify_task_completion(&task_completion_registry, task_id).await;
         let data_dir_sess = store_path.parent().unwrap_or_else(|| store_path.as_ref());
@@ -13335,6 +13353,16 @@ pub async fn handle_api(
             .and_then(|v| v.get("studio_project_id").and_then(|x| x.as_str()))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        let studio_ticket_id = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_ticket_id").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let studio_ticket_enforcement_mode_input = body_json
+            .as_ref()
+            .and_then(|v| v.get("studio_ticket_enforcement_mode").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| matches!(s.as_str(), "off" | "soft" | "strict"));
         let fork_from_task_id: Option<Uuid> = {
             let raw = body_json
                 .as_ref()
@@ -13406,6 +13434,36 @@ pub async fn handle_api(
         } else {
             None
         };
+        if let Some(ref root) = studio_disk_root {
+            let studio_ticket_enforcement_mode = studio_ticket_enforcement_mode_input
+                .clone()
+                .unwrap_or_else(|| crate::api_studio::studio_ticket_enforcement_mode(root));
+            if studio_ticket_enforcement_mode == "strict" && studio_ticket_id.is_none() {
+                let body = serde_json::json!({
+                    "error": "ticket_required",
+                    "detail": "studio_ticket_id is required in strict mode"
+                });
+                return json_response("409 Conflict", &body.to_string());
+            }
+            if let Some(ref tid) = studio_ticket_id {
+                let Some(ticket) = crate::api_studio::studio_get_ticket(root, tid) else {
+                    let body = serde_json::json!({
+                        "error": "ticket_not_found",
+                        "detail": "studio_ticket_id does not match an existing project ticket"
+                    });
+                    return json_response("404 Not Found", &body.to_string());
+                };
+                if ticket.status == "done" {
+                    let body = serde_json::json!({
+                        "error": "ticket_already_done",
+                        "detail": "cannot start execution on a done ticket"
+                    });
+                    return json_response("409 Conflict", &body.to_string());
+                }
+            } else if studio_ticket_enforcement_mode == "soft" {
+                tracing::warn!("Code Studio soft ticket enforcement: run started without studio_ticket_id");
+            }
+        }
         let studio_ui_agent_preference = body_json
             .as_ref()
             .and_then(|v| v.get("studio_assigned_agent").and_then(|x| x.as_str()))
@@ -13487,6 +13545,19 @@ pub async fn handle_api(
             if let Some(ref h) = studio_policy_hint {
                 if let Some(p) = crate::api_studio::studio_one_shot_policy_hint_prefix(h) {
                     message_for_llm = format!("{p}{message_for_llm}");
+                }
+            }
+            if let Some(ref ticket_id) = studio_ticket_id {
+                if let Some(ticket) = crate::api_studio::studio_get_ticket(root, ticket_id) {
+                    message_for_llm = format!(
+                        "[Ticket Kanban obligatoire]\n- ticket_id: {}\n- titre: {}\n- assigned_agent: {}\n- review_agent: {}\n- status: {}\n- contraintes: ne pas clôturer en done; produire un résultat exécutable et laisser le ticket en review pour validation.\n\n{}",
+                        ticket.id,
+                        ticket.title,
+                        ticket.assigned_agent,
+                        ticket.review_agent,
+                        ticket.status,
+                        message_for_llm
+                    );
                 }
             }
             if let Some(ref h) = studio_design_hint {
@@ -13573,11 +13644,29 @@ pub async fn handle_api(
             image_data_urls,
             priority,
         );
-        envelope.studio_disk_root = studio_disk_root;
+        envelope.studio_disk_root = studio_disk_root.clone();
         envelope.studio_forced_agent = studio_forced_agent;
         envelope.studio_evolution_branch = studio_evolution_branch;
         match crate::gateway::handle_envelope(main_agent, store_path, envelope).await {
             Ok(task_id) => {
+                if let (Some(root), Some(ticket_id)) = (studio_disk_root.as_ref(), studio_ticket_id.as_ref()) {
+                    let _ = crate::api_studio::studio_attach_task_to_ticket(
+                        root,
+                        ticket_id,
+                        &task_id.to_string(),
+                        "system",
+                    );
+                    if let Ok(task_store) = TaskStore::open(store_path) {
+                        let _ = task_store.insert_event(
+                            task_id,
+                            "studio_ticket_link",
+                            Some(&serde_json::json!({
+                                "ticket_id": ticket_id,
+                            })),
+                            &chrono::Utc::now().to_rfc3339(),
+                        );
+                    }
+                }
                 if let Some(meta) = fork_meta_for_task {
                     if let Ok(task_store) = TaskStore::open(store_path) {
                         let _ = task_store.insert_event(

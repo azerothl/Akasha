@@ -407,6 +407,9 @@ struct StudioMeta {
     /// Résumé produit / intention à la création (préfixe agent + graine plan & DESIGN.md).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     project_summary: Option<String>,
+    /// Ticket enforcement mode for Code Studio runs: off | soft | strict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ticket_enforcement_mode: Option<String>,
 }
 
 const MAX_TECH_STACK_CHARS: usize = 4000;
@@ -417,6 +420,75 @@ const MAX_POLICY_NOTES_CHARS: usize = 4000;
 const MAX_PROJECT_SUMMARY_CHARS: usize = 6000;
 const MAX_DESIGN_HINT_CHARS: usize = 4000;
 const MAX_DESIGN_DOC_CHARS: usize = 12000;
+const STUDIO_TICKETS_FILE: &str = ".akasha-studio-tickets.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StudioTicketAcceptanceCriterion {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StudioTicketEvidence {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub task_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StudioTicket {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub description: String,
+    pub status: String,
+    pub requested_by: String,
+    pub assigned_agent: String,
+    pub review_agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_task_id: Option<String>,
+    #[serde(default)]
+    pub acceptance_criteria: Vec<StudioTicketAcceptanceCriterion>,
+    #[serde(default)]
+    pub evidence: StudioTicketEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corrective_steps: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StudioTicketEvent {
+    pub id: String,
+    pub ticket_id: String,
+    pub event_type: String,
+    pub at: String,
+    pub actor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct StudioTicketsStore {
+    #[serde(default)]
+    tickets: Vec<StudioTicket>,
+    #[serde(default)]
+    events: Vec<StudioTicketEvent>,
+}
 
 /// Keep only prompt-safe characters:
 /// - drop NUL and non-printable control chars (except LF/CR/TAB)
@@ -652,6 +724,160 @@ fn save_studio_meta(project_root: &Path, meta: &StudioMeta) -> Result<(), String
     let p = project_root.join(".akasha-studio.json");
     let j = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?;
     fs::write(&p, j).map_err(|e| e.to_string())
+}
+
+fn studio_tickets_path(project_root: &Path) -> PathBuf {
+    project_root.join(STUDIO_TICKETS_FILE)
+}
+
+fn load_studio_tickets_store(project_root: &Path) -> StudioTicketsStore {
+    let p = studio_tickets_path(project_root);
+    let Ok(s) = fs::read_to_string(p) else {
+        return StudioTicketsStore::default();
+    };
+    serde_json::from_str(&s).unwrap_or_default()
+}
+
+fn save_studio_tickets_store(project_root: &Path, store: &StudioTicketsStore) -> Result<(), String> {
+    let p = studio_tickets_path(project_root);
+    let j = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
+    fs::write(&p, j).map_err(|e| e.to_string())
+}
+
+pub fn studio_ticket_enforcement_mode(project_root: &Path) -> String {
+    load_studio_meta(project_root)
+        .and_then(|m| m.ticket_enforcement_mode)
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| matches!(s.as_str(), "off" | "soft" | "strict"))
+        .unwrap_or_else(|| "off".to_string())
+}
+
+pub fn studio_list_tickets(project_root: &Path) -> Vec<StudioTicket> {
+    let mut tickets = load_studio_tickets_store(project_root).tickets;
+    tickets.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    tickets
+}
+
+pub fn studio_get_ticket(project_root: &Path, ticket_id: &str) -> Option<StudioTicket> {
+    let id = ticket_id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    load_studio_tickets_store(project_root)
+        .tickets
+        .into_iter()
+        .find(|t| t.id == id)
+}
+
+pub fn studio_list_ticket_events(project_root: &Path, ticket_id: &str) -> Vec<StudioTicketEvent> {
+    let id = ticket_id.trim();
+    if id.is_empty() {
+        return Vec::new();
+    }
+    let mut events: Vec<StudioTicketEvent> = load_studio_tickets_store(project_root)
+        .events
+        .into_iter()
+        .filter(|e| e.ticket_id == id)
+        .collect();
+    events.sort_by(|a, b| a.at.cmp(&b.at));
+    events
+}
+
+pub fn studio_upsert_ticket(project_root: &Path, ticket: StudioTicket) -> Result<(), String> {
+    let mut store = load_studio_tickets_store(project_root);
+    if let Some(idx) = store.tickets.iter().position(|t| t.id == ticket.id) {
+        store.tickets[idx] = ticket;
+    } else {
+        store.tickets.push(ticket);
+    }
+    save_studio_tickets_store(project_root, &store)
+}
+
+pub fn studio_append_ticket_event(
+    project_root: &Path,
+    ticket_id: &str,
+    event_type: &str,
+    actor: &str,
+    payload: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let mut store = load_studio_tickets_store(project_root);
+    store.events.push(StudioTicketEvent {
+        id: uuid::Uuid::new_v4().to_string(),
+        ticket_id: ticket_id.to_string(),
+        event_type: event_type.to_string(),
+        at: chrono::Utc::now().to_rfc3339(),
+        actor: actor.to_string(),
+        payload,
+    });
+    if store.events.len() > 5000 {
+        let trim_from = store.events.len().saturating_sub(5000);
+        if trim_from > 0 {
+            store.events.drain(..trim_from);
+        }
+    }
+    save_studio_tickets_store(project_root, &store)
+}
+
+pub fn studio_attach_task_to_ticket(
+    project_root: &Path,
+    ticket_id: &str,
+    task_id: &str,
+    actor: &str,
+) -> Result<(), String> {
+    let Some(mut ticket) = studio_get_ticket(project_root, ticket_id) else {
+        return Err("ticket_not_found".to_string());
+    };
+    if ticket.status == "todo" {
+        ticket.status = "in_progress".to_string();
+    }
+    ticket.related_task_id = Some(task_id.to_string());
+    if !ticket.evidence.task_ids.iter().any(|t| t == task_id) {
+        ticket.evidence.task_ids.push(task_id.to_string());
+    }
+    ticket.updated_at = chrono::Utc::now().to_rfc3339();
+    studio_upsert_ticket(project_root, ticket.clone())?;
+    studio_append_ticket_event(
+        project_root,
+        ticket_id,
+        "ticket_execution_started",
+        actor,
+        Some(serde_json::json!({
+            "task_id": task_id,
+            "status": ticket.status,
+        })),
+    )?;
+    Ok(())
+}
+
+pub fn studio_mark_ticket_ready_for_review(
+    project_root: &Path,
+    ticket_id: &str,
+    task_id: &str,
+    actor: &str,
+) -> Result<(), String> {
+    let Some(mut ticket) = studio_get_ticket(project_root, ticket_id) else {
+        return Err("ticket_not_found".to_string());
+    };
+    if ticket.status == "in_progress" {
+        ticket.status = "review".to_string();
+    }
+    ticket.related_task_id = Some(task_id.to_string());
+    if !ticket.evidence.task_ids.iter().any(|t| t == task_id) {
+        ticket.evidence.task_ids.push(task_id.to_string());
+    }
+    ticket.updated_at = chrono::Utc::now().to_rfc3339();
+    studio_upsert_ticket(project_root, ticket.clone())?;
+    studio_append_ticket_event(
+        project_root,
+        ticket_id,
+        "ticket_ready_for_review",
+        actor,
+        Some(serde_json::json!({
+            "task_id": task_id,
+            "status": ticket.status,
+        })),
+    )?;
+    Ok(())
 }
 
 fn list_project_dirs(base: &Path) -> Vec<PathBuf> {
