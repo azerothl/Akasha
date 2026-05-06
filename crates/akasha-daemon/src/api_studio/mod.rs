@@ -1634,6 +1634,173 @@ async fn git_output(project_root: &Path, args: &[&str]) -> Result<std::process::
     c.output().await.map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct StudioGitBranch {
+    pub name: String,
+    pub current: bool,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub last_commit_subject: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct StudioGitCompareCommit {
+    pub hash: String,
+    pub subject: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct StudioGitCompare {
+    pub base: String,
+    pub target: String,
+    pub ahead: u32,
+    pub behind: u32,
+    pub files_changed: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+    pub commits: Vec<StudioGitCompareCommit>,
+}
+
+pub(super) async fn git_list_branches(project_root: &Path) -> Result<Vec<StudioGitBranch>, String> {
+    let out = git_output(
+        project_root,
+        &["for-each-ref", "--format=%(refname:short)|%(upstream:short)|%(HEAD)", "refs/heads"],
+    )
+    .await?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    let mut rows = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let name = parts.first().map(|s| s.trim()).unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        let upstream = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()).map(ToString::to_string);
+        let current = parts.get(2).map(|s| s.trim() == "*").unwrap_or(false);
+        let mut ahead = 0u32;
+        let mut behind = 0u32;
+        if let Some(up) = upstream.as_deref() {
+            let cmp = git_output(project_root, &["rev-list", "--left-right", "--count", &format!("{name}...{up}")]).await?;
+            if cmp.status.success() {
+                let txt = String::from_utf8_lossy(&cmp.stdout);
+                let mut it = txt.split_whitespace();
+                ahead = it.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                behind = it.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            }
+        }
+        let subject = git_output(project_root, &["log", "-1", "--pretty=%s", name]).await.ok().and_then(|o| {
+            if o.status.success() {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if s.is_empty() { None } else { Some(s) }
+            } else {
+                None
+            }
+        });
+        rows.push(StudioGitBranch {
+            name: name.to_string(),
+            current,
+            upstream,
+            ahead,
+            behind,
+            last_commit_subject: subject,
+        });
+    }
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(rows)
+}
+
+pub(super) async fn git_checkout_branch(project_root: &Path, branch: &str) -> Result<(), String> {
+    let out = git_output(project_root, &["checkout", branch]).await?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
+pub(super) async fn git_compare_branches(
+    project_root: &Path,
+    base: &str,
+    target: &str,
+) -> Result<StudioGitCompare, String> {
+    let ahead_behind = git_output(project_root, &["rev-list", "--left-right", "--count", &format!("{base}...{target}")]).await?;
+    if !ahead_behind.status.success() {
+        return Err(String::from_utf8_lossy(&ahead_behind.stderr).trim().to_string());
+    }
+    let ab = String::from_utf8_lossy(&ahead_behind.stdout);
+    let mut ab_it = ab.split_whitespace();
+    let behind = ab_it.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    let ahead = ab_it.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+
+    let stat = git_output(project_root, &["diff", "--shortstat", &format!("{base}...{target}")]).await?;
+    let mut files_changed = 0u32;
+    let mut insertions = 0u32;
+    let mut deletions = 0u32;
+    if stat.status.success() {
+        let txt = String::from_utf8_lossy(&stat.stdout);
+        for seg in txt.split(',') {
+            let part = seg.trim();
+            if part.contains("file changed") || part.contains("files changed") {
+                files_changed = part.split_whitespace().next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            } else if part.contains("insertion") {
+                insertions = part.split_whitespace().next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            } else if part.contains("deletion") {
+                deletions = part.split_whitespace().next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            }
+        }
+    }
+
+    let commits_out = git_output(project_root, &["log", "--pretty=%H|%s", "--max-count=50", &format!("{base}..{target}")]).await?;
+    let mut commits = Vec::new();
+    if commits_out.status.success() {
+        for line in String::from_utf8_lossy(&commits_out.stdout).lines() {
+            let mut parts = line.splitn(2, '|');
+            let hash = parts.next().unwrap_or("").trim().to_string();
+            let subject = parts.next().unwrap_or("").trim().to_string();
+            if !hash.is_empty() {
+                commits.push(StudioGitCompareCommit { hash, subject });
+            }
+        }
+    }
+
+    Ok(StudioGitCompare {
+        base: base.to_string(),
+        target: target.to_string(),
+        ahead,
+        behind,
+        files_changed,
+        insertions,
+        deletions,
+        commits,
+    })
+}
+
+pub(super) async fn git_conflict_files(project_root: &Path) -> Result<Vec<String>, String> {
+    let out = git_output(project_root, &["diff", "--name-only", "--diff-filter=U"]).await?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect())
+}
+
+pub(super) async fn git_merge_abort(project_root: &Path) -> Result<(), String> {
+    let out = git_output(project_root, &["merge", "--abort"]).await?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
 async fn git_current_branch(project_root: &Path) -> Result<String, String> {
     let o = git_output(project_root, &["symbolic-ref", "--short", "HEAD"]).await?;
     if !o.status.success() {
@@ -1923,7 +2090,7 @@ fn guess_mime_and_text(rel: &str, bytes: &[u8]) -> (&'static str, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_main_or_master_branch, studio_command_from_argv};
+    use super::{ensure_main_or_master_branch, git_list_branches, studio_command_from_argv};
     use std::ffi::OsStr;
 
     #[test]
@@ -2206,6 +2373,65 @@ Try `npm i --save-dev @types/jest`";
         assert!(log.status.success());
         let msg = String::from_utf8_lossy(&log.stdout);
         assert!(msg.contains("Akasha Code Studio: save pending evolution changes"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn git_list_branches_marks_current_branch() {
+        use std::process::Command;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let git_available = Command::new("git")
+            .arg("--version")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !git_available {
+            return;
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("akasha_studio_branches_{stamp}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let init = Command::new("git").arg("init").current_dir(&dir).status().unwrap();
+        assert!(init.success());
+        let _ = Command::new("git")
+            .args(["config", "user.name", "Akasha Test"])
+            .current_dir(&dir)
+            .status();
+        let _ = Command::new("git")
+            .args(["config", "user.email", "akasha-test@example.com"])
+            .current_dir(&dir)
+            .status();
+
+        std::fs::write(dir.join("README.md"), "hello\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["checkout", "-b", "studio/feature-a"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+
+        let branches = git_list_branches(&dir).await.expect("list branches");
+        assert!(branches.iter().any(|b| b.name == "studio/feature-a" && b.current));
+        assert!(branches.iter().any(|b| b.name == "master" || b.name == "main"));
 
         std::fs::remove_dir_all(&dir).ok();
     }

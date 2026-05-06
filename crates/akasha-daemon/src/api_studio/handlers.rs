@@ -982,6 +982,294 @@ pub async fn handle_studio_route(
         }
     }
 
+    // GET /api/studio/projects/:id/git/branches
+    if method == "GET" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/git/branches") {
+        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+        let id = rest
+            .strip_suffix("/git/branches")
+            .unwrap_or(rest)
+            .trim_end_matches('/');
+        let id = id.split('/').next().unwrap_or("");
+        let root = match resolve_studio_project_dir(data_dir, id) {
+            Ok(d) => d,
+            Err(e) => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        };
+        if !root.is_dir() {
+            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+        }
+        if !is_git_repo(&root).await {
+            return Some(json_response("409 Conflict", r#"{"error":"not_a_git_repository"}"#));
+        }
+        match git_list_branches(&root).await {
+            Ok(branches) => {
+                let current = branches.iter().find(|b| b.current).map(|b| b.name.clone());
+                return Some(json_response(
+                    "200 OK",
+                    &serde_json::json!({ "current_branch": current, "branches": branches }).to_string(),
+                ));
+            }
+            Err(e) => {
+                return Some(json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        }
+    }
+
+    // POST /api/studio/projects/:id/git/checkout
+    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/git/checkout") {
+        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+        let id = rest
+            .strip_suffix("/git/checkout")
+            .unwrap_or(rest)
+            .trim_end_matches('/');
+        let id = id.split('/').next().unwrap_or("");
+        let root = match resolve_studio_project_dir(data_dir, id) {
+            Ok(d) => d,
+            Err(e) => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        };
+        if !root.is_dir() {
+            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+        }
+        if !is_git_repo(&root).await {
+            return Some(json_response("409 Conflict", r#"{"error":"not_a_git_repository"}"#));
+        }
+        let req = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+            Some(v) => v,
+            None => return Some(json_response("400 Bad Request", r#"{"error":"invalid_json"}"#)),
+        };
+        let branch = req
+            .get("branch")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+        if branch.is_empty() {
+            return Some(json_response("400 Bad Request", r#"{"error":"branch_required"}"#));
+        }
+        match git_checkout_branch(&root, branch).await {
+            Ok(()) => return Some(json_response("200 OK", r#"{"ok":true}"#)),
+            Err(e) => {
+                return Some(json_response(
+                    "409 Conflict",
+                    &serde_json::json!({ "error": "checkout_failed", "detail": e }).to_string(),
+                ));
+            }
+        }
+    }
+
+    // POST /api/studio/projects/:id/git/compare
+    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/git/compare") {
+        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+        let id = rest
+            .strip_suffix("/git/compare")
+            .unwrap_or(rest)
+            .trim_end_matches('/');
+        let id = id.split('/').next().unwrap_or("");
+        let root = match resolve_studio_project_dir(data_dir, id) {
+            Ok(d) => d,
+            Err(e) => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        };
+        if !root.is_dir() {
+            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+        }
+        if !is_git_repo(&root).await {
+            return Some(json_response("409 Conflict", r#"{"error":"not_a_git_repository"}"#));
+        }
+        let req = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+            Some(v) => v,
+            None => return Some(json_response("400 Bad Request", r#"{"error":"invalid_json"}"#)),
+        };
+        let base = req.get("base").and_then(|v| v.as_str()).map(str::trim).unwrap_or("");
+        let target = req
+            .get("target")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+        if base.is_empty() || target.is_empty() {
+            return Some(json_response("400 Bad Request", r#"{"error":"base_target_required"}"#));
+        }
+        match git_compare_branches(&root, base, target).await {
+            Ok(payload) => {
+                return Some(json_response(
+                    "200 OK",
+                    &serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+                ))
+            }
+            Err(e) => {
+                return Some(json_response(
+                    "409 Conflict",
+                    &serde_json::json!({ "error": "compare_failed", "detail": e }).to_string(),
+                ));
+            }
+        }
+    }
+
+    // POST /api/studio/projects/:id/git/merge
+    if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/git/merge") {
+        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+        let id = rest
+            .strip_suffix("/git/merge")
+            .unwrap_or(rest)
+            .trim_end_matches('/');
+        let id = id.split('/').next().unwrap_or("");
+        let root = match resolve_studio_project_dir(data_dir, id) {
+            Ok(d) => d,
+            Err(e) => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        };
+        if !root.is_dir() {
+            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+        }
+        if !is_git_repo(&root).await {
+            return Some(json_response("409 Conflict", r#"{"error":"not_a_git_repository"}"#));
+        }
+        let req = match body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok()) {
+            Some(v) => v,
+            None => return Some(json_response("400 Bad Request", r#"{"error":"invalid_json"}"#)),
+        };
+        let source = req
+            .get("source")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+        let target = req
+            .get("target")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+        if source.is_empty() || target.is_empty() {
+            return Some(json_response("400 Bad Request", r#"{"error":"source_target_required"}"#));
+        }
+        let _permit = studio_ops_semaphore().acquire().await.ok();
+        if let Err(e) = git_checkout_branch(&root, target).await {
+            return Some(json_response(
+                "409 Conflict",
+                &serde_json::json!({ "error": "checkout_target_failed", "detail": e }).to_string(),
+            ));
+        }
+        match git_output(
+            &root,
+            &["merge", "--no-ff", source, "-m", "Akasha Code Studio: merge branch"],
+        )
+        .await
+        {
+            Ok(o) if o.status.success() => {
+                return Some(json_response("200 OK", r#"{"ok":true,"message":"merged"}"#));
+            }
+            Ok(o) => {
+                let msg = String::from_utf8_lossy(&o.stderr).to_string();
+                return Some(json_response(
+                    "409 Conflict",
+                    &serde_json::json!({ "error": "merge_failed", "detail": msg }).to_string(),
+                ));
+            }
+            Err(e) => {
+                return Some(json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        }
+    }
+
+    // GET /api/studio/projects/:id/git/conflicts
+    if method == "GET" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/git/conflicts") {
+        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+        let id = rest
+            .strip_suffix("/git/conflicts")
+            .unwrap_or(rest)
+            .trim_end_matches('/');
+        let id = id.split('/').next().unwrap_or("");
+        let root = match resolve_studio_project_dir(data_dir, id) {
+            Ok(d) => d,
+            Err(e) => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        };
+        if !root.is_dir() {
+            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+        }
+        if !is_git_repo(&root).await {
+            return Some(json_response("409 Conflict", r#"{"error":"not_a_git_repository"}"#));
+        }
+        match git_conflict_files(&root).await {
+            Ok(files) => {
+                let merge_in_progress = !files.is_empty() || root.join(".git").join("MERGE_HEAD").exists();
+                return Some(json_response(
+                    "200 OK",
+                    &serde_json::json!({ "merge_in_progress": merge_in_progress, "conflict_files": files })
+                        .to_string(),
+                ));
+            }
+            Err(e) => {
+                return Some(json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        }
+    }
+
+    // POST /api/studio/projects/:id/git/merge/abort
+    if method == "POST"
+        && path_only.contains("/api/studio/projects/")
+        && path_only.ends_with("/git/merge/abort")
+    {
+        let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
+        let id = rest
+            .strip_suffix("/git/merge/abort")
+            .unwrap_or(rest)
+            .trim_end_matches('/');
+        let id = id.split('/').next().unwrap_or("");
+        let root = match resolve_studio_project_dir(data_dir, id) {
+            Ok(d) => d,
+            Err(e) => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        };
+        if !root.is_dir() {
+            return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
+        }
+        if !is_git_repo(&root).await {
+            return Some(json_response("409 Conflict", r#"{"error":"not_a_git_repository"}"#));
+        }
+        match git_merge_abort(&root).await {
+            Ok(()) => return Some(json_response("200 OK", r#"{"ok":true}"#)),
+            Err(e) => {
+                return Some(json_response(
+                    "409 Conflict",
+                    &serde_json::json!({ "error": "merge_abort_failed", "detail": e }).to_string(),
+                ));
+            }
+        }
+    }
+
     // POST /api/studio/projects/:id/preview/stop — kill dev server started for this project.
     if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/preview/stop") {
         let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
