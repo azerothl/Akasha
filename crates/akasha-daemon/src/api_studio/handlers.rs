@@ -884,7 +884,18 @@ pub async fn handle_studio_route(
                     }
                 }
             }
-            if let Some(v) = body_v.get("status").and_then(|x| x.as_str()) {
+            let mut recovered_execution: Option<(String, Option<String>)> = None;
+            if body_v.get("recover_stuck_execution").and_then(|x| x.as_bool()) == Some(true) {
+                if ticket.status != "in_progress" && ticket.status != "review" {
+                    return Some(json_response(
+                        "409 Conflict",
+                        r#"{"error":"recover_only_in_progress_or_review"}"#,
+                    ));
+                }
+                recovered_execution = Some((ticket.status.clone(), ticket.related_task_id.clone()));
+                ticket.related_task_id = None;
+                ticket.status = "todo".to_string();
+            } else if let Some(v) = body_v.get("status").and_then(|x| x.as_str()) {
                 let next = v.trim().to_ascii_lowercase();
                 let valid = matches!(
                     next.as_str(),
@@ -916,13 +927,30 @@ pub async fn handle_studio_route(
                     &serde_json::json!({ "error": e }).to_string(),
                 ));
             }
-            let _ = studio_append_ticket_event(
-                &root,
-                &ticket.id,
-                "ticket_updated",
-                "user",
-                Some(serde_json::json!({ "status": ticket.status })),
-            );
+            match recovered_execution {
+                Some((previous_status, previous_related_task_id)) => {
+                    let _ = studio_append_ticket_event(
+                        &root,
+                        &ticket.id,
+                        "ticket_execution_recovered",
+                        "user",
+                        Some(serde_json::json!({
+                            "status": ticket.status,
+                            "previous_status": previous_status,
+                            "previous_related_task_id": previous_related_task_id,
+                        })),
+                    );
+                }
+                None => {
+                    let _ = studio_append_ticket_event(
+                        &root,
+                        &ticket.id,
+                        "ticket_updated",
+                        "user",
+                        Some(serde_json::json!({ "status": ticket.status })),
+                    );
+                }
+            }
             let body = serde_json::json!({ "ticket": ticket }).to_string();
             return Some(json_response("200 OK", &body));
         }

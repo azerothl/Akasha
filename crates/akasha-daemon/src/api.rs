@@ -8794,7 +8794,7 @@ pub(crate) async fn run_message_via_llm(
             user_message
         )
     };
-    let reply_text;
+    let mut reply_text = String::new();
     let mut last_llm_model_used: Option<String> = None;
     let mut first_meaningful_progress_sent = false;
 
@@ -8916,6 +8916,12 @@ pub(crate) async fn run_message_via_llm(
             .unwrap_or_else(|| llm_timeout_secs.min(300));
 
         'tool_rounds: loop {
+            match store.get(task_id).ok().flatten().map(|t| t.status) {
+                Some(TaskStatus::Paused) | Some(TaskStatus::Cancelled) => {
+                    break 'tool_rounds;
+                }
+                _ => {}
+            }
             // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
             if let Some(ref store) = task_usage_store {
                 let (session_tokens, session_cost) =
@@ -10903,16 +10909,15 @@ pub(crate) async fn run_message_via_llm(
         }
         reply_text
     };
-    let is_paused = matches!(
-        store.get(task_id),
-        Ok(Some(Task {
-            status: TaskStatus::Paused,
-            ..
-        }))
+    let task_status_snapshot = store.get(task_id).ok().flatten().map(|t| t.status);
+    let is_paused = matches!(task_status_snapshot, Some(TaskStatus::Paused));
+    let halted_user = matches!(
+        task_status_snapshot,
+        Some(TaskStatus::Paused | TaskStatus::Cancelled | TaskStatus::Interrupted)
     );
     let mut studio_verify_error: Option<String> = None;
     let mut studio_autofix_applied = false;
-    if !is_paused && code_studio_disk_task {
+    if !halted_user && code_studio_disk_task {
         let max_passes: u32 = if is_session_recall {
             1
         } else {
@@ -11481,15 +11486,23 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
         );
     }
 
-    let final_event_type = if is_paused {
+    let final_event_type = if matches!(task_status_snapshot, Some(TaskStatus::Cancelled)) {
+        EventType::TaskCancelled
+    } else if is_paused {
+        EventType::TaskPaused
+    } else if matches!(task_status_snapshot, Some(TaskStatus::Interrupted)) {
         EventType::TaskPaused
     } else if studio_verify_error.is_some() {
         EventType::TaskFailed
     } else {
         EventType::TaskCompleted
     };
-    let final_status_str = if is_paused {
+    let final_status_str = if matches!(task_status_snapshot, Some(TaskStatus::Cancelled)) {
+        "cancelled"
+    } else if is_paused {
         "paused"
+    } else if matches!(task_status_snapshot, Some(TaskStatus::Interrupted)) {
+        "interrupted"
     } else if studio_verify_error.is_some() {
         "failed"
     } else {
@@ -11529,8 +11542,8 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
     );
     clear_task_milestones(task_id, Some(store_path.as_path()));
 
-    // Phase 2 AI OS: do not overwrite Paused with Completed (user paused the task).
-    if !is_paused {
+    // Phase 2 AI OS: do not overwrite Paused / Cancelled / Interrupted with Completed.
+    if !halted_user {
         if studio_verify_error.is_some() {
             let _ = store.update_status(task_id, TaskStatus::Failed);
         } else {
@@ -15465,10 +15478,15 @@ async fn cancel_task(store_path: &Path, id: Uuid, main_agent: &crate::agents::Ma
 }
 
 /// Returns true when a task in `status` can be paused.
-/// Only `Pending` and `Queued` tasks can be paused safely; `Running` tasks cannot be cooperatively
-/// interrupted and must be allowed to complete or be cancelled instead.
+/// `Running` : la pause est appliquée en base ; la boucle outils sort au prochain tour et ne marque pas la tâche comme terminée.
 pub(crate) fn is_pausable(status: &TaskStatus) -> bool {
-    matches!(status, TaskStatus::Pending | TaskStatus::Queued)
+    matches!(
+        status,
+        TaskStatus::Pending
+            | TaskStatus::Queued
+            | TaskStatus::Running
+            | TaskStatus::WaitingUserInput
+    )
 }
 
 /// Returns true when a task in `status` can be resumed.
@@ -15492,7 +15510,7 @@ async fn pause_task(store_path: &Path, id: Uuid, main_agent: &crate::agents::Mai
     if !is_pausable(&task.status) {
         let body = serde_json::json!({
             "error": "task_not_pausable",
-            "detail": "La tâche ne peut pas être mise en pause dans son état actuel (déjà terminée, annulée, en pause ou en cours d'exécution).",
+            "detail": "La tâche ne peut pas être mise en pause dans son état actuel (terminée, annulée, en pause ou interrompue).",
             "status": task.status.as_str()
         });
         return json_response("400 Bad Request", &body.to_string());
@@ -17435,17 +17453,16 @@ line two new"#;
     // --- is_pausable / is_resumable state transitions ---
 
     #[test]
-    fn pausable_only_pending_and_queued() {
+    fn pausable_includes_pending_queued_running_and_waiting_input() {
         assert!(is_pausable(&TaskStatus::Pending));
         assert!(is_pausable(&TaskStatus::Queued));
-        // Running tasks cannot be cooperatively paused
-        assert!(!is_pausable(&TaskStatus::Running));
+        assert!(is_pausable(&TaskStatus::Running));
+        assert!(is_pausable(&TaskStatus::WaitingUserInput));
         assert!(!is_pausable(&TaskStatus::Paused));
         assert!(!is_pausable(&TaskStatus::Completed));
         assert!(!is_pausable(&TaskStatus::Failed));
         assert!(!is_pausable(&TaskStatus::Cancelled));
         assert!(!is_pausable(&TaskStatus::Interrupted));
-        assert!(!is_pausable(&TaskStatus::WaitingUserInput));
     }
 
     #[test]
