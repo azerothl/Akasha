@@ -13460,6 +13460,13 @@ pub async fn handle_api(
                     });
                     return json_response("409 Conflict", &body.to_string());
                 }
+                if !crate::api_studio::studio_ticket_prerequisite_done(root, &ticket) {
+                    let body = serde_json::json!({
+                        "error": "ticket_prerequisite_pending",
+                        "detail": "depends_on_ticket_id must reference a ticket in status \"done\" before this run is allowed"
+                    });
+                    return json_response("409 Conflict", &body.to_string());
+                }
             } else if studio_ticket_enforcement_mode == "soft" {
                 tracing::warn!("Code Studio soft ticket enforcement: run started without studio_ticket_id");
             }

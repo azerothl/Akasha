@@ -694,6 +694,26 @@ pub async fn handle_studio_route(
                 .and_then(|v| serde_json::from_value::<Vec<StudioTicketAcceptanceCriterion>>(v).ok())
                 .unwrap_or_default();
 
+            let depends_on_ticket_id = match body_v.get("depends_on_ticket_id") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(v) => {
+                    let s = v.as_str().map(str::trim).filter(|s| !s.is_empty());
+                    let Some(dep) = s.map(str::to_string) else {
+                        return Some(json_response(
+                            "422 Unprocessable Entity",
+                            r#"{"error":"depends_on_ticket_id_must_be_string_or_null"}"#,
+                        ));
+                    };
+                    if studio_get_ticket(&root, &dep).is_none() {
+                        return Some(json_response(
+                            "422 Unprocessable Entity",
+                            r#"{"error":"depends_on_ticket_not_found"}"#,
+                        ));
+                    }
+                    Some(dep)
+                }
+            };
+
             let now = chrono::Utc::now().to_rfc3339();
             let ticket = StudioTicket {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -704,6 +724,7 @@ pub async fn handle_studio_route(
                 requested_by,
                 assigned_agent: assigned_agent.clone(),
                 review_agent: review_agent.clone(),
+                depends_on_ticket_id,
                 related_task_id: None,
                 acceptance_criteria,
                 evidence: StudioTicketEvidence::default(),
@@ -726,7 +747,8 @@ pub async fn handle_studio_route(
                 "user",
                 Some(serde_json::json!({
                     "assigned_agent": assigned_agent,
-                    "review_agent": review_agent
+                    "review_agent": review_agent,
+                    "depends_on_ticket_id": ticket.depends_on_ticket_id,
                 })),
             );
             let body = serde_json::json!({ "ticket": ticket }).to_string();
@@ -805,6 +827,51 @@ pub async fn handle_studio_route(
                     return Some(json_response("422 Unprocessable Entity", r#"{"error":"review_agent_required"}"#));
                 }
                 ticket.review_agent = a.to_string();
+            }
+            if body_v.get("depends_on_ticket_id").is_some() {
+                let next_dep = match body_v.get("depends_on_ticket_id") {
+                    Some(serde_json::Value::Null) => None,
+                    Some(v) => {
+                        let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                            return Some(json_response(
+                                "422 Unprocessable Entity",
+                                r#"{"error":"depends_on_ticket_id_invalid"}"#,
+                            ));
+                        };
+                        let d = s.to_string();
+                        if d == ticket_id {
+                            return Some(json_response(
+                                "422 Unprocessable Entity",
+                                r#"{"error":"depends_on_ticket_self"}"#,
+                            ));
+                        }
+                        if studio_get_ticket(&root, &d).is_none() {
+                            return Some(json_response(
+                                "422 Unprocessable Entity",
+                                r#"{"error":"depends_on_ticket_not_found"}"#,
+                            ));
+                        }
+                        let mut cycle = false;
+                        if let Some(other) = studio_get_ticket(&root, &d) {
+                            if other
+                                .depends_on_ticket_id
+                                .as_deref()
+                                .is_some_and(|x| x == ticket_id)
+                            {
+                                cycle = true;
+                            }
+                        }
+                        if cycle {
+                            return Some(json_response(
+                                "422 Unprocessable Entity",
+                                r#"{"error":"depends_on_ticket_cycle"}"#,
+                            ));
+                        }
+                        Some(d)
+                    }
+                    None => None,
+                };
+                ticket.depends_on_ticket_id = next_dep;
             }
             if let Some(v) = body_v.get("acceptance_criteria") {
                 match serde_json::from_value::<Vec<StudioTicketAcceptanceCriterion>>(v.clone()) {

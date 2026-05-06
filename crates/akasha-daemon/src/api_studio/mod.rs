@@ -455,6 +455,9 @@ pub struct StudioTicket {
     pub requested_by: String,
     pub assigned_agent: String,
     pub review_agent: String,
+    /// Autre ticket du même projet qui doit être en `done` avant de pouvoir lancer celui-ci.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on_ticket_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub related_task_id: Option<String>,
     #[serde(default)]
@@ -767,6 +770,22 @@ pub fn studio_get_ticket(project_root: &Path, ticket_id: &str) -> Option<StudioT
         .tickets
         .into_iter()
         .find(|t| t.id == id)
+}
+
+/// `true` lorsque aucun prérequis ou le ticket référencé existe et est `done`.
+pub fn studio_ticket_prerequisite_done(project_root: &Path, ticket: &StudioTicket) -> bool {
+    let Some(dep_id) = ticket
+        .depends_on_ticket_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return true;
+    };
+    let Some(dep) = studio_get_ticket(project_root, dep_id) else {
+        return false;
+    };
+    dep.status == "done"
 }
 
 pub fn studio_list_ticket_events(project_root: &Path, ticket_id: &str) -> Vec<StudioTicketEvent> {
