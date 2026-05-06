@@ -1182,7 +1182,7 @@ impl App {
                 let handles: Vec<_> = paths
                     .iter()
                     .enumerate()
-                    .map(|(i, (label, path))| {
+                    .map(|(_i, (label, path))| {
                         let client = &client;
                         let url = format!("{base}{path}");
                         s.spawn(move || {
