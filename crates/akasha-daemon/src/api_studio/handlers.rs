@@ -931,7 +931,7 @@ pub async fn handle_studio_route(
                     ("in_progress", "review") => true,
                     ("review", "done") => false,
                     ("review", "in_progress") => !ticket.corrective_steps.is_empty(),
-                    (_, "blocked") => true,
+                    (_, "blocked") if cur != "done" => true,
                     ("blocked", "in_progress") => true,
                     (a, b) if a == b => true,
                     _ => false,
