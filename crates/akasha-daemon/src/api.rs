@@ -13394,11 +13394,6 @@ pub async fn handle_api(
             .and_then(|v| v.get("studio_ticket_id").and_then(|x| x.as_str()))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        let studio_ticket_enforcement_mode_input = body_json
-            .as_ref()
-            .and_then(|v| v.get("studio_ticket_enforcement_mode").and_then(|x| x.as_str()))
-            .map(|s| s.trim().to_ascii_lowercase())
-            .filter(|s| matches!(s.as_str(), "off" | "soft" | "strict"));
         let fork_from_task_id: Option<Uuid> = {
             let raw = body_json
                 .as_ref()
@@ -13471,9 +13466,7 @@ pub async fn handle_api(
             None
         };
         if let Some(ref root) = studio_disk_root {
-            let studio_ticket_enforcement_mode = studio_ticket_enforcement_mode_input
-                .clone()
-                .unwrap_or_else(|| crate::api_studio::studio_ticket_enforcement_mode(root));
+            let studio_ticket_enforcement_mode = crate::api_studio::studio_ticket_enforcement_mode(root);
             if studio_ticket_enforcement_mode == "strict" && studio_ticket_id.is_none() {
                 let body = serde_json::json!({
                     "error": "ticket_required",

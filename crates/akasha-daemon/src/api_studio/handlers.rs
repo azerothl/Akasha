@@ -688,11 +688,18 @@ pub async fn handle_studio_route(
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "user".to_string());
-            let acceptance_criteria = body_v
-                .get("acceptance_criteria")
-                .cloned()
-                .and_then(|v| serde_json::from_value::<Vec<StudioTicketAcceptanceCriterion>>(v).ok())
-                .unwrap_or_default();
+            let acceptance_criteria = match body_v.get("acceptance_criteria") {
+                None => vec![],
+                Some(v) => match serde_json::from_value::<Vec<StudioTicketAcceptanceCriterion>>(v.clone()) {
+                    Ok(criteria) => criteria,
+                    Err(_) => {
+                        return Some(json_response(
+                            "422 Unprocessable Entity",
+                            r#"{"error":"acceptance_criteria_invalid"}"#,
+                        ));
+                    }
+                },
+            };
 
             let depends_on_ticket_id = match body_v.get("depends_on_ticket_id") {
                 None | Some(serde_json::Value::Null) => None,
@@ -852,13 +859,27 @@ pub async fn handle_studio_route(
                             ));
                         }
                         let mut cycle = false;
-                        if let Some(other) = studio_get_ticket(&root, &d) {
-                            if other
-                                .depends_on_ticket_id
-                                .as_deref()
-                                .is_some_and(|x| x == ticket_id)
-                            {
-                                cycle = true;
+                        let mut current_id = d.clone();
+                        let mut seen = std::collections::HashSet::new();
+                        seen.insert(d.clone());
+                        loop {
+                            if let Some(other) = studio_get_ticket(&root, &current_id) {
+                                match other.depends_on_ticket_id.as_deref() {
+                                    Some(next) if next == ticket_id => {
+                                        cycle = true;
+                                        break;
+                                    }
+                                    Some(next) => {
+                                        if !seen.insert(next.to_string()) {
+                                            // already visited — pre-existing cycle not involving ticket_id
+                                            break;
+                                        }
+                                        current_id = next.to_string();
+                                    }
+                                    None => break,
+                                }
+                            } else {
+                                break;
                             }
                         }
                         if cycle {
@@ -910,7 +931,7 @@ pub async fn handle_studio_route(
                     ("in_progress", "review") => true,
                     ("review", "done") => false,
                     ("review", "in_progress") => !ticket.corrective_steps.is_empty(),
-                    (_, "blocked") => true,
+                    (_, "blocked") if cur != "done" => true,
                     ("blocked", "in_progress") => true,
                     (a, b) if a == b => true,
                     _ => false,
