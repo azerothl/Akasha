@@ -1865,6 +1865,10 @@ async fn process_root_task(
         let mut first_child_spawned = false;
         let mut recovery_used = false;
         let mut cumulative_problem_sids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let root_studio_project_id: Option<String> = TaskStore::open(&store_path_buf)
+            .ok()
+            .and_then(|st| st.get(root_task_id).ok().flatten())
+            .and_then(|t| t.studio_project_id.clone());
         for (wave_idx, wave) in waves.iter().enumerate() {
             let mut batch: Vec<(Uuid, Arc<tokio::sync::Notify>, String, Vec<String>)> = Vec::new();
             for &idx in wave {
@@ -1954,6 +1958,7 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                             Some(child_message.clone())
                         }
                     },
+                    studio_project_id: root_studio_project_id.clone(),
                 };
                 // Open TaskStore in a short scope so it is dropped before any .await.
                 {
@@ -2159,6 +2164,7 @@ Shared trace file: `workspace:/{plan_rel}` — toujours utiliser `write_file wor
                             created_at: Utc::now(),
                             updated_at: Utc::now(),
                             initial_message: Some(format!("[recovery-retry {sid}]")),
+                            studio_project_id: root_studio_project_id.clone(),
                         };
                         let retry_inserted = {
                             TaskStore::open(&store_path_buf)
@@ -2255,6 +2261,7 @@ Use TOOL: write_file <exact_path> with real, substantive content for each entry 
                         created_at: Utc::now(),
                         updated_at: Utc::now(),
                         initial_message: Some(format!("[deliverable-retry {sid}]")),
+                        studio_project_id: root_studio_project_id.clone(),
                     };
                     let retry_inserted = {
                         TaskStore::open(&store_path_buf)
@@ -2407,6 +2414,7 @@ Reply with SHORT actionable guidance only: what the user should provide, which p
                                 .chain(std::iter::once('…'))
                                 .collect::<String>(),
                         ),
+                        studio_project_id: root_studio_project_id.clone(),
                     };
                     let recovery_ok = TaskStore::open(&store_path_buf)
                         .map(|s| s.insert(&recovery_task).is_ok())
@@ -2486,6 +2494,7 @@ Do not only describe the files — execute the tools."#,
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                     initial_message: Some(remediation_message.chars().take(500).collect()),
+                    studio_project_id: root_studio_project_id.clone(),
                 };
                 let remediation_ok = TaskStore::open(&store_path_buf)
                     .map(|s| s.insert(&remediation_task).is_ok())
@@ -2757,6 +2766,7 @@ Formatting rules (Markdown):
                         .chain(std::iter::once('…'))
                         .collect::<String>(),
                 ),
+                studio_project_id: root_studio_project_id.clone(),
             };
             // Open store in a short scope so it is dropped before the awaits below.
             let refinement_inserted = {

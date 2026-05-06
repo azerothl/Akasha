@@ -500,6 +500,10 @@ User message:\n{}",
         // connection) must be dropped before the .await below (system_selector_decision).
         {
             let store = TaskStore::open(store_path)?;
+            let data_dir_for_pid = store_path.parent().unwrap_or_else(|| store_path.as_ref());
+            let studio_project_id = studio_disk_root
+                .as_ref()
+                .and_then(|root| crate::studio::studio_project_id_from_disk_root(data_dir_for_pid, root));
             let task = Task {
                 id: task_id,
                 parent_task_id: None,
@@ -508,6 +512,7 @@ User message:\n{}",
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 initial_message,
+                studio_project_id,
             };
             store.insert(&task)?;
         }

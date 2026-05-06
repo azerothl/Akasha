@@ -180,6 +180,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 initial_message: None,
+                studio_project_id: None,
             })
             .expect("insert root");
         store
@@ -191,6 +192,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 initial_message: None,
+                studio_project_id: None,
             })
             .expect("insert child");
 

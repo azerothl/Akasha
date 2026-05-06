@@ -1375,6 +1375,10 @@ pub async fn run_delegation_handler(
         } else {
             Some(delegated_message.clone())
         };
+        let studio_project_id = store
+            .lineage_root_studio_project_id(req.requesting_task_id)
+            .ok()
+            .flatten();
         let child_task = Task {
             id: child_id,
             parent_task_id: Some(req.requesting_task_id),
@@ -1383,6 +1387,7 @@ pub async fn run_delegation_handler(
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             initial_message,
+            studio_project_id,
         };
         if store.insert(&child_task).is_err() {
             let _ = req.reply_tx.send(Err("store insert failed".to_string()));
@@ -4332,6 +4337,7 @@ pub(crate) async fn execute_tool_call_impl(
                         created_at: now,
                         updated_at: now,
                         initial_message,
+                        studio_project_id: None,
                     };
                     match TaskStore::open(path) {
                         Ok(store) => {
@@ -7889,19 +7895,36 @@ pub(crate) async fn run_message_via_llm(
     let (message, embedded_studio_acceptance) =
         crate::api_studio::strip_embedded_acceptance_json(&message);
     let lineage_for_studio = workspace_lineage_root_task_id(task_id, Some(store_path.as_path()));
+    let data_dir_for_studio_flags = store_path.parent().unwrap_or_else(|| store_path.as_ref());
     let tool_disk_workspace_root: std::path::PathBuf = {
         let reg = studio_disk_registry.read().await;
         if let Some(p) = reg.get(&lineage_for_studio) {
             p.clone()
         } else {
             drop(reg);
-            store_path
-                .parent()
-                .map(|x| x.to_path_buf())
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
+            let mut resolved: Option<std::path::PathBuf> = None;
+            if let Some(pid) = store
+                .get(lineage_for_studio)
+                .ok()
+                .flatten()
+                .and_then(|t| t.studio_project_id.clone())
+            {
+                if let Ok(dir) = crate::studio::resolve_studio_project_dir(data_dir_for_studio_flags, &pid) {
+                    resolved = Some(dir);
+                }
+            }
+            if let Some(dir) = resolved {
+                let mut w = studio_disk_registry.write().await;
+                w.insert(lineage_for_studio, dir.clone());
+                dir
+            } else {
+                store_path
+                    .parent()
+                    .map(|x| x.to_path_buf())
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+            }
         }
     };
-    let data_dir_for_studio_flags = store_path.parent().unwrap_or_else(|| store_path.as_ref());
     let code_studio_disk_task = tool_disk_workspace_root
         .starts_with(crate::studio::studio_projects_base(data_dir_for_studio_flags));
     let studio_disk_system_append = {
