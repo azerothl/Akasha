@@ -26,6 +26,7 @@ pub mod api;
 pub mod api_studio;
 pub mod api_workspace_graph;
 pub mod studio;
+pub mod studio_worktree;
 pub mod tool_output;
 pub mod autonomous_heartbeat;
 pub mod autonomous_mission_config;

@@ -15,6 +15,7 @@ use tracing::{error, info, warn, Instrument};
 use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask, TaskPersistenceMsg};
 use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, new_task_workspace_store, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
 use crate::studio::new_studio_disk_root_registry;
+use crate::studio_worktree::new_studio_worktree_registry;
 use crate::memory::ShortTermStore;
 use crate::memory_actor::start_memory_actor;
 use crate::health::{HealthState, HealthStatus};
@@ -564,6 +565,7 @@ impl Daemon {
             let human_input_store = new_human_input_store();
             let workspace_store = new_task_workspace_store();
             let studio_disk_registry = new_studio_disk_root_registry();
+            let studio_worktree_registry = new_studio_worktree_registry();
             let browser_registry: crate::browser::BrowserSessionRegistry =
                 Arc::new(RwLock::new(std::collections::HashMap::new()));
             let task_usage_store = std::sync::Arc::new(crate::api::TaskUsageStore::new());
@@ -692,6 +694,8 @@ impl Daemon {
                 let progress = progress.clone();
                 let task_completion = task_completion.clone();
                 let delegation_sem = delegation_sem.clone();
+                let studio_disk_registry = studio_disk_registry.clone();
+                let studio_worktree_registry = studio_worktree_registry.clone();
                 async move {
                     run_delegation_handler(
                         delegation_rx,
@@ -701,6 +705,8 @@ impl Daemon {
                         progress,
                         task_completion,
                         delegation_sem,
+                        studio_disk_registry,
+                        studio_worktree_registry,
                     )
                     .await;
                 }
@@ -764,6 +770,7 @@ impl Daemon {
                 let delegation_tx = delegation_tx.clone();
                 let autonomous_mission_worker = autonomous_mission.clone();
                 let studio_disk_registry = studio_disk_registry.clone();
+                let studio_worktree_registry = studio_worktree_registry.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
                         // Phase 4: skip if task was cancelled (e.g. via POST /api/tasks/:id/cancel) before worker started.
@@ -822,6 +829,7 @@ impl Daemon {
                             let browser_registry = browser_registry.clone();
                             let delegation_tx = delegation_tx.clone();
                             let studio_reg = studio_disk_registry.clone();
+                            let studio_worktree_registry = studio_worktree_registry.clone();
                             let task_id = task.task_id;
                             let message = task.message;
                             let session_id = task.session_id;
@@ -857,6 +865,7 @@ impl Daemon {
                                     Some(browser_registry),
                                     autonomous_mission,
                                     studio_reg,
+                                    studio_worktree_registry,
                                 )
                                 .instrument(span)
                                 .await;
@@ -888,6 +897,7 @@ impl Daemon {
                             let browser_registry = browser_registry.clone();
                             let delegation_tx = delegation_tx.clone();
                             let studio_reg = studio_disk_registry.clone();
+                            let studio_worktree_registry = studio_worktree_registry.clone();
                             let task_id = task.task_id;
                             let message = task.message;
                             let session_id = task.session_id;
@@ -923,6 +933,7 @@ impl Daemon {
                                     Some(browser_registry),
                                     autonomous_mission,
                                     studio_reg,
+                                    studio_worktree_registry,
                                 )
                                 .instrument(span)
                                 .await;
@@ -982,6 +993,16 @@ impl Daemon {
                                 }
                             }
                         }
+                    }
+                }
+            });
+            tokio::spawn({
+                let studio_worktree_registry = studio_worktree_registry.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(900));
+                    loop {
+                        interval.tick().await;
+                        crate::studio_worktree::gc_stale_worktrees(&studio_worktree_registry, 24).await;
                     }
                 }
             });

@@ -1268,6 +1268,8 @@ pub async fn run_delegation_handler(
     progress: ProgressCache,
     task_completion: TaskCompletionRegistry,
     delegation_sem: std::sync::Arc<tokio::sync::Semaphore>,
+    studio_disk_registry: crate::studio::StudioDiskRootRegistry,
+    studio_worktree_registry: crate::studio_worktree::StudioWorktreeRegistry,
 ) {
     while let Some(req) = delegation_rx.recv().await {
         let permit = match delegation_sem.clone().try_acquire_owned() {
@@ -1393,6 +1395,54 @@ pub async fn run_delegation_handler(
             let _ = req.reply_tx.send(Err("store insert failed".to_string()));
             continue;
         }
+        // EnteredSpan is not Send and must not cross await points.
+        drop(span_guard);
+        let lineage_root = store
+            .lineage_root_task_id(req.requesting_task_id)
+            .ok()
+            .unwrap_or(req.requesting_task_id);
+        if crate::studio_worktree::worktree_feature_enabled() {
+            if let Some(ref project_id) = child_task.studio_project_id {
+                if let Some(data_dir) = store_path.parent() {
+                    match crate::studio_worktree::create_worktree_for_child_task(
+                        data_dir,
+                        project_id,
+                        lineage_root,
+                        child_id,
+                    ) {
+                        Ok(wt) => {
+                            crate::studio::register_studio_root(
+                                &studio_disk_registry,
+                                child_id,
+                                wt.worktree_path.clone(),
+                            )
+                            .await;
+                            crate::studio_worktree::register_worktree(&studio_worktree_registry, wt.clone())
+                                .await;
+                            let _ = bus.send(
+                                EventEnvelope::new(
+                                    EventType::ProgressUpdate,
+                                    Some(serde_json::json!({
+                                        "task_id": child_id.to_string(),
+                                        "event_type": "studio_worktree_created",
+                                        "worktree_branch": wt.worktree_branch,
+                                        "worktree_path": wt.worktree_path,
+                                    })),
+                                )
+                                .with_correlation(req.requesting_task_id),
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                child_task_id = %child_id,
+                                error = %e,
+                                "studio worktree creation failed; fallback to shared root"
+                            );
+                        }
+                    }
+                }
+            }
+        }
         let _ = bus.send(
             EventEnvelope::new(
                 EventType::SubAgentSpawned,
@@ -1418,9 +1468,6 @@ pub async fn run_delegation_handler(
             )
             .with_correlation(req.requesting_task_id),
         );
-        // Drop the span guard before any await point: EnteredSpan is not Send and must
-        // not be held across await boundaries in a Send future.
-        drop(span_guard);
         // Register a completion notifier *before* sending to conv_tx so the worker can notify
         // even if it completes before the spawned waiter calls notified().
         let notify = Arc::new(tokio::sync::Notify::new());
@@ -1452,6 +1499,7 @@ pub async fn run_delegation_handler(
         let parent_task_id_span = req.requesting_task_id;
         let agent_type_span = agent_type.clone();
         let bus_for_waiter = bus.clone();
+        let studio_worktree_registry = studio_worktree_registry.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let span = tracing::info_span!(
@@ -1514,6 +1562,44 @@ pub async fn run_delegation_handler(
                         }
                     })
             };
+            if crate::studio_worktree::worktree_feature_enabled() {
+                if let Some(wt) = crate::studio_worktree::complete_and_cleanup_worktree(
+                    &studio_worktree_registry,
+                    child_id_span,
+                )
+                .await
+                {
+                    let event_type = match wt.lifecycle_state {
+                        crate::studio_worktree::WorktreeLifecycleState::NeedsUserResolution => {
+                            "studio_worktree_integration_conflict"
+                        }
+                        crate::studio_worktree::WorktreeLifecycleState::Cleaned => {
+                            "studio_worktree_integration_cleaned"
+                        }
+                        crate::studio_worktree::WorktreeLifecycleState::Integrated => {
+                            "studio_worktree_integration_merged"
+                        }
+                        crate::studio_worktree::WorktreeLifecycleState::Failed => {
+                            "studio_worktree_integration_failed"
+                        }
+                        _ => "studio_worktree_integration_state",
+                    };
+                    let _ = bus_for_waiter.send(
+                        EventEnvelope::new(
+                            EventType::ProgressUpdate,
+                            Some(serde_json::json!({
+                                "task_id": child_id_span.to_string(),
+                                "event_type": event_type,
+                                "integration_status": wt.integration_status,
+                                "conflict_state": wt.conflict_state,
+                                "worktree_branch": wt.worktree_branch,
+                                "worktree_path": wt.worktree_path,
+                            })),
+                        )
+                        .with_correlation(parent_task_id_span),
+                    );
+                }
+            }
             let _ = reply_tx.send(match task.status {
                 TaskStatus::Completed => {
                     let _ = bus_for_waiter.send(
@@ -8052,6 +8138,7 @@ pub(crate) async fn run_message_via_llm(
     browser_registry: Option<crate::browser::BrowserSessionRegistry>,
     autonomous_mission: Option<Arc<RwLock<AutonomousMissionConfig>>>,
     studio_disk_registry: crate::studio::StudioDiskRootRegistry,
+    studio_worktree_registry: crate::studio_worktree::StudioWorktreeRegistry,
 ) {
     let store = match TaskStore::open(&store_path) {
         Ok(s) => s,
@@ -8070,6 +8157,10 @@ pub(crate) async fn run_message_via_llm(
     let lineage_for_studio = workspace_lineage_root_task_id(task_id, Some(store_path.as_path()));
     let data_dir_for_studio_flags = store_path.parent().unwrap_or_else(|| store_path.as_ref());
     let tool_disk_workspace_root: std::path::PathBuf = {
+        if let Some(wt) = crate::studio_worktree::get_worktree_for_task(&studio_worktree_registry, task_id).await
+        {
+            wt.worktree_path
+        } else {
         let reg = studio_disk_registry.read().await;
         if let Some(p) = reg.get(&lineage_for_studio) {
             p.clone()
@@ -8096,6 +8187,7 @@ pub(crate) async fn run_message_via_llm(
                     .map(|x| x.to_path_buf())
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
             }
+        }
         }
     };
     let code_studio_disk_task = tool_disk_workspace_root
