@@ -1268,7 +1268,7 @@ pub async fn run_delegation_handler(
     progress: ProgressCache,
     task_completion: TaskCompletionRegistry,
     delegation_sem: std::sync::Arc<tokio::sync::Semaphore>,
-    studio_disk_registry: crate::studio::StudioDiskRootRegistry,
+    _studio_disk_registry: crate::studio::StudioDiskRootRegistry,
     studio_worktree_registry: crate::studio_worktree::StudioWorktreeRegistry,
 ) {
     while let Some(req) = delegation_rx.recv().await {
@@ -1409,16 +1409,13 @@ pub async fn run_delegation_handler(
                         project_id,
                         lineage_root,
                         child_id,
-                    ) {
+                    )
+                    .await
+                    {
                         Ok(wt) => {
-                            crate::studio::register_studio_root(
-                                &studio_disk_registry,
-                                child_id,
-                                wt.worktree_path.clone(),
-                            )
-                            .await;
                             crate::studio_worktree::register_worktree(&studio_worktree_registry, wt.clone())
                                 .await;
+                            let worktree_path = wt.worktree_path.to_string_lossy().into_owned();
                             let _ = bus.send(
                                 EventEnvelope::new(
                                     EventType::ProgressUpdate,
@@ -1426,7 +1423,7 @@ pub async fn run_delegation_handler(
                                         "task_id": child_id.to_string(),
                                         "event_type": "studio_worktree_created",
                                         "worktree_branch": wt.worktree_branch,
-                                        "worktree_path": wt.worktree_path,
+                                        "worktree_path": worktree_path,
                                     })),
                                 )
                                 .with_correlation(req.requesting_task_id),
@@ -1584,6 +1581,7 @@ pub async fn run_delegation_handler(
                         }
                         _ => "studio_worktree_integration_state",
                     };
+                    let worktree_path = wt.worktree_path.to_string_lossy().into_owned();
                     let _ = bus_for_waiter.send(
                         EventEnvelope::new(
                             EventType::ProgressUpdate,
@@ -1593,7 +1591,7 @@ pub async fn run_delegation_handler(
                                 "integration_status": wt.integration_status,
                                 "conflict_state": wt.conflict_state,
                                 "worktree_branch": wt.worktree_branch,
-                                "worktree_path": wt.worktree_path,
+                                "worktree_path": worktree_path,
                             })),
                         )
                         .with_correlation(parent_task_id_span),
