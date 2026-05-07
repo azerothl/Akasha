@@ -541,7 +541,12 @@ fn tech_stack_prefix_from_meta(meta: &StudioMeta) -> Option<String> {
         return None;
     }
     Some(format!(
-        "[Stack projet — respecter pour fichiers, dépendances et build (sauf demande utilisateur contraire) :\n{t}\n]\n\n"
+        "[Stack projet — CONTRAINTE FORTE :\n\
+- Respecter strictement cette stack pour fichiers, dépendances, commandes et recommandations.\n\
+- Interdiction de migrer vers un autre écosystème/langage (ex. Python -> TypeScript) sans demande explicite de l’utilisateur dans ce tour.\n\
+- Si une proposition hors stack est envisagée, la garder en option textuelle sans modifier les fichiers ni la section Stack de `CODE_STUDIO_PLAN.md`.\n\
+- En cas de doute, conserver la stack existante et demander clarification plutôt que réécrire.\n\
+Stack active :\n{t}\n]\n\n"
     ))
 }
 
