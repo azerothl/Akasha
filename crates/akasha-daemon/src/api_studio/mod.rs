@@ -20,6 +20,7 @@ pub(crate) use response_auditor::{
 
 use crate::api_http::json_response;
 use crate::studio::{is_strictly_under_studio_root, resolve_studio_project_dir, studio_projects_base};
+use crate::studio_task_snapshot::EXCLUDED_DIR_NAMES;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1446,9 +1447,6 @@ fn collect_files_recursive(root: &Path, rel: &Path, depth: usize, out: &mut Vec<
             break;
         }
         let name = e.file_name().to_string_lossy().to_string();
-        if name == ".git" || name == "node_modules" {
-            continue;
-        }
         // Use file_type() (does not follow symlinks) to skip symlinked entries entirely.
         // Following symlinks could traverse outside the studio sandbox root.
         let ft = match e.file_type() {
@@ -1456,6 +1454,13 @@ fn collect_files_recursive(root: &Path, rel: &Path, depth: usize, out: &mut Vec<
             Err(_) => continue,
         };
         if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir()
+            && EXCLUDED_DIR_NAMES
+                .iter()
+                .any(|d| name.eq_ignore_ascii_case(d))
+        {
             continue;
         }
         let mut sub = rel.to_path_buf();

@@ -13,18 +13,56 @@ const MAX_SNAPSHOT_BYTES_PER_FILE: u64 = 512 * 1024;
 const MAX_TOTAL_SNAPSHOT_CHARS: usize = 6 * 1024 * 1024;
 const MAX_DIFF_OUTPUT_CHARS_PER_FILE: usize = 24_000;
 
-const EXCLUDED_DIR_NAMES: &[&str] = &[
+/// Dossiers de gestionnaire de paquets, caches outils, sorties de build et
+/// métadonnées IDE — toujours masqués des opérations Code Studio (snapshot diff,
+/// liste de fichiers, etc.). Comparaison **insensible à la casse**.
+///
+/// Source unique partagée par `studio_task_snapshot` et la liste de fichiers
+/// servie par `GET /api/studio/projects/:id/files` (cf. `api_studio::collect_files_recursive`).
+pub(crate) const EXCLUDED_DIR_NAMES: &[&str] = &[
+    // VCS / studio metadata
     ".git",
+    // JS / TS — paquets, caches, frameworks
     "node_modules",
     "dist",
     "build",
-    "target",
     ".next",
+    ".nuxt",
+    ".svelte-kit",
     ".turbo",
     ".cache",
+    ".parcel-cache",
+    ".angular",
+    ".yarn",
+    // Rust / Java
+    "target",
+    ".gradle",
+    // Python — venvs, caches, eggs
     "__pycache__",
     ".venv",
     "venv",
+    ".tox",
+    ".nox",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".eggs",
+    // Ruby
+    ".bundle",
+    // PHP / Go (Composer / vendoring)
+    "vendor",
+    // Swift / iOS / Xcode
+    "Pods",
+    "DerivedData",
+    ".build",
+    // Elixir
+    "_build",
+    // IDE caches
+    ".idea",
+    ".vs",
+    // Test / coverage reports
+    "coverage",
+    ".nyc_output",
 ];
 
 #[derive(Debug, Serialize, Deserialize)]
