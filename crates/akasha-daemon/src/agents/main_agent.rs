@@ -150,6 +150,7 @@ const SPECIALIST_AGENTS: &[&str] = &[
     "studio_backend",
     "studio_fullstack",
     "studio_planner",
+    "studio_reviewer",
     "studio_project_manager",
 ];
 

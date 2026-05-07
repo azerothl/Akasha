@@ -1733,6 +1733,27 @@ fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, assigned_agent
             }
         }
     }
+    if assigned_agent.eq_ignore_ascii_case("studio_reviewer") {
+        out.retain(|t| {
+            !matches!(
+                t.as_str(),
+                "write_file"
+                    | "write_code"
+                    | "delete_file"
+                    | "rename_path"
+                    | "move_tree"
+                    | "edit_file"
+                    | "apply_patch"
+                    | "search_replace"
+                    | "delegate_to_agent"
+            )
+        });
+        for t in ["studio_list_tickets", "studio_update_ticket"] {
+            if !out.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+                out.push(t.to_string());
+            }
+        }
+    }
     out
 }
 
@@ -3379,6 +3400,7 @@ Règles d’orchestration :\n\
 - **Dossier `specs/`** : pour toute demande d’**évolution** (nouvelle fonctionnalité, changement de comportement, refonte ciblée, branche d’évolution active, ou demande explicitement traitée comme évolution), crée un fichier plan dédié `workspace:/specs/<YYYYMMDD>-<slug-court>.md` avant de lancer l’implémentation. Le plan doit contenir : objectif, périmètre, critères d’acceptation, liste d’étapes numérotées, **marquage des étapes parallélisables** (ex. « (parallèle avec 3) »), risques, et une section **Iterations** pour suivre les passes de correction.\n\
 - **Délégation** : tu es le **seul** à appeler `TOOL: delegate_to_agent <agent> <message>` vers des sous-agents (`conversation`, `code`, `studio_frontend`, `studio_backend`, `studio_fullstack`, `studio_scaffold`, `studio_planner` pour lecture/plan seul, `qa`, etc.). Les sous-agents **ne** doivent **pas** rappeler `delegate_to_agent`. **Mode anti-conflit Code Studio** : exécute une délégation **séquentielle** (un seul `delegate_to_agent` à la fois), attends le résultat, relis les fichiers impactés, puis lance le suivant. Quand le runtime injecte une consigne « délégation obligatoire », tu délègue avant toute implémentation applicative.\n\
 - **Boucle de correction** : après chaque vague de sous-agents, lis les résultats / erreurs de build (`run_command --cwd workspace:/` quand autorisé), mets à jour le plan dans `specs/…` et relance des sous-tâches ciblées. **Maximum 5** vagues de retours sous-agents pour la même demande racine ; si au-delà le besoin n’est pas satisfait, réponds à l’utilisateur avec ce qui a été fait, les blocages, et des suggestions concrètes.\n\
+- **Phase review ticket** : si le ticket est en `review`, délègue à `studio_reviewer` (ou au `review_agent` du ticket s’il vaut `studio_reviewer`) pour audit et feedback seulement. En review, ne mandate pas un agent d’implémentation pour réécrire le code ; la sortie attendue est un verdict + commentaires + retour `in_progress` si corrections requises.\n\
 - **Synthèse utilisateur** : une fois le besoin rempli (ou en échec contrôlé), termine par un résumé clair en langage accessible.\n\
 - **Fichiers** : respecte les règles Code Studio existantes pour `CODE_STUDIO_PLAN.md` et `DESIGN.md` ; n’écrase pas le plan global sans nécessité.\n\
 Langue : aligne-toi sur le dernier message utilisateur."),
@@ -3387,6 +3409,7 @@ Langue : aligne-toi sur le dernier message utilisateur."),
         "studio_backend" => Some("You are the Code Studio backend agent. Add APIs, env-based config, and CORS as needed. Prefer workspace:/ paths. When a [Stack technique du projet] block is present, follow it for runtime (Node, Python, Rust, etc.), framework, and persistence choices. Never switch to another language/ecosystem unless the user explicitly asks for that migration; do not rewrite the Stack section of `CODE_STUDIO_PLAN.md` to a different stack on your own. Never assume dependencies exist without checking the manifest. Use git_* tools on the project root when inspecting history. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. For code files, output syntactically valid code only (except valid language comments). Before declaring completion: run tests or at least start/build checks when feasible; summarize APIs and behavior for the user in accessible terms."),
         "studio_fullstack" => Some("You are the Code Studio full-stack agent. Coordinate frontend and backend changes in one pass: clear API contracts, shared types when applicable, and a coherent folder layout. Prefer workspace:/ paths; use run_in_container when policy allows for installs and builds. When a [Stack technique du projet] block is present in the user message, treat it as binding for the whole stack unless the user explicitly contradicts it in the same message. Never switch to another language/ecosystem unless the user explicitly asks for that migration; do not rewrite the Stack section of `CODE_STUDIO_PLAN.md` to a different stack on your own. Maintain workspace:/CODE_STUDIO_PLAN.md per the injected Code Studio plan rules (section-wise updates; no full-file rewrite for small tasks). FILE OUTPUT RULE (strict): when writing files, write only the file content itself; never insert chat prose/status/explanations/reflection inside files. If prose was accidentally inserted in a source file, remove it and keep only valid syntax for that file type. Verify end-to-end coherence; run combined build/test when policy allows. Close with a plain-language recap of what changed and how to run the app."),
         "studio_planner" => Some("You are the Code Studio planning agent. READ-ONLY on application source: do NOT write_file, write_code, edit_file, delete_file, rename_path, move_tree, search_replace, or apply_patch to any path except workspace:/CODE_STUDIO_PLAN.md. Do NOT run_command except read-only diagnostics (git status, git log, git diff, ls, cat, npm/yarn/pnpm only if the user explicitly asked for a read-only check). You MAY update workspace:/CODE_STUDIO_PLAN.md by sections to capture the plan. Explore with read_file, list_dir, grep_content. Deliver a clear implementation plan, critical files, and risks; end with next steps for a human or for an implement agent."),
+        "studio_reviewer" => Some("You are the Code Studio QA/Review agent. STRICTLY NON-MUTATING: never modify application files and never run write tools (write_file, write_code, edit_file, search_replace, apply_patch, delete_file, rename_path, move_tree). Your job in ticket `review` is to verify that the work linked to the ticket is present and behaves as expected, then post structured feedback on the ticket. Use read-only inspection (read_file, grep_content, git_* and optional diagnostics) and finish by updating the ticket via `studio_update_ticket`: if accepted set review_outcome=approved and status=done; if issues remain set review_outcome=changes_requested, add concrete corrective_steps, and set status=in_progress. Do not rewrite the implementation during review."),
         _ => None,
     }
 }
@@ -3549,6 +3572,40 @@ pub(crate) async fn execute_tool_call_impl(
     workspace_root: Option<&std::path::Path>,
 ) -> (bool, String, Option<String>) {
     use std::path::Path;
+    let is_studio_workspace =
+        crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root).is_some();
+    let assigned_agent_for_task = if is_studio_workspace {
+        store_path
+            .and_then(|sp| TaskStore::open(sp).ok())
+            .and_then(|store| store.get(task_id).ok().flatten())
+            .map(|t| t.assigned_agent.to_ascii_lowercase())
+    } else {
+        None
+    };
+    if assigned_agent_for_task.as_deref() == Some("studio_reviewer") {
+        let blocked = matches!(
+            tool_name,
+            "write_file"
+                | "write_code"
+                | "delete_file"
+                | "rename_path"
+                | "move_tree"
+                | "edit_file"
+                | "apply_patch"
+                | "search_replace"
+                | "delegate_to_agent"
+        );
+        if blocked {
+            return (
+                false,
+                format!(
+                    "[{}] forbidden for `studio_reviewer`: review agent is read-only and must only validate then update ticket feedback/status.",
+                    tool_name
+                ),
+                None,
+            );
+        }
+    }
     let plugin_invocation = parse_plugin_tool_invocation(plugin_registry, tool_name, args);
     let is_plugin_candidate = plugin_invocation.is_some();
     let studio_ticket_tool_ok = matches!(
@@ -16683,6 +16740,7 @@ mod tests {
         parse_memory_store_explicit_links, parse_plugin_reputation_reset_body, parse_run_command_args,
         parse_skill_install_url, parse_tool_calls, parse_write_file_request,
         resolve_run_command_working_dir, strip_markdown_fences_from_write_content,
+        code_studio_tools_for_prompt,
         response_looks_off_topic_for_small_talk, rewrite_workspace_plan_key_to_lineage_root,
         rewrite_workspace_plan_path_str, small_talk_fast_lane, PluginReputationResetBody,
         SessionRecallIntent, SessionRecallRange, SmallTalkLanguage,
@@ -17550,6 +17608,7 @@ line two new"#;
             "qa",
             "system",
             "image_generation",
+            "studio_reviewer",
         ];
         for t in &with_role {
             let s = agent_role_system_prompt(t);
@@ -17568,6 +17627,30 @@ line two new"#;
         assert!(agent_role_system_prompt("").is_none());
         // schedule is handled specially (recurring task), no role prompt
         assert!(agent_role_system_prompt("schedule").is_none());
+    }
+
+    #[test]
+    fn code_studio_tools_for_reviewer_are_read_only_plus_ticket_updates() {
+        let tools = code_studio_tools_for_prompt(None, "studio_reviewer");
+        assert!(tools.iter().any(|t| t == "read_file"));
+        assert!(tools.iter().any(|t| t == "studio_list_tickets"));
+        assert!(tools.iter().any(|t| t == "studio_update_ticket"));
+        for forbidden in [
+            "write_file",
+            "write_code",
+            "delete_file",
+            "rename_path",
+            "move_tree",
+            "edit_file",
+            "apply_patch",
+            "search_replace",
+            "delegate_to_agent",
+        ] {
+            assert!(
+                !tools.iter().any(|t| t == forbidden),
+                "tool `{forbidden}` must not be available for studio_reviewer"
+            );
+        }
     }
 
     // --- ensure_no_open_code_block ---
