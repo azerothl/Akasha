@@ -455,7 +455,10 @@ pub struct StudioTicket {
     pub requested_by: String,
     pub assigned_agent: String,
     pub review_agent: String,
-    /// Autre ticket du même projet qui doit être en `done` avant de pouvoir lancer celui-ci.
+    /// Tickets du même projet qui doivent être en `done` avant de lancer celui-ci (union avec `depends_on_ticket_id` si présent).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on_ticket_ids: Vec<String>,
+    /// Déprécié : premier prérequis seulement ; fusionné dans `depends_on_ticket_ids` au chargement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depends_on_ticket_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -738,7 +741,82 @@ fn load_studio_tickets_store(project_root: &Path) -> StudioTicketsStore {
     let Ok(s) = fs::read_to_string(p) else {
         return StudioTicketsStore::default();
     };
-    serde_json::from_str(&s).unwrap_or_default()
+    let mut store: StudioTicketsStore = serde_json::from_str(&s).unwrap_or_default();
+    for t in &mut store.tickets {
+        normalize_ticket_dependencies(t);
+    }
+    store
+}
+
+/// Union des prérequis (`depends_on_ticket_ids` + ancien champ singleton).
+pub fn ticket_dependency_ids(ticket: &StudioTicket) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut set: BTreeSet<String> = BTreeSet::new();
+    for x in &ticket.depends_on_ticket_ids {
+        let x = x.trim();
+        if !x.is_empty() {
+            set.insert(x.to_string());
+        }
+    }
+    if let Some(ref o) = ticket.depends_on_ticket_id {
+        let o = o.trim();
+        if !o.is_empty() {
+            set.insert(o.to_string());
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// Fusionne les champs legacy / liste et met à jour `depends_on_ticket_id` comme alias du premier id (tri lexicographique).
+pub fn normalize_ticket_dependencies(ticket: &mut StudioTicket) {
+    let merged = ticket_dependency_ids(ticket);
+    ticket.depends_on_ticket_ids = merged.clone();
+    ticket.depends_on_ticket_id = merged.first().cloned();
+}
+
+/// Suit la chaîne des prérequis depuis `start_id` ; retourne `true` si `needle` est atteignable (cycle si needle est le ticket courant).
+pub fn prerequisite_chain_reaches_ticket(project_root: &Path, start_id: &str, needle: &str) -> bool {
+    let store = load_studio_tickets_store(project_root);
+    let mut id_to_ticket: std::collections::HashMap<String, StudioTicket> =
+        std::collections::HashMap::new();
+    for t in store.tickets {
+        id_to_ticket.insert(t.id.clone(), t);
+    }
+    let mut stack = vec![start_id.to_string()];
+    let mut seen = std::collections::HashSet::<String>::new();
+    while let Some(cur) = stack.pop() {
+        if cur == needle {
+            return true;
+        }
+        if !seen.insert(cur.clone()) {
+            continue;
+        }
+        let Some(t) = id_to_ticket.get(&cur) else {
+            continue;
+        };
+        for d in ticket_dependency_ids(t) {
+            stack.push(d);
+        }
+    }
+    false
+}
+
+/// `true` si ajouter des arêtes ticket → chaque id dans `new_dep_ids` créerait un cycle.
+pub fn studio_ticket_deps_would_cycle(
+    project_root: &Path,
+    ticket_id: &str,
+    new_dep_ids: &[String],
+) -> bool {
+    for dep in new_dep_ids {
+        let dep = dep.trim();
+        if dep.is_empty() || dep == ticket_id {
+            return true;
+        }
+        if prerequisite_chain_reaches_ticket(project_root, dep, ticket_id) {
+            return true;
+        }
+    }
+    false
 }
 
 fn save_studio_tickets_store(project_root: &Path, store: &StudioTicketsStore) -> Result<(), String> {
@@ -772,20 +850,21 @@ pub fn studio_get_ticket(project_root: &Path, ticket_id: &str) -> Option<StudioT
         .find(|t| t.id == id)
 }
 
-/// `true` lorsque aucun prérequis ou le ticket référencé existe et est `done`.
+/// `true` lorsque tous les prérequis existent et sont `done` (ou aucun prérequis).
 pub fn studio_ticket_prerequisite_done(project_root: &Path, ticket: &StudioTicket) -> bool {
-    let Some(dep_id) = ticket
-        .depends_on_ticket_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
+    let deps = ticket_dependency_ids(ticket);
+    if deps.is_empty() {
         return true;
-    };
-    let Some(dep) = studio_get_ticket(project_root, dep_id) else {
-        return false;
-    };
-    dep.status == "done"
+    }
+    for dep_id in deps {
+        let Some(dep) = studio_get_ticket(project_root, &dep_id) else {
+            return false;
+        };
+        if dep.status != "done" {
+            return false;
+        }
+    }
+    true
 }
 
 pub fn studio_list_ticket_events(project_root: &Path, ticket_id: &str) -> Vec<StudioTicketEvent> {
@@ -802,7 +881,8 @@ pub fn studio_list_ticket_events(project_root: &Path, ticket_id: &str) -> Vec<St
     events
 }
 
-pub fn studio_upsert_ticket(project_root: &Path, ticket: StudioTicket) -> Result<(), String> {
+pub fn studio_upsert_ticket(project_root: &Path, mut ticket: StudioTicket) -> Result<(), String> {
+    normalize_ticket_dependencies(&mut ticket);
     let mut store = load_studio_tickets_store(project_root);
     if let Some(idx) = store.tickets.iter().position(|t| t.id == ticket.id) {
         store.tickets[idx] = ticket;
@@ -897,6 +977,442 @@ pub fn studio_mark_ticket_ready_for_review(
         })),
     )?;
     Ok(())
+}
+
+/// Workspace roots permitted for `studio_*` ticket tools: must sit under `<data_dir>/studio-projects/`.
+pub fn studio_ticket_tool_workspace_root(
+    store_path: Option<&Path>,
+    workspace_root: Option<&Path>,
+) -> Option<PathBuf> {
+    let sp = store_path?;
+    let ws = workspace_root?;
+    let data_dir = sp.parent()?;
+    let base = studio_projects_base(data_dir);
+    if ws.starts_with(&base) && ws.is_dir() {
+        Some(ws.to_path_buf())
+    } else {
+        None
+    }
+}
+
+/// Heuristic: user message looks like a code/feature evolution request (avoid greetings / bootstrap noise).
+pub fn studio_user_message_suggests_evolution(message: &str) -> bool {
+    let t = message.trim();
+    if t.starts_with("[Bootstrap Kanban") {
+        return false;
+    }
+    if t.len() < 16 {
+        return false;
+    }
+    let lower = t.to_ascii_lowercase();
+    if lower.len() < 48
+        && (lower == "bonjour"
+            || lower == "salut"
+            || lower == "hello"
+            || lower == "hi"
+            || lower == "thanks"
+            || lower == "merci"
+            || lower == "ok"
+            || lower == "okay")
+    {
+        return false;
+    }
+    const KW: &[&str] = &[
+        "implement",
+        "implément",
+        "implémente",
+        "feature",
+        "bug",
+        "fix",
+        "corrige",
+        "correct",
+        "refactor",
+        "refonte",
+        " ajoute",
+        "add ",
+        "change",
+        "chang",
+        "modif",
+        "modify",
+        "update ",
+        "mise à jour",
+        "endpoint",
+        "route ",
+        "component",
+        "composant",
+        "build error",
+        "erreur de build",
+        "typescript",
+        "eslint",
+        "nouvelle fonctionnalité",
+        "new feature",
+        "patch",
+        "hotfix",
+        "évolution",
+        "evolution",
+        "enhancement",
+        "régression",
+        "regression",
+        "fonctionnalité",
+        "migration",
+        "schema",
+        "database",
+        "api ",
+    ];
+    KW.iter().any(|k| lower.contains(k))
+}
+
+/// Auto-create a Kanban ticket from a chat message (linked to the next `/api/message` turn).
+pub fn studio_create_evolution_ticket_from_chat(
+    project_root: &Path,
+    message: &str,
+) -> Result<String, String> {
+    let meta = load_studio_meta(project_root).ok_or_else(|| "studio_meta_missing".to_string())?;
+    let raw_title = message.lines().next().unwrap_or(message).trim();
+    let mut title = if raw_title.chars().count() > 200 {
+        raw_title.chars().take(200).collect::<String>()
+    } else {
+        raw_title.to_string()
+    };
+    if title.is_empty() {
+        title = "Évolution (chat)".to_string();
+    }
+    let new_ticket_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let ticket = StudioTicket {
+        id: new_ticket_id.clone(),
+        project_id: meta.id.clone(),
+        title,
+        description: message.trim().to_string(),
+        status: "todo".to_string(),
+        requested_by: "user_chat".to_string(),
+        assigned_agent: "studio_fullstack".to_string(),
+        review_agent: "studio_reviewer".to_string(),
+        depends_on_ticket_ids: Vec::new(),
+        depends_on_ticket_id: None,
+        related_task_id: None,
+        acceptance_criteria: Vec::new(),
+        evidence: StudioTicketEvidence::default(),
+        review_outcome: None,
+        review_notes: None,
+        corrective_steps: Vec::new(),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    studio_upsert_ticket(project_root, ticket.clone())?;
+    let _ = studio_append_ticket_event(
+        project_root,
+        &ticket.id,
+        "ticket_created",
+        "system",
+        Some(json!({
+            "source": "chat_evolution_auto",
+            "title": ticket.title,
+        })),
+    );
+    Ok(new_ticket_id)
+}
+
+/// Agent tool: create ticket (JSON args). `assigned_agent` defaults to `studio_fullstack`; `review_agent` to `studio_reviewer`.
+pub fn studio_tool_create_ticket_json(
+    project_root: &Path,
+    body: &serde_json::Value,
+) -> Result<StudioTicket, String> {
+    let meta = load_studio_meta(project_root).ok_or_else(|| "studio_meta_missing".to_string())?;
+    let title = body
+        .get("title")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "title_required".to_string())?;
+    if title.chars().count() > 200 {
+        return Err("title_invalid".to_string());
+    }
+    let description = body
+        .get("description")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let assigned_agent = body
+        .get("assigned_agent")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "studio_fullstack".to_string());
+    let review_agent = body
+        .get("review_agent")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "studio_reviewer".to_string());
+    let requested_by = body
+        .get("requested_by")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "studio_project_manager".to_string());
+    let acceptance_criteria = match body.get("acceptance_criteria") {
+        None => vec![],
+        Some(v) => serde_json::from_value::<Vec<StudioTicketAcceptanceCriterion>>(v.clone())
+            .map_err(|_| "acceptance_criteria_invalid".to_string())?,
+    };
+
+    let mut depends_on_ticket_ids: Vec<String> = Vec::new();
+    if let Some(raw) = body.get("depends_on_ticket_ids") {
+        if raw.is_null() {
+            // empty
+        } else if let Some(arr) = raw.as_array() {
+            for v in arr {
+                let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                    return Err("depends_on_ticket_ids_must_be_string_array".to_string());
+                };
+                depends_on_ticket_ids.push(s.to_string());
+            }
+        } else {
+            return Err("depends_on_ticket_ids_must_be_array_or_null".to_string());
+        }
+    }
+    match body.get("depends_on_ticket_id") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(v) => {
+            let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                return Err("depends_on_ticket_id_invalid".to_string());
+            };
+            if !depends_on_ticket_ids.iter().any(|x| x == s) {
+                depends_on_ticket_ids.push(s.to_string());
+            }
+        }
+    }
+    depends_on_ticket_ids.sort();
+    depends_on_ticket_ids.dedup();
+
+    let new_ticket_id = uuid::Uuid::new_v4().to_string();
+    for d in &depends_on_ticket_ids {
+        if d == &new_ticket_id {
+            return Err("depends_on_ticket_self".to_string());
+        }
+        if studio_get_ticket(project_root, d).is_none() {
+            return Err("depends_on_ticket_not_found".to_string());
+        }
+    }
+    if studio_ticket_deps_would_cycle(project_root, &new_ticket_id, &depends_on_ticket_ids) {
+        return Err("depends_on_ticket_cycle".to_string());
+    }
+    let depends_on_ticket_id = depends_on_ticket_ids.first().cloned();
+
+    let status = body
+        .get("status")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| matches!(s.as_str(), "todo" | "in_progress" | "review" | "done" | "blocked"))
+        .unwrap_or_else(|| "todo".to_string());
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let ticket = StudioTicket {
+        id: new_ticket_id,
+        project_id: meta.id.clone(),
+        title: title.to_string(),
+        description,
+        status,
+        requested_by,
+        assigned_agent,
+        review_agent,
+        depends_on_ticket_ids,
+        depends_on_ticket_id,
+        related_task_id: None,
+        acceptance_criteria,
+        evidence: StudioTicketEvidence::default(),
+        review_outcome: None,
+        review_notes: None,
+        corrective_steps: Vec::new(),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    studio_upsert_ticket(project_root, ticket.clone())?;
+    let _ = studio_append_ticket_event(
+        project_root,
+        &ticket.id,
+        "ticket_created",
+        "agent",
+        Some(json!({
+            "assigned_agent": ticket.assigned_agent,
+            "review_agent": ticket.review_agent,
+            "depends_on_ticket_id": ticket.depends_on_ticket_id,
+            "depends_on_ticket_ids": ticket.depends_on_ticket_ids,
+            "source": "studio_create_ticket",
+        })),
+    );
+    Ok(ticket)
+}
+
+/// Agent tool: PATCH ticket fields from JSON (`ticket_id` or `id` required). Same validation rules as HTTP PATCH.
+pub fn studio_tool_apply_ticket_patch_json(
+    project_root: &Path,
+    body: &serde_json::Value,
+) -> Result<StudioTicket, String> {
+    let ticket_id = body
+        .get("ticket_id")
+        .or_else(|| body.get("id"))
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "ticket_id_required".to_string())?;
+    let Some(mut ticket) = studio_get_ticket(project_root, ticket_id) else {
+        return Err("ticket_not_found".to_string());
+    };
+    let body_v = body;
+    if let Some(v) = body_v.get("title").and_then(|x| x.as_str()) {
+        let t = v.trim();
+        if t.is_empty() || t.chars().count() > 200 {
+            return Err("title_invalid".to_string());
+        }
+        ticket.title = t.to_string();
+    }
+    if let Some(v) = body_v.get("description").and_then(|x| x.as_str()) {
+        ticket.description = v.trim().to_string();
+    }
+    if let Some(v) = body_v.get("assigned_agent").and_then(|x| x.as_str()) {
+        let a = v.trim();
+        if a.is_empty() {
+            return Err("assigned_agent_required".to_string());
+        }
+        ticket.assigned_agent = a.to_string();
+    }
+    if let Some(v) = body_v.get("review_agent").and_then(|x| x.as_str()) {
+        let a = v.trim();
+        if a.is_empty() {
+            return Err("review_agent_required".to_string());
+        }
+        ticket.review_agent = a.to_string();
+    }
+    if body_v.get("depends_on_ticket_ids").is_some() {
+        let next_deps: Vec<String> = match body_v.get("depends_on_ticket_ids") {
+            Some(serde_json::Value::Null) => Vec::new(),
+            Some(arr_v) => {
+                let Some(arr) = arr_v.as_array() else {
+                    return Err("depends_on_ticket_ids_must_be_array_or_null".to_string());
+                };
+                let mut out = Vec::new();
+                for v in arr {
+                    let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                        return Err("depends_on_ticket_ids_must_be_string_array".to_string());
+                    };
+                    out.push(s.to_string());
+                }
+                out.sort();
+                out.dedup();
+                out
+            }
+            None => Vec::new(),
+        };
+        for d in &next_deps {
+            if d == ticket_id {
+                return Err("depends_on_ticket_self".to_string());
+            }
+            if studio_get_ticket(project_root, d).is_none() {
+                return Err("depends_on_ticket_not_found".to_string());
+            }
+        }
+        if studio_ticket_deps_would_cycle(project_root, ticket_id, &next_deps) {
+            return Err("depends_on_ticket_cycle".to_string());
+        }
+        ticket.depends_on_ticket_ids = next_deps;
+        ticket.depends_on_ticket_id = ticket.depends_on_ticket_ids.first().cloned();
+    } else if body_v.get("depends_on_ticket_id").is_some() {
+        let next_dep = match body_v.get("depends_on_ticket_id") {
+            Some(serde_json::Value::Null) => None,
+            Some(v) => {
+                let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                    return Err("depends_on_ticket_id_invalid".to_string());
+                };
+                let d = s.to_string();
+                if d == ticket_id {
+                    return Err("depends_on_ticket_self".to_string());
+                }
+                if studio_get_ticket(project_root, &d).is_none() {
+                    return Err("depends_on_ticket_not_found".to_string());
+                }
+                Some(d)
+            }
+            None => None,
+        };
+        let next_deps: Vec<String> = match next_dep {
+            None => Vec::new(),
+            Some(d) => vec![d],
+        };
+        if studio_ticket_deps_would_cycle(project_root, ticket_id, &next_deps) {
+            return Err("depends_on_ticket_cycle".to_string());
+        }
+        ticket.depends_on_ticket_ids = next_deps;
+        ticket.depends_on_ticket_id = ticket.depends_on_ticket_ids.first().cloned();
+    }
+    if let Some(v) = body_v.get("acceptance_criteria") {
+        match serde_json::from_value::<Vec<StudioTicketAcceptanceCriterion>>(v.clone()) {
+            Ok(criteria) => ticket.acceptance_criteria = criteria,
+            Err(_) => return Err("acceptance_criteria_invalid".to_string()),
+        }
+    }
+    let mut recovered_execution: Option<(String, Option<String>)> = None;
+    if body_v.get("recover_stuck_execution").and_then(|x| x.as_bool()) == Some(true) {
+        if ticket.status != "in_progress" && ticket.status != "review" {
+            return Err("recover_only_in_progress_or_review".to_string());
+        }
+        recovered_execution = Some((ticket.status.clone(), ticket.related_task_id.clone()));
+        ticket.related_task_id = None;
+        ticket.status = "todo".to_string();
+    } else if let Some(v) = body_v.get("status").and_then(|x| x.as_str()) {
+        let next = v.trim().to_ascii_lowercase();
+        let valid = matches!(
+            next.as_str(),
+            "todo" | "in_progress" | "review" | "done" | "blocked"
+        );
+        if !valid {
+            return Err("invalid_status".to_string());
+        }
+        let cur = ticket.status.as_str();
+        let transition_ok = match (cur, next.as_str()) {
+            ("todo", "in_progress") => !ticket.assigned_agent.trim().is_empty(),
+            ("in_progress", "review") => true,
+            ("review", "done") => false,
+            ("review", "in_progress") => !ticket.corrective_steps.is_empty(),
+            (_, "blocked") if cur != "done" => true,
+            ("blocked", "in_progress") => true,
+            (a, b) if a == b => true,
+            _ => false,
+        };
+        if !transition_ok {
+            return Err("invalid_status_transition".to_string());
+        }
+        ticket.status = next;
+    }
+    ticket.updated_at = chrono::Utc::now().to_rfc3339();
+    studio_upsert_ticket(project_root, ticket.clone())?;
+    match recovered_execution {
+        Some((previous_status, previous_related_task_id)) => {
+            let _ = studio_append_ticket_event(
+                project_root,
+                &ticket.id,
+                "ticket_execution_recovered",
+                "agent",
+                Some(json!({
+                    "status": ticket.status,
+                    "previous_status": previous_status,
+                    "previous_related_task_id": previous_related_task_id,
+                })),
+            );
+        }
+        None => {
+            let _ = studio_append_ticket_event(
+                project_root,
+                &ticket.id,
+                "ticket_updated",
+                "agent",
+                Some(json!({ "status": ticket.status })),
+            );
+        }
+    }
+    Ok(ticket)
 }
 
 fn list_project_dirs(base: &Path) -> Vec<PathBuf> {
@@ -2679,5 +3195,21 @@ Try `npm i --save-dev @types/jest`";
         assert!(branches.iter().any(|b| b.name == "master" || b.name == "main"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn evolution_heuristic_skips_bootstrap_and_greetings() {
+        use super::studio_user_message_suggests_evolution;
+        assert!(!studio_user_message_suggests_evolution(
+            "[Bootstrap Kanban — exécution unique] x"
+        ));
+        assert!(!studio_user_message_suggests_evolution("bonjour"));
+        assert!(!studio_user_message_suggests_evolution("merci"));
+        assert!(studio_user_message_suggests_evolution(
+            "Ajoute une route API /health pour le monitoring du service."
+        ));
+        assert!(studio_user_message_suggests_evolution(
+            "Please fix the TypeScript error in src/App.tsx when building."
+        ));
     }
 }

@@ -1624,6 +1624,9 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("image", "image <path|url> [prompt] — vision: joindre l'image en pièce jointe au chat (modèle vision dans llm_router)"),
     ("pdf", "pdf <path> — extraire le texte d'un PDF (path dans allowed_read_paths)"),
     ("ask_user", "ask_user — demande une information à l'utilisateur (human in the loop). Ligne suivante : JSON avec question (requis), context (optionnel), choices (optionnel, tableau de chaînes pour choix multiples). Pour une réponse ouverte (chemin, texte libre, secret), omettre choices ou laisser un tableau vide. Si choices est fourni, l'UI propose quand même une saisie libre en plus des boutons. Exemple : {\"question\":\"Quel fichier ?\",\"context\":\"...\",\"choices\":[\"a.txt\",\"b.txt\"]}"),
+    ("studio_list_tickets", "studio_list_tickets — (Code Studio) lister les tickets Kanban du projet (JSON compact : id, titre, statut, prérequis, agents). Réservé au disque projet courant (workspace)."),
+    ("studio_create_ticket", "studio_create_ticket <json> — (Code Studio) créer un ticket. Un seul objet JSON en argument (titre requis, description, assigned_agent, review_agent, depends_on_ticket_ids, status). Réservé studio-projects."),
+    ("studio_update_ticket", "studio_update_ticket <json> — (Code Studio) mettre à jour un ticket (ticket_id ou id requis, champs optionnels comme PATCH HTTP). Réservé studio-projects."),
     ("delegate_to_agent", "delegate_to_agent <agent_type> <message> — déléguer à un sous-agent (Code Studio : réservé à studio_project_manager). agent_type utiles : studio_frontend | studio_backend | studio_fullstack | studio_scaffold | studio_planner | qa | code | conversation | … (voir liste des spécialistes). Un seul niveau depuis la tâche racine : les sous-agents ne rappellent pas delegate_to_agent."),
     ("install_skill", "install_skill <url> — installer un skill depuis une URL GitHub (ex. https://github.com/BankrBot/skills/tree/main/bankr). Télécharge SKILL.md, l'enregistre dans le dossier skills, puis recharge les skills."),
     ("uninstall_skill", "uninstall_skill <name> — désinstaller un skill (supprime data_dir/skills/<name>, retire la commande de tools_policy si présente, recharge les skills)."),
@@ -1717,6 +1720,17 @@ fn code_studio_tools_for_prompt(allowed_tools: Option<&[String]>, assigned_agent
             .any(|t| t.eq_ignore_ascii_case("delegate_to_agent"))
         {
             out.push("delegate_to_agent".to_string());
+        }
+    }
+    if assigned_agent.eq_ignore_ascii_case("studio_project_manager") {
+        for t in [
+            "studio_list_tickets",
+            "studio_create_ticket",
+            "studio_update_ticket",
+        ] {
+            if !out.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+                out.push(t.to_string());
+            }
         }
     }
     out
@@ -3360,6 +3374,7 @@ pub fn agent_role_system_prompt(agent_type: &str) -> Option<&'static str> {
         "image_generation" => Some("You are the image generation agent. Produce images from text prompts using the generate_image tool. Focus on clear, concrete prompts that yield the requested visual. One precise deliverable per request."),
         "studio_project_manager" => Some("You are the Code Studio project manager (chef de projet). Tu coordonnes chaque demande sur le dépôt ouvert (chemins `workspace:/…`).\n\
 Règles d’orchestration :\n\
+- **Kanban / tickets** : après lecture de `CODE_STUDIO_PLAN.md`, `DESIGN.md` et du résumé projet, assure-toi que le tableau Kanban reflète le travail : utilise `TOOL: studio_list_tickets`, puis `TOOL: studio_create_ticket` / `TOOL: studio_update_ticket` avec un **JSON sur une ligne** (ex. `TOOL: studio_create_ticket {\"title\":\"…\",\"description\":\"…\",\"depends_on_ticket_ids\":[\"uuid\"]}`). Crée ou ajuste les tickets **avant** de déléguer l’implémentation aux sous-agents.\n\
 - **Dossier `specs/`** : pour toute demande d’**évolution** (nouvelle fonctionnalité, changement de comportement, refonte ciblée, branche d’évolution active, ou demande explicitement traitée comme évolution), crée un fichier plan dédié `workspace:/specs/<YYYYMMDD>-<slug-court>.md` avant de lancer l’implémentation. Le plan doit contenir : objectif, périmètre, critères d’acceptation, liste d’étapes numérotées, **marquage des étapes parallélisables** (ex. « (parallèle avec 3) »), risques, et une section **Iterations** pour suivre les passes de correction.\n\
 - **Délégation** : tu es le **seul** à appeler `TOOL: delegate_to_agent <agent> <message>` vers des sous-agents (`conversation`, `code`, `studio_frontend`, `studio_backend`, `studio_fullstack`, `studio_scaffold`, `studio_planner` pour lecture/plan seul, `qa`, etc.). Les sous-agents **ne** doivent **pas** rappeler `delegate_to_agent`. **Mode anti-conflit Code Studio** : exécute une délégation **séquentielle** (un seul `delegate_to_agent` à la fois), attends le résultat, relis les fichiers impactés, puis lance le suivant. Quand le runtime injecte une consigne « délégation obligatoire », tu délègue avant toute implémentation applicative.\n\
 - **Boucle de correction** : après chaque vague de sous-agents, lis les résultats / erreurs de build (`run_command --cwd workspace:/` quand autorisé), mets à jour le plan dans `specs/…` et relance des sous-tâches ciblées. **Maximum 5** vagues de retours sous-agents pour la même demande racine ; si au-delà le besoin n’est pas satisfait, réponds à l’utilisateur avec ce qui a été fait, les blocages, et des suggestions concrètes.\n\
@@ -3535,7 +3550,12 @@ pub(crate) async fn execute_tool_call_impl(
     use std::path::Path;
     let plugin_invocation = parse_plugin_tool_invocation(plugin_registry, tool_name, args);
     let is_plugin_candidate = plugin_invocation.is_some();
-    let can_use_named_tool = executor.policy.can_use_tool(tool_name);
+    let studio_ticket_tool_ok = matches!(
+        tool_name,
+        "studio_list_tickets" | "studio_create_ticket" | "studio_update_ticket"
+    ) && crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root).is_some();
+    let can_use_named_tool =
+        executor.policy.can_use_tool(tool_name) || studio_ticket_tool_ok;
     let can_use_plugin_call =
         executor.policy.can_use_tool("plugin.call") || executor.policy.can_use_tool("plugin_call");
     if is_plugin_candidate && !can_use_plugin_call {
@@ -3623,6 +3643,101 @@ pub(crate) async fn execute_tool_call_impl(
                         None,
                     ),
                 }
+            }
+        }
+        "studio_list_tickets" => {
+            let Some(root) =
+                crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root)
+            else {
+                return (
+                    false,
+                    "[studio_list_tickets] Code Studio project workspace required".to_string(),
+                    None,
+                );
+            };
+            let tickets = crate::api_studio::studio_list_tickets(&root);
+            let slim: Vec<serde_json::Value> = tickets
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "id": t.id,
+                        "title": t.title,
+                        "status": t.status,
+                        "depends_on_ticket_ids": crate::api_studio::ticket_dependency_ids(t),
+                        "assigned_agent": t.assigned_agent,
+                        "review_agent": t.review_agent,
+                    })
+                })
+                .collect();
+            let pretty = serde_json::to_string_pretty(&slim).unwrap_or_else(|_| "[]".to_string());
+            (
+                true,
+                format!("[studio_list_tickets]\n{}", pretty),
+                None,
+            )
+        }
+        "studio_create_ticket" => {
+            let Some(root) =
+                crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root)
+            else {
+                return (
+                    false,
+                    "[studio_create_ticket] Code Studio project workspace required".to_string(),
+                    None,
+                );
+            };
+            let payload = args.join(" ");
+            let v: serde_json::Value = match serde_json::from_str(payload.trim()) {
+                Ok(x) => x,
+                Err(e) => {
+                    return (
+                        false,
+                        format!(
+                            "[studio_create_ticket] invalid JSON (single JSON object as args): {}",
+                            e
+                        ),
+                        None,
+                    );
+                }
+            };
+            match crate::api_studio::studio_tool_create_ticket_json(&root, &v) {
+                Ok(ticket) => {
+                    let enc = serde_json::to_string_pretty(&ticket).unwrap_or_default();
+                    (true, format!("[studio_create_ticket]\n{}", enc), None)
+                }
+                Err(e) => (false, format!("[studio_create_ticket] {}", e), None),
+            }
+        }
+        "studio_update_ticket" => {
+            let Some(root) =
+                crate::api_studio::studio_ticket_tool_workspace_root(store_path, workspace_root)
+            else {
+                return (
+                    false,
+                    "[studio_update_ticket] Code Studio project workspace required".to_string(),
+                    None,
+                );
+            };
+            let payload = args.join(" ");
+            let v: serde_json::Value = match serde_json::from_str(payload.trim()) {
+                Ok(x) => x,
+                Err(e) => {
+                    return (
+                        false,
+                        format!(
+                            "[studio_update_ticket] invalid JSON (single JSON object as args): {}",
+                            e
+                        ),
+                        None,
+                    );
+                }
+            };
+            match crate::api_studio::studio_tool_apply_ticket_patch_json(&root, &v) {
+                Ok(ticket) => {
+                    let enc = serde_json::to_string_pretty(&ticket).unwrap_or_default();
+                    (true, format!("[studio_update_ticket]\n{}", enc), None)
+                }
+                Err(e) => (false, format!("[studio_update_ticket] {}", e), None),
             }
         }
         "read_file" => {
@@ -13389,7 +13504,7 @@ pub async fn handle_api(
             .and_then(|v| v.get("studio_project_id").and_then(|x| x.as_str()))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        let studio_ticket_id = body_json
+        let mut studio_ticket_id = body_json
             .as_ref()
             .and_then(|v| v.get("studio_ticket_id").and_then(|x| x.as_str()))
             .map(|s| s.trim().to_string())
@@ -13465,6 +13580,29 @@ pub async fn handle_api(
         } else {
             None
         };
+        if let (Some(ref root), Some(_pid)) = (studio_disk_root.as_ref(), studio_project_id.as_ref())
+        {
+            if studio_ticket_id.is_none() {
+                let mode = crate::api_studio::studio_ticket_enforcement_mode(root);
+                if mode != "off"
+                    && crate::api_studio::studio_user_message_suggests_evolution(&message)
+                {
+                    match crate::api_studio::studio_create_evolution_ticket_from_chat(root, &message)
+                    {
+                        Ok(id) => {
+                            tracing::info!(
+                                ticket_id = %id,
+                                "auto-created Code Studio evolution ticket from chat"
+                            );
+                            studio_ticket_id = Some(id);
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "studio evolution auto-ticket skipped");
+                        }
+                    }
+                }
+            }
+        }
         if let Some(ref root) = studio_disk_root {
             let studio_ticket_enforcement_mode = crate::api_studio::studio_ticket_enforcement_mode(root);
             if studio_ticket_enforcement_mode == "strict" && studio_ticket_id.is_none() {

@@ -701,29 +701,71 @@ pub async fn handle_studio_route(
                 },
             };
 
-            let depends_on_ticket_id = match body_v.get("depends_on_ticket_id") {
-                None | Some(serde_json::Value::Null) => None,
+            let mut depends_on_ticket_ids: Vec<String> = Vec::new();
+            if let Some(raw) = body_v.get("depends_on_ticket_ids") {
+                if raw.is_null() {
+                    // empty list
+                } else if let Some(arr) = raw.as_array() {
+                    for v in arr {
+                        let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                            return Some(json_response(
+                                "422 Unprocessable Entity",
+                                r#"{"error":"depends_on_ticket_ids_must_be_string_array"}"#,
+                            ));
+                        };
+                        depends_on_ticket_ids.push(s.to_string());
+                    }
+                } else {
+                    return Some(json_response(
+                        "422 Unprocessable Entity",
+                        r#"{"error":"depends_on_ticket_ids_must_be_array_or_null"}"#,
+                    ));
+                }
+            }
+            depends_on_ticket_ids.sort();
+            depends_on_ticket_ids.dedup();
+            match body_v.get("depends_on_ticket_id") {
+                None | Some(serde_json::Value::Null) => {}
                 Some(v) => {
-                    let s = v.as_str().map(str::trim).filter(|s| !s.is_empty());
-                    let Some(dep) = s.map(str::to_string) else {
+                    let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
                         return Some(json_response(
                             "422 Unprocessable Entity",
                             r#"{"error":"depends_on_ticket_id_must_be_string_or_null"}"#,
                         ));
                     };
-                    if studio_get_ticket(&root, &dep).is_none() {
-                        return Some(json_response(
-                            "422 Unprocessable Entity",
-                            r#"{"error":"depends_on_ticket_not_found"}"#,
-                        ));
+                    if !depends_on_ticket_ids.iter().any(|x| x == s) {
+                        depends_on_ticket_ids.push(s.to_string());
+                        depends_on_ticket_ids.sort();
+                        depends_on_ticket_ids.dedup();
                     }
-                    Some(dep)
                 }
-            };
+            }
+            let new_ticket_id = uuid::Uuid::new_v4().to_string();
+            for d in &depends_on_ticket_ids {
+                if d == &new_ticket_id {
+                    return Some(json_response(
+                        "422 Unprocessable Entity",
+                        r#"{"error":"depends_on_ticket_self"}"#,
+                    ));
+                }
+                if studio_get_ticket(&root, d).is_none() {
+                    return Some(json_response(
+                        "422 Unprocessable Entity",
+                        r#"{"error":"depends_on_ticket_not_found"}"#,
+                    ));
+                }
+            }
+            if crate::api_studio::studio_ticket_deps_would_cycle(&root, &new_ticket_id, &depends_on_ticket_ids) {
+                return Some(json_response(
+                    "422 Unprocessable Entity",
+                    r#"{"error":"depends_on_ticket_cycle"}"#,
+                ));
+            }
+            let depends_on_ticket_id = depends_on_ticket_ids.first().cloned();
 
             let now = chrono::Utc::now().to_rfc3339();
             let ticket = StudioTicket {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: new_ticket_id,
                 project_id: id.to_string(),
                 title: title.to_string(),
                 description,
@@ -731,6 +773,7 @@ pub async fn handle_studio_route(
                 requested_by,
                 assigned_agent: assigned_agent.clone(),
                 review_agent: review_agent.clone(),
+                depends_on_ticket_ids,
                 depends_on_ticket_id,
                 related_task_id: None,
                 acceptance_criteria,
@@ -756,6 +799,7 @@ pub async fn handle_studio_route(
                     "assigned_agent": assigned_agent,
                     "review_agent": review_agent,
                     "depends_on_ticket_id": ticket.depends_on_ticket_id,
+                    "depends_on_ticket_ids": ticket.depends_on_ticket_ids,
                 })),
             );
             let body = serde_json::json!({ "ticket": ticket }).to_string();
@@ -835,7 +879,55 @@ pub async fn handle_studio_route(
                 }
                 ticket.review_agent = a.to_string();
             }
-            if body_v.get("depends_on_ticket_id").is_some() {
+            if body_v.get("depends_on_ticket_ids").is_some() {
+                let next_deps: Vec<String> = match body_v.get("depends_on_ticket_ids") {
+                    Some(serde_json::Value::Null) => Vec::new(),
+                    Some(arr_v) => {
+                        let Some(arr) = arr_v.as_array() else {
+                            return Some(json_response(
+                                "422 Unprocessable Entity",
+                                r#"{"error":"depends_on_ticket_ids_must_be_array_or_null"}"#,
+                            ));
+                        };
+                        let mut out = Vec::new();
+                        for v in arr {
+                            let Some(s) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                                return Some(json_response(
+                                    "422 Unprocessable Entity",
+                                    r#"{"error":"depends_on_ticket_ids_must_be_string_array"}"#,
+                                ));
+                            };
+                            out.push(s.to_string());
+                        }
+                        out.sort();
+                        out.dedup();
+                        out
+                    }
+                    None => Vec::new(),
+                };
+                for d in &next_deps {
+                    if d == ticket_id {
+                        return Some(json_response(
+                            "422 Unprocessable Entity",
+                            r#"{"error":"depends_on_ticket_self"}"#,
+                        ));
+                    }
+                    if studio_get_ticket(&root, d).is_none() {
+                        return Some(json_response(
+                            "422 Unprocessable Entity",
+                            r#"{"error":"depends_on_ticket_not_found"}"#,
+                        ));
+                    }
+                }
+                if crate::api_studio::studio_ticket_deps_would_cycle(&root, ticket_id, &next_deps) {
+                    return Some(json_response(
+                        "422 Unprocessable Entity",
+                        r#"{"error":"depends_on_ticket_cycle"}"#,
+                    ));
+                }
+                ticket.depends_on_ticket_ids = next_deps;
+                ticket.depends_on_ticket_id = ticket.depends_on_ticket_ids.first().cloned();
+            } else if body_v.get("depends_on_ticket_id").is_some() {
                 let next_dep = match body_v.get("depends_on_ticket_id") {
                     Some(serde_json::Value::Null) => None,
                     Some(v) => {
@@ -858,41 +950,22 @@ pub async fn handle_studio_route(
                                 r#"{"error":"depends_on_ticket_not_found"}"#,
                             ));
                         }
-                        let mut cycle = false;
-                        let mut current_id = d.clone();
-                        let mut seen = std::collections::HashSet::new();
-                        seen.insert(d.clone());
-                        loop {
-                            if let Some(other) = studio_get_ticket(&root, &current_id) {
-                                match other.depends_on_ticket_id.as_deref() {
-                                    Some(next) if next == ticket_id => {
-                                        cycle = true;
-                                        break;
-                                    }
-                                    Some(next) => {
-                                        if !seen.insert(next.to_string()) {
-                                            // already visited — pre-existing cycle not involving ticket_id
-                                            break;
-                                        }
-                                        current_id = next.to_string();
-                                    }
-                                    None => break,
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                        if cycle {
-                            return Some(json_response(
-                                "422 Unprocessable Entity",
-                                r#"{"error":"depends_on_ticket_cycle"}"#,
-                            ));
-                        }
                         Some(d)
                     }
                     None => None,
                 };
-                ticket.depends_on_ticket_id = next_dep;
+                let next_deps: Vec<String> = match next_dep {
+                    None => Vec::new(),
+                    Some(d) => vec![d],
+                };
+                if crate::api_studio::studio_ticket_deps_would_cycle(&root, ticket_id, &next_deps) {
+                    return Some(json_response(
+                        "422 Unprocessable Entity",
+                        r#"{"error":"depends_on_ticket_cycle"}"#,
+                    ));
+                }
+                ticket.depends_on_ticket_ids = next_deps;
+                ticket.depends_on_ticket_id = ticket.depends_on_ticket_ids.first().cloned();
             }
             if let Some(v) = body_v.get("acceptance_criteria") {
                 match serde_json::from_value::<Vec<StudioTicketAcceptanceCriterion>>(v.clone()) {
