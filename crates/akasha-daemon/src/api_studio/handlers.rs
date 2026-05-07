@@ -1947,7 +1947,8 @@ pub async fn handle_studio_route(
         ));
     }
 
-    // POST /api/studio/projects/:id/preview/install — npm install uniquement (pas de serveur dev).
+    // POST /api/studio/projects/:id/preview/install — installation seule (pas de serveur dev).
+    // Détecte la stack et lance la commande adaptée (`npm install`, `uv sync`, …).
     if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/preview/install") {
         let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
         let id = rest
@@ -1970,24 +1971,54 @@ pub async fn handle_studio_route(
         if !root.is_dir() {
             return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
         }
-        let pkg = root.join("package.json");
-        if !pkg.is_file() {
+        // Le port n’a pas d’incidence sur `install_argv`, on en passe un fictif valide.
+        let plan = match detect_studio_preview_plan(&root, 0) {
+            Ok(p) => p,
+            Err(e) => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        };
+        let Some(install_argv) = plan.install_argv.clone() else {
             return Some(json_response(
-                "400 Bad Request",
-                r#"{"error":"package_json_required_for_preview"}"#,
+                "200 OK",
+                &serde_json::json!({
+                    "ok": true,
+                    "skipped": true,
+                    "reason": "no_install_step_for_profile",
+                    "profile": plan.label,
+                })
+                .to_string(),
             ));
-        }
+        };
         let body_v = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
         let force = body_v
             .as_ref()
             .and_then(|v| v.get("force"))
             .and_then(|x| x.as_bool())
             .unwrap_or(false);
-        let node_modules = root.join("node_modules");
-        if !force && node_modules.is_dir() {
+        let install_already_present = plan
+            .install_skip_when_present
+            .as_ref()
+            .map(|p| root.join(p).is_dir())
+            .unwrap_or(false);
+        if !force && install_already_present {
+            let marker = plan
+                .install_skip_when_present
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
             return Some(json_response(
                 "200 OK",
-                r#"{"ok":true,"skipped":true,"reason":"node_modules_present"}"#,
+                &serde_json::json!({
+                    "ok": true,
+                    "skipped": true,
+                    "reason": format!("install_marker_present:{marker}"),
+                    "profile": plan.label,
+                })
+                .to_string(),
             ));
         }
         let _permit = match studio_ops_semaphore().acquire().await {
@@ -1999,16 +2030,23 @@ pub async fn handle_studio_route(
                 ));
             }
         };
-        let argv = vec!["npm".to_string(), "install".to_string()];
-        match studio_run_command_capture(&root, &argv, NPM_INSTALL_TIMEOUT_SEC).await {
+        if !argv_looks_safe(&install_argv) {
+            return Some(json_response(
+                "400 Bad Request",
+                r#"{"error":"invalid preview install argv"}"#,
+            ));
+        }
+        match studio_run_command_capture(&root, &install_argv, NPM_INSTALL_TIMEOUT_SEC).await {
             Ok((code, stdout, stderr)) => {
                 let ok = code == Some(0);
                 let body = serde_json::json!({
                     "ok": ok,
+                    "profile": plan.label,
                     "install": {
                         "exit_code": code,
                         "stdout": stdout,
                         "stderr": stderr,
+                        "argv": install_argv,
                     }
                 });
                 let status = if ok { "200 OK" } else { "500 Internal Server Error" };
@@ -2023,7 +2061,8 @@ pub async fn handle_studio_route(
         }
     }
 
-    // POST /api/studio/projects/:id/preview/start — npm install if needed, then npm run dev (background).
+    // POST /api/studio/projects/:id/preview/start — détecte la stack (Node, Python uv …),
+    // installe les dépendances si nécessaire, puis lance le serveur de dev en arrière-plan.
     if method == "POST" && path_only.contains("/api/studio/projects/") && path_only.ends_with("/preview/start") {
         let rest = path_only.strip_prefix("/api/studio/projects/").unwrap_or("");
         let id = rest
@@ -2046,13 +2085,6 @@ pub async fn handle_studio_route(
         if !root.is_dir() {
             return Some(json_response("404 Not Found", r#"{"error":"project_not_found"}"#));
         }
-        let pkg = root.join("package.json");
-        if !pkg.is_file() {
-            return Some(json_response(
-                "400 Bad Request",
-                r#"{"error":"package_json_required_for_preview","hint":"Use static HTML preview in the UI or add a package.json with a dev script."}"#,
-            ));
-        }
         let body_v = body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
         let force_install = body_v
             .as_ref()
@@ -2073,66 +2105,79 @@ pub async fn handle_studio_route(
                 ));
             }
         };
-        let node_modules = root.join("node_modules");
-        let mut install_block: Option<serde_json::Value> = None;
-        if force_install || !node_modules.is_dir() {
-            let argv = vec!["npm".to_string(), "install".to_string()];
-            match studio_run_command_capture(&root, &argv, NPM_INSTALL_TIMEOUT_SEC).await {
-                Ok((code, stdout, stderr)) => {
-                    let ok = code == Some(0);
-                    install_block = Some(serde_json::json!({
-                        "exit_code": code,
-                        "stdout": stdout,
-                        "stderr": stderr,
-                    }));
-                    if !ok {
-                        return Some(json_response(
-                            "500 Internal Server Error",
-                            &serde_json::json!({
-                                "error": "npm_install_failed",
-                                "install": install_block,
-                            })
-                            .to_string(),
-                        ));
-                    }
-                }
-                Err(e) => {
-                    return Some(json_response(
-                        "500 Internal Server Error",
-                        &serde_json::json!({ "error": e }).to_string(),
-                    ));
-                }
-            }
-        }
+        // Réserve d’abord le port pour que `run_argv` reçoive la bonne valeur.
         let Some(port) = pick_preview_port(preferred_port) else {
             return Some(json_response(
                 "503 Service Unavailable",
                 r#"{"error":"no_free_preview_port"}"#,
             ));
         };
-        let mut map = studio_preview_registry().lock().await;
-        if let Some(mut old) = map.remove(id) {
-            let _ = old.child.kill().await;
+        // Détecte la stack à partir des manifestes du projet (package.json, pyproject.toml …).
+        let plan = match detect_studio_preview_plan(&root, port) {
+            Ok(p) => p,
+            Err(e) => {
+                return Some(json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                ));
+            }
+        };
+        let mut install_block: Option<serde_json::Value> = None;
+        if let Some(install_argv) = plan.install_argv.as_ref() {
+            let install_already_present = plan
+                .install_skip_when_present
+                .as_ref()
+                .map(|p| root.join(p).is_dir())
+                .unwrap_or(false);
+            if force_install || !install_already_present {
+                if !argv_looks_safe(install_argv) {
+                    return Some(json_response(
+                        "400 Bad Request",
+                        r#"{"error":"invalid preview install argv"}"#,
+                    ));
+                }
+                match studio_run_command_capture(&root, install_argv, NPM_INSTALL_TIMEOUT_SEC).await {
+                    Ok((code, stdout, stderr)) => {
+                        let ok = code == Some(0);
+                        install_block = Some(serde_json::json!({
+                            "exit_code": code,
+                            "stdout": stdout,
+                            "stderr": stderr,
+                            "argv": install_argv,
+                        }));
+                        if !ok {
+                            return Some(json_response(
+                                "500 Internal Server Error",
+                                &serde_json::json!({
+                                    "error": "preview_install_failed",
+                                    "profile": plan.label,
+                                    "install": install_block,
+                                })
+                                .to_string(),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        return Some(json_response(
+                            "500 Internal Server Error",
+                            &serde_json::json!({ "error": e }).to_string(),
+                        ));
+                    }
+                }
+            }
         }
-        let port_s = port.to_string();
-        let argv = vec![
-            "npm".to_string(),
-            "run".to_string(),
-            "dev".to_string(),
-            "--".to_string(),
-            "--host".to_string(),
-            "127.0.0.1".to_string(),
-            "--port".to_string(),
-            port_s.clone(),
-        ];
-        if !argv_looks_safe(&argv) {
+        if !argv_looks_safe(&plan.run_argv) {
             return Some(json_response(
                 "400 Bad Request",
                 r#"{"error":"invalid preview argv"}"#,
             ));
         }
+        let mut map = studio_preview_registry().lock().await;
+        if let Some(mut old) = map.remove(id) {
+            let _ = old.child.kill().await;
+        }
         let log = Arc::new(Mutex::new(String::new()));
-        let mut cmd = studio_command_from_argv(&argv);
+        let mut cmd = studio_command_from_argv(&plan.run_argv);
         cmd.current_dir(&root).kill_on_drop(false);
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
@@ -2163,6 +2208,8 @@ pub async fn handle_studio_route(
                     "url": url,
                     "port": port,
                     "proxy_signed": true,
+                    "profile": plan.label,
+                    "run_argv": plan.run_argv,
                 });
                 if let Some(ib) = install_block {
                     body["installed"] = serde_json::Value::Bool(true);

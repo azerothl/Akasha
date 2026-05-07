@@ -226,6 +226,143 @@ async fn run_build_in_container(
     }
 }
 
+/// Plan d’exécution pour `POST /api/studio/projects/:id/preview/start` détecté
+/// à partir des fichiers manifestes du projet (package.json, pyproject.toml, …).
+///
+/// Reste volontairement minimaliste : le daemon n’embarque pas un vrai détecteur
+/// de stack, juste les conventions les plus courantes pour permettre l’aperçu
+/// au-delà de Node.js.
+#[derive(Debug, Clone)]
+pub struct StudioPreviewPlan {
+    /// Libellé lisible affiché dans l’UI / les réponses (« Node.js (npm) », « Python · uv · Streamlit », …).
+    pub label: String,
+    /// Commande d’installation des dépendances (ex. `["npm","install"]`, `["uv","sync"]`).
+    /// `None` = pas d’étape d’installation gérée par le daemon.
+    pub install_argv: Option<Vec<String>>,
+    /// Si présent et que ce chemin existe (relatif au projet), l’installation est sautée
+    /// sauf `force=true` (ex. `node_modules` pour Node, `.venv` pour uv).
+    pub install_skip_when_present: Option<PathBuf>,
+    /// Commande de lancement du serveur de dev — déjà bornée au port choisi.
+    pub run_argv: Vec<String>,
+}
+
+/// Cherche `streamlit` ou `fastapi` dans le contenu d’un `pyproject.toml`.
+///
+/// Heuristique simple (pas de parser TOML) : on regarde si le mot apparaît dans
+/// le fichier en minuscules. Suffisant pour les conventions habituelles
+/// (`dependencies = ["streamlit", ...]`, `streamlit = "^1.0"`, etc.).
+fn pyproject_mentions(content_lower: &str, needle: &str) -> bool {
+    content_lower
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .any(|tok| tok == needle)
+}
+
+/// Première entrée existante parmi `candidates` (chemins relatifs au projet).
+fn first_existing_relative(project_root: &Path, candidates: &[&str]) -> Option<String> {
+    for name in candidates {
+        if project_root.join(name).is_file() {
+            return Some((*name).to_string());
+        }
+    }
+    None
+}
+
+/// Détecte la stack technique du projet et renvoie le plan d’aperçu correspondant.
+///
+/// Priorités :
+/// 1. `package.json` → Node.js (npm) — `npm install` + `npm run dev -- --host 127.0.0.1 --port <p>`.
+/// 2. `pyproject.toml` mentionnant `streamlit` → Python (uv) Streamlit — `uv sync` + `uv run streamlit run …`.
+/// 3. `pyproject.toml` mentionnant `fastapi` → Python (uv) FastAPI — `uv sync` + `uv run uvicorn main:app …`.
+/// 4. Sinon : `Err` avec un indice pour configurer la stack manuellement.
+pub fn detect_studio_preview_plan(project_root: &Path, port: u16) -> Result<StudioPreviewPlan, String> {
+    let port_s = port.to_string();
+
+    // 1) Node.js — comportement historique
+    if project_root.join("package.json").is_file() {
+        return Ok(StudioPreviewPlan {
+            label: "Node.js (npm)".to_string(),
+            install_argv: Some(vec!["npm".into(), "install".into()]),
+            install_skip_when_present: Some(PathBuf::from("node_modules")),
+            run_argv: vec![
+                "npm".into(),
+                "run".into(),
+                "dev".into(),
+                "--".into(),
+                "--host".into(),
+                "127.0.0.1".into(),
+                "--port".into(),
+                port_s.clone(),
+            ],
+        });
+    }
+
+    // 2) / 3) Python via `pyproject.toml` (uv pour la gestion d’environnement)
+    let pyproject = project_root.join("pyproject.toml");
+    if pyproject.is_file() {
+        let content = fs::read_to_string(&pyproject)
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+
+        if pyproject_mentions(&content, "streamlit") {
+            let entry = first_existing_relative(
+                project_root,
+                &["app.py", "streamlit_app.py", "main.py", "src/app.py"],
+            )
+            .unwrap_or_else(|| "app.py".to_string());
+            return Ok(StudioPreviewPlan {
+                label: "Python · uv · Streamlit".to_string(),
+                install_argv: Some(vec!["uv".into(), "sync".into()]),
+                install_skip_when_present: Some(PathBuf::from(".venv")),
+                run_argv: vec![
+                    "uv".into(),
+                    "run".into(),
+                    "streamlit".into(),
+                    "run".into(),
+                    entry,
+                    "--server.port".into(),
+                    port_s.clone(),
+                    "--server.address".into(),
+                    "127.0.0.1".into(),
+                    "--server.headless".into(),
+                    "true".into(),
+                ],
+            });
+        }
+
+        if pyproject_mentions(&content, "fastapi") {
+            // Convention `main:app` ; sinon `app.main:app` si le module existe.
+            let target = if project_root.join("app").join("main.py").is_file() {
+                "app.main:app"
+            } else {
+                "main:app"
+            };
+            return Ok(StudioPreviewPlan {
+                label: "Python · uv · FastAPI".to_string(),
+                install_argv: Some(vec!["uv".into(), "sync".into()]),
+                install_skip_when_present: Some(PathBuf::from(".venv")),
+                run_argv: vec![
+                    "uv".into(),
+                    "run".into(),
+                    "uvicorn".into(),
+                    target.to_string(),
+                    "--host".into(),
+                    "127.0.0.1".into(),
+                    "--port".into(),
+                    port_s,
+                    "--reload".into(),
+                ],
+            });
+        }
+    }
+
+    Err(
+        "preview_stack_unsupported: ajoutez un manifeste reconnu (package.json pour Node ; \
+         pyproject.toml mentionnant streamlit ou fastapi pour Python via uv). \
+         L’aperçu HTML statique reste disponible en ouvrant un fichier .html."
+            .to_string(),
+    )
+}
+
 /// Pick a TCP port on 127.0.0.1 (best-effort; released before the dev server binds).
 fn pick_preview_port(preferred: Option<u16>) -> Option<u16> {
     if let Some(p) = preferred {
@@ -1503,6 +1640,8 @@ fn allowed_studio_command(cmd: &str) -> bool {
             | "cargo.exe"
             | "git"
             | "git.exe"
+            | "uv"
+            | "uv.exe"
     )
 }
 
@@ -1548,6 +1687,10 @@ fn allowed_studio_subcommand(cmd: &str, argv: &[String]) -> bool {
         }
         "git" | "git.exe" => {
             matches!(subcommand, Some("rev-parse") | Some("status") | Some("diff"))
+        }
+        "uv" | "uv.exe" => {
+            // `uv sync` (install deps) and `uv run <tool> ...` (start dev server / streamlit / uvicorn).
+            matches!(subcommand, Some("sync") | Some("run"))
         }
         _ => false,
     }
