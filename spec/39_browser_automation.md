@@ -20,12 +20,10 @@ L’équivalent visé est le **navigateur géré** d’OpenClaw (sans Browser Re
 
 ### 1.2 État actuel dans Akasha
 
-- L’outil **`browser`** est déjà déclaré dans la liste `AVAILABLE_TOOLS` du daemon ([api.rs](../crates/akasha-daemon/src/api.rs), vers L561), avec la description :  
-  `browser navigate <url> | browser screenshot | browser snapshot — automation navigateur (non implémenté, prévu phase 3)`.
-- Le handler associé renvoie actuellement :  
-  `[browser] browser automation not implemented (planned Phase 3)`.
+- L’outil **`browser`** est **implémenté** (Playwright, `scripts/playwright-runner/run.mjs`) : `navigate`, `snapshot`, `screenshot`, `click`, `fill`, `wait`, avec politique `tools_policy.yaml` (domaines, headless, timeouts). Voir le handler dans [api.rs](../crates/akasha-daemon/src/api.rs).
+- **Boucle vision (alignement UI-TARS / navigateur hybride)** : après un `browser screenshot` réussi, le daemon peut joindre la capture PNG complète au **tour LLM suivant** sous forme de `data:image/png;base64,...` pour les modèles multimodaux (en complément du texte d’outil tronqué). Les pièces jointes utilisateur ne sont pas répétées à chaque tour d’outils ; les captures d’outils sont mises en file **une fois** pour le prochain `CompletionRequest`. Variables : `AKASHA_BROWSER_SCREENSHOT_VISION` (défaut activé ; `0`/`false` désactive la pièce jointe vision), `AKASHA_VISION_INJECT_MAX_CHARS` (taille max de l’URL data, défaut voir `VISION_INJECT_DEFAULT_MAX_CHARS` dans `tool_output.rs`).
 
-La présente spécification précise le **comportement attendu**, l’**architecture** et la **politique de sécurité** pour une implémentation future.
+La présente spécification complète le **comportement attendu**, l’**architecture** et la **politique de sécurité**.
 
 ---
 

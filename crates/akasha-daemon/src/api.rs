@@ -2670,6 +2670,42 @@ pub(crate) fn build_image_markdown(label: &str, url: &str) -> String {
     format!("\n\n![{}](<{}>)", label, url)
 }
 
+/// Max chars for a single vision attachment on the next completion (`AKASHA_VISION_INJECT_MAX_CHARS`).
+fn vision_inject_max_chars() -> usize {
+    std::env::var("AKASHA_VISION_INJECT_MAX_CHARS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(crate::tool_output::VISION_INJECT_DEFAULT_MAX_CHARS)
+        .max(100_000)
+}
+
+/// True if tool `captured_image` should be forwarded to the multimodal LLM on the following turn (excludes audio TTS).
+fn captured_media_suitable_for_vision_injection(s: &str) -> bool {
+    if s.starts_with("data:audio/") {
+        return false;
+    }
+    if s.starts_with("data:image/") {
+        return true;
+    }
+    !s.starts_with("data:") && !s.is_empty()
+}
+
+fn normalize_captured_media_for_vision_turn(s: &str) -> String {
+    if s.starts_with("data:image/")
+        || (s.starts_with("data:") && !s.starts_with("data:audio/"))
+    {
+        s.to_string()
+    } else if !s.starts_with("data:") {
+        format!("data:image/jpeg;base64,{}", s)
+    } else {
+        s.to_string()
+    }
+}
+
+fn vision_payload_within_cap(normalized: &str) -> bool {
+    normalized.len() <= vision_inject_max_chars()
+}
+
 /// Returns true if content should be skipped when capturing to long-term memory (noise, loop risk, or too short/long).
 fn should_skip_capture_content(content: &str) -> bool {
     let t = content.trim();
@@ -4965,6 +5001,26 @@ pub(crate) async fn execute_tool_call_impl(
                                 .pointer("/result/data_base64")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
+                            let vision_attach_enabled = std::env::var("AKASHA_BROWSER_SCREENSHOT_VISION")
+                                .map(|v| {
+                                    let l = v.to_lowercase();
+                                    l != "0" && l != "false" && l != "no"
+                                })
+                                .unwrap_or(true);
+                            let mut captured_for_llm: Option<String> = None;
+                            if vision_attach_enabled && !b64.is_empty() {
+                                let url =
+                                    format!("data:image/png;base64,{}", b64);
+                                if vision_payload_within_cap(&url) {
+                                    captured_for_llm = Some(url);
+                                } else {
+                                    tracing::info!(
+                                        len = url.len(),
+                                        cap = vision_inject_max_chars(),
+                                        "browser screenshot: vision attachment skipped (exceeds AKASHA_VISION_INJECT_MAX_CHARS)"
+                                    );
+                                }
+                            }
                             let (preview, total, trunc) = crate::tool_output::truncate_utf8_by_bytes(
                                 b64,
                                 crate::tool_output::BROWSER_SCREENSHOT_B64_MAX,
@@ -4977,9 +5033,9 @@ pub(crate) async fn execute_tool_call_impl(
                                 base,
                                 trunc,
                                 total,
-                                "truncated base64; decode externally or use a narrower viewport",
+                                "truncated base64 in text; full frame attached for vision on next model turn when enabled (AKASHA_BROWSER_SCREENSHOT_VISION)",
                             );
-                            (true, msg, None)
+                            (true, msg, captured_for_llm)
                         } else {
                             let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("screenshot failed");
                             (false, format!("[browser] {}", err), None)
@@ -9186,6 +9242,8 @@ pub(crate) async fn run_message_via_llm(
         let mut studio_unparsed_tool_marker_nags = 0u32;
         let mut studio_pm_mandatory_delegate_nags = 0u32;
         let mut last_captured_image_base64: Option<String> = None;
+        // Images from tools (browser screenshot, camera, generate_image) queued for the next CompletionRequest for multimodal models.
+        let mut pending_completion_image_urls: Option<Vec<String>> = None;
 
         let llm_timeout_secs = std::env::var("AKASHA_LLM_TIMEOUT_SECS")
             .ok()
@@ -9247,21 +9305,31 @@ pub(crate) async fn run_message_via_llm(
                     .unwrap_or_else(|| llm_router.resolve_task_type_for_agent(&assigned_agent))
             };
             let preferred_task_type = Some(router_task_type_for_llm);
+            let mut merged_image_urls: Vec<String> = Vec::new();
+            if tool_loop_history_by_agent
+                .get(&loop_agent_key)
+                .map(|v| v.is_empty())
+                .unwrap_or(true)
+            {
+                if let Some(ref u) = image_data_urls {
+                    merged_image_urls.extend(u.iter().cloned());
+                }
+            }
+            if let Some(mut pending) = pending_completion_image_urls.take() {
+                merged_image_urls.append(&mut pending);
+            }
+            let merged_image_data_urls = if merged_image_urls.is_empty() {
+                None
+            } else {
+                Some(merged_image_urls)
+            };
             let request = CompletionRequest {
                 prompt: format!("{}{}", current_prompt, tool_instruction),
                 max_tokens: Some(completion_max_tokens),
                 temperature: Some(0.7),
                 preferred_task_type,
                 system_prompt: system_prompt.clone(),
-                image_data_urls: if tool_loop_history_by_agent
-                    .get(&loop_agent_key)
-                    .map(|v| v.is_empty())
-                    .unwrap_or(true)
-                {
-                    image_data_urls.clone()
-                } else {
-                    None
-                },
+                image_data_urls: merged_image_data_urls,
                 top_p: None,
                 top_k: None,
                 frequency_penalty: None,
@@ -10625,7 +10693,21 @@ pub(crate) async fn run_message_via_llm(
                                 .await
                             };
                         if let Some(img) = captured_image {
-                            last_captured_image_base64 = Some(img);
+                            last_captured_image_base64 = Some(img.clone());
+                            if captured_media_suitable_for_vision_injection(&img) {
+                                let norm = normalize_captured_media_for_vision_turn(&img);
+                                if vision_payload_within_cap(&norm) {
+                                    pending_completion_image_urls
+                                        .get_or_insert_with(Vec::new)
+                                        .push(norm);
+                                } else {
+                                    tracing::debug!(
+                                        len = norm.len(),
+                                        cap = vision_inject_max_chars(),
+                                        "vision inject skipped (payload cap)"
+                                    );
+                                }
+                            }
                         }
                         // Phase F: emit ToolInvoked for Actions tab (spec 33)
                         // Redact or truncate args in the event to avoid leaking large blobs or secrets.
