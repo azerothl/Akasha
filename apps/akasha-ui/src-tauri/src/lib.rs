@@ -67,6 +67,8 @@ struct SendMessageAckResult {
     task_id: String,
     session_id: String,
     message: String,
+    #[serde(default)]
+    queued: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -84,6 +86,8 @@ async fn send_message_ack(
     session_id: Option<String>,
     attachments: Option<Vec<AttachmentPayload>>,
     new_session: Option<bool>,
+    queue_mode: Option<String>,
+    target_task_id: Option<String>,
     port: Option<u16>,
 ) -> Result<SendMessageAckResult, String> {
     let port = port.unwrap_or(DAEMON_PORT);
@@ -121,6 +125,18 @@ async fn send_message_ack(
             body["attachments"] = serde_json::Value::Array(arr);
         }
     }
+    if let Some(ref mode) = queue_mode {
+        let m = mode.trim().to_lowercase();
+        if m == "steering" || m == "follow_up" {
+            body["queue_mode"] = serde_json::Value::String(m);
+            body["message_delivery_mode"] = serde_json::Value::String(m);
+        }
+    }
+    if let Some(ref tid) = target_task_id {
+        if !tid.trim().is_empty() {
+            body["target_task_id"] = serde_json::Value::String(tid.trim().to_string());
+        }
+    }
     let resp = client
         .post(&url)
         .json(&body)
@@ -134,11 +150,13 @@ async fn send_message_ack(
     let task_id = json.get("task_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let session_id = json.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let message = json.get("message").and_then(|v| v.as_str()).unwrap_or("Request received. You can follow progress in the Tasks tab.").to_string();
+    let queued = json.get("queued").and_then(|v| v.as_bool()).unwrap_or(false);
     Ok(SendMessageAckResult {
         ack: true,
         task_id,
         session_id,
         message,
+        queued,
     })
 }
 
@@ -627,6 +645,41 @@ async fn daemon_get_text(path: String, port: Option<u16>) -> Result<serde_json::
     let url = format!("{}{}", daemon_base_url(port), p);
     let client = http_client();
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let ok = resp.status().is_success();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "ok": ok, "status": status, "text": text }))
+}
+
+/// Generic daemon HTTP passthrough (GET/POST) for settings panels.
+#[tauri::command]
+async fn daemon_request(
+    method: String,
+    path: String,
+    body: Option<String>,
+    port: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let port = port.unwrap_or(DAEMON_PORT);
+    let p = path.trim();
+    if !p.starts_with('/') || (!p.starts_with("/api/") && p != "/") {
+        return Err("invalid_path".to_string());
+    }
+    if p.contains("..") || p.contains('\\') || p.len() > 2048 || p.chars().any(|c| c.is_control()) {
+        return Err("invalid_path".to_string());
+    }
+    let url = format!("{}{}", daemon_base_url(port), p);
+    let client = http_client();
+    let m = method.trim().to_uppercase();
+    let resp = match m.as_str() {
+        "POST" => {
+            let b = body.unwrap_or_else(|| "{}".to_string());
+            client.post(&url).header("Content-Type", "application/json").body(b)
+        }
+        _ => client.get(&url),
+    }
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
     let status = resp.status().as_u16();
     let ok = resp.status().is_success();
     let text = resp.text().await.map_err(|e| e.to_string())?;
@@ -1912,6 +1965,7 @@ pub fn run() {
             read_file_as_data_url,
             get_advice,
             daemon_get_text,
+            daemon_request,
             get_plugins,
             reload_plugins,
             set_plugin_enabled,

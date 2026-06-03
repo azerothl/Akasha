@@ -398,6 +398,23 @@ impl LongTermStore {
         Ok(inserted)
     }
 
+    /// Delete entries whose `source` column starts with the given prefix (e.g. `project:<id>`).
+    pub fn delete_by_source_prefix(&self, prefix: &str) -> anyhow::Result<u64> {
+        let p = prefix.trim();
+        if p.is_empty() {
+            return Ok(0);
+        }
+        let pattern = format!(
+            "{}%",
+            p.replace('%', "\\%").replace('_', "\\_").replace('\\', "\\\\")
+        );
+        let n = self.conn.execute(
+            "DELETE FROM memory_entries WHERE source LIKE ?1 ESCAPE '\\'",
+            rusqlite::params![pattern],
+        )?;
+        Ok(n as u64)
+    }
+
     /// Delete entries matching a keyword query (same logic as search_by_keywords). Returns number of deleted rows (plan moyen terme 9).
     pub fn delete_by_keywords(&self, query: &str) -> anyhow::Result<u64> {
         let words: Vec<String> = query

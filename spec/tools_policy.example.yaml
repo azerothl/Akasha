@@ -133,3 +133,15 @@ command_timeout_secs: 60
 # Recommandé pour install_playwright (téléchargement lourd) : require_approval: [..., install_playwright]
 # Éviter d'ajouter « browser » ici : chaque navigate/snapshot demanderait une approbation.
 # require_approval: [write_file, run_command, run_in_container, apply_patch, edit_file, device_invoke, install_playwright]
+
+# Optionnel : politique MCP (outils `mcp_<server>_<tool>`). Si la section est présente, seuls les serveurs listés sont autorisés.
+# mcp_max_calls_per_task: 20
+# mcp_servers:
+#   filesystem:
+#     enabled: true
+#     allowed_tools: ["*"]
+#     blocked_tools: []
+#     max_calls_per_task: 10
+#   github:
+#     enabled: true
+#     allowed_tools: ["search_repositories", "get_file_contents"]

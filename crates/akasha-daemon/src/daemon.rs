@@ -13,7 +13,7 @@ use futures_util::future::Either;
 use tracing::{error, info, warn, Instrument};
 
 use crate::agents::{run_progress_subscriber, MainAgent, Orchestrator, OrchestratorTask, TaskPersistenceMsg};
-use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_process_registry, new_task_completion_registry, new_task_workspace_store, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
+use crate::api::{handle_api, new_agent_profile_cache, new_events_cache, new_progress_cache, new_human_input_store, new_steering_queue_store, new_process_registry, new_task_completion_registry, new_task_workspace_store, new_update_check_cache, parse_content_length, parse_request, run_delegation_handler, run_message_via_llm, run_update_check_once, RestartTx};
 use crate::studio::new_studio_disk_root_registry;
 use crate::studio_worktree::new_studio_worktree_registry;
 use crate::memory::ShortTermStore;
@@ -563,6 +563,7 @@ impl Daemon {
             let device_bridge = std::sync::Arc::new(crate::device_bridge::DeviceBridge::new());
             let process_registry = new_process_registry();
             let human_input_store = new_human_input_store();
+            let steering_queue = new_steering_queue_store();
             let workspace_store = new_task_workspace_store();
             let studio_disk_registry = new_studio_disk_root_registry();
             let studio_worktree_registry = new_studio_worktree_registry();
@@ -645,6 +646,9 @@ impl Daemon {
                     info!(path = %memory_db_path.display(), "Long-term memory actor started");
                     client
                 });
+            if let Some(ref lt) = long_term_client {
+                crate::memory_hygiene::spawn_scheduler(Some(lt.clone()));
+            }
             if long_term_client.is_some() {
                 let st_dir = short_term_dir.clone();
                 let router = llm_router.clone();
@@ -771,6 +775,7 @@ impl Daemon {
                 let autonomous_mission_worker = autonomous_mission.clone();
                 let studio_disk_registry = studio_disk_registry.clone();
                 let studio_worktree_registry = studio_worktree_registry.clone();
+                let steering_queue = steering_queue.clone();
                 async move {
                     while let Some(task) = conv_rx.recv().await {
                         // Phase 4: skip if task was cancelled (e.g. via POST /api/tasks/:id/cancel) before worker started.
@@ -821,6 +826,7 @@ impl Daemon {
                             let process_registry = process_registry.clone();
                             let conv_tx = conv_tx.clone();
                             let human_input_store = human_input_store.clone();
+                            let steering_queue = steering_queue.clone();
                             let task_completion = task_completion.clone();
                             let agent_profile_cache = agent_profile_cache.clone();
                             let task_usage_store = task_usage_store.clone();
@@ -856,6 +862,7 @@ impl Daemon {
                                     Some(process_registry),
                                     Some(conv_tx),
                                     Some(human_input_store),
+                                    Some(steering_queue),
                                     Some(delegation_tx),
                                     Some(task_completion),
                                     Some(agent_profile_cache),
@@ -889,6 +896,7 @@ impl Daemon {
                             let process_registry = process_registry.clone();
                             let conv_tx = conv_tx.clone();
                             let human_input_store = human_input_store.clone();
+                            let steering_queue = steering_queue.clone();
                             let task_completion = task_completion.clone();
                             let agent_profile_cache = agent_profile_cache.clone();
                             let task_usage_store = task_usage_store.clone();
@@ -924,6 +932,7 @@ impl Daemon {
                                     Some(process_registry),
                                     Some(conv_tx),
                                     Some(human_input_store),
+                                    Some(steering_queue),
                                     Some(delegation_tx),
                                     Some(task_completion),
                                     Some(agent_profile_cache),
@@ -1169,6 +1178,7 @@ impl Daemon {
                 let short_term = short_term.clone();
                 let long_term_client = long_term_client.clone();
                 let human_input_store = human_input_store.clone();
+                let steering_queue = steering_queue.clone();
                 let user_rag_store = user_rag_store.clone();
                 let agent_profile_cache = agent_profile_cache.clone();
                 let task_usage_store = task_usage_store.clone();
@@ -1233,6 +1243,7 @@ impl Daemon {
                                             Some(short_term),
                                             long_term_client,
                                             Some(human_input_store),
+                                            Some(steering_queue.clone()),
                                             &user_rag_store,
                                             &agent_profile_cache,
                                             &update_check_cache_clone,

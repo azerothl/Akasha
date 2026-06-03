@@ -1530,6 +1530,8 @@ function App() {
   );
   const [health, setHealth] = useState<HealthState | null>(null);
   const [message, setMessage] = useState("");
+  const [chatDeliveryMode, setChatDeliveryMode] = useState<"immediate" | "steering" | "follow_up">("immediate");
+  const [memoryHygieneHint, setMemoryHygieneHint] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageRow[]>([]);
   const exportChatTranscript = useCallback(() => {
     const body = exportChatPlainText(messages);
@@ -3862,16 +3864,58 @@ function App() {
     [fetchPluginStatus, t],
   );
 
-  const fetchSystemEndpoint = useCallback(async (path: string): Promise<{ ok: boolean; status: number; text: string }> => {
+  const fetchSystemEndpoint = useCallback(async (path: string, init?: RequestInit): Promise<{ ok: boolean; status: number; text: string }> => {
     if (E2E_WEB) {
-      const res = await fetch(e2eDaemonHttpUrl(path));
+      const res = await fetch(e2eDaemonHttpUrl(path), init);
       return { ok: res.ok, status: res.status, text: await res.text() };
     }
-    return invoke<{ ok: boolean; status: number; text: string }>("daemon_get_text", {
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "GET") {
+      return invoke<{ ok: boolean; status: number; text: string }>("daemon_get_text", {
+        path,
+        port: DAEMON_PORT,
+      });
+    }
+    const body = typeof init?.body === "string" ? init.body : undefined;
+    return invoke<{ ok: boolean; status: number; text: string }>("daemon_request", {
+      method,
       path,
+      body,
       port: DAEMON_PORT,
     });
   }, []);
+
+  const requestSystemEndpoint = useCallback(
+    async (method: string, path: string, body?: string) => fetchSystemEndpoint(path, { method, body }),
+    [fetchSystemEndpoint],
+  );
+
+  useEffect(() => {
+    if (tab !== "memory") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetchSystemEndpoint("/api/memory/recall-metrics");
+        if (cancelled || !res.ok) return;
+        const j = JSON.parse(res.text) as { hygiene_last_suggestions?: number };
+        const n = j.hygiene_last_suggestions ?? 0;
+        if (n > 0) {
+          setMemoryHygieneHint(
+            locale === "en"
+              ? `Hygiene scan: ${n} possible duplicate cluster(s). Review long-term memory or run relation rebuild.`
+              : `Hygiène mémoire : ${n} groupe(s) de doublons possibles. Vérifiez la mémoire long terme ou reconstruisez les relations.`,
+          );
+        } else {
+          setMemoryHygieneHint(null);
+        }
+      } catch {
+        if (!cancelled) setMemoryHygieneHint(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, fetchSystemEndpoint, locale]);
 
   const fetchUserRagDocuments = useCallback(async () => {
     setUserRagLoading(true);
@@ -4647,13 +4691,35 @@ function App() {
       const useNewSession = pendingNewSessionAfterSlashRef.current;
       if (useNewSession) pendingNewSessionAfterSlashRef.current = false;
       const sessionAtSend = sessionId;
-      const ack = await invoke<{ task_id: string; session_id: string; message: string }>("send_message_ack", {
+      const runningIds = Object.keys(runningTaskChips);
+      const steerTarget =
+        chatDeliveryMode !== "immediate" && runningIds.length > 0 ? runningIds[0] : undefined;
+      const ack = await invoke<{
+        task_id: string;
+        session_id: string;
+        message: string;
+        queued?: boolean;
+      }>("send_message_ack", {
         message: userMessage,
         sessionId: sessionId,
         attachments: attachmentsPayload,
         newSession: useNewSession ? true : undefined,
+        queueMode: steerTarget ? chatDeliveryMode : undefined,
+        targetTaskId: steerTarget,
         port: DAEMON_PORT,
       });
+      if (ack?.queued) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "system",
+            text:
+              chatDeliveryMode === "steering"
+                ? "Message mis en file steering (injection prioritaire)."
+                : "Message mis en file follow-up (après le tour en cours).",
+          },
+        ]);
+      }
       setLoading(false);
       if (ack?.session_id) {
         setSessionId(ack.session_id);
@@ -5939,6 +6005,31 @@ function App() {
                     ×
                   </button>
                 )}
+              </div>
+            )}
+            {Object.keys(runningTaskChips).length > 0 && (
+              <div className="chat-delivery-mode-row">
+                <label htmlFor="chat-delivery-mode" className="chat-delivery-mode-label">
+                  {locale === "en" ? "Delivery" : "Envoi"}
+                </label>
+                <select
+                  id="chat-delivery-mode"
+                  className="chat-delivery-mode-select"
+                  value={chatDeliveryMode}
+                  onChange={(e) =>
+                    setChatDeliveryMode(e.target.value as "immediate" | "steering" | "follow_up")
+                  }
+                  disabled={loading}
+                  title={
+                    locale === "en"
+                      ? "Steering injects mid-task; follow-up runs after the current turn"
+                      : "Steering : injection prioritaire ; follow-up : après le tour en cours"
+                  }
+                >
+                  <option value="immediate">{locale === "en" ? "Immediate" : "Immédiat"}</option>
+                  <option value="steering">Steering</option>
+                  <option value="follow_up">Follow-up</option>
+                </select>
               </div>
             )}
             <div className="input-area">
@@ -7602,6 +7693,11 @@ function App() {
             className="panel memory-panel"
           >
             <h2 className="panel-title">{t("memory.title")}</h2>
+            {memoryHygieneHint ? (
+              <p className="memory-hygiene-hint" role="status">
+                {memoryHygieneHint}
+              </p>
+            ) : null}
             <button
               type="button"
               className="refresh-btn"
@@ -8851,6 +8947,7 @@ function App() {
                   <SystemHealthPanel
                     sessionId={sessionId}
                     fetchEndpoint={fetchSystemEndpoint}
+                    requestEndpoint={requestSystemEndpoint}
                     expert={uiMode === "expert"}
                     locale={locale}
                     labels={{

@@ -1656,6 +1656,13 @@ pub fn new_human_input_store() -> HumanInputStore {
     Arc::new(RwLock::new(std::collections::HashMap::new()))
 }
 
+pub type SteeringQueueStore = crate::steering_queue::SteeringQueueStore;
+
+pub fn new_steering_queue_store() -> SteeringQueueStore {
+    SteeringQueueStore::new()
+}
+
+
 /// Liste des outils disponibles (source unique pour le prompt et la doc).
 /// Format: une ligne par outil "nom — usage".
 /// Note: "Session terminal" (spec 33) est optionnel et prévu pour une version ultérieure.
@@ -3726,6 +3733,63 @@ pub(crate) async fn execute_tool_call_impl(
             );
         }
     }
+    if tool_name.starts_with("mcp_") {
+        if std::env::var("AKASHA_MCP_TOOLS_ENABLED").ok().as_deref() == Some("0") {
+            return (
+                false,
+                "[mcp] MCP tools disabled (AKASHA_MCP_TOOLS_ENABLED=0)".to_string(),
+                None,
+            );
+        }
+        let Some((server, mcp_tool)) = crate::mcp_runtime::parse_mcp_tool_name(tool_name) else {
+            return (
+                false,
+                format!("[{tool_name}] invalid MCP tool name (expected mcp_<server>_<tool>)"),
+                None,
+            );
+        };
+        if !executor.policy.can_use_mcp_tool(&server, &mcp_tool) {
+            return (
+                false,
+                format!(
+                    "[{tool_name}] MCP server/tool denied by tools_policy.yaml (mcp_servers)"
+                ),
+                None,
+            );
+        }
+        if let Some(max) = executor.policy.mcp_max_calls_per_task_for(&server) {
+            let used = crate::mcp_budget::count(task_id);
+            if used >= max {
+                return (
+                    false,
+                    format!(
+                        "[{tool_name}] MCP budget exceeded ({used}/{max} calls this task)"
+                    ),
+                    None,
+                );
+            }
+        }
+        crate::mcp_budget::record_call(task_id);
+        let args_json = if args.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({ "input": args.join(" ") })
+        };
+        return match crate::mcp_runtime::tools_call(&mcp_tool, args_json).await {
+            Ok(v) => {
+                let preview = v.to_string();
+                let (p, total, trunc) = crate::tool_output::truncate_utf8_by_bytes(&preview, 12_000);
+                let msg = crate::tool_output::with_truncation_footer(
+                    format!("[{tool_name}] {p}"),
+                    trunc,
+                    total,
+                    "MCP response truncated",
+                );
+                (true, msg, None)
+            }
+            Err(e) => (false, format!("[{tool_name}] MCP error: {e}"), None),
+        };
+    }
     let plugin_invocation = parse_plugin_tool_invocation(plugin_registry, tool_name, args);
     let is_plugin_candidate = plugin_invocation.is_some();
     let studio_ticket_tool_ok = matches!(
@@ -3743,7 +3807,8 @@ pub(crate) async fn execute_tool_call_impl(
             None,
         );
     }
-    if !can_use_named_tool && !is_plugin_candidate {
+    let is_mcp_tool = tool_name.starts_with("mcp_");
+    if !can_use_named_tool && !is_plugin_candidate && !is_mcp_tool {
         return (
             false,
             format!("[{}] tool not allowed by current profile", tool_name),
@@ -6620,6 +6685,14 @@ async fn compact_short_term_if_needed(
                     .await;
                 short_term.increment_compaction_count(session_id).await;
                 tracing::debug!(session_id, to_summarize, "Short-term memory compacted");
+                crate::memory_hierarchical::maybe_run_hierarchical_compaction(
+                    short_term,
+                    llm_router,
+                    long_term_client,
+                    session_id,
+                    max_context_tokens,
+                )
+                .await;
                 // Promote summary to long-term memory (spec 06)
                 if let Some(client) = long_term_client {
                     let summary = summary.to_string();
@@ -8183,6 +8256,7 @@ pub(crate) async fn run_message_via_llm(
     process_registry: Option<ProcessRegistry>,
     conv_tx: Option<mpsc::Sender<OrchestratorTask>>,
     human_input_store: Option<HumanInputStore>,
+    steering_queue: Option<SteeringQueueStore>,
     delegation_tx: Option<mpsc::Sender<DelegationRequest>>,
     task_completion_registry: Option<TaskCompletionRegistry>,
     agent_profile_cache: Option<AgentProfileCache>,
@@ -8200,6 +8274,9 @@ pub(crate) async fn run_message_via_llm(
             tracing::error!(task_id = %task_id, error_kind = "store_open", error = %e, "LLM task: store open failed");
             if let Some(reg) = &browser_registry {
                 crate::browser::close_task(reg, task_id).await;
+            }
+            if let Some(ref sq) = steering_queue {
+                sq.unregister_active(task_id).await;
             }
             notify_task_completion(&task_completion_registry, task_id).await;
             return;
@@ -8270,6 +8347,10 @@ pub(crate) async fn run_message_via_llm(
         .as_ref()
         .and_then(|t| t.parent_task_id)
         .is_some();
+    if let Some(ref sq) = steering_queue {
+        sq.register_active(task_id, session_id.clone(), !is_subagent)
+            .await;
+    }
     if code_studio_disk_task && !is_subagent {
         let dd = data_dir_for_studio_flags.to_path_buf();
         let root = tool_disk_workspace_root.clone();
@@ -8790,6 +8871,11 @@ pub(crate) async fn run_message_via_llm(
         if !fused_str.is_empty() {
             user_prefix.push_str(&fused_str);
         }
+        crate::memory_maintenance::schedule_post_retrieval(
+            long_term_client.clone(),
+            message.clone(),
+            Some(session_id.clone()),
+        );
     }
     if memory_profile.user_rag_top_k > 0 {
         let user_rag_store = crate::user_rag::UserRagStore::new(data_dir);
@@ -9092,7 +9178,7 @@ pub(crate) async fn run_message_via_llm(
         ""
     };
     // When user clearly wants a photo from camera, prefix the message with an imperative so the model responds with device_invoke directly (no ask_user).
-    let user_message = if !device_camera_reminder.is_empty() {
+    let mut user_message = if !device_camera_reminder.is_empty() {
         format!(
             "[Répondre par: TOOL: device_discover local_media puis TOOL: device_invoke local_media camera capture. Ne pas utiliser ask_user.]\n\n{}",
             clean_message
@@ -9266,6 +9352,39 @@ pub(crate) async fn run_message_via_llm(
                 }
                 _ => {}
             }
+            if let Some(ref sq) = steering_queue {
+                let steering_items = sq.drain_steering(task_id).await;
+                for item in steering_items {
+                    let steer_text = format!(
+                        "[Steering — instruction utilisateur à appliquer maintenant]\n{}",
+                        item.text
+                    );
+                    if let Some(st) = short_term.as_ref() {
+                        st.append(&session_id, "user", steer_text.clone()).await;
+                    }
+                    user_message = format!("{user_message}\n\n{steer_text}");
+                    let _ = store.insert_event(
+                        task_id,
+                        "user_steering_applied",
+                        Some(&serde_json::json!({
+                            "queue_id": item.id,
+                            "preview": item.text.chars().take(200).collect::<String>(),
+                            "schema_version": 1
+                        })),
+                        &chrono::Utc::now().to_rfc3339(),
+                    );
+                    let _ = bus.send(
+                        EventEnvelope::new(
+                            EventType::ProgressUpdate,
+                            Some(serde_json::json!({
+                                "message": format!("[Steering] {}", item.text.chars().take(120).collect::<String>()),
+                                "task_id": task_id.to_string()
+                            })),
+                        )
+                        .with_correlation(task_id),
+                    );
+                }
+            }
             // Quota: stop task if session cost or tokens exceed configured limits (Phase 2.3).
             if let Some(ref store) = task_usage_store {
                 let (session_tokens, session_cost) =
@@ -9430,6 +9549,17 @@ pub(crate) async fn run_message_via_llm(
                             )
                             .with_correlation(task_id),
                         );
+                        if !chunk_ref.is_empty() {
+                            let _ = store.insert_event(
+                                task_id,
+                                "assistant_text_delta",
+                                Some(&serde_json::json!({
+                                    "delta": chunk_ref,
+                                    "schema_version": 1
+                                })),
+                                &chrono::Utc::now().to_rfc3339(),
+                            );
+                        }
                     }
                     Ok(None) => break,
                     Err(_) => {
@@ -10014,6 +10144,7 @@ pub(crate) async fn run_message_via_llm(
                                                 .to_rfc3339(),
                                         ),
                                         decision_note: None,
+                                        decision_source: None,
                                     };
                                     if let Err(err) = crate::permissions_queue::upsert_request(data_dir, queue_req) {
                                         eprintln!(
@@ -10086,6 +10217,7 @@ pub(crate) async fn run_message_via_llm(
                                                 &approval_request_id,
                                                 crate::permissions_queue::QueueStatus::Expired,
                                                 Some("timeout".to_string()),
+                                                Some("timeout".to_string()),
                                             );
                                             let _ = bus.send(
                                                 EventEnvelope::new(
@@ -10109,6 +10241,7 @@ pub(crate) async fn run_message_via_llm(
                                         &approval_request_id,
                                         queue_status,
                                         Some(answer.clone()),
+                                        Some("chat_inline".to_string()),
                                     ) {
                                         eprintln!(
                                             "failed to update permission queue status for {} (task {}): {}",
@@ -11257,6 +11390,37 @@ pub(crate) async fn run_message_via_llm(
             } else {
                 ""
             };
+            if let Some(ref sq) = steering_queue {
+                let follow_items = sq.drain_follow_up(task_id).await;
+                if !follow_items.is_empty() && !is_subagent {
+                    for item in follow_items {
+                        let fu = format!(
+                            "[Follow-up — poursuivre après le travail en cours]\n{}",
+                            item.text
+                        );
+                        if let Some(st) = short_term.as_ref() {
+                            st.append(&session_id, "user", fu.clone()).await;
+                        }
+                        user_message.push_str("\n\n");
+                        user_message.push_str(&fu);
+                        let _ = store.insert_event(
+                            task_id,
+                            "user_follow_up_applied",
+                            Some(&serde_json::json!({
+                                "queue_id": item.id,
+                                "preview": item.text.chars().take(200).collect::<String>(),
+                                "schema_version": 1
+                            })),
+                            &chrono::Utc::now().to_rfc3339(),
+                        );
+                    }
+                    current_prompt = format!(
+                        "{guardrail_reminder_block}{write_reminder}{web_search_reminder}{web_search_followup_reminder}{transport_reminder}{geolocation_distance_reminder}{plugin_catalog_reminder}{social_feed_reminder}{device_camera_reminder}{image_generation_reminder}{github_vault_reminder}{code_dev_sandbox_reminder}{user_prefix}User:\n{user_message}"
+                    );
+                    round = 0;
+                    continue;
+                }
+            }
             reply_text = if response_for_user.is_empty() {
                 format!("{}{}", response, image_md)
             } else {
@@ -11936,6 +12100,9 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
             }
         }
         notify_task_completion(&task_completion_registry, task_id).await;
+        if let Some(ref sq) = steering_queue {
+            sq.unregister_active(task_id).await;
+        }
         let data_dir_sess = store_path.parent().unwrap_or_else(|| store_path.as_ref());
         let is_root_task = store
             .get(task_id)
@@ -12139,6 +12306,24 @@ where
     Ok(())
 }
 
+fn permission_queue_decision_body(body: Option<&[u8]>) -> (Option<String>, Option<String>) {
+    let Some(b) = body else {
+        return (None, None);
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(b) else {
+        return (None, None);
+    };
+    let note = v
+        .get("note")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+    let decision_source = v
+        .get("decision_source")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+    (note, decision_source)
+}
+
 pub async fn handle_api(
     method: &str,
     path: &str,
@@ -12162,6 +12347,7 @@ pub async fn handle_api(
     short_term: Option<std::sync::Arc<ShortTermStore>>,
     long_term_client: Option<LongTermMemoryClient>,
     human_input_store: Option<HumanInputStore>,
+    steering_queue: Option<SteeringQueueStore>,
     user_rag_store: &crate::user_rag::SharedUserRagStore,
     agent_profile_cache: &AgentProfileCache,
     update_cache: &UpdateCheckCache,
@@ -12637,9 +12823,79 @@ pub async fn handle_api(
         return json_response("200 OK", &body.to_string());
     }
 
+    if method == "GET" && path == "/api/memory/hygiene-status" {
+        return json_response(
+            "200 OK",
+            &crate::memory_hygiene::metrics_snapshot().to_string(),
+        );
+    }
+
+    if method == "POST" && path == "/api/migrate/openclaw/preview" {
+        let source_dir = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+            .and_then(|v| v.get("source_dir").and_then(|x| x.as_str()).map(|s| s.to_string()))
+            .unwrap_or_default();
+        if source_dir.trim().is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_source_dir"}"#);
+        }
+        match crate::openclaw_migration::preview(&source_dir) {
+            Ok(p) => {
+                return json_response("200 OK", &serde_json::to_string(&p).unwrap_or_else(|_| "{}".into()));
+            }
+            Err(e) => {
+                return json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                );
+            }
+        }
+    }
+
+    if method == "POST" && path == "/api/migrate/openclaw/apply" {
+        let parsed = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+        let source_dir = parsed
+            .as_ref()
+            .and_then(|v| v.get("source_dir").and_then(|x| x.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let dry_run = parsed
+            .as_ref()
+            .and_then(|v| v.get("dry_run").and_then(|x| x.as_bool()))
+            .unwrap_or(false);
+        if source_dir.trim().is_empty() {
+            return json_response("400 Bad Request", r#"{"error":"missing_source_dir"}"#);
+        }
+        match crate::openclaw_migration::apply(&source_dir, data_dir, dry_run) {
+            Ok(r) => {
+                return json_response("200 OK", &serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()));
+            }
+            Err(e) => {
+                return json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": e }).to_string(),
+                );
+            }
+        }
+    }
+
     // GET /api/memory/recall-metrics — counters from memory orchestrator (semantic recall hits/empty).
     if method == "GET" && path == "/api/memory/recall-metrics" {
-        let body = crate::memory_orchestrator::memory_recall_metrics_snapshot();
+        let mut body = crate::memory_orchestrator::memory_recall_metrics_snapshot();
+        if let Some(obj) = body.as_object_mut() {
+            if let Some(m) = crate::memory_maintenance::metrics_snapshot().as_object() {
+                for (k, v) in m {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+            if let Some(m) = crate::memory_hygiene::metrics_snapshot().as_object() {
+                for (k, v) in m {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
         return json_response(
             "200 OK",
             &serde_json::to_string(&body).unwrap_or_else(|_| "{}".into()),
@@ -13310,6 +13566,47 @@ pub async fn handle_api(
             "npm_on_path": npm_on_path,
         });
 
+        let rbitnet_models_url = std::env::var("RBITNET_CHAT_BASE_URL")
+            .ok()
+            .map(|u| {
+                let base = u.trim_end_matches('/');
+                if base.ends_with("/v1") {
+                    format!("{base}/models")
+                } else {
+                    format!("{base}/v1/models")
+                }
+            })
+            .or_else(|| {
+                std::env::var("RBITNET_BIND").ok().map(|b| {
+                    let host = b.trim();
+                    if host.starts_with("http://") || host.starts_with("https://") {
+                        format!("{host}/v1/models")
+                    } else {
+                        format!("http://{host}/v1/models")
+                    }
+                })
+            })
+            .unwrap_or_else(|| "http://127.0.0.1:8080/v1/models".to_string());
+        let rbitnet_ok = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+            .get(&rbitnet_models_url)
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        checks.push(serde_json::json!({
+            "id": "rbitnet",
+            "ok": rbitnet_ok,
+            "description": if rbitnet_ok {
+                "Rbitnet reachable (local inference). Compare perf vs llama.cpp: see Rbitnet/docs/BENCHMARKS.md"
+            } else {
+                "Rbitnet unreachable (optional: rbitnet-server on RBITNET_BIND, default 127.0.0.1:8080)"
+            },
+            "models_url": rbitnet_models_url
+        }));
+
         let all_ok = checks
             .iter()
             .all(|c| c.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
@@ -13690,9 +13987,19 @@ pub async fn handle_api(
             .filter(|s| !s.is_empty());
         let message_delivery_mode = body_json
             .as_ref()
-            .and_then(|v| v.get("message_delivery_mode").and_then(|x| x.as_str()))
+            .and_then(|v| {
+                v.get("queue_mode")
+                    .or_else(|| v.get("message_delivery_mode"))
+                    .and_then(|x| x.as_str())
+            })
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty());
+        let target_task_id: Option<Uuid> = body_json
+            .as_ref()
+            .and_then(|v| v.get("target_task_id").and_then(|x| x.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .and_then(|s| Uuid::parse_str(&s).ok());
         let studio_policy_hint = body_json
             .as_ref()
             .and_then(|v| v.get("studio_policy_hint").and_then(|x| x.as_str()))
@@ -13895,6 +14202,46 @@ pub async fn handle_api(
                     crate::api_studio::evolution_branch_for_id(data_dir, pid.trim(), eid.trim());
             }
         }
+        // Steering / follow-up: queue on a running task instead of spawning a new root task.
+        if let (Some(ref mode_s), Some(ref sq)) = (message_delivery_mode.as_deref(), steering_queue.as_ref())
+        {
+            if let Some(qmode) = crate::steering_queue::QueueMode::parse(mode_s) {
+                if let Some(tid) = sq
+                    .resolve_running_task(&session_id, target_task_id)
+                    .await
+                {
+                    let queued = sq.enqueue(tid, qmode, message.clone()).await;
+                    let event_type = match qmode {
+                        crate::steering_queue::QueueMode::Steering => "user_steering_queued",
+                        crate::steering_queue::QueueMode::FollowUp => "user_follow_up_queued",
+                    };
+                    if let Ok(ts) = TaskStore::open(store_path) {
+                        let _ = ts.insert_event(
+                            tid,
+                            event_type,
+                            Some(&serde_json::json!({
+                                "queue_id": queued.id,
+                                "mode": queued.mode,
+                                "preview": queued.text.chars().take(200).collect::<String>(),
+                                "schema_version": 1
+                            })),
+                            &chrono::Utc::now().to_rfc3339(),
+                        );
+                    }
+                    let body = serde_json::json!({
+                        "ack": true,
+                        "queued": true,
+                        "queue_mode": queued.mode,
+                        "queue_id": queued.id,
+                        "task_id": tid.to_string(),
+                        "session_id": session_id,
+                        "message": "Message mis en file pour la tâche en cours."
+                    });
+                    return json_response("200 OK", &body.to_string());
+                }
+            }
+        }
+
         // Build acknowledgment message before moving `message` into the envelope.
         let ack_message = build_ack_message(&message);
         // Capture the raw user message for code-RAG retrieval before any prefixes are injected.
@@ -14143,6 +14490,33 @@ pub async fn handle_api(
                 }
                 if method == "POST" && parts.get(1) == Some(&"resume") {
                     return resume_task(store_path, id, main_agent).await;
+                }
+                if method == "GET" && parts.get(1) == Some(&"queue") {
+                    if let Some(ref sq) = steering_queue {
+                        let body = sq.snapshot(id).await;
+                        return json_response("200 OK", &body.to_string());
+                    }
+                    return json_response("200 OK", r#"{"steering":[],"follow_up":[]}"#);
+                }
+                if method == "DELETE" && parts.get(1) == Some(&"queue") {
+                    if let Some(ref sq) = steering_queue {
+                        let (s, f) = sq.flush(id).await;
+                        if let Ok(ts) = TaskStore::open(store_path) {
+                            let _ = ts.insert_event(
+                                id,
+                                "user_queue_flushed",
+                                Some(&serde_json::json!({
+                                    "steering_removed": s,
+                                    "follow_up_removed": f,
+                                    "schema_version": 1
+                                })),
+                                &chrono::Utc::now().to_rfc3339(),
+                            );
+                        }
+                        let body = serde_json::json!({ "ok": true, "steering_removed": s, "follow_up_removed": f });
+                        return json_response("200 OK", &body.to_string());
+                    }
+                    return json_response("200 OK", r#"{"ok":true,"steering_removed":0,"follow_up_removed":0}"#);
                 }
                 if method == "GET" && parts.get(1) == Some(&"events") {
                     return get_task_events(store_path, events, id).await;
@@ -14979,15 +15353,13 @@ pub async fn handle_api(
         if id.is_empty() {
             return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
         }
-        let note = body
-            .as_deref()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
-            .and_then(|v| v.get("note").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let (note, decision_source) = permission_queue_decision_body(body.as_deref());
         match crate::permissions_queue::update_status(
             data_dir,
             id,
             crate::permissions_queue::QueueStatus::Approved,
             note,
+            decision_source.or(Some("api".to_string())),
         ) {
             Ok(Some(item)) => {
                 if let (Some(store), Ok(task_id)) =
@@ -15025,15 +15397,13 @@ pub async fn handle_api(
         if id.is_empty() {
             return json_response("400 Bad Request", r#"{"error":"missing_id"}"#);
         }
-        let note = body
-            .as_deref()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
-            .and_then(|v| v.get("note").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let (note, decision_source) = permission_queue_decision_body(body.as_deref());
         match crate::permissions_queue::update_status(
             data_dir,
             id,
             crate::permissions_queue::QueueStatus::Denied,
             note,
+            decision_source.or(Some("api".to_string())),
         ) {
             Ok(Some(item)) => {
                 if let (Some(store), Ok(task_id)) =

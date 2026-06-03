@@ -3197,6 +3197,40 @@ a.settings-link-btn.refresh-btn {
   margin-top: 0.35rem;
 }
 
+.permissions-queue-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+}
+.permissions-queue-item {
+  border: 1px solid var(--akasha-border, #333);
+  border-radius: 6px;
+  padding: 0.65rem 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.permissions-queue-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.chat-delivery-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+  font-size: 0.875rem;
+}
+.chat-delivery-mode-select {
+  max-width: 10rem;
+}
+.memory-hygiene-hint {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--akasha-accent, #6b9) 12%, transparent);
+  font-size: 0.875rem;
+}
+
 .settings-row-actions {
   display: flex;
   flex-wrap: wrap;

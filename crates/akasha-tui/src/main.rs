@@ -1225,6 +1225,8 @@ impl App {
         port: u16,
         session_id: Option<String>,
         new_session: bool,
+        delivery_mode: Option<&str>,
+        target_task_id: Option<&str>,
         i18n: I18n,
     ) {
         let base = daemon_base_url(port);
@@ -1239,13 +1241,24 @@ impl App {
                 return;
             }
         };
-        let body = if new_session {
+        let mut body = if new_session {
             serde_json::json!({ "message": message, "new_session": true })
         } else if let Some(ref s) = session_id {
             serde_json::json!({ "message": message, "session_id": s })
         } else {
             serde_json::json!({ "message": message })
         };
+        if let Some(mode) = delivery_mode {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("message_delivery_mode".into(), serde_json::Value::String(mode.to_string()));
+                obj.insert("queue_mode".into(), serde_json::Value::String(mode.to_string()));
+            }
+        }
+        if let Some(tid) = target_task_id {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("target_task_id".into(), serde_json::Value::String(tid.to_string()));
+            }
+        }
         let resp = match client.post(&url).json(&body).send() {
             Ok(r) => r,
             Err(e) => {
@@ -1264,10 +1277,15 @@ impl App {
                 return;
             }
         };
+        let queued = json.get("queued").and_then(|v| v.as_bool()).unwrap_or(false);
         let task_id = json.get("task_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let session_id = json.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let default_ack = i18n.t("chat.ack_default");
         let ack_msg = json.get("message").and_then(|v| v.as_str()).unwrap_or_else(|| default_ack.as_str());
+        if queued && !task_id.is_empty() {
+            let _ = tx.send(Ok((ack_msg.to_string(), session_id, Some(task_id))));
+            return;
+        }
         let ack_text = if task_id.is_empty() {
             ack_msg.to_string()
         } else {
@@ -3258,8 +3276,34 @@ fn run_app(
                             app.force_new_session = false;
                             let progress_tx = app.progress_tx.clone();
                             let i18n = app.i18n.clone();
+                            let pending_task = app.pending_reply_task_id.clone();
+                            let (delivery, target, text) = if msg.starts_with("/steer ") {
+                                (
+                                    Some("steering".to_string()),
+                                    pending_task,
+                                    msg.trim_start_matches("/steer ").to_string(),
+                                )
+                            } else if msg.starts_with("/follow ") {
+                                (
+                                    Some("follow_up".to_string()),
+                                    pending_task,
+                                    msg.trim_start_matches("/follow ").to_string(),
+                                )
+                            } else {
+                                (None, None, msg)
+                            };
                             thread::spawn(move || {
-                                App::send_message_non_blocking(tx, progress_tx, msg, port, session_id, new_session, i18n);
+                                App::send_message_non_blocking(
+                                    tx,
+                                    progress_tx,
+                                    text,
+                                    port,
+                                    session_id,
+                                    new_session,
+                                    delivery.as_deref(),
+                                    target.as_deref(),
+                                    i18n,
+                                );
                             });
                         }
                         }

@@ -88,6 +88,29 @@ pub struct ToolsPolicy {
     /// When true and no `--cwd` is passed to `run_command`, use `workspace_root` (task workspace) as the process working directory when available.
     #[serde(default)]
     pub run_command_default_cwd_workspace: bool,
+    /// Optional: per-MCP-server policy (server id as in `mcp_<server>_<tool>`). When non-empty, servers not listed are denied.
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, McpServerPolicy>,
+    /// Optional: default max MCP tool invocations per task (overridable per server in `mcp_servers`).
+    #[serde(default)]
+    pub mcp_max_calls_per_task: Option<u32>,
+}
+
+/// Policy for one MCP server namespace (`mcp_<server>_*` tools).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", default)]
+pub struct McpServerPolicy {
+    /// When false, all tools from this server are denied.
+    pub enabled: Option<bool>,
+    /// Tool names allowed (bare tool name or full `mcp_<server>_<tool>`). Use `["*"]` for all on this server.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    /// Denied tool names (bare or full); takes precedence over `allowed_tools`.
+    #[serde(default)]
+    pub blocked_tools: Vec<String>,
+    /// Max MCP invocations per task for this server (falls back to `mcp_max_calls_per_task`).
+    #[serde(default)]
+    pub max_calls_per_task: Option<u32>,
 }
 
 fn default_browser_headless() -> bool {
@@ -269,6 +292,64 @@ impl ToolsPolicy {
             let a = allowed.trim().to_lowercase();
             name_base == a || name.ends_with(&a)
         })
+    }
+
+    /// Returns whether an MCP namespaced tool may run (`mcp_<server>_<tool>`).
+    /// When `mcp_servers` is non-empty, only listed servers are allowed (unless `enabled: false`).
+    pub fn can_use_mcp_tool(&self, server: &str, tool: &str) -> bool {
+        let server = server.trim();
+        let tool = tool.trim();
+        if server.is_empty() || tool.is_empty() {
+            return false;
+        }
+        let full = format!("mcp_{server}_{tool}");
+        if self.mcp_servers.is_empty() {
+            return true;
+        }
+        let Some(entry) = self.mcp_servers.get(server) else {
+            return false;
+        };
+        if entry.enabled == Some(false) {
+            return false;
+        }
+        if entry
+            .blocked_tools
+            .iter()
+            .any(|b| Self::mcp_tool_name_matches(b, server, tool, &full))
+        {
+            return false;
+        }
+        if entry.allowed_tools.is_empty() {
+            return true;
+        }
+        entry
+            .allowed_tools
+            .iter()
+            .any(|a| Self::mcp_tool_name_matches(a, server, tool, &full))
+    }
+
+    fn mcp_tool_name_matches(rule: &str, server: &str, tool: &str, full: &str) -> bool {
+        let r = rule.trim();
+        if r.is_empty() {
+            return false;
+        }
+        if r == "*" || r.eq_ignore_ascii_case("all") {
+            return true;
+        }
+        let rl = r.to_ascii_lowercase();
+        if rl == full.to_ascii_lowercase() {
+            return true;
+        }
+        rl == tool.to_ascii_lowercase()
+            || rl == format!("mcp_{server}_{tool}").to_ascii_lowercase()
+    }
+
+    /// Effective MCP call budget per task for a server (global default, then per-server override).
+    pub fn mcp_max_calls_per_task_for(&self, server: &str) -> Option<u32> {
+        self.mcp_servers
+            .get(server)
+            .and_then(|e| e.max_calls_per_task)
+            .or(self.mcp_max_calls_per_task)
     }
 
     /// If default_profile is set, returns whether the tool is in the profile or in allowed_commands (skills/CLIs). Otherwise true.
@@ -658,6 +739,25 @@ mod tests {
             blocked_device_interfaces: blocked.into_iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn mcp_server_allowlist() {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "fs".to_string(),
+            McpServerPolicy {
+                enabled: Some(true),
+                allowed_tools: vec!["*".to_string()],
+                ..Default::default()
+            },
+        );
+        let p = ToolsPolicy {
+            mcp_servers: servers,
+            ..Default::default()
+        };
+        assert!(p.can_use_mcp_tool("fs", "read"));
+        assert!(!p.can_use_mcp_tool("other", "read"));
     }
 
     // --- can_use_device_interface ---
