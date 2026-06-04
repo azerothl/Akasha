@@ -5,17 +5,40 @@ use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Se
 const DAEMON_PORT: u16 = 3876;
 const TASK_POLL_INTERVAL_MS: u64 = 1500;
 const TASK_POLL_TIMEOUT_SECS: u64 = 600;
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+const LONG_LLM_REQUEST_TIMEOUT_SECS: u64 = 600;
 
 fn daemon_base_url(port: u16) -> String {
     format!("http://127.0.0.1:{}", port)
 }
 
+/// Per-route HTTP timeout for daemon passthrough (embedded LLM can take several minutes).
+fn request_timeout_for_path(path: &str, method: &str) -> std::time::Duration {
+    let p = path.trim();
+    let m = method.trim().to_uppercase();
+    let long_post = m == "POST"
+        && (p.starts_with("/api/research/deep")
+            || p == "/api/compare"
+            || p == "/api/diagnostic/advice"
+            || p == "/api/chat/suggest-thread-title"
+            || p == "/api/memory/rebuild-relations"
+            || p.starts_with("/api/voice/stt")
+            || p.starts_with("/api/voice/tts"));
+    let long_get = m == "GET" && p.starts_with("/api/first-message");
+    if long_post || long_get {
+        std::time::Duration::from_secs(LONG_LLM_REQUEST_TIMEOUT_SECS)
+    } else {
+        std::time::Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)
+    }
+}
+
 /// Shared HTTP client for all daemon requests (avoids creating a new client per command).
+/// Default 30s; long routes override per request in `daemon_request` / `daemon_get_text`.
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS))
             .build()
             .expect("HTTP client init")
     })
@@ -128,7 +151,7 @@ async fn send_message_ack(
     if let Some(ref mode) = queue_mode {
         let m = mode.trim().to_lowercase();
         if m == "steering" || m == "follow_up" {
-            body["queue_mode"] = serde_json::Value::String(m);
+            body["queue_mode"] = serde_json::Value::String(m.clone());
             body["message_delivery_mode"] = serde_json::Value::String(m);
         }
     }
@@ -644,7 +667,13 @@ async fn daemon_get_text(path: String, port: Option<u16>) -> Result<serde_json::
     }
     let url = format!("{}{}", daemon_base_url(port), p);
     let client = http_client();
-    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let timeout = request_timeout_for_path(p, "GET");
+    let resp = client
+        .get(&url)
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     let status = resp.status().as_u16();
     let ok = resp.status().is_success();
     let text = resp.text().await.map_err(|e| e.to_string())?;
@@ -670,6 +699,7 @@ async fn daemon_request(
     let url = format!("{}{}", daemon_base_url(port), p);
     let client = http_client();
     let m = method.trim().to_uppercase();
+    let timeout = request_timeout_for_path(p, &m);
     let resp = match m.as_str() {
         "POST" => {
             let b = body.unwrap_or_else(|| "{}".to_string());
@@ -677,6 +707,7 @@ async fn daemon_request(
         }
         _ => client.get(&url),
     }
+    .timeout(timeout)
     .send()
     .await
     .map_err(|e| e.to_string())?;
