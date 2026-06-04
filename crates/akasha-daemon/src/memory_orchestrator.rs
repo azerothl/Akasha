@@ -39,8 +39,10 @@ pub struct RecallParams {
     pub filter_by_session: bool,
     /// Phase 6: optional explicit policy/rules text (e.g. from tools_policy summary).
     pub policy_summary: Option<String>,
-    /// Graph RAG: when true, expand context with 1-hop related entries (AKASHA_GRAPH_EXPAND=1).
+    /// Graph RAG: when true, expand context with related entries (see graph_expand_hops).
     pub expand_by_graph: bool,
+    /// 0 = off, 1 = one hop, 2 = two hops (bounded).
+    pub graph_expand_hops: u8,
     /// Optional prefix for user identity block (e.g. from user_profile.json: how to address the user).
     pub user_identity_prefix: Option<String>,
     /// Max rows in `[Recent task outcomes]`; `0` = omit that section.
@@ -67,6 +69,7 @@ impl Default for RecallParams {
             filter_by_session: true,
             policy_summary: None,
             expand_by_graph: false,
+            graph_expand_hops: 0,
             user_identity_prefix: None,
             task_outcomes_limit: 8,
             task_outcomes_scope_session: false,
@@ -91,6 +94,7 @@ impl RecallParams {
             filter_by_session: true,
             policy_summary: None,
             expand_by_graph: false,
+            graph_expand_hops: 0,
             user_identity_prefix: None,
             task_outcomes_limit: 8,
             task_outcomes_scope_session: false,
@@ -183,6 +187,15 @@ pub async fn recall_context(
         let recall_filter = if params.filter_by_session {
             Some(MemorySearchFilter {
                 session_id: Some(params.session_id.clone()),
+                process_id: params.process_id.clone(),
+                entity_id: params.entity_id.clone(),
+                include_global: true,
+                ..Default::default()
+            })
+        } else if params.process_id.is_some() || params.entity_id.is_some() {
+            Some(MemorySearchFilter {
+                process_id: params.process_id.clone(),
+                entity_id: params.entity_id.clone(),
                 include_global: true,
                 ..Default::default()
             })
@@ -212,30 +225,43 @@ pub async fn recall_context(
             ctx.long_term_block.push_str("\n");
         }
 
-        // Graph RAG: optional 1-hop expansion from top results
-        const MAX_RELATED_ENTRIES: usize = 5;
-        const MAX_RELATED_CHARS: usize = 1500;
-        if params.expand_by_graph && results.len() > 0 {
-            let expand_from = results.iter().take(3).map(|(id, _)| id.clone()).collect::<Vec<_>>();
-            let mut related_ids = std::collections::HashSet::new();
-            for id in &expand_from {
-                let ids = client.get_related_ids(id.clone(), None, 5);
-                for to_id in ids {
-                    if !result_ids.contains(&to_id) {
-                        related_ids.insert(to_id);
+        // Graph RAG: optional multi-hop expansion from top results
+        const MAX_RELATED_ENTRIES: usize = 8;
+        const MAX_RELATED_CHARS: usize = 2000;
+        let graph_hops = if params.graph_expand_hops > 0 {
+            params.graph_expand_hops
+        } else if params.expand_by_graph {
+            1
+        } else {
+            0
+        };
+        if graph_hops > 0 && !results.is_empty() {
+            let mut frontier: Vec<String> = results.iter().take(3).map(|(id, _)| id.clone()).collect();
+            let mut seen = result_ids.clone();
+            let mut related_ids: Vec<String> = Vec::new();
+            for _hop in 0..graph_hops.min(2) {
+                let mut next_frontier = Vec::new();
+                for id in &frontier {
+                    let ids = client.get_related_ids(id.clone(), None, 5);
+                    for to_id in ids {
+                        if seen.insert(to_id.clone()) {
+                            related_ids.push(to_id.clone());
+                            next_frontier.push(to_id);
+                        }
                     }
                 }
+                frontier = next_frontier;
             }
             let related_ids: Vec<String> = related_ids.into_iter().take(MAX_RELATED_ENTRIES).collect();
             if !related_ids.is_empty() {
-                let contents = client.get_contents_by_ids(related_ids);
+                let contents = client.get_contents_by_ids(related_ids.clone());
                 let mut added_chars = 0usize;
                 let mut added_count = 0usize;
-                for (_, content) in &contents {
+                for (id, content) in &contents {
                     if added_count >= MAX_RELATED_ENTRIES || added_chars >= MAX_RELATED_CHARS {
                         break;
                     }
-                    let line = format!("- [lié] {}", content.replace('\n', " "));
+                    let line = format!("- [lié:{}] {}", id, content.replace('\n', " "));
                     if added_chars + line.len() + 1 > MAX_RELATED_CHARS {
                         break;
                     }

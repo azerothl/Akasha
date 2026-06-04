@@ -71,11 +71,26 @@ Pour distinguer ce qui est conservé en long terme de ce qui reste du « bruit �
 | Plugin Memory | Stub | Trait `MemoryPlugin` (store/retrieve par clé) dans l’API plugin ; pas d’implémentation ni de branchement dans le flux. |
 | RAG | Oui (spec/runbooks) | RAG pack pour la spec et les runbooks (recherche par mots‑clés), pas pour la mémoire utilisateur. |
 
-En résumé : **court terme** et **long terme** sont implémentés. Le modèle d’embeddings est **porté par l’application** (fastembed, inférence locale). La **politique de sélection** fine reste à préciser.
+En résumé : **court terme** et **long terme** sont implémentés. Le modèle d’embeddings est **porté par l’application** (fastembed, inférence locale). Retrieval hybride **RRF + scores recency/importance/confidence** via `akasha-store::memory_fusion` (voir variables ci-dessous).
+
+### Retrieval hybride et flags (2026-06)
+
+| Variable | Défaut | Rôle |
+|----------|--------|------|
+| `AKASHA_MEMORY_RRF` | `1` | Fusion RRF listes keyword + embedding |
+| `AKASHA_MEMORY_SCORE_WEIGHTS` | `0.55,0.2,0.15,0.1` | Poids sim, recency, importance, confidence |
+| `AKASHA_MEMORY_MAINTENANCE_BUDGET` | `3` | Boost/decay post-recall (0 = off) |
+| `AKASHA_MEMORY_FACT_LLM` | off | Extraction faits LLM après promote |
+| `AKASHA_MEMORY_HYGIENE_INTERVAL_SECS` | `3600` | Janitor purge (0 = off) |
+| `AKASHA_MEMORY_DECAY_RECALL_THRESHOLD` | `5` | Seuil recall sans useful → decay |
+
+Colonnes maintenance sur `memory_entries` : `confidence`, `last_recalled_at`, `recall_count`, `useful_count`.
 
 ---
 
-## Maintenance opportuniste post-retrieval (phase cible)
+## Maintenance opportuniste post-retrieval
+
+**Statut : implémenté** (`memory_maintenance.rs`, métriques sur `/api/memory/recall-metrics`).
 
 Objectif: améliorer la qualité mémoire sans ajouter de latence visible côté réponse utilisateur.
 

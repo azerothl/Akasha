@@ -61,11 +61,19 @@ pub enum MemoryRequest {
     GetRelationsForEntries { ids: Vec<String> },
     /// Recompute embedding-tier relations (`similar` / `relates_to`) for all entries (graph display).
     RebuildSimilarRelations { max_per_entry: usize },
+    /// Post-retrieval maintenance: boost confidence on recalled ids.
+    RecordRecallBoost { ids: Vec<String> },
+    /// Post-retrieval maintenance: decay stale recalled entries.
+    RecordRecallDecay { ids: Vec<String> },
+    /// Update entry content (re-embed in actor).
+    Update { id: String, content: String },
+    /// Janitor: purge expired and low-confidence entries.
+    HygienePurge,
 }
 
 pub enum MemoryResponse {
     Search(Vec<(String, String)>), // (id, content)
-    Promote(Result<(), String>),
+    Promote(Result<Option<String>, String>), // Some(id) on success
     List((Vec<(String, String, String, String)>, u64)), // (entries, total_count)
     Delete(Result<(), String>),
     ForgetByQuery(Result<u64, String>),
@@ -79,6 +87,10 @@ pub enum MemoryResponse {
     GetContentsByIds(Vec<(String, String)>),
     GetRelationsForEntries(std::collections::HashMap<String, Vec<(String, String)>>),
     RebuildSimilarRelations(Result<u64, String>),
+    RecordRecallBoost(Result<u64, String>),
+    RecordRecallDecay(Result<u64, String>),
+    Update(Result<(), String>),
+    HygienePurge(Result<(u64, u64), String>),
 }
 
 /// Client handle: Send + Sync, can be used from async code.
@@ -126,7 +138,7 @@ impl LongTermMemoryClient {
         scope: Option<String>,
         expires_at: Option<String>,
         explicit_links: Option<Vec<(String, String)>>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<String>, String> {
         #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
         {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -141,7 +153,7 @@ impl LongTermMemoryClient {
         #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
         {
             let _ = (content, source, entity_id, process_id, session_id, importance, scope, expires_at, explicit_links);
-            Ok(())
+            Ok(None)
         }
     }
 
@@ -419,6 +431,81 @@ impl LongTermMemoryClient {
             Err("long-term memory disabled".into())
         }
     }
+
+    pub fn record_recall_boost(&self, ids: Vec<String>) -> Result<u64, String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::RecordRecallBoost { ids }, resp_tx)).is_err() {
+                return Err("memory actor disconnected".into());
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::RecordRecallBoost(r)) => r,
+                _ => Err("no response".into()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = ids;
+            Ok(0)
+        }
+    }
+
+    pub fn record_recall_decay(&self, ids: Vec<String>) -> Result<u64, String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::RecordRecallDecay { ids }, resp_tx)).is_err() {
+                return Err("memory actor disconnected".into());
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::RecordRecallDecay(r)) => r,
+                _ => Err("no response".into()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = ids;
+            Ok(0)
+        }
+    }
+
+    pub fn update(&self, id: String, content: String) -> Result<(), String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::Update { id, content }, resp_tx)).is_err() {
+                return Err("memory actor disconnected".into());
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::Update(r)) => r,
+                _ => Err("no response".into()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            let _ = (id, content);
+            Err("long-term memory disabled".into())
+        }
+    }
+
+    pub fn run_hygiene_purge(&self) -> Result<(u64, u64), String> {
+        #[cfg(any(feature = "embeddings", feature = "embeddings-tract"))]
+        {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if self.tx.send((MemoryRequest::HygienePurge, resp_tx)).is_err() {
+                return Err("memory actor disconnected".into());
+            }
+            match resp_rx.blocking_recv() {
+                Ok(MemoryResponse::HygienePurge(r)) => r,
+                _ => Err("no response".into()),
+            }
+        }
+        #[cfg(not(any(feature = "embeddings", feature = "embeddings-tract")))]
+        {
+            Ok((0, 0))
+        }
+    }
 }
 
 /// Start the long-term memory actor on a dedicated thread. Returns a client and the join handle.
@@ -433,7 +520,11 @@ pub fn start_memory_actor(
         use tokio::sync::oneshot;
         use uuid::Uuid;
         use akasha_embeddings::{embedding_to_bytes, Embedder};
-        use akasha_store::{cosine_similarity, decode_embedding_bytes, extract_facts_simple, EpisodicStore, FactsStore, LongTermStore};
+        use akasha_store::{
+            extract_facts_simple, hybrid_memory_search, HybridSearchOptions, EpisodicStore,
+            FactsStore, LongTermStore,
+        };
+        use crate::memory_fact_extract;
         use crate::memory_relation_inference;
 
         let (tx, rx) = mpsc::channel::<(MemoryRequest, oneshot::Sender<MemoryResponse>)>();
@@ -468,30 +559,18 @@ pub fn start_memory_actor(
                     }
                     MemoryRequest::Search { query_text, top_k, filter } => {
                         let filter_ref = filter.as_ref();
-                        const HYBRID_CANDIDATES: usize = 50;
                         let contents = match embedder.embed_one(&query_text) {
                             Ok(query_vec) => {
-                                // Hybrid (plan moyen terme 2): keyword candidates then rerank by embedding.
-                                let keyword_candidates = store
-                                    .search_by_keywords(&query_text, HYBRID_CANDIDATES, filter_ref)
-                                    .unwrap_or_default();
-                                if keyword_candidates.is_empty() {
-                                    let entries = store.search_by_embedding(&query_vec, top_k, filter_ref).unwrap_or_default();
-                                    entries.into_iter().map(|e| (e.id.to_string(), e.content)).collect()
-                                } else {
-                                    let ids: Vec<String> = keyword_candidates.iter().map(|(id, _)| id.clone()).collect();
-                                    let with_emb = store.get_entries_with_embeddings_by_ids(&ids).unwrap_or_default();
-                                    let mut scored: Vec<(f32, (String, String))> = with_emb
-                                        .into_iter()
-                                        .map(|(id, content, emb_bytes)| {
-                                            let emb = decode_embedding_bytes(&emb_bytes);
-                                            let sim = cosine_similarity(&query_vec, &emb);
-                                            (sim, (id, content))
-                                        })
-                                        .collect();
-                                    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                                    scored.into_iter().take(top_k).map(|(_, pair)| pair).collect()
-                                }
+                                let options = HybridSearchOptions::default();
+                                hybrid_memory_search(
+                                    &store,
+                                    &query_text,
+                                    &query_vec,
+                                    top_k,
+                                    filter_ref,
+                                    &options,
+                                )
+                                .unwrap_or_default()
                             }
                             Err(_) => {
                                 store.search_by_keywords(&query_text, top_k, filter_ref).unwrap_or_default()
@@ -503,7 +582,7 @@ pub fn start_memory_actor(
                         let already_exists = store.content_exists(&content).unwrap_or(false);
                         if already_exists {
                             tracing::debug!(content = %content.chars().take(60).collect::<String>(), "Skipping duplicate long-term memory entry");
-                            MemoryResponse::Promote(Ok(()))
+                            MemoryResponse::Promote(Ok(None))
                         } else {
                             use chrono::DateTime;
                             let expires_at_dt = expires_at
@@ -565,8 +644,16 @@ pub fn start_memory_actor(
                                             }
                                         }
                                     }
-                                    Ok(())
-                                });
+                                    Ok(id)
+                                })
+                                .map(|id| Some(id.to_string()));
+                            if let Ok(Some(ref entry_id)) = &result {
+                                memory_fact_extract::enqueue_after_promote(
+                                    entry_id.clone(),
+                                    content.clone(),
+                                    source.clone(),
+                                );
+                            }
                             MemoryResponse::Promote(result)
                         }
                     }
@@ -647,6 +734,51 @@ pub fn start_memory_actor(
                             .rebuild_similar_relations(max_per_entry)
                             .map_err(|e| e.to_string());
                         MemoryResponse::RebuildSimilarRelations(result)
+                    }
+                    MemoryRequest::RecordRecallBoost { ids } => {
+                        let threshold = std::env::var("AKASHA_MEMORY_DECAY_RECALL_THRESHOLD")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(5);
+                        let _ = store.record_recall_decay(&ids, threshold);
+                        let result = store.record_recall_boost(&ids).map_err(|e| e.to_string());
+                        MemoryResponse::RecordRecallBoost(result)
+                    }
+                    MemoryRequest::RecordRecallDecay { ids } => {
+                        let threshold = std::env::var("AKASHA_MEMORY_DECAY_RECALL_THRESHOLD")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(5);
+                        let result = store.record_recall_decay(&ids, threshold).map_err(|e| e.to_string());
+                        MemoryResponse::RecordRecallDecay(result)
+                    }
+                    MemoryRequest::Update { id, content } => {
+                        let result = Uuid::parse_str(&id)
+                            .map_err(|_| "invalid uuid".to_string())
+                            .and_then(|uuid| {
+                                embedder
+                                    .embed_one(&content)
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|vec| {
+                                        let bytes = embedding_to_bytes(&vec);
+                                        store
+                                            .update_entry_content(uuid, &content, &bytes)
+                                            .map_err(|e| e.to_string())
+                                            .and_then(|ok| {
+                                                if ok {
+                                                    Ok(())
+                                                } else {
+                                                    Err("not found".to_string())
+                                                }
+                                            })
+                                    })
+                            });
+                        MemoryResponse::Update(result)
+                    }
+                    MemoryRequest::HygienePurge => {
+                        let expired = store.purge_expired_entries().unwrap_or(0);
+                        let low = store.purge_low_confidence(0.2).unwrap_or(0);
+                        MemoryResponse::HygienePurge(Ok((expired, low)))
                     }
                 };
                 let _ = resp_tx.send(response);

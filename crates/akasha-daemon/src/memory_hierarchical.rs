@@ -71,6 +71,22 @@ pub async fn maybe_run_hierarchical_compaction(
         } else {
             "session_checkpoint_l1"
         };
+        let explicit_links = if trigger_l2 {
+            let (entries, _) = client.list(30, 0);
+            let links: Vec<(String, String)> = entries
+                .iter()
+                .filter(|(_, _, _, src)| src == "session_checkpoint_l1")
+                .take(5)
+                .map(|(id, _, _, _)| (id.clone(), "relates_to".to_string()))
+                .collect();
+            if links.is_empty() {
+                None
+            } else {
+                Some(links)
+            }
+        } else {
+            None
+        };
         if let Err(e) = client.promote(
             l1_summary.clone(),
             source.to_string(),
@@ -80,7 +96,7 @@ pub async fn maybe_run_hierarchical_compaction(
             Some(if trigger_l2 { 2 } else { 1 }),
             Some("session".to_string()),
             None,
-            None,
+            explicit_links,
         ) {
             tracing::warn!(error = %e, "L1/L2 promote failed");
         }

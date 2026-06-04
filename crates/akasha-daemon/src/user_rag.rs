@@ -1,5 +1,5 @@
 //! User RAG: per-user documents indexed for retrieval by agents.
-//! Storage in data_dir/user_rag/, keyword-based retrieval (MVP).
+//! Storage in data_dir/user_rag/, keyword + optional embedding retrieval.
 
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -11,6 +11,15 @@ use uuid::Uuid;
 
 const MANIFEST_FILENAME: &str = "index.json";
 const DOCUMENTS_DIR: &str = "documents";
+const CHUNKS_SUFFIX: &str = ".chunks.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexedChunk {
+    content: String,
+    /// Little-endian f32 embedding bytes (optional).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    embedding: Vec<u8>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserDocMeta {
@@ -43,11 +52,6 @@ pub(crate) fn is_safe_relative_filename(filename: &str) -> bool {
         Some(std::path::Component::Normal(_)) => components.next().is_none(),
         _ => false,
     }
-}
-
-/// In-memory chunk for retrieval.
-struct Chunk {
-    content: String,
 }
 
 /// A `UserRagStore` wrapped in an `Arc<Mutex<…>>` so it can be safely shared
@@ -177,8 +181,17 @@ impl UserRagStore {
         Ok(manifest.documents)
     }
 
-    /// Retrieve up to k text chunks most relevant to the query (keyword match). Only indexes text/* and common text extensions.
+    /// Retrieve up to k text chunks (keyword match; optional semantic rerank when query_embedding provided).
     pub fn retrieve(&self, query: &str, k: usize) -> anyhow::Result<Vec<String>> {
+        self.retrieve_hybrid(query, None, k)
+    }
+
+    pub fn retrieve_hybrid(
+        &self,
+        query: &str,
+        query_embedding: Option<&[f32]>,
+        k: usize,
+    ) -> anyhow::Result<Vec<String>> {
         let manifest = self.load_manifest()?;
         if manifest.documents.is_empty() || k == 0 {
             return Ok(Vec::new());
@@ -191,12 +204,21 @@ impl UserRagStore {
             .map(String::from)
             .collect();
 
-        let mut chunks: Vec<Chunk> = Vec::new();
+        let mut chunks: Vec<IndexedChunk> = Vec::new();
         let docs_dir = self.documents_dir();
         for doc in &manifest.documents {
             if !is_safe_relative_filename(&doc.path) {
                 warn!(id = %doc.id, path = %doc.path, "Skipping document with unsafe path in retrieve");
                 continue;
+            }
+            let chunk_path = self.base_dir.join(format!("{}{}", doc.id, CHUNKS_SUFFIX));
+            if chunk_path.is_file() {
+                if let Ok(s) = std::fs::read_to_string(&chunk_path) {
+                    if let Ok(stored) = serde_json::from_str::<Vec<IndexedChunk>>(&s) {
+                        chunks.extend(stored);
+                        continue;
+                    }
+                }
             }
             let path = docs_dir.join(&doc.path);
             if !path.is_file() {
@@ -216,14 +238,42 @@ impl UserRagStore {
             };
             let content_trim = content.trim();
             if content_trim.chars().count() > 10 {
-                chunks.push(Chunk {
+                chunks.push(IndexedChunk {
                     content: content_trim.chars().take(4000).collect::<String>(),
+                    embedding: Vec::new(),
                 });
             }
         }
 
         if chunks.is_empty() {
             return Ok(Vec::new());
+        }
+
+        if let Some(q_emb) = query_embedding {
+            if !q_emb.is_empty() {
+                let mut scored: Vec<(f32, usize)> = chunks
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, c)| {
+                        if c.embedding.len() < 4 {
+                            return None;
+                        }
+                        let emb = akasha_store::decode_embedding_bytes(&c.embedding);
+                        if emb.is_empty() {
+                            return None;
+                        }
+                        Some((akasha_store::cosine_similarity(q_emb, &emb), i))
+                    })
+                    .collect();
+                if !scored.is_empty() {
+                    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                    return Ok(scored
+                        .into_iter()
+                        .take(k)
+                        .map(|(_, i)| chunks[i].content.clone())
+                        .collect());
+                }
+            }
         }
 
         if terms.is_empty() {
@@ -248,6 +298,18 @@ impl UserRagStore {
             .map(|(_, i)| chunks[i].content.clone())
             .collect();
         Ok(result)
+    }
+
+    /// Persist chunk embeddings for a document (called after async indexing).
+    pub fn save_chunk_embeddings(&self, doc_id: &str, chunks: Vec<(String, Vec<u8>)>) -> anyhow::Result<()> {
+        let indexed: Vec<IndexedChunk> = chunks
+            .into_iter()
+            .map(|(content, embedding)| IndexedChunk { content, embedding })
+            .collect();
+        let path = self.base_dir.join(format!("{doc_id}{CHUNKS_SUFFIX}"));
+        std::fs::create_dir_all(&self.base_dir)?;
+        std::fs::write(path, serde_json::to_string_pretty(&indexed)?)?;
+        Ok(())
     }
 }
 
