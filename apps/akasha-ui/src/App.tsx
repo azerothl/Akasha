@@ -3,13 +3,25 @@ import { defaultExportBasename, exportChatPlainText, heuristicToolBatchSummary }
 import { invoke } from "@tauri-apps/api/core";
 import RelationGraph from "relation-graph/react";
 import type { RGJsonData, RGOptions, RGNode, RelationGraphComponent } from "relation-graph/react";
-import { preprocessDataUrlImages } from "./preprocessDataUrlImages";
-import { preprocessMessagePaths } from "./preprocessMessagePaths";
 import { collapseStreamedProgressEvents } from "./taskEvents";
 import { getCached, setCached } from "./useTabCache";
 import { useI18n } from "./useI18n";
 import { GeoMapView } from "./GeoMapView";
 import { SystemHealthPanel } from "./SystemHealthPanel";
+import { AppNavigation } from "./components/AppNavigation";
+import { PermissionsBell } from "./components/PermissionsBell";
+import { ChatRenderer } from "./components/ChatRenderer";
+import { ChatCompositionBar } from "./components/ChatCompositionBar";
+import { useHashRoute } from "./hooks/useHashRoute";
+import { NAV_ITEMS } from "./navigation/types";
+import { ComparePanel } from "./panels/ComparePanel";
+import { CookbookPanel } from "./panels/CookbookPanel";
+import { DeepResearchPanel } from "./panels/DeepResearchPanel";
+import {
+  buildMessageWithResearchContext,
+  type ChatResearchContext,
+} from "./chatResearchContext";
+import type { ResearchReportDocument } from "./researchReportExport";
 
 const LazyMarkdownContent = lazy(() => import("./MarkdownContent").then((m) => ({ default: m.default })));
 
@@ -31,6 +43,10 @@ const CHAT_TIPS_STORAGE_KEY = "akasha_ui_chat_tips";
 const CHAT_PROMPT_CHIPS_STORAGE_KEY = "akasha_ui_prompt_chips";
 const CHAT_BUDDY_STORAGE_KEY = "akasha_ui_buddy";
 const AKASHA_CHAT_THREADS_KEY = "akasha_chat_threads_v1";
+const DENSITY_STORAGE_KEY = "akasha_ui_density";
+const CHAT_AGENT_MODE_KEY = "akasha_chat_agent_mode";
+const CHAT_WEB_SEARCH_KEY = "akasha_chat_web_search";
+const CHAT_INCOGNITO_KEY = "akasha_chat_incognito";
 
 export type ChatThreadEntry = {
   id: string;
@@ -59,7 +75,6 @@ function loadChatThreadsInitial(): ChatThreadEntry[] {
 }
 
 export type ThemeId = "dark_akasha" | "dark" | "dark_nord" | "light" | "light_latte";
-type UiMode = "simple" | "expert";
 type TaskOrchestrationDebugLevel = "minimal" | "normal" | "full";
 
 const THEME_IDS: ThemeId[] = ["dark_akasha", "dark", "dark_nord", "light", "light_latte"];
@@ -1181,8 +1196,8 @@ function isDeterministicAutoToolEvent(eventType?: string | null): boolean {
   );
 }
 
-type Tab = "chat" | "scheduled" | "router" | "settings" | "docs" | "tasks" | "calendar" | "memory" | "mission";
-
+type UiMode = "simple" | "expert";
+type UiDensity = "compact" | "comfortable" | "spacious";
 type SettingsSection = "display" | "system" | "agent" | "user" | "data";
 type AgentProfileSubTab = "identity" | "personality" | "traits" | "rules" | "can_do" | "cannot_do";
 
@@ -1312,7 +1327,20 @@ function App() {
       })),
     [t]
   );
-  const [tab, setTab] = useState<Tab>("chat");
+  const { tab, setTab } = useHashRoute("chat");
+  const [sidebarNavCollapsed, setSidebarNavCollapsed] = useState(false);
+  const [uiDensity, setUiDensity] = useState<UiDensity>(() => {
+    try {
+      const s = localStorage.getItem(DENSITY_STORAGE_KEY);
+      if (s === "compact" || s === "comfortable" || s === "spacious") return s;
+    } catch {
+      /* ignore */
+    }
+    return "comfortable";
+  });
+  const [chatAgentMode, setChatAgentMode] = useState(() => localStorage.getItem(CHAT_AGENT_MODE_KEY) !== "0");
+  const [chatWebSearch, setChatWebSearch] = useState(() => localStorage.getItem(CHAT_WEB_SEARCH_KEY) === "1");
+  const [chatIncognito, setChatIncognito] = useState(() => localStorage.getItem(CHAT_INCOGNITO_KEY) === "1");
   const [rightSidebarOpen, setRightSidebarOpen] = useState(false);
   const [theme, setTheme] = useState<ThemeId>(loadSavedTheme);
   const [uiMode, setUiMode] = useState<UiMode>(loadSavedUiMode);
@@ -1530,9 +1558,22 @@ function App() {
   );
   const [health, setHealth] = useState<HealthState | null>(null);
   const [message, setMessage] = useState("");
+  const [chatResearchContext, setChatResearchContext] = useState<ChatResearchContext | null>(null);
   const [chatDeliveryMode, setChatDeliveryMode] = useState<"immediate" | "steering" | "follow_up">("immediate");
   const [memoryHygieneHint, setMemoryHygieneHint] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageRow[]>([]);
+  const discussResearchReport = useCallback(
+    (doc: ResearchReportDocument) => {
+      if (!doc.reportMarkdown.trim()) return;
+      setChatResearchContext({
+        topic: doc.topic,
+        reportMarkdown: doc.reportMarkdown,
+        category: doc.reportMeta?.category,
+      });
+      setTab("chat");
+    },
+    [setTab],
+  );
   const exportChatTranscript = useCallback(() => {
     const body = exportChatPlainText(messages);
     const base = defaultExportBasename(messages);
@@ -2614,7 +2655,8 @@ function App() {
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     document.documentElement.setAttribute("data-ui-mode", uiMode);
-  }, [theme, uiMode]);
+    document.documentElement.setAttribute("data-density", uiDensity);
+  }, [theme, uiMode, uiDensity]);
 
   const setThemeAndSave = useCallback((next: ThemeId) => {
     setTheme(next);
@@ -2684,21 +2726,20 @@ function App() {
   }, [pendingNotifOpen]);
 
   // Global keyboard shortcuts: 1–9 = switch tab (when not in a modal or input)
-  const tabsByIndex: Tab[] = ["chat", "scheduled", "router", "docs", "tasks", "calendar", "memory", "mission", "settings"];
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (humanInputModalTaskId != null) return;
       const target = e.target as HTMLElement;
       if (target?.closest("input") || target?.closest("textarea") || target?.closest("[role='dialog']")) return;
-      const n = e.key === "1" ? 1 : e.key === "2" ? 2 : e.key === "3" ? 3 : e.key === "4" ? 4 : e.key === "5" ? 5 : e.key === "6" ? 6 : e.key === "7" ? 7 : e.key === "8" ? 8 : e.key === "9" ? 9 : 0;
-      if (n >= 1 && n <= 9) {
+      const item = NAV_ITEMS.find((n) => n.shortcut === e.key);
+      if (item) {
         e.preventDefault();
-        setTab(tabsByIndex[n - 1]);
+        setTab(item.id);
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [humanInputModalTaskId]);
+  }, [humanInputModalTaskId, setTab]);
 
   const fetchMission = useCallback(async () => {
     setMissionLoading(true);
@@ -4656,6 +4697,11 @@ function App() {
 
     if (fromVoice) replyWithTtsRef.current = true;
     const userMessage = content || "(Pièce(s) jointe(s))";
+    const researchCtx = chatResearchContext;
+    const messageToSend = researchCtx
+      ? buildMessageWithResearchContext(userMessage, researchCtx, locale)
+      : userMessage;
+    if (researchCtx) setChatResearchContext(null);
     setMessages((prev) => {
       const cleaned = prev.filter((m) => !(m.role === "assistant" && m.streaming));
       return [...cleaned, { role: "user", text: userMessage }];
@@ -4700,7 +4746,7 @@ function App() {
         message: string;
         queued?: boolean;
       }>("send_message_ack", {
-        message: userMessage,
+        message: messageToSend,
         sessionId: sessionId,
         attachments: attachmentsPayload,
         newSession: useNewSession ? true : undefined,
@@ -5071,98 +5117,7 @@ function App() {
             <h1 className="logo">Akasha</h1>
             <p className="tagline">Local-first AI assistant</p>
           </div>
-          <nav className="tabs sidebar-nav" role="tablist" aria-label="Sections">
-            <button
-              role="tab"
-              aria-selected={tab === "chat"}
-              aria-controls="panel-chat"
-              id="tab-chat"
-              className={tab === "chat" ? "active" : ""}
-              onClick={() => setTab("chat")}
-            >
-              {t("tabs.chat")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "scheduled"}
-              aria-controls="panel-scheduled"
-              id="tab-scheduled"
-              className={tab === "scheduled" ? "active" : ""}
-              onClick={() => setTab("scheduled")}
-            >
-              {t("tabs.scheduled")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "router"}
-              aria-controls="panel-router"
-              id="tab-router"
-              className={tab === "router" ? "active" : ""}
-              onClick={() => setTab("router")}
-            >
-              {t("tabs.router")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "docs"}
-              aria-controls="panel-docs"
-              id="tab-docs"
-              className={tab === "docs" ? "active" : ""}
-              onClick={() => setTab("docs")}
-            >
-              {t("tabs.docs")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "tasks"}
-              aria-controls="panel-tasks"
-              id="tab-tasks"
-              className={tab === "tasks" ? "active" : ""}
-              onClick={() => setTab("tasks")}
-            >
-              {t("tabs.tasks")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "calendar"}
-              aria-controls="panel-calendar"
-              id="tab-calendar"
-              className={tab === "calendar" ? "active" : ""}
-              onClick={() => setTab("calendar")}
-            >
-              {t("tabs.calendar")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "memory"}
-              aria-controls="panel-memory"
-              id="tab-memory"
-              className={tab === "memory" ? "active" : ""}
-              onClick={() => setTab("memory")}
-            >
-              {t("tabs.memory")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "mission"}
-              aria-controls="panel-mission"
-              id="tab-mission"
-              className={tab === "mission" ? "active" : ""}
-              onClick={() => setTab("mission")}
-            >
-              {t("tabs.mission")}
-            </button>
-            <button
-              role="tab"
-              aria-selected={tab === "settings"}
-              aria-controls="panel-settings"
-              id="tab-settings"
-              className={tab === "settings" ? "active" : ""}
-              onClick={() => setTab("settings")}
-            >
-              {t("tabs.settings")}
-            </button>
-          </nav>
+          <AppNavigation tab={tab} setTab={setTab} t={t} collapsed={sidebarNavCollapsed} onToggleCollapse={() => setSidebarNavCollapsed((c) => !c)} />
           <div className="sidebar-left-bottom">
             <div className="daemon-status" role="status" aria-live="polite">
               <span
@@ -5226,6 +5181,7 @@ function App() {
                 <p className="view-subtitle">{isSimpleMode ? t("settings.ui_mode_hint") : t("chat.follow_tasks")}</p>
               </div>
               <div className="view-header-actions">
+                <PermissionsBell fetchEndpoint={fetchSystemEndpoint} locale={locale} />
                 <span className="view-mode-badge">{uiMode === "simple" ? t("settings.ui_mode_simple") : t("settings.ui_mode_expert")}</span>
                 <span
                   className={`daemon-status ${health?.ok ? "daemon-status-ok" : "daemon-status-off"}`}
@@ -5529,8 +5485,13 @@ function App() {
             id="panel-chat"
             role="tabpanel"
             aria-labelledby="tab-chat"
-            className="panel chat-panel"
+            className="panel chat-panel chat-panel-centered"
           >
+            {chatIncognito ? (
+              <p className="chat-incognito-banner" role="status">
+                {locale === "en" ? "Incognito — memory promotion disabled for this session (UI flag)." : "Incognito — promotion mémoire désactivée pour cette session (indicateur UI)."}
+              </p>
+            ) : null}
             <div className="panel-hero chat-panel-hero">
               <div>
                 <h3 className="panel-hero-title">{t("chat.hero_title")}</h3>
@@ -5563,92 +5524,65 @@ function App() {
                   </p>
                 </div>
               ) : (
-                <>
-                  {messages.map((m, i) => {
-                    const askUserData = m.role === "assistant" ? parseAskUserMessage(m.text) : null;
-                    const assistantMapVisual =
-                      m.role === "assistant" ? (m.mapVisual ?? (m.taskId ? chatMapByTaskId[m.taskId] : undefined)) : undefined;
-                    return (
-                      <div
-                        key={i}
-                        className={`message ${m.role} ${m.error ? "error" : ""} ${askUserData ? "message-ask-user" : ""} ${m.streaming ? "message-streaming" : ""}`}
+                <ChatRenderer
+                  messages={messages}
+                  parseAskUser={parseAskUserMessage}
+                  onPathClick={handlePathClick}
+                  userAvatar={userAvatar}
+                  agentAvatar={agentProfile.avatar}
+                  agentName={agentProfile.name || "Akasha"}
+                  renderAskUserChoice={(choice, j) => {
+                    const pendingTaskIdForReply = Object.keys(pendingHumanInput)[0] ?? null;
+                    return pendingTaskIdForReply ? (
+                      <button
+                        key={j}
+                        type="button"
+                        className="message-ask-user-choice-tag"
+                        onClick={async () => {
+                          try {
+                            await invoke("post_task_human_reply", { taskId: pendingTaskIdForReply, response: choice, port: DAEMON_PORT });
+                            setPendingHumanInput((prev) => {
+                              const next = { ...prev };
+                              delete next[pendingTaskIdForReply];
+                              return next;
+                            });
+                            setHumanInputModalTaskId((c) => (c === pendingTaskIdForReply ? null : c));
+                          } catch (e) {
+                            console.error(e);
+                          }
+                        }}
                       >
-                        <div className="message-head">
-                          {m.role === "user" ? (userAvatar ? <img src={userAvatar} alt="" className="message-avatar message-avatar-user" /> : null) : m.role === "assistant" ? (agentProfile.avatar ? <img src={agentProfile.avatar} alt="" className="message-avatar message-avatar-assistant" /> : null) : null}
-                          <span className="role" aria-hidden>
-                            {m.role === "user" ? "Vous" : m.role === "system" ? "Système" : (agentProfile.name || "Akasha")}
-                          </span>
-                        </div>
-                        {m.role === "system" ? (
-                          <div className="text system-text" style={{ whiteSpace: "pre-wrap" }}>
-                            {m.text}
-                          </div>
-                        ) : askUserData ? (
-                          <div className="message-ask-user-card">
-                            <div className="message-ask-user-question markdown-rendered">
-                              <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent>
-                                {askUserData.question}
-                              </LazyMarkdownContent></Suspense>
-                            </div>
-                            {askUserData.context && (
-                              <p className="message-ask-user-context">{askUserData.context}</p>
-                            )}
-                            {askUserData.choices?.length ? (
-                              <div className="message-ask-user-choices">
-                                {askUserData.choices.map((choice, j) => {
-                                  const pendingTaskIdForReply = Object.keys(pendingHumanInput)[0] ?? null;
-                                  return pendingTaskIdForReply ? (
-                                    <button
-                                      key={j}
-                                      type="button"
-                                      className="message-ask-user-choice-tag"
-                                      onClick={async () => {
-                                        try {
-                                          await invoke("post_task_human_reply", { taskId: pendingTaskIdForReply, response: choice, port: DAEMON_PORT });
-                                          setPendingHumanInput((prev) => { const next = { ...prev }; delete next[pendingTaskIdForReply]; return next; });
-                                          setHumanInputModalTaskId((c) => (c === pendingTaskIdForReply ? null : c));
-                                        } catch (e) {
-                                          console.error(e);
-                                        }
-                                      }}
-                                    >
-                                      {choice}
-                                    </button>
-                                  ) : (
-                                    <span key={j} className="message-ask-user-choice-tag">{choice}</span>
-                                  );
-                                })}
-                              </div>
-                            ) : null}
-                            <p className="message-ask-user-hint">Répondre ci‑dessous (boutons ou champ texte) ou via « Action requise » sur la tâche.</p>
-                          </div>
-                        ) : (
-                          <div className="text markdown-rendered">
-                            <Suspense fallback={<span className="markdown-rendered">…</span>}><LazyMarkdownContent onPathClick={handlePathClick}>
-                              {preprocessMessagePaths(preprocessDataUrlImages(m.text))}
-                            </LazyMarkdownContent></Suspense>
-                            {m.streaming ? <span className="message-streaming-caret" aria-hidden /> : null}
-                          </div>
-                        )}
-                        {assistantMapVisual ? (
-                          <div className="chat-message-map-embed">
-                            <MapPluginEventView
-                              visual={assistantMapVisual}
-                              t={t}
-                              width={460}
-                              height={160}
-                              toolbar="inline"
-                              variant="chat"
-                              showPanelHeading={false}
-                              onFullscreen={() => setEventVisualFullscreen({ visual: assistantMapVisual, sourceEventType: "chat_map" })}
-                              onExportCsv={() => exportAdvancedViewCsv(assistantMapVisual)}
-                            />
-                          </div>
-                        ) : null}
+                        {choice}
+                      </button>
+                    ) : (
+                      <span key={j} className="message-ask-user-choice-tag">
+                        {choice}
+                      </span>
+                    );
+                  }}
+                  renderMapVisual={(m) => {
+                    const assistantMapVisual =
+                      m.role === "assistant"
+                        ? ((m.mapVisual ?? (m.taskId ? chatMapByTaskId[m.taskId] : undefined)) as EventAdvancedView | undefined)
+                        : undefined;
+                    if (!assistantMapVisual || assistantMapVisual.kind !== "map") return null;
+                    return (
+                      <div className="chat-message-map-embed">
+                        <MapPluginEventView
+                          visual={assistantMapVisual}
+                          t={t}
+                          width={460}
+                          height={160}
+                          toolbar="inline"
+                          variant="chat"
+                          showPanelHeading={false}
+                          onFullscreen={() => setEventVisualFullscreen({ visual: assistantMapVisual, sourceEventType: "chat_map" })}
+                          onExportCsv={() => exportAdvancedViewCsv(assistantMapVisual)}
+                        />
                       </div>
                     );
-                  })}
-                </>
+                  }}
+                />
               )}
               {(loading || Object.keys(runningTaskChips).length > 0) && (
                 <div className="chat-loading-row" role="status" aria-live="polite">
@@ -5950,6 +5884,23 @@ function App() {
                 </div>
               );
             })()}
+            {chatResearchContext ? (
+              <div className="chat-research-context-banner" role="status">
+                <span>
+                  {locale === "en"
+                    ? `Discussing Deep Research report: ${chatResearchContext.topic}`
+                    : `Discussion du rapport Deep Research : ${chatResearchContext.topic}`}
+                </span>
+                <button
+                  type="button"
+                  className="chat-research-context-dismiss"
+                  onClick={() => setChatResearchContext(null)}
+                  aria-label={locale === "en" ? "Clear report context" : "Retirer le contexte du rapport"}
+                >
+                  ×
+                </button>
+              </div>
+            ) : null}
             {attachments.length > 0 && (
               <div className="chat-attachments">
                 {attachments.map((a) => (
@@ -6032,6 +5983,37 @@ function App() {
                 </select>
               </div>
             )}
+            <ChatCompositionBar
+              locale={locale}
+              agentMode={chatAgentMode}
+              onAgentModeChange={(v) => {
+                setChatAgentMode(v);
+                try {
+                  localStorage.setItem(CHAT_AGENT_MODE_KEY, v ? "1" : "0");
+                } catch {
+                  /* ignore */
+                }
+              }}
+              webSearchEnabled={chatWebSearch}
+              onWebSearchChange={(v) => {
+                setChatWebSearch(v);
+                try {
+                  localStorage.setItem(CHAT_WEB_SEARCH_KEY, v ? "1" : "0");
+                } catch {
+                  /* ignore */
+                }
+              }}
+              incognito={chatIncognito}
+              onIncognitoChange={(v) => {
+                setChatIncognito(v);
+                try {
+                  localStorage.setItem(CHAT_INCOGNITO_KEY, v ? "1" : "0");
+                } catch {
+                  /* ignore */
+                }
+              }}
+              disabled={loading}
+            />
             <div className="input-area">
               <input
                 ref={fileInputRef}
@@ -6091,6 +6073,33 @@ function App() {
             <p id="send-hint" className="hint sr-only">
               Entrée pour envoyer
             </p>
+          </section>
+        )}
+
+        {tab === "compare" && (
+          <section id="panel-compare" role="tabpanel" aria-labelledby="tab-compare" className="panel compare-panel-wrap">
+            <ComparePanel fetchEndpoint={fetchSystemEndpoint} locale={locale} />
+          </section>
+        )}
+
+        <section
+          id="panel-research"
+          role="tabpanel"
+          aria-labelledby="tab-research"
+          className="panel research-panel"
+          hidden={tab !== "research"}
+          aria-hidden={tab !== "research"}
+        >
+          <DeepResearchPanel
+            fetchEndpoint={fetchSystemEndpoint}
+            locale={locale}
+            onDiscussReport={discussResearchReport}
+          />
+        </section>
+
+        {tab === "cookbook" && (
+          <section id="panel-cookbook" role="tabpanel" aria-labelledby="tab-cookbook" className="panel cookbook-panel-wrap">
+            <CookbookPanel fetchEndpoint={fetchSystemEndpoint} locale={locale} />
           </section>
         )}
 
@@ -8635,6 +8644,27 @@ function App() {
                 </select>
                 <span className="settings-theme-hint">{t("settings.ui_mode_hint")}</span>
               </dd>
+              <dt>{t("settings.ui_density")}</dt>
+              <dd>
+                <select
+                  aria-label={t("settings.ui_density")}
+                  className="settings-theme-select"
+                  value={uiDensity}
+                  onChange={(e) => {
+                    const next = e.target.value as UiDensity;
+                    setUiDensity(next);
+                    try {
+                      localStorage.setItem(DENSITY_STORAGE_KEY, next);
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                >
+                  <option value="compact">{t("settings.ui_density_compact")}</option>
+                  <option value="comfortable">{t("settings.ui_density_comfortable")}</option>
+                  <option value="spacious">{t("settings.ui_density_spacious")}</option>
+                </select>
+              </dd>
               <dt>{t("settings.language")}</dt>
               <dd>
                 <select
@@ -8759,6 +8789,10 @@ function App() {
                         {t("settings.open_docs_tab")}
                       </button>
                       <span className="settings-doc muted"> — {t("settings.doc_from_daemon")}</span>
+                    </dd>
+                    <dt>{t("settings.utility_model")}</dt>
+                    <dd>
+                      <p className="settings-doc muted">{t("settings.utility_model_hint")}</p>
                     </dd>
                   </dl>
                 )}
