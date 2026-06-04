@@ -522,8 +522,7 @@ impl Daemon {
                 match akasha_tools::ToolsPolicy::load_from_path(&tools_policy_path) {
                     Ok(mut policy) => {
                         if let Ok(v) = &vault {
-                            policy.brave_api_key = v.get("brave_api_key").ok();
-                            policy.cloudflare_api_token = v.get("cloudflare_api_token").ok();
+                            policy.apply_vault_api_keys(|k| v.get(k).ok());
                         }
                         policy.workspace_root = Some(self.data_dir.clone());
                         Some(Arc::new(tokio::sync::RwLock::new(Arc::new(
@@ -648,6 +647,13 @@ impl Daemon {
                 });
             if let Some(ref lt) = long_term_client {
                 crate::memory_hygiene::spawn_scheduler(Some(lt.clone()));
+                crate::memory_agent_identity::bootstrap_agent_identity(&data_dir, Some(lt));
+            }
+            if long_term_client.is_some() {
+                crate::memory_fact_extract::init_fact_extract_worker(
+                    llm_router.clone(),
+                    memory_db_path.clone(),
+                );
             }
             if long_term_client.is_some() {
                 let st_dir = short_term_dir.clone();

@@ -1691,7 +1691,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("apply_patch", "apply_patch <path> <patch_content> — appliquer un patch unifié (contenu du patch après le path)"),
     ("search_replace", "search_replace <path> <ancien_texte> | <nouveau_texte> — une seule ligne TOOL:. Séparateur : **espace | espace** (` | `). Après le chemin, mettre tout de suite le texte exact à remplacer (pas un `|` seul : le découpage sur espaces le transforme en token et vide la recherche). Si le motif contient ` | `, utiliser edit_file ou apply_patch. Exemple : TOOL: search_replace workspace:/src/App.tsx const x = 1 | const x = 2"),
     ("web_fetch", "web_fetch <url> — récupérer le contenu d'une URL (domaine autorisé dans tools_policy allowed_web_domains)"),
-    ("web_search", "web_search <query> [max_results] — rechercher sur le web (Brave API; BRAVE_API_KEY, web_search_enabled)"),
+    ("web_search", "web_search <query> [max_results] — recherche web multi-fournisseurs (Brave, SearXNG, DuckDuckGo, … ; web_search_enabled)"),
     ("web_crawl", "web_crawl <url> [limit] — lancer un crawl Cloudflare Browser Rendering (web_crawl_enabled, cloudflare_account_id, token vault cloudflare_api_token ou CLOUDFLARE_API_TOKEN ; domaines = allowed_web_domains). Retourne un job_id ; poller avec web_crawl_status."),
     ("web_crawl_status", "web_crawl_status <job_id> — statut / résultat d’un job crawl Cloudflare (même config que web_crawl)."),
     ("run_in_container", "run_in_container <work_dir> <image> <command> [args...] — exécuter une commande dans un conteneur (work_dir autorisé en lecture, ex. node:20 node index.js)"),
@@ -1699,6 +1699,7 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("workspace_graph_search", "workspace_graph_search <query> [--workspace <uuid>] — rechercher dans les graphes projet indexés (nœuds label/chemin) ; limite ~20 lignes ; --workspace pour un espace enregistré uniquement"),
     ("memory_store", "memory_store <content> <source> [link_to: uuid1+kind1,uuid2+kind2,...] [link_kind: default_kind] — mémoire long terme. Types recommandés : similar, relates_to, related, updates, supersedes, excludes, contradicts, supports, derived_from, same_as, spouse, child, birth_date, … ; par cible utiliser uuid+kind, ou uuid seuls avec link_kind (défaut related)."),
     ("memory_delete", "memory_delete <id> — supprimer une entrée de la mémoire long terme par son id (UUID)"),
+    ("memory_update", "memory_update <id> <new_content> — mettre à jour le contenu d'une entrée (re-embedding automatique)"),
     ("memory_forget", "memory_forget <query> — supprimer les entrées dont le contenu correspond aux mots-clés (plan moyen terme 9)"),
     ("memory_stats", "memory_stats — nombre d'entrées et taille approximative de la mémoire long terme"),
     ("memory_gc", "memory_gc [retention_days] [protect_sources...] — supprimer les entrées plus anciennes que N jours (sources protégées optionnelles, ex. user_fact project)"),
@@ -3234,8 +3235,7 @@ async fn do_install_skill(
                 if let Some((r, path)) = tools_reload {
                     if let Ok(mut reloaded) = akasha_tools::ToolsPolicy::load_from_path(path) {
                         if let Ok(v) = akasha_vault::open_vault(data_dir) {
-                            reloaded.brave_api_key = v.get("brave_api_key").ok();
-                            reloaded.cloudflare_api_token = v.get("cloudflare_api_token").ok();
+                            reloaded.apply_vault_api_keys(|k| v.get(k).ok());
                         }
                         *r.write().await =
                             std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
@@ -3341,8 +3341,7 @@ async fn do_uninstall_skill(
         if let Some((r, path)) = tools_reload {
             if let Ok(mut reloaded) = akasha_tools::ToolsPolicy::load_from_path(path) {
                 if let Ok(v) = akasha_vault::open_vault(data_dir) {
-                    reloaded.brave_api_key = v.get("brave_api_key").ok();
-                    reloaded.cloudflare_api_token = v.get("cloudflare_api_token").ok();
+                    reloaded.apply_vault_api_keys(|k| v.get(k).ok());
                 }
                 *r.write().await = std::sync::Arc::new(akasha_tools::ToolExecutor::new(reloaded));
             }
@@ -3386,7 +3385,7 @@ const WEB_SEARCH_FOLLOWUP_REMINDER: &str = "\n[Reminder — page fetch: Search s
 /// Reminder injected when the user asks for external information (weather, news, etc.) but
 /// web_search is not available in the current tools policy. Prevents the model from ignoring
 /// the question and falling back to a generic capability introduction.
-const WEB_SEARCH_UNAVAILABLE_REMINDER: &str = "\n[Note: the user is asking for weather, news, or other live external information. web_search is not currently enabled. Answer as best you can from your training knowledge, clearly state that the data may be outdated, and explain how to enable web search: set web_search_enabled: true in tools_policy.yaml and configure BRAVE_API_KEY. Do NOT respond with a generic capabilities introduction — address the user's question directly.]\n\n";
+const WEB_SEARCH_UNAVAILABLE_REMINDER: &str = "\n[Note: the user is asking for weather, news, or other live external information. web_search is not currently enabled. Answer as best you can from your training knowledge, clearly state that the data may be outdated, and explain how to enable web search: set web_search_enabled: true in tools_policy.yaml (SearXNG/DuckDuckGo work without API keys; optional Brave/Tavily/Serper keys in vault or env). Do NOT respond with a generic capabilities introduction — address the user's question directly.]\n\n";
 
 const TRANSPORT_REMINDER: &str = "\n[Reminder: the user is asking about transport schedules, routes, or travel information. You MUST use TOOL: web_search <query> first (e.g. web_search \"horaires train Angoulême Paris CDG dimanche\"). Do NOT write any files, generate HTML, or ask about project file paths — the user wants travel information only. If web_search is unavailable, say so clearly and suggest the relevant site (e.g. sncf.com, ratp.fr, transilien.com).]\n\n";
 
@@ -3484,7 +3483,7 @@ const APP_CONTEXT: &str = concat!(
     "Never invent data. If you do not have the information to answer, say so clearly (e.g. \"I did not find that information\"). ",
     "For questions about information you do not have (weather, forecasts, news, schedules, etc.), you must use the web_search tool first, then if snippets are insufficient use web_fetch and/or browser navigate plus browser snapshot to read the page itself and reply with the synthesized facts. When you have just received tool results (e.g. web_search, web_fetch, browser snapshot), you must answer immediately with the synthesized result — do not reply with a promise (e.g. \"I will fetch…\", \"Action in progress\"); the task ends after your message, so give the actual answer. ",
     "Do not suggest the user visit a site without having used web_search first if you have access to that tool; do not only list URLs for the user when web_fetch or browser snapshot can retrieve the content. ",
-    "If web_search returns an error (e.g. not enabled), you can then suggest sites and explain how to enable web search (tools_policy.yaml, web_search_enabled, BRAVE_API_KEY). ",
+    "If web_search returns an error (e.g. not enabled), you can then suggest sites and explain how to enable web search (tools_policy.yaml, web_search_enabled; keyless SearXNG/DuckDuckGo or optional API keys). ",
     "Playwright / managed browser: the daemon may auto-install Chromium on first browser use unless AKASHA_PLAYWRIGHT_AUTO_INSTALL=0. If browser fails for missing Chromium, the runner is missing, or the user must explicitly approve a large download, use TOOL: ask_user (e.g. choices agreeing to install), then TOOL: install_playwright. List install_playwright in tool_profiles when using a profile. tools_policy require_approval can include install_playwright for UI approval before the install runs. For other dependencies (npm, cargo, etc.), use run_command with allowed_commands after ask_user consent. ",
     "You have access to the write_file tool: you MUST use it whenever the user asks to save, store or write a file (e.g. \"save the code to …\", \"write to file\"). ",
     "Reply ONLY with a header line TOOL: write_file <full_path>, then the file content on the following lines. Do not put the full file content on the same TOOL line. ",
@@ -4398,7 +4397,7 @@ pub(crate) async fn execute_tool_call_impl(
                     }
                     let body = crate::terminal_pty::PtyInputBody { text: Some(payload), bytes_b64: None };
                     match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().write_input(&sid, body)).await {
-                        Ok(Ok(())) => (true, "[terminal_session write] ok".to_string(), None),
+                        Ok(Ok(_)) => (true, "[terminal_session write] ok".to_string(), None),
                         Ok(Err(e)) => (false, format!("[terminal_session write] {}", e), None),
                         Err(e) => (false, format!("[terminal_session write] join: {}", e), None),
                     }
@@ -4412,7 +4411,7 @@ pub(crate) async fn execute_tool_call_impl(
                     }
                     let body = crate::terminal_pty::PtyResizeBody { cols, rows };
                     match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().resize(&sid, body)).await {
-                        Ok(Ok(())) => (true, "[terminal_session resize] ok".to_string(), None),
+                        Ok(Ok(_)) => (true, "[terminal_session resize] ok".to_string(), None),
                         Ok(Err(e)) => (false, format!("[terminal_session resize] {}", e), None),
                         Err(e) => (false, format!("[terminal_session resize] join: {}", e), None),
                     }
@@ -4423,7 +4422,7 @@ pub(crate) async fn execute_tool_call_impl(
                         return (false, "[terminal_session stop] usage: terminal_session stop <session_id>".to_string(), None);
                     }
                     match tokio::task::spawn_blocking(move || crate::terminal_pty::PtyManager::global().close(&sid)).await {
-                        Ok(Ok(())) => (true, "[terminal_session stop] ok".to_string(), None),
+                        Ok(Ok(_)) => (true, "[terminal_session stop] ok".to_string(), None),
                         Ok(Err(e)) => (false, format!("[terminal_session stop] {}", e), None),
                         Err(e) => (false, format!("[terminal_session stop] join: {}", e), None),
                     }
@@ -4553,7 +4552,8 @@ pub(crate) async fn execute_tool_call_impl(
                         .ok()
                         .and_then(|r| r.ok());
                     match out {
-                        Some(()) => (true, "[memory_store] stored".to_string(), None),
+                        Some(Some(id)) => (true, format!("[memory_store] stored id={id}"), None),
+                        Some(None) => (true, "[memory_store] stored (duplicate skipped)".to_string(), None),
                         None => (false, "[memory_store] failed or memory not available".to_string(), None),
                     }
                 }
@@ -4579,6 +4579,44 @@ pub(crate) async fn execute_tool_call_impl(
                     }
                 }
                 None => (false, "[memory_delete] long-term memory not available".to_string(), None),
+            }
+        }
+        "memory_update" => {
+            let id = args.get(0).map(|a| a.as_str()).unwrap_or("").trim();
+            let content = args.get(1..).map(|a| a.join(" ")).unwrap_or_default();
+            if id.is_empty() || content.is_empty() {
+                return (false, "[memory_update] usage: memory_update <id> <new_content>".to_string(), None);
+            }
+            match long_term_client {
+                Some(client) => {
+                    let client = client.clone();
+                    let emit_client = client.clone();
+                    let id = id.to_string();
+                    let id_for_emit = id.clone();
+                    let content = content.trim().to_string();
+                    let out = tokio::task::spawn_blocking(move || client.update(id, content))
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok());
+                    match out {
+                        Some(()) => {
+                            let _ = emit_client.emit_event(
+                                "memory_updated".to_string(),
+                                format!("{{\"id\":\"{id_for_emit}\"}}"),
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some(2),
+                                Some("global_user".to_string()),
+                                Some("memory_update".to_string()),
+                            );
+                            (true, "[memory_update] updated".to_string(), None)
+                        }
+                        None => (false, "[memory_update] failed or not found".to_string(), None),
+                    }
+                }
+                None => (false, "[memory_update] long-term memory not available".to_string(), None),
             }
         }
         "memory_forget" => {
@@ -6760,7 +6798,7 @@ Factual response in English.\n\n{}",
         prompt: summary_prompt,
         max_tokens: Some(summary_max_tokens),
         temperature: Some(0.2),
-        preferred_task_type: Some("system".to_string()),
+        preferred_task_type: Some("utility".to_string()),
         system_prompt: None,
         image_data_urls: None,
         top_p: None,
@@ -6811,7 +6849,7 @@ Factual response in English.\n\n{}",
                 })
                 .await
                 {
-                    Ok(Ok(())) => {
+                    Ok(Ok(_)) => {
                         tracing::info!(session_id = %session_id, "Yesterday summarized and stored in long-term memory")
                     }
                     Ok(Err(e)) => {
@@ -6959,6 +6997,7 @@ struct MemoryProfile {
     user_rag_top_k: usize,
     workspace_graph_top_k: usize,
     expand_by_graph: bool,
+    graph_expand_hops: u8,
     compact_before_prompt: bool,
     allow_project_recall: bool,
     allow_identity_lookup: bool,
@@ -6987,6 +7026,7 @@ fn memory_profile_for_task(
             user_rag_top_k: 0,
             workspace_graph_top_k: 0,
             expand_by_graph: false,
+            graph_expand_hops: 0,
             compact_before_prompt: false,
             allow_project_recall: false,
             allow_identity_lookup: false,
@@ -7009,6 +7049,11 @@ fn memory_profile_for_task(
             user_rag_top_k: 5,
             workspace_graph_top_k: 5,
             expand_by_graph: std::env::var("AKASHA_GRAPH_EXPAND").ok().as_deref() == Some("1"),
+            graph_expand_hops: if std::env::var("AKASHA_GRAPH_EXPAND").ok().as_deref() == Some("1") {
+                1
+            } else {
+                1
+            },
             compact_before_prompt: true,
             allow_project_recall: true,
             allow_identity_lookup: true,
@@ -7023,6 +7068,7 @@ fn memory_profile_for_task(
             user_rag_top_k: 0,
             workspace_graph_top_k: 0,
             expand_by_graph: false,
+            graph_expand_hops: 0,
             compact_before_prompt: false,
             allow_project_recall: false,
             allow_identity_lookup: true,
@@ -8445,6 +8491,7 @@ pub(crate) async fn run_message_via_llm(
             user_rag_top_k: 0,
             workspace_graph_top_k: 0,
             expand_by_graph: false,
+            graph_expand_hops: 0,
             compact_before_prompt: false,
             allow_project_recall: false,
             allow_identity_lookup: false,
@@ -8846,6 +8893,9 @@ pub(crate) async fn run_message_via_llm(
             && memory_profile.allow_identity_lookup
             && !code_studio_disk_task,
         expand_by_graph: memory_profile.expand_by_graph,
+        graph_expand_hops: memory_profile.graph_expand_hops,
+        process_id: Some(task_id.to_string()),
+        task_id: Some(task_id.to_string()),
         user_identity_prefix: if user_identity_prefix.is_empty()
             || !memory_profile.allow_identity_lookup
         {
@@ -8871,10 +8921,12 @@ pub(crate) async fn run_message_via_llm(
         if !fused_str.is_empty() {
             user_prefix.push_str(&fused_str);
         }
+        let recall_had_results = !fused_str.is_empty();
         crate::memory_maintenance::schedule_post_retrieval(
             long_term_client.clone(),
             message.clone(),
             Some(session_id.clone()),
+            recall_had_results,
         );
     }
     if memory_profile.user_rag_top_k > 0 {
@@ -9073,14 +9125,13 @@ pub(crate) async fn run_message_via_llm(
     } else {
         ""
     };
-    // web_search is effectively available only when the tool is allowed by the active profile,
-    // web_search_enabled is true in the policy, and a Brave API key is present (vault or env).
+    // web_search is available when allowed by profile, enabled in policy, and a provider chain exists
+    // (Brave/Tavily/Serper/Google PSE with keys, or keyless SearXNG + DuckDuckGo).
     let web_search_effectively_available = tools_executor_snapshot
         .as_ref()
         .map(|e| {
             e.policy.can_use_tool("web_search")
-                && e.policy.web_search_enabled
-                && (e.policy.brave_api_key.is_some() || std::env::var("BRAVE_API_KEY").is_ok())
+                && akasha_tools::any_provider_available(&e.policy)
         })
         .unwrap_or(false);
     let web_search_reminder: &str = if intent_flags.external_info {
@@ -11741,7 +11792,7 @@ pub(crate) async fn run_message_via_llm(
                 })
                 .await
                 {
-                    Ok(Ok(())) => {
+                    Ok(Ok(_)) => {
                         tracing::info!("Personal fact stored in long-term memory (heuristic)")
                     }
                     Ok(Err(e)) => {
@@ -11895,7 +11946,7 @@ Extract only facts explicitly mentioned (by the user or the assistant). Do not i
                     })
                     .await
                     {
-                        Ok(Ok(())) => {}
+                        Ok(Ok(_)) => {}
                         Ok(Err(e)) => tracing::warn!(error = %e, "Long-term promote failed"),
                         Err(e) => tracing::debug!(error = %e, "Promote task join error"),
                     }
@@ -12438,6 +12489,35 @@ pub async fn handle_api(
         return resp;
     }
 
+    if let Some(tools_exec) = tools_executor {
+        let research_ctx = crate::deep_research::build_research_context(
+            llm_router.clone(),
+            tools_exec.clone(),
+            data_dir,
+        );
+        if let Some(resp) = crate::deep_research::handle_deep_research_routes(
+            method,
+            path_only,
+            body.as_deref(),
+            &research_ctx,
+        )
+        .await
+        {
+            return resp;
+        }
+    }
+
+    if let Some(resp) = crate::api_routes_workspace::handle_workspace_routes(
+        method,
+        path_only,
+        body.as_deref(),
+        &llm_router,
+    )
+    .await
+    {
+        return resp;
+    }
+
     if let Some(resp) = crate::api_routes_mission::handle_mission_routes(
         method,
         path_only,
@@ -12830,6 +12910,49 @@ pub async fn handle_api(
         );
     }
 
+    if method == "GET" && path == "/api/memory/export" {
+        let db = data_dir.join("memory.db");
+        match crate::memory_export::export_memory(&db) {
+            Ok(bundle) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::to_string(&bundle).unwrap_or_else(|_| "{}".into()),
+                );
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                );
+            }
+        }
+    }
+
+    if method == "POST" && path == "/api/memory/import" {
+        let parsed = body
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<crate::memory_export::MemoryExportBundle>(b).ok());
+        let Some(bundle) = parsed else {
+            return json_response("400 Bad Request", r#"{"error":"invalid_json"}"#);
+        };
+        let db = data_dir.join("memory.db");
+        match crate::memory_export::import_memory(&db, &bundle) {
+            Ok((entries, facts)) => {
+                return json_response(
+                    "200 OK",
+                    &serde_json::json!({ "entries_imported": entries, "facts_imported": facts })
+                        .to_string(),
+                );
+            }
+            Err(e) => {
+                return json_response(
+                    "500 Internal Server Error",
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                );
+            }
+        }
+    }
+
     if method == "POST" && path == "/api/migrate/openclaw/preview" {
         let source_dir = body
             .as_deref()
@@ -13001,7 +13124,7 @@ pub async fn handle_api(
             prompt,
             max_tokens: Some(80),
             temperature: Some(0.3),
-            preferred_task_type: None,
+            preferred_task_type: Some("utility".to_string()),
             system_prompt: Some(
                 "Output only the title text. No quotes. No leading 'Title:'.".to_string(),
             ),
@@ -15876,6 +15999,11 @@ pub async fn handle_api(
             .and_then(|j| j.get("model"))
             .and_then(|v| v.as_str())
             .map(String::from);
+        let role = body_json
+            .as_ref()
+            .and_then(|j| j.get("role"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("primary");
         match (category, provider, model) {
             (Some(cat), Some(prov), Some(modl))
                 if !cat.is_empty() && !prov.is_empty() && !modl.is_empty() =>
@@ -15889,11 +16017,16 @@ pub async fn handle_api(
                     model: modl.clone(),
                     config: None,
                 };
-                llm_router.set_primary_route(&cat, entry.clone());
                 let router_path = data_dir.join("llm_router.yaml");
                 let mut config = akasha_llm::config::RoutingConfig::load_from_path(&router_path)
                     .unwrap_or_else(|_| akasha_llm::config::RoutingConfig::default_config());
-                config.set_primary_route(&cat, entry);
+                if role == "fallback" {
+                    llm_router.add_fallback_route(&cat, entry.clone());
+                    config.add_fallback_route(&cat, entry);
+                } else {
+                    llm_router.set_primary_route(&cat, entry.clone());
+                    config.set_primary_route(&cat, entry);
+                }
                 if let Err(e) = config.save_to_path(&router_path) {
                     let body_err =
                         serde_json::json!({ "ok": false, "error": format!("save failed: {}", e) });
@@ -15904,7 +16037,12 @@ pub async fn handle_api(
                     "category": cat,
                     "provider": prov,
                     "model": modl,
-                    "message": "Route updated (in memory and saved to llm_router.yaml)."
+                    "role": role,
+                    "message": if role == "fallback" {
+                        "Fallback route added (in memory and saved to llm_router.yaml)."
+                    } else {
+                        "Route updated (in memory and saved to llm_router.yaml)."
+                    }
                 });
                 crate::http_get_cache::invalidate_router_models();
                 crate::http_get_cache::invalidate_router_routes();

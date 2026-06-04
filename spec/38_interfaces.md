@@ -77,8 +77,27 @@ En production : lancer le binaire installé (ex. `akasha-ui.exe` sous Windows). 
 
 ### Interface web (Tauri)
 
-- **1 à 7** : basculer vers l’onglet (1 = Chat, 2 = Routeur, 3 = Doc, 4 = Tâches, 5 = Calendrier, 6 = Mémoire, 7 = Paramètres). Inactif si le focus est dans un champ de saisie, une zone de texte ou une modale.
+Navigation **chat-first** avec groupes (Principal, Workspace, Opérations, Données, Aide). Routes hash : `#/chat`, `#/compare`, `#/research`, etc.
+
+Raccourcis clavier (hors champ de saisie / modale) :
+
+| Touche | Onglet |
+|--------|--------|
+| **1** | Chat |
+| **2** | Comparer |
+| **3** | Recherche approfondie |
+| **4** | Tâches |
+| **5** | Routeur |
+| **6** | Calendrier |
+| **7** | Mémoire |
+| **8** | Documentation |
+| **9** | Mission |
+
+- **Permissions** : cloche dans l’en-tête (file d’approbation outils), en plus de Paramètres → Système → Santé.
+- **Densité UI** : Paramètres → Affichage (compact / confortable / spacieuse).
 - Le focus est maintenu sur le champ de saisie du chat après envoi d’un message lorsque l’onglet Chat est actif.
+
+Voir aussi [`odysseus-inspiration-matrix.md`](dev/roadmap/odysseus-inspiration-matrix.md).
 
 ### Commandes slash (Chat, TUI et Web)
 
